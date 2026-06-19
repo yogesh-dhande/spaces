@@ -24,7 +24,7 @@ import workspacecore
         try? FileManager.default.removeItem(at: databaseRoot)
     }
 
-    @MainActor @Test func terminalSessionHostUsesRemoteHostForServiceOwnedSession() throws {
+    @MainActor @Test func terminalSessionHostUsesRemoteSessionHostForServiceOwnedSession() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

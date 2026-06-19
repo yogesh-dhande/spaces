@@ -2930,64 +2930,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(windows.first?.name, "shell-1")
     }
 
-    func testRefreshWorkspaceWindowsPreservesRemoteAdHocBuiltInTerminalWindowUsingDaemonState() throws {
-        let root = try makeTempDirectory()
-        let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, )
-        let sessionID = "remote-ad-hoc-session-live"
-        let remoteWorkingDirectory = "/srv/spaces/project/feature"
-        let stateCapture = RemoteStateCapture(sessionID: sessionID, workspaceID: "workspace-remote", workingDirectory: remoteWorkingDirectory)
-        let orchestrator = WorkspaceOrchestrator(store: store, remoteTerminalServiceClient: stateCapture.client)
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
-        let project = ProjectRecord(id: "project-remote", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
-        let workspace = WorkspaceRecord(
-            id: "workspace-remote", projectID: project.id, hostID: host.id, title: "feature", dir: projectDir.path,
-            runtimePath: remoteWorkingDirectory, dirname: "feature", branch: "feature", targetBranch: "main", isDefault: false, isArchived: false,
-            isRunning: true, lastLaunchedAt: "now")
-        try orchestrator.upsertComputeHost(host)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-remote-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
-
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
-            let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            try paths.ensureDirectories()
-            let timestamp = "2026-06-11T00:00:00Z"
-            try TerminalSessionPersistence.writeLaunchConfiguration(
-                .init(
-                    sessionID: sessionID, title: "shell-1", workingDirectory: remoteWorkingDirectory, shell: "/bin/bash", command: nil,
-                    createdAt: timestamp, workspaceID: workspace.id, kind: .shell), paths: paths)
-            try TerminalSessionPersistence.writeRuntimeState(
-                .init(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 42, childPID: 4242, state: .running, updatedAt: timestamp,
-                    title: "shell-1", workingDirectory: remoteWorkingDirectory), paths: paths)
-            let ownerClient = TerminalClient(
-                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
-                connectedAt: timestamp)
-            try TerminalSessionPersistence.writeAttachmentSnapshot(
-                TerminalSessionAttachmentSnapshot(
-                    clients: [ownerClient],
-                    attachments: [TerminalAttachment(sessionID: sessionID, clientID: ownerClient.id, mode: .owner, attachedAt: timestamp)]),
-                paths: paths)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
-
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-            }
-        }
-
-        let windows = try orchestrator.windows(workspaceID: workspace.id)
-        XCTAssertEqual(windows.filter { $0.role == "terminal" }.map(\.id), ["window-remote-shell-1"])
-        XCTAssertEqual(stateCapture.requests().map(\.command), ["state"])
-        XCTAssertEqual(stateCapture.requests().map(\.sessionID), [sessionID])
-    }
-
     func testRefreshWorkspaceWindowsPrunesAdHocBuiltInTerminalWindowAfterOwnerCloses() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
@@ -3515,6 +3457,12 @@ final class OrchestratorTests: XCTestCase {
         let openCapture = TerminalOpenCapture()
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
+        let killLog = root.appendingPathComponent("kill.log").path
+        let killMock = """
+            #!/bin/sh
+            printf '%s\\n' "$*" >> "$SPACES_TEST_KILL_LOG"
+            exit 0
+            """
         let orchestrator = WorkspaceOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
@@ -3538,7 +3486,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: nil, status: .running,
+                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: 999_999, status: .running,
                 logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
@@ -3547,13 +3495,16 @@ final class OrchestratorTests: XCTestCase {
                 lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
+            try withEnv(name: "SPACES_TEST_KILL_LOG", value: killLog) {
+                try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "kill": killMock]) {
+                    try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
+                }
             }
         }
 
         XCTAssertEqual(closeCapture.sessionIDs, ["old-spaces-session"])
         XCTAssertEqual(terminateCapture.sessionIDs, ["old-spaces-session"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: killLog))
         XCTAssertEqual(openCapture.modes, [.owner])
         XCTAssertEqual(openCapture.sessionIDs.count, 1)
         XCTAssertNotEqual(openCapture.sessionIDs.first, "old-spaces-session")
@@ -9167,16 +9118,14 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(resolved[1].url, "http://localhost:4000/v1")
     }
 
-    // Tests passive resolvedWorkspaceBrowserSessions does not open SSH forwards for remote browser display.
-    func testResolvedWorkspaceBrowserSessionsPassiveRemoteDoesNotOpenForward() throws {
+    // Tests passive resolvedWorkspaceBrowserSessions resolves device-local browser display without opening SSH forwards.
+    func testResolvedWorkspaceBrowserSessionsPassiveLocalDoesNotOpenForward() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
-        let host = makeComputeHostRecord(id: "host-a", name: "Builder A")
         let project = makeProjectRecord(dir: "/projects/app")
         let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, hostID: host.id, title: "dev", dir: "/projects/app", runtimePath: "/srv/app", dirname: nil,
-            branch: "main", targetBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
-        try orchestrator.upsertComputeHost(host)
+            id: "workspace-a", projectID: project.id, title: "dev", dir: "/projects/app", runtimePath: "/projects/app", dirname: nil, branch: "main",
+            targetBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])

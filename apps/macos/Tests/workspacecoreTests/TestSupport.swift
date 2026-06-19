@@ -31,9 +31,9 @@ func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, titl
         lastLaunchedAt: nil)
 }
 
-func makeComputeHostRecord(id: String = UUID().uuidString, name: String = "Builder") -> ComputeHostRecord {
+func makeSpacesDeviceRecord(id: String = UUID().uuidString, name: String = "Builder") -> SpacesDeviceRecord {
     let hostSlug = name.lowercased().replacingOccurrences(of: " ", with: "-")
-    return ComputeHostRecord(
+    return SpacesDeviceRecord(
         id: id, name: name, sshHost: "\(hostSlug).internal", sshUser: "spaces", sshPort: 22, workspaceRoot: "/srv/spaces",
         daemonEndpoint: SpacesDaemonEndpoint(host: "\(hostSlug).lan", port: 8443, certificateFingerprint: "SHA256:abcdef"),
         createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")

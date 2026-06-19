@@ -47,11 +47,11 @@ public struct TerminalSessionPaths: Sendable, Equatable {
     }
 
     private static func spacesRuntimeDirectory(fileManager: FileManager = .default) throws -> URL {
-        URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true)
+        URL(fileURLWithPath: try SpacesProfile.current().runtimeDirectory, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
     }
 
     private static func spacesProfileRootDirectory(fileManager: FileManager = .default) throws -> URL {
-        URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true)
+        URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
     }
 
     private static func socketPathComponent(for spacesRoot: String, sessionID: String) -> String {

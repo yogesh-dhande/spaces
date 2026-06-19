@@ -139,7 +139,6 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
     public let includeArchived: Bool?
     public let workspaceID: String?
     public let branch: String?
-    public let hostID: String?
     public let title: String?
     public let targetBranch: String?
     public let existingBranch: Bool?
@@ -152,16 +151,14 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
 
     public init(
         operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
-        branch: String? = nil, hostID: String? = nil, title: String? = nil, targetBranch: String? = nil, existingBranch: Bool? = nil,
-        terminalSessionID: String? = nil, agentEvent: String? = nil, terminalText: String? = nil, terminalBytes: Data? = nil,
-        appendNewline: Bool? = nil, lineCount: Int? = nil
+        branch: String? = nil, title: String? = nil, targetBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil,
+        agentEvent: String? = nil, terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
     ) {
         self.operation = operation
         self.projectID = projectID
         self.includeArchived = includeArchived
         self.workspaceID = workspaceID
         self.branch = branch
-        self.hostID = hostID
         self.title = title
         self.targetBranch = targetBranch
         self.existingBranch = existingBranch
@@ -195,7 +192,6 @@ public struct TerminalServiceProfileProjectSummary: Codable, Sendable, Equatable
 public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let projectID: String
-    public let hostID: String
     public let title: String
     public let dir: String
     public let runtimePath: String
@@ -210,12 +206,11 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let notes: String?
 
     public init(
-        id: String, projectID: String, hostID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?,
-        targetBranch: String?, isDefault: Bool, isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        id: String, projectID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?, targetBranch: String?,
+        isDefault: Bool, isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
         self.projectID = projectID
-        self.hostID = hostID
         self.title = title
         self.dir = dir
         self.runtimePath = runtimePath
@@ -273,7 +268,7 @@ public struct TerminalServiceWorkspaceRuntimePortMapping: Codable, Sendable, Equ
 public struct TerminalServiceWorkspaceRuntimeManifest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let projectID: String
-    public let computeHostID: String?
+    public let deviceID: String?
     public let location: TerminalServiceWorkspaceLocation
     public let localPath: String
     public let remotePath: String?
@@ -285,13 +280,13 @@ public struct TerminalServiceWorkspaceRuntimeManifest: Codable, Sendable, Equata
     public let allowedFileRoots: [String]
 
     public init(
-        workspaceID: String, projectID: String, computeHostID: String?, location: TerminalServiceWorkspaceLocation, localPath: String,
-        remotePath: String?, branch: String?, targetBranch: String?, gitRemoteURL: String?, namedPorts: [TerminalServiceWorkspaceRuntimePortMapping],
+        workspaceID: String, projectID: String, deviceID: String?, location: TerminalServiceWorkspaceLocation, localPath: String, remotePath: String?,
+        branch: String?, targetBranch: String?, gitRemoteURL: String?, namedPorts: [TerminalServiceWorkspaceRuntimePortMapping],
         processEnvironment: [String: String], allowedFileRoots: [String]
     ) {
         self.workspaceID = workspaceID
         self.projectID = projectID
-        self.computeHostID = computeHostID
+        self.deviceID = deviceID
         self.location = location
         self.localPath = localPath
         self.remotePath = remotePath

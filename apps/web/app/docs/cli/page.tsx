@@ -70,17 +70,18 @@ spaces agent signal --workspace <id> --session <terminal-session-id> waiting`}</
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Workspaces</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Workspace commands list, create, start, and restart explicit host-scoped workspaces.
+          Workspace commands list, create, start, and restart workspaces on the same-machine daemon.
         </p>
         <CodeBlock>{`spaces workspace list
 spaces workspace list --project <project-id> --include-archived
-spaces workspace create --project <project-id> --branch <branch> --host <local|host-id>
+spaces workspace create --project <project-id> --branch <branch>
 spaces workspace start --workspace <workspace-id>
-spaces workspace restart --workspace <workspace-id>`}</CodeBlock>
+spaces workspace restart --workspace <workspace-id>
+spaces pair
+spaces pair --json`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--project <id>" description="Project ID for listing or workspace creation." />
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
-          <Flag name="--host <id>" description="Host ID for creation. Use local for the Mac." />
           <Flag name="--workspace <id>" description="Workspace ID for runtime commands." />
           <Flag name="--title <title>" description="Optional title for workspace creation." />
           <Flag name="--target-branch <branch>" description="Optional target branch for new branch creation." />
@@ -115,7 +116,7 @@ spaces agent signal --workspace <workspace-id> --session <terminal-session-id> e
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
         <CodeBlock>{`spaces project list
-spaces workspace create --project <project-id> --branch bugfix/login-timeout --host local
+spaces workspace create --project <project-id> --branch bugfix/login-timeout
 spaces workspace start --workspace <workspace-id>
 spaces agent signal --workspace <workspace-id> --session <terminal-session-id> init
 spaces agent signal --workspace <workspace-id> --session <terminal-session-id> start

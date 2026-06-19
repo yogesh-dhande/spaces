@@ -11,11 +11,11 @@ spaces_e2e_load_env "$repo_root"
 remote_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-remote_host_id="${SPACES_E2E_REMOTE_HOST_ID:-keptune-remote-e2e}"
 remote_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
 remote_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 remote_git_root="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 remote_install_root="${SPACES_E2E_REMOTE_INSTALL_ROOT:-~/.spaces/remote-artifact-e2e}"
+remote_device_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
 remote_legacy_install_root="~/.spaces/e2e-tools"
 
 if [[ -z "$remote_host" ]]; then
@@ -85,11 +85,11 @@ cleanup_local_ssh_forwards
 
 echo "==> Cleaning remote E2E host $ssh_destination"
 ssh "${ssh_args[@]}" "$ssh_destination" \
-  "SPACES_E2E_REMOTE_HOST_ID='$remote_host_id' \
-   SPACES_E2E_REMOTE_DAEMON_PORT='$remote_daemon_port' \
+  "SPACES_E2E_REMOTE_DAEMON_PORT='$remote_daemon_port' \
    SPACES_E2E_REMOTE_WORKSPACE_ROOT='$remote_workspace_root' \
    SPACES_E2E_REMOTE_GIT_ROOT='$remote_git_root' \
    SPACES_E2E_REMOTE_INSTALL_ROOT='$remote_install_root' \
+   SPACES_E2E_REMOTE_DEVICE_ROOT='$remote_device_root' \
    SPACES_E2E_REMOTE_LEGACY_INSTALL_ROOT='$remote_legacy_install_root' \
    bash -s" <<'REMOTE_CLEANUP'
 set -euo pipefail
@@ -103,15 +103,43 @@ print(os.path.abspath(os.path.expanduser(sys.argv[1])))
 PY
 }
 
-host_id="${SPACES_E2E_REMOTE_HOST_ID:?}"
 daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:?}"
 workspace_root="$(expand_path "${SPACES_E2E_REMOTE_WORKSPACE_ROOT:?}")"
 git_root="$(expand_path "${SPACES_E2E_REMOTE_GIT_ROOT:?}")"
 install_root="$(expand_path "${SPACES_E2E_REMOTE_INSTALL_ROOT:?}")"
+device_root="$(expand_path "${SPACES_E2E_REMOTE_DEVICE_ROOT:?}")"
 legacy_install_root="$(expand_path "${SPACES_E2E_REMOTE_LEGACY_INSTALL_ROOT:?}")"
-profile_root="${HOME}/.spaces/compute-hosts/${host_id}"
+spaces_root="$(expand_path "${HOME}/.spaces")"
 
-python3 - "$profile_root" "$workspace_root" "$git_root" "$install_root" "$legacy_install_root" <<'PY'
+mapfile -t e2e_roots < <(
+  python3 - "$spaces_root" "$workspace_root" "$git_root" "$install_root" "$device_root" "$legacy_install_root" <<'PY'
+import sys
+from pathlib import Path
+
+spaces_root = Path(sys.argv[1]).resolve()
+protected = {
+    spaces_root,
+    spaces_root / "bin",
+    spaces_root / "daemon",
+    spaces_root / "runtime",
+    spaces_root / "workspaces",
+}
+
+for raw in sys.argv[2:]:
+    if not raw:
+        continue
+    path = Path(raw).resolve()
+    if path in protected:
+        print(f"skipping protected Spaces path: {path}", file=sys.stderr)
+        continue
+    if "e2e" not in path.name.lower():
+        print(f"skipping non-E2E cleanup root: {path}", file=sys.stderr)
+        continue
+    print(path)
+PY
+)
+
+python3 - "${e2e_roots[@]}" <<'PY'
 import os
 import signal
 import sys
@@ -180,18 +208,30 @@ if command -v lsof >/dev/null 2>&1 && [[ "$daemon_port" =~ ^[0-9]+$ ]]; then
   if [ -n "$pids" ]; then
     for pid in $pids; do
       command_line="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-      case "$command_line" in
-        *"$profile_root"*|*"$install_root"*|*spacesd*)
-          kill "$pid" >/dev/null 2>&1 || true
-          ;;
-        *)
-          echo "leaving non-E2E listener on remote daemon port $daemon_port: pid=$pid command=$command_line" >&2
-          ;;
-      esac
+      should_kill=0
+      for root in "${e2e_roots[@]}"; do
+        if [[ -n "$root" && "$command_line" == *"$root"* ]]; then
+          should_kill=1
+          break
+        fi
+      done
+      if [[ "$should_kill" == "1" ]]; then
+        kill "$pid" >/dev/null 2>&1 || true
+      else
+        echo "leaving non-E2E listener on remote daemon port $daemon_port: pid=$pid command=$command_line" >&2
+      fi
     done
     sleep 0.5
     for pid in $pids; do
-      kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true
+      command_line="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+      should_kill=0
+      for root in "${e2e_roots[@]}"; do
+        if [[ -n "$root" && "$command_line" == *"$root"* ]]; then
+          should_kill=1
+          break
+        fi
+      done
+      [[ "$should_kill" == "1" ]] && kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true
     done
   fi
 fi
@@ -205,13 +245,12 @@ for link in "${HOME}/bin/spacesd" "${HOME}/bin/spaces"; do
   fi
 done
 
-rm -rf "$profile_root" "$workspace_root" "$git_root" "$install_root" "$legacy_install_root"
+for root in "${e2e_roots[@]}"; do
+  rm -rf "$root"
+  echo "removed e2e_root=$root"
+done
 
-echo "removed profile=$profile_root"
-echo "removed workspace_root=$workspace_root"
-echo "removed git_root=$git_root"
-echo "removed install_root=$install_root"
-echo "removed legacy_install_root=$legacy_install_root"
+echo "preserved spaces_root=$spaces_root"
 REMOTE_CLEANUP
 
 echo "==> Remote E2E cleanup complete"

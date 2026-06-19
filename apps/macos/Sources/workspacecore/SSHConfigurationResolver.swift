@@ -44,6 +44,20 @@ public struct SSHResolvedConfiguration: Sendable, Equatable {
     }
 }
 
+public enum SSHConfigurationResolverError: LocalizedError, Sendable, Equatable {
+    case commandTimedOut(TimeInterval)
+    case commandFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .commandTimedOut(let timeout): return "SSH configuration lookup timed out after \(timeout) seconds."
+        case .commandFailed(let message):
+            let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty ? "SSH configuration lookup failed." : "SSH configuration lookup failed: \(detail)"
+        }
+    }
+}
+
 public struct SSHConfigurationResolver {
     public typealias CommandRunner = @Sendable ([String], TimeInterval) throws -> String
 
@@ -77,7 +91,7 @@ public struct SSHConfigurationResolver {
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
         if process.isRunning {
             process.terminate()
-            throw ComputeHostBootstrapError.sshCommandTimedOut(timeout)
+            throw SSHConfigurationResolverError.commandTimedOut(timeout)
         }
 
         let outputText = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -85,7 +99,7 @@ public struct SSHConfigurationResolver {
         guard process.terminationStatus == 0 else {
             let message = [errorText, outputText].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(
                 separator: "\n")
-            throw ComputeHostBootstrapError.sshCommandFailed(message)
+            throw SSHConfigurationResolverError.commandFailed(message)
         }
         return outputText
     }

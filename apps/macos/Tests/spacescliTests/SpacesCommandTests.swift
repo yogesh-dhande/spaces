@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Foundation
 import XCTest
+import spacesdeviceapi
 import spacesterminalcore
 import spacesterminalghostty
 
@@ -17,15 +18,13 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertTrue(command.includeArchived)
     }
 
-    func testWorkspaceCreateParsesExplicitHostScopedArguments() throws {
+    func testWorkspaceCreateParsesDeviceScopedArguments() throws {
         let command = try WorkspaceCreateCommand.parse([
-            "--project", "project-1", "--branch", "feature/a", "--host", "local", "--title", "Feature A", "--target-branch", "main",
-            "--existing-branch",
+            "--project", "project-1", "--branch", "feature/a", "--title", "Feature A", "--target-branch", "main", "--existing-branch",
         ])
 
         XCTAssertEqual(command.project, "project-1")
         XCTAssertEqual(command.branch, "feature/a")
-        XCTAssertEqual(command.host, "local")
         XCTAssertEqual(command.title, "Feature A")
         XCTAssertEqual(command.targetBranch, "main")
         XCTAssertTrue(command.existingBranch)
@@ -176,9 +175,51 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.authToken, "SECRET")
     }
 
+    func testPairCommandParses() throws {
+        XCTAssertNoThrow(try PairCommand.parse([]))
+        XCTAssertTrue(try PairCommand.parse(["--json"]).json)
+    }
+
+    func testPairCommandLinesUseSpacesScheme() throws {
+        let window = SpacesDevicePairingWindowSnapshot(
+            window: SpacesDevicePairingCoordinator().openWindow(
+                host: "studio.local", port: 7443, transportKey: "PSK", certificateFingerprint: "SHA256:abc", name: "Studio",
+                now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
+        let lines = try pairCommandLines {
+            SpacesDeviceAPIControlResponse(ok: true, message: "ok", result: .pairingWindow(.init(pairingWindow: window)))
+        }
+
+        XCTAssertEqual(lines[0], "Spaces pairing window")
+        XCTAssertEqual(lines[1], "link=\(window.linkString)")
+        XCTAssertTrue(lines[1].contains("spaces://pair?"))
+        XCTAssertEqual(lines[2], "code=12345678")
+        XCTAssertTrue(lines[3].hasPrefix("expires_at="))
+    }
+
+    func testPairCommandJSONPayloadUsesDeviceMetadata() throws {
+        let window = SpacesDevicePairingWindowSnapshot(
+            window: SpacesDevicePairingCoordinator().openWindow(
+                host: "studio.local", port: 7443, transportKey: "PSK", certificateFingerprint: "SHA256:abc", name: "Studio",
+                now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
+
+        let payload = try pairCommandPayload {
+            SpacesDeviceAPIControlResponse(ok: true, message: "ok", result: .pairingWindow(.init(pairingWindow: window)))
+        }
+
+        XCTAssertEqual(payload.name, "Studio")
+        XCTAssertEqual(payload.host, "studio.local")
+        XCTAssertEqual(payload.port, 7443)
+        XCTAssertEqual(payload.pairingCode, "12345678")
+        XCTAssertEqual(payload.pairingNonce, "N")
+        XCTAssertEqual(payload.transportKey, "PSK")
+        XCTAssertEqual(payload.certificateFingerprint, "SHA256:abc")
+        XCTAssertEqual(payload.pairingLink, window.linkString)
+    }
+
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "MobileCommand", "MCPCommand"])
+        XCTAssertEqual(
+            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "PairCommand", "MobileCommand", "MCPCommand"])
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {
@@ -195,7 +236,7 @@ final class SpacesCommandTests: XCTestCase {
 
         let createTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_workspace_create" })
         let schema = try XCTUnwrap(createTool["inputSchema"] as? [String: Any])
-        XCTAssertEqual(schema["required"] as? [String], ["project", "branch", "host"])
+        XCTAssertEqual(schema["required"] as? [String], ["project", "branch"])
 
         let tailTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_terminal_tail" })
         let tailSchema = try XCTUnwrap(tailTool["inputSchema"] as? [String: Any])

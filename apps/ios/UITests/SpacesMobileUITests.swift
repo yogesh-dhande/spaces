@@ -261,7 +261,7 @@ final class SpacesMobileUITests: XCTestCase {
         let secondaryDetail = app.descendants(matching: .any)["terminal.detail.\(secondarySessionID)"]
         XCTAssertTrue(secondaryDetail.exists, "Secondary terminal detail disappeared after primary interrupt")
         XCTAssertFalse(app.staticTexts["This terminal session ended before a final render was available."].exists)
-        XCTAssertFalse(app.staticTexts["The mobile bridge request timed out."].exists)
+        XCTAssertFalse(app.staticTexts["The Device API request timed out."].exists)
         if !configuration.expectedSecondaryText.isEmpty {
             XCTAssertNotNil(
                 waitForRenderDump(configuration: configuration, timeout: 20) { dump in
@@ -330,6 +330,9 @@ final class SpacesMobileUITests: XCTestCase {
         app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
         app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
         app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
+        if let deviceSeedJSON = configuration.deviceSeedJSON {
+            app.launchEnvironment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"] = deviceSeedJSON
+        }
         app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
         if let secondarySessionID = configuration.secondarySessionID {
             app.launchEnvironment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"] = secondarySessionID
@@ -1055,6 +1058,8 @@ private struct UITestConfiguration: Decodable {
 
     let sessionID: String
     let secondarySessionID: String?
+    let deviceID: String?
+    let deviceName: String?
     let host: String
     let port: Int
     let authToken: String
@@ -1100,9 +1105,39 @@ private struct UITestConfiguration: Decodable {
     let attachToExistingApp: Bool
     let bundleID: String
 
+    var deviceSeedJSON: String? {
+        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (1...65_535).contains(port),
+              !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !transportKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        let payload: [String: Any] = [
+            "activeDeviceID": deviceID ?? "",
+            "devices": [
+                [
+                    "id": deviceID ?? "",
+                    "name": deviceName ?? "This Mac",
+                    "host": host,
+                    "port": port,
+                    "authToken": authToken,
+                    "transportKey": transportKey,
+                    "certificateFingerprint": certificateFingerprint,
+                ],
+            ],
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     private enum CodingKeys: String, CodingKey {
         case sessionID
         case secondarySessionID
+        case deviceID
+        case deviceName
         case host
         case port
         case authToken
@@ -1154,6 +1189,8 @@ private struct UITestConfiguration: Decodable {
         attachToExistingApp = try container.decodeIfPresent(Bool.self, forKey: .attachToExistingApp) ?? false
         sessionID = try container.decode(String.self, forKey: .sessionID)
         secondarySessionID = try container.decodeIfPresent(String.self, forKey: .secondarySessionID)
+        deviceID = try container.decodeIfPresent(String.self, forKey: .deviceID)
+        deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName)
         host = try container.decode(String.self, forKey: .host)
         port = try container.decode(Int.self, forKey: .port)
         authToken = try container.decode(String.self, forKey: .authToken)

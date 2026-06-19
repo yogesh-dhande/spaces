@@ -25,7 +25,7 @@
 			<string>dev.usespaces.spacesmobile</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>spacesmobile</string>
+				<string>spaces</string>
 			</array>
 		</dict>
 	</array>

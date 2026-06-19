@@ -1,109 +1,88 @@
 import SwiftUI
-import spacesmobilecore
+import spacesdevicecore
 
 struct ConnectionSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var settings: SpacesMobileConnectionSettings
-    @State private var pendingPairingLink: SpacesMobilePairingLink?
+    @State private var pendingPairingLink: SpacesDevicePairingLink?
     @State private var isConfirmingPairing = false
     @State private var isShowingScanner = false
     @State private var isPairing = false
     @State private var isLaunchingSpaces = false
     @State private var errorMessage: String?
-    @State private var discovery = SpacesMobileBridgeDiscovery()
-    private let initialPairingLink: SpacesMobilePairingLink?
+    private let initialPairingLink: SpacesDevicePairingLink?
+    let pairedDevices: [SpacesMobilePairedDeviceRecord]
+    let activeDeviceID: String?
     let noticeMessage: String?
     let onPairingLinkConsumed: () -> Void
     let onLaunchSpaces: (() async -> Void)?
-    let onSave: (SpacesMobileConnectionSettings) -> Void
+    let onSelectDevice: (String) -> Void
+    let onRemoveDevice: (String) -> Void
+    let onSave: (SpacesMobileConnectionSettings, String) -> Void
 
     init(
         initialSettings: SpacesMobileConnectionSettings,
-        initialPairingLink: SpacesMobilePairingLink? = nil,
+        initialPairingLink: SpacesDevicePairingLink? = nil,
+        pairedDevices: [SpacesMobilePairedDeviceRecord] = [],
+        activeDeviceID: String? = nil,
         noticeMessage: String? = nil,
         onPairingLinkConsumed: @escaping () -> Void = {},
         onLaunchSpaces: (() async -> Void)? = nil,
-        onSave: @escaping (SpacesMobileConnectionSettings) -> Void
+        onSelectDevice: @escaping (String) -> Void = { _ in },
+        onRemoveDevice: @escaping (String) -> Void = { _ in },
+        onSave: @escaping (SpacesMobileConnectionSettings, String) -> Void
     ) {
         _settings = State(initialValue: initialSettings)
         self.initialPairingLink = initialPairingLink
+        self.pairedDevices = pairedDevices
+        self.activeDeviceID = activeDeviceID
         self.noticeMessage = noticeMessage
         self.onPairingLinkConsumed = onPairingLinkConsumed
         self.onLaunchSpaces = onLaunchSpaces
+        self.onSelectDevice = onSelectDevice
+        self.onRemoveDevice = onRemoveDevice
         self.onSave = onSave
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    HStack(spacing: 10) {
-                        StatusDot(kind: settings.isPaired ? .running : .idle)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(settings.isPaired ? "Paired" : "Not paired")
-                                .font(.system(size: 13, weight: .medium))
-                            Text("\(settings.trimmedHost):\(settings.port)")
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                    if settings.isPaired, let onLaunchSpaces {
-                        Button {
-                            Task {
-                                isLaunchingSpaces = true
-                                await onLaunchSpaces()
-                                isLaunchingSpaces = false
-                            }
-                        } label: {
-                            if isLaunchingSpaces {
-                                HStack(spacing: 10) {
-                                    ProgressView().controlSize(.small)
-                                    Text("Launching…")
-                                }
-                            } else {
-                                Label("Launch Spaces on Mac", systemImage: "macwindow")
-                            }
-                        }
-                        .disabled(isLaunchingSpaces)
-                    }
-                }
-
-                Section("Nearby Macs") {
-                    if discovery.discoveredBridges.isEmpty {
-                        HStack(spacing: 10) {
-                            ProgressView().controlSize(.small)
-                            Text("Searching…")
-                                .foregroundStyle(.secondary)
-                        }
+                Section("Connected Devices") {
+                    if pairedDevices.isEmpty {
+                        Text("No devices are paired.")
+                            .foregroundStyle(.secondary)
                     } else {
-                        ForEach(Array(discovery.discoveredBridges.enumerated()), id: \.element.id) { _, bridge in
-                            Button {
-                                settings.host = bridge.host
-                                settings.port = bridge.port
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Label(String(bridge.serviceName.trimmingPrefix("Spaces ")), systemImage: "macbook")
-                                        .foregroundStyle(.primary)
-                                    Text("\(bridge.host):\(bridge.port)")
-                                        .font(.caption.monospaced())
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .padding(.leading, 28)
+                        ForEach(pairedDevices) { device in
+                            HStack(spacing: 10) {
+                                Image(systemName: device.id == activeDeviceID ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(device.id == activeDeviceID ? Theme.accent : .secondary)
+                                Button {
+                                    settings.host = device.host
+                                    settings.port = device.port
+                                    settings.certificateFingerprint = device.certificateFingerprint
+                                    onSelectDevice(device.id)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(device.name)
+                                            .foregroundStyle(.primary)
+                                        Text("\(device.host):\(device.port)")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
                                 }
+                                Spacer(minLength: 0)
+                                Button(role: .destructive) {
+                                    onRemoveDevice(device.id)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
                             }
                         }
                     }
-                }
-
-                Section("Endpoint") {
-                    TextField("Host", text: $settings.host)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    TextField("Port", value: $settings.port, format: .number.grouping(.never))
-                        .keyboardType(.numberPad)
                 }
 
                 Section {
@@ -124,6 +103,26 @@ struct ConnectionSettingsView: View {
                     }
                     .disabled(isPairing)
 
+                    if settings.isPaired, let onLaunchSpaces {
+                        Button {
+                            Task {
+                                isLaunchingSpaces = true
+                                await onLaunchSpaces()
+                                isLaunchingSpaces = false
+                            }
+                        } label: {
+                            if isLaunchingSpaces {
+                                HStack(spacing: 10) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Launching…")
+                                }
+                            } else {
+                                Label("Launch Spaces on Mac", systemImage: "macwindow")
+                            }
+                        }
+                        .disabled(isLaunchingSpaces)
+                    }
+
                     if let noticeMessage {
                         Text(noticeMessage)
                             .font(.footnote)
@@ -135,23 +134,16 @@ struct ConnectionSettingsView: View {
                             .foregroundStyle(.red)
                     }
                 } header: {
-                    Text(settings.isPaired ? "Re-pair This Device" : "Pair This Device")
+                    Text("Add Device")
                 } footer: {
-                    Text("Scan the QR code from the Mac app to pair. Nearby Macs can still be selected for the saved endpoint.")
+                    Text("Scan a QR code from a Mac or Linux device running spacesd.")
                 }
             }
-            .navigationTitle("Connection")
+            .navigationTitle("Devices")
             .tint(Theme.accent)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        onSave(settings)
-                        dismiss()
-                    }
-                    .disabled(!settings.isValid)
                 }
             }
             .alert(
@@ -174,19 +166,15 @@ struct ConnectionSettingsView: View {
                 }
             }
             .task {
-                discovery.start()
                 applyIncomingPairingLink(initialPairingLink)
             }
             .onChange(of: initialPairingLink) { _, newValue in
                 applyIncomingPairingLink(newValue)
             }
-            .onDisappear {
-                discovery.stop()
-            }
         }
     }
 
-    @MainActor private func applyIncomingPairingLink(_ pairingLink: SpacesMobilePairingLink?) {
+    @MainActor private func applyIncomingPairingLink(_ pairingLink: SpacesDevicePairingLink?) {
         guard let pairingLink else { return }
         pendingPairingLink = pairingLink
         errorMessage = nil
@@ -196,7 +184,7 @@ struct ConnectionSettingsView: View {
 
     @MainActor private func handleScannedPayload(_ payload: String) {
         do {
-            pendingPairingLink = try SpacesMobilePairingLink.parse(payload)
+            pendingPairingLink = try SpacesDevicePairingLink.parse(payload)
             errorMessage = nil
             isConfirmingPairing = true
         } catch {
@@ -204,7 +192,7 @@ struct ConnectionSettingsView: View {
         }
     }
 
-    @MainActor private func pairDevice(using pairingLink: SpacesMobilePairingLink) async {
+    @MainActor private func pairDevice(using pairingLink: SpacesDevicePairingLink) async {
         guard !isPairing else { return }
         isPairing = true
         defer { isPairing = false }
@@ -214,7 +202,7 @@ struct ConnectionSettingsView: View {
             pairedSettings.port = pairingLink.port
             pairedSettings.transportKey = pairingLink.transportKey
             pairedSettings.certificateFingerprint = pairingLink.certificateFingerprint
-            let bridgeClient = SpacesMobileBridgeClient(settings: pairedSettings)
+            let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings)
             let commandChannel = bridgeClient.makeCommandChannel()
             let issuedAuthToken: String
             do {
@@ -228,7 +216,7 @@ struct ConnectionSettingsView: View {
             settings = pairedSettings
             pendingPairingLink = nil
             errorMessage = nil
-            onSave(pairedSettings)
+            onSave(pairedSettings, pairingLink.name)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription

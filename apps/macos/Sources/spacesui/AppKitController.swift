@@ -3,7 +3,9 @@ import Carbon
 import CoreImage
 import Foundation
 import Sparkle
-import spacesmobilebridge
+import spacesclientcore
+import spacesdeviceapi
+import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
 import spacesterminalui
@@ -46,47 +48,6 @@ private final class CommandPaletteSearchField: NSSearchField { override var need
 private final class CommandPalettePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
-}
-
-@MainActor private final class ComputeHostFormRefs {
-    let hostField: NSTextField
-    let sshUserField: NSTextField
-    let sshPortField: NSTextField
-    let displayNameField: NSTextField
-    var editingHostID: String?
-
-    init(hostField: NSTextField, sshUserField: NSTextField, displayNameField: NSTextField, sshPortField: NSTextField, editingHostID: String? = nil) {
-        self.hostField = hostField
-        self.sshUserField = sshUserField
-        self.displayNameField = displayNameField
-        self.sshPortField = sshPortField
-        self.editingHostID = editingHostID
-    }
-}
-
-private struct RemoteHostSetupRetryState {
-    let draft: ComputeHostDraft?
-    let existingHost: ComputeHostRecord?
-    let authToken: String
-}
-
-private struct RemoteHostUpgradeResult: Sendable {
-    let host: ComputeHostRecord
-    let authToken: String
-    let outcome: ComputeHostBootstrapOutcome?
-    let report: ComputeHostDaemonStatusReport
-    let alreadyCurrent: Bool
-}
-
-private struct RemoteHostActiveSessionsError: LocalizedError, Sendable {
-    let host: ComputeHostRecord
-    let action: String
-    let activeSessionCount: Int
-    let sessions: [TerminalServiceSessionSummary]
-
-    var errorDescription: String? {
-        "\(host.name) has \(activeSessionCount) active remote session\(activeSessionCount == 1 ? "" : "s"). Stop those sessions before \(action)."
-    }
 }
 
 protocol ProcessLifecyclePolicyController {
@@ -226,6 +187,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
+    private var activeDeviceID = SpacesPairedDeviceRecord.localDeviceID
+    private var activeDeviceName = "This Mac"
+    private var activeDeviceIsRemote = false
+    private var activePairedDevice: SpacesPairedDeviceRecord?
+    private var activeDeviceOverview: SpacesDeviceOverviewPayload?
     private var alertsGroups: [AlertsGroup] = []
     private var dismissedAlertsAttentionItemIDs: Set<String> = []
     private var visibleDetailWorkspaceID: String?
@@ -286,11 +252,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var commandPaletteMainWindowVisibility: Bool?
     private var mobileConnectionPanel: NSPanel?
     private var mobileConnectionTimer: Timer?
-    private var remoteHostsPanel: NSPanel?
-    private var remoteHostAdvancedVisible = false
-    private var remoteHostStatusByID: [String: String] = [:]
-    private var remoteHostSetupByID: [String: ComputeHostSetupChecklist] = [:]
-    private var remoteHostSetupRetryByID: [String: RemoteHostSetupRetryState] = [:]
+    private weak var activeDeviceSelectorContainer: NSView?
+    private weak var activeDevicePopUpButton: NSPopUpButton?
+    private weak var remoteDeviceSSHHostField: NSTextField?
+    private weak var remoteDeviceSSHUserField: NSTextField?
+    private weak var remoteDeviceSSHPortField: NSTextField?
+    private weak var remoteDevicePairingStatusLabel: NSTextField?
+    private var currentDevicePairingWindow: ClientDevicePairingWindow?
+    private var devicePanelStatusMessage: (message: String, isError: Bool)?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -304,7 +273,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var showWindowIssueModalIPCObserver: NSObjectProtocol?
     private var cycleWorkspaceWindowIPCObserver: NSObjectProtocol?
     private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
-    private var triggerComputeHostUpgradeIPCObserver: NSObjectProtocol?
     private var runWorkspaceProcessIPCObserver: NSObjectProtocol?
     private var stopWorkspaceProcessIPCObserver: NSObjectProtocol?
     private var restartWorkspaceProcessIPCObserver: NSObjectProtocol?
@@ -322,6 +290,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var setupManager: SetupManager?
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
+    private var pendingSidebarReloadFailureMessage: String?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
     private var didLogFirstStartupInteraction = false
@@ -340,7 +309,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var inlineWorkspaceFieldTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceLabelTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceOutsideClickMonitor: Any?
-    private var computeHostFormRefsByTag: [Int: ComputeHostFormRefs] = [:]
     private var activeAddWorkspaceFormTag: Int?
     private var activeAddProjectFormTag: Int?
     private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
@@ -427,17 +395,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let canRun: Bool
         let canStop: Bool
         let canRestart: Bool
-    }
-
-    struct RemoteHostUpgradeSessionStopPlan: Equatable, Sendable {
-        enum LocalStop: Equatable, Sendable {
-            case process(workspaceID: String, processID: String)
-            case codingAgent(workspaceID: String, agentID: String)
-            case workspaceTerminal(workspaceID: String, sessionID: String)
-        }
-
-        let localStop: LocalStop?
-        let remoteSessionID: String
     }
 
     enum WindowFocusRequest: Sendable {
@@ -536,7 +493,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         setupCycleWorkspaceWindowIPCObserver()
         setupSelectWorkspaceDetailIPCObserver()
         setupOpenWorkspaceTerminalIPCObserver()
-        setupTriggerComputeHostUpgradeIPCObserver()
         setupRunWorkspaceProcessIPCObserver()
         setupStopWorkspaceProcessIPCObserver()
         setupRestartWorkspaceProcessIPCObserver()
@@ -566,7 +522,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated static func persistentTerminationPolicyReason() -> String {
-        "Spaces coordinates long-lived workspace windows, terminal sessions, and mobile bridge clients."
+        "Spaces coordinates long-lived workspace windows, terminal sessions, and paired device clients."
     }
 
     nonisolated static func applyPersistentTerminationPolicy(processInfo: any ProcessLifecyclePolicyController = ProcessInfo.processInfo) {
@@ -664,10 +620,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             DistributedNotificationCenter.default().removeObserver(openWorkspaceTerminalIPCObserver)
             self.openWorkspaceTerminalIPCObserver = nil
         }
-        if let triggerComputeHostUpgradeIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(triggerComputeHostUpgradeIPCObserver)
-            self.triggerComputeHostUpgradeIPCObserver = nil
-        }
         if let runWorkspaceProcessIPCObserver {
             DistributedNotificationCenter.default().removeObserver(runWorkspaceProcessIPCObserver)
             self.runWorkspaceProcessIPCObserver = nil
@@ -728,123 +680,87 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         releaseLaunchLeases()
     }
 
-    private func setupAgentEventIPCObserver() {
+    private func addDistributedIPCObserver(name: Notification.Name, selector: Selector) -> NSObjectProtocol {
         DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleAgentEventIPC(_:)), name: IPCNotification.agentEventFired, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        agentEventIPCObserver = self
+            self, selector: selector, name: name, object: nil, suspensionBehavior: .deliverImmediately)
+        return self
+    }
+
+    private func setupAgentEventIPCObserver() {
+        agentEventIPCObserver = addDistributedIPCObserver(name: IPCNotification.agentEventFired, selector: #selector(handleAgentEventIPC(_:)))
     }
 
     private func setupShowMainWindowIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleShowMainWindowIPC(_:)), name: IPCNotification.showMainWindow, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        showMainWindowIPCObserver = self
+        showMainWindowIPCObserver = addDistributedIPCObserver(name: IPCNotification.showMainWindow, selector: #selector(handleShowMainWindowIPC(_:)))
     }
 
     private func setupHideMainWindowIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleHideMainWindowIPC(_:)), name: IPCNotification.hideMainWindow, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        hideMainWindowIPCObserver = self
+        hideMainWindowIPCObserver = addDistributedIPCObserver(name: IPCNotification.hideMainWindow, selector: #selector(handleHideMainWindowIPC(_:)))
     }
 
     private func setupShowWindowIssueModalIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleShowWindowIssueModalIPC(_:)), name: IPCNotification.showWindowIssueModal, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        showWindowIssueModalIPCObserver = self
+        showWindowIssueModalIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.showWindowIssueModal, selector: #selector(handleShowWindowIssueModalIPC(_:)))
     }
 
     private func setupCycleWorkspaceWindowIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleCycleWorkspaceWindowIPC(_:)), name: IPCNotification.cycleWorkspaceWindow, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        cycleWorkspaceWindowIPCObserver = self
+        cycleWorkspaceWindowIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.cycleWorkspaceWindow, selector: #selector(handleCycleWorkspaceWindowIPC(_:)))
     }
 
     private func setupSelectWorkspaceDetailIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleSelectWorkspaceDetailIPC(_:)), name: IPCNotification.selectWorkspaceDetail, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        selectWorkspaceDetailIPCObserver = self
+        selectWorkspaceDetailIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.selectWorkspaceDetail, selector: #selector(handleSelectWorkspaceDetailIPC(_:)))
     }
 
     private func setupOpenWorkspaceTerminalIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleOpenWorkspaceTerminalIPC(_:)), name: IPCNotification.openWorkspaceTerminal, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        openWorkspaceTerminalIPCObserver = self
-    }
-
-    private func setupTriggerComputeHostUpgradeIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleTriggerComputeHostUpgradeIPC(_:)), name: IPCNotification.triggerComputeHostUpgrade, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        triggerComputeHostUpgradeIPCObserver = self
+        openWorkspaceTerminalIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.openWorkspaceTerminal, selector: #selector(handleOpenWorkspaceTerminalIPC(_:)))
     }
 
     private func setupRunWorkspaceProcessIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleRunWorkspaceProcessIPC(_:)), name: IPCNotification.runWorkspaceProcess, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        runWorkspaceProcessIPCObserver = self
+        runWorkspaceProcessIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.runWorkspaceProcess, selector: #selector(handleRunWorkspaceProcessIPC(_:)))
     }
 
     private func setupStopWorkspaceProcessIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleStopWorkspaceProcessIPC(_:)), name: IPCNotification.stopWorkspaceProcess, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        stopWorkspaceProcessIPCObserver = self
+        stopWorkspaceProcessIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.stopWorkspaceProcess, selector: #selector(handleStopWorkspaceProcessIPC(_:)))
     }
 
     private func setupRestartWorkspaceProcessIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleRestartWorkspaceProcessIPC(_:)), name: IPCNotification.restartWorkspaceProcess, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        restartWorkspaceProcessIPCObserver = self
+        restartWorkspaceProcessIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.restartWorkspaceProcess, selector: #selector(handleRestartWorkspaceProcessIPC(_:)))
     }
 
     private func setupLaunchWorkspaceAgentIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleLaunchWorkspaceAgentIPC(_:)), name: IPCNotification.launchWorkspaceAgent, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        launchWorkspaceAgentIPCObserver = self
+        launchWorkspaceAgentIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.launchWorkspaceAgent, selector: #selector(handleLaunchWorkspaceAgentIPC(_:)))
     }
 
     private func setupOpenTerminalSessionWindowIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleOpenTerminalSessionWindowIPC(_:)), name: IPCNotification.openTerminalSessionWindow, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        openTerminalSessionWindowIPCObserver = self
+        openTerminalSessionWindowIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.openTerminalSessionWindow, selector: #selector(handleOpenTerminalSessionWindowIPC(_:)))
     }
 
     private func setupCloseTerminalSessionWindowIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleCloseTerminalSessionWindowIPC(_:)), name: IPCNotification.closeTerminalSessionWindow, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        closeTerminalSessionWindowIPCObserver = self
+        closeTerminalSessionWindowIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.closeTerminalSessionWindow, selector: #selector(handleCloseTerminalSessionWindowIPC(_:)))
     }
 
     private func setupDumpTerminalSessionWindowStateIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleDumpTerminalSessionWindowStateIPC(_:)), name: IPCNotification.dumpTerminalSessionWindowState, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        dumpTerminalSessionWindowStateIPCObserver = self
+        dumpTerminalSessionWindowStateIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.dumpTerminalSessionWindowState, selector: #selector(handleDumpTerminalSessionWindowStateIPC(_:)))
     }
 
     private func setupPerformTerminalSessionWindowShortcutIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handlePerformTerminalSessionWindowShortcutIPC(_:)), name: IPCNotification.performTerminalSessionWindowShortcut,
-            object: nil, suspensionBehavior: .deliverImmediately)
-        performTerminalSessionWindowShortcutIPCObserver = self
+        performTerminalSessionWindowShortcutIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.performTerminalSessionWindowShortcut, selector: #selector(handlePerformTerminalSessionWindowShortcutIPC(_:)))
     }
 
     private func setupFocusTerminalSessionWindowIPCObserver() {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(handleFocusTerminalSessionWindowIPC(_:)), name: IPCNotification.focusTerminalSessionWindow, object: nil,
-            suspensionBehavior: .deliverImmediately)
-        focusTerminalSessionWindowIPCObserver = self
+        focusTerminalSessionWindowIPCObserver = addDistributedIPCObserver(
+            name: IPCNotification.focusTerminalSessionWindow, selector: #selector(handleFocusTerminalSessionWindowIPC(_:)))
     }
 
     @objc private nonisolated func handleAgentEventIPC(_ notification: Notification) {
@@ -951,18 +867,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    @objc private nonisolated func handleTriggerComputeHostUpgradeIPC(_ notification: Notification) {
-        let object = notification.object as? String
-        guard let hostID = notification.userInfo?[IPCNotification.computeHostIDUserInfoKey] as? String else { return }
-        Task { @MainActor [weak self, object, hostID] in
-            guard let self, self.matchesProfileIPCObject(object) else { return }
-            self.presentRemoteHostsPanel()
-            let sender = NSButton()
-            sender.identifier = NSUserInterfaceItemIdentifier(hostID)
-            self.upgradeSavedComputeHost(sender)
-        }
-    }
-
     @objc private nonisolated func handleRunWorkspaceProcessIPC(_ notification: Notification) {
         let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
@@ -1010,7 +914,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:)) ?? .owner
         let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
         Task { @MainActor [weak self, object, sessionID, mode, requestID] in
-            guard let self, self.matchesProfileIPCObject(object) else { return }
+            guard let self else { return }
+            guard self.matchesProfileIPCObject(object) else { return }
             self.openTerminalSessionWindow(sessionID: sessionID, mode: mode, requestID: requestID)
         }
     }
@@ -1261,10 +1166,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: plan.manifest.remotePath ?? plan.manifest.localPath,
             shell: "/bin/bash", command: nil, createdAt: ISO8601DateFormatter().string(from: Date()), workspaceID: workspaceID, kind: kind)
-        guard let endpoint = target.endpoint, let hostID = target.computeHostID else {
+        guard let endpoint = target.endpoint, let deviceID = target.deviceID else {
             throw WorkspaceError.invalidArgument(message: "Remote terminal session is missing its pinned TLS endpoint.")
         }
-        let authToken = try ComputeHostCredentialStore.resolvedAuthToken(hostID: hostID)
+        let authToken = try SpacesDeviceCredentialStore.token(deviceID: deviceID)
         let requestTimeout: TimeInterval = 5
         let requestClient = try TerminalServicePinnedTLSRequestSessionClient(
             host: endpoint.host, port: endpoint.port, authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, timeout: 30)
@@ -1508,20 +1413,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true, canRestart: false)
     }
 
-    nonisolated static func remoteHostUpgradeSessionStopPlan(sessionID: String, descriptor: TerminalRuntimeControlDescriptor?)
-        -> RemoteHostUpgradeSessionStopPlan
-    {
-        var localStop: RemoteHostUpgradeSessionStopPlan.LocalStop?
-        if let descriptor {
-            switch descriptor.kind {
-            case .process: if let processID = descriptor.processID { localStop = .process(workspaceID: descriptor.workspaceID, processID: processID) }
-            case .codingAgent: if let agentID = descriptor.agentID { localStop = .codingAgent(workspaceID: descriptor.workspaceID, agentID: agentID) }
-            case .workspaceTerminal: localStop = .workspaceTerminal(workspaceID: descriptor.workspaceID, sessionID: descriptor.sessionID)
-            }
-        }
-        return RemoteHostUpgradeSessionStopPlan(localStop: localStop, remoteSessionID: sessionID)
-    }
-
     private static func configuredProcessTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
         guard let settings else { return nil }
         if let templateID = trimmedNonEmpty(process.templateID) { return settings.processes.first(where: { $0.id == templateID }) }
@@ -1564,8 +1455,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return trimmed
     }
 
-    static func computeHostIDCandidate(name: String?, sshHost: String?, daemonHost: String?) -> String {
-        let source = trimmedNonEmpty(name) ?? trimmedNonEmpty(sshHost) ?? trimmedNonEmpty(daemonHost) ?? "remote-host"
+    static func deviceIDCandidate(name: String?, sshHost: String?, daemonHost: String?) -> String {
+        let source = trimmedNonEmpty(name) ?? trimmedNonEmpty(sshHost) ?? trimmedNonEmpty(daemonHost) ?? "remote-device"
         var scalars: [UnicodeScalar] = []
         var lastWasSeparator = false
         for scalar in source.lowercased().unicodeScalars {
@@ -1578,7 +1469,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
         }
         let slug = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return slug.isEmpty ? "remote-host" : slug
+        return slug.isEmpty ? "remote-device" : slug
     }
 
     private static func terminalSessionIsRunning(sessionID: String) -> Bool {
@@ -1589,70 +1480,98 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func runTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        performTerminalRuntimeMutation(metric: "terminal_runtime_run", descriptor: descriptor) {
-            switch descriptor.kind {
-            case .process:
-                guard let processKey = descriptor.processKey else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
-                if let templateID = descriptor.processTemplateID {
-                    try orchestrator.runConfiguredProcess(workspaceID: descriptor.workspaceID, processTemplateID: templateID, processKey: processKey)
-                } else {
-                    try orchestrator.runConfiguredProcess(workspaceID: descriptor.workspaceID, processKey: processKey)
+        if let device = activeDeviceForDaemonStateMutation() {
+            performActiveDeviceTerminalRuntimeMutation(metric: "terminal_runtime_run", descriptor: descriptor, device: device) { device in
+                switch descriptor.kind {
+                case .process:
+                    guard let processKey = descriptor.processKey else {
+                        throw WorkspaceError.invalidArgument(message: "Configured process not found.")
+                    }
+                    return try SpacesActiveDeviceClient.runWorkspaceProcess(
+                        workspaceID: descriptor.workspaceID, processKey: processKey, processTemplateID: descriptor.processTemplateID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                case .codingAgent:
+                    guard let agentName = descriptor.agentLauncherName else {
+                        throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
+                    }
+                    return try SpacesActiveDeviceClient.runCodingAgent(
+                        workspaceID: descriptor.workspaceID, agentName: agentName, agentLauncherID: descriptor.agentLauncherID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Run.")
                 }
-            case .codingAgent:
-                if let launcherID = descriptor.agentLauncherID {
-                    _ = try orchestrator.launchAgentLauncher(workspaceID: descriptor.workspaceID, launcherID: launcherID)
-                } else if let launcherName = descriptor.agentLauncherName {
-                    _ = try orchestrator.launchAgentLauncher(workspaceID: descriptor.workspaceID, name: launcherName)
-                } else {
-                    throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-                }
-            case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Run.")
             }
+            return
         }
+        showNoActiveDeviceSelectedError()
     }
 
     private func stopTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        performTerminalRuntimeMutation(metric: "terminal_runtime_stop", descriptor: descriptor) {
-            switch descriptor.kind {
-            case .process:
-                guard let processID = descriptor.processID else { return }
-                try orchestrator.stopWorkspaceProcess(workspaceID: descriptor.workspaceID, processID: processID)
-            case .codingAgent:
-                guard let agentID = descriptor.agentID else { return }
-                try orchestrator.stopCodingAgent(workspaceID: descriptor.workspaceID, agentID: agentID)
-            case .workspaceTerminal:
-                _ = try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: descriptor.workspaceID, sessionID: descriptor.sessionID)
+        if let device = activeDeviceForDaemonStateMutation() {
+            performActiveDeviceTerminalRuntimeMutation(metric: "terminal_runtime_stop", descriptor: descriptor, device: device) { device in
+                switch descriptor.kind {
+                case .process:
+                    return try SpacesActiveDeviceClient.stopWorkspaceProcess(
+                        workspaceID: descriptor.workspaceID, processID: descriptor.processID, processKey: descriptor.processKey,
+                        processTemplateID: descriptor.processTemplateID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                case .codingAgent:
+                    return try SpacesActiveDeviceClient.stopCodingAgent(
+                        workspaceID: descriptor.workspaceID, agentID: descriptor.agentID, agentName: descriptor.agentLauncherName,
+                        agentLauncherID: descriptor.agentLauncherID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                case .workspaceTerminal:
+                    return try SpacesActiveDeviceClient.stopWorkspaceTerminal(
+                        workspaceID: descriptor.workspaceID, sessionID: descriptor.sessionID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
             }
+            return
         }
+        showNoActiveDeviceSelectedError()
     }
 
     private func restartTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        performTerminalRuntimeMutation(metric: "terminal_runtime_restart", descriptor: descriptor) {
-            switch descriptor.kind {
-            case .process:
-                guard let processID = descriptor.processID else { return }
-                try orchestrator.restartWorkspaceProcess(workspaceID: descriptor.workspaceID, processID: processID)
-            case .codingAgent:
-                guard let agentID = descriptor.agentID else { return }
-                _ = try orchestrator.restartCodingAgent(workspaceID: descriptor.workspaceID, agentID: agentID)
-            case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Restart.")
+        if let device = activeDeviceForDaemonStateMutation() {
+            performActiveDeviceTerminalRuntimeMutation(metric: "terminal_runtime_restart", descriptor: descriptor, device: device) { device in
+                switch descriptor.kind {
+                case .process:
+                    return try SpacesActiveDeviceClient.restartWorkspaceProcess(
+                        workspaceID: descriptor.workspaceID, processID: descriptor.processID, processKey: descriptor.processKey,
+                        processTemplateID: descriptor.processTemplateID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                case .codingAgent:
+                    return try SpacesActiveDeviceClient.restartCodingAgent(
+                        workspaceID: descriptor.workspaceID, agentID: descriptor.agentID, agentName: descriptor.agentLauncherName,
+                        agentLauncherID: descriptor.agentLauncherID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Restart.")
+                }
             }
+            return
         }
+        showNoActiveDeviceSelectedError()
     }
 
-    private func performTerminalRuntimeMutation(metric: String, descriptor: TerminalRuntimeControlDescriptor, _ operation: () throws -> Void) {
+    private func performActiveDeviceTerminalRuntimeMutation(
+        metric: String, descriptor: TerminalRuntimeControlDescriptor, device: SpacesPairedDeviceRecord,
+        operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
+    ) {
         let startedAt = Date()
-        do {
-            try operation()
-            logPerfMetric(
-                metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
-                elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "kind=\(descriptor.kind)")
-            reloadData()
-        } catch {
-            logPerfMetric(
-                metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
-                elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false, detail: "kind=\(descriptor.kind)")
-            showError(error)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.activeDeviceMutation(device: device, operation: operation)
+            switch result {
+            case .success(let response):
+                logPerfMetric(
+                    metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
+                    elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "kind=\(descriptor.kind)")
+                applyActiveDeviceMutationResponse(response, selectedWorkspaceID: descriptor.workspaceID)
+            case .failure(let error):
+                logPerfMetric(
+                    metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
+                    elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false, detail: "kind=\(descriptor.kind)")
+                showError(error)
+            }
         }
     }
 
@@ -1892,19 +1811,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return false
     }
 
-    private enum WorkspaceLifecycleAction {
-        case launch
-        case restart
-        case stop
-        case archive(deleteLocalBranch: Bool, deleteRemoteBranch: Bool)
-    }
-
     private enum AddWorkspaceBranchMode: String {
         case existing
         case create
     }
-
-    private struct WorkspaceLifecycleOutcome: Sendable { let notice: String? }
 
     private struct VisibleWorkspaceDetailRefreshOutcome: Sendable {
         let didMutateWindows: Bool
@@ -1925,23 +1835,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let replaceExistingManagedDirectory: Bool
     }
 
-    private struct ProjectCreateInput: Sendable {
-        let directoryPath: String?
-        let preparedGitProject: WorkspaceOrchestrator.PreparedGitProjectImport?
-        let setupScript: String?
-        let stopScript: String?
-        let ports: [PortDefinition]
-        let processes: [ProcessTemplate]
-        let browserSessions: [BrowserSession]
-        let agentLaunchers: [AgentLauncher]
-    }
-
     private struct SidebarDataSnapshot: Sendable {
         let config: AppConfig
         let projects: [ProjectSummary]
         let workspacesByProject: [String: [WorkspaceSummary]]
         let workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
         let alertsGroups: [AlertsGroup]
+        let activeDeviceID: String
+        let activeDeviceName: String
+        let activeDeviceIsRemote: Bool
+        let activePairedDevice: SpacesPairedDeviceRecord
+        let activeDeviceOverview: SpacesDeviceOverviewPayload
+    }
+
+    private struct ClientConnectedDevice: Sendable {
+        let id: String
+        let name: String
+        let host: String?
+        let port: Int?
+        let sshHost: String?
+        let sshUser: String?
+        let sshPort: Int?
+        let isLocal: Bool
+        let isAvailable: Bool
+        let requiresReconnect: Bool
+    }
+
+    private struct ClientDevicePairingWindow {
+        let deviceID: String
+        let deviceName: String
+        let linkString: String
+        let expiresAt: Date
+
+        var isVisible: Bool { expiresAt > Date() }
     }
 
     enum BackgroundRefreshFailureAction: Equatable {
@@ -2178,6 +2104,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return .workspaceWindow(workspaceID: workspaceID, index: windowListIndex)
     }
 
+    nonisolated private static func activeDeviceMutation(
+        device: SpacesPairedDeviceRecord, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
+    ) async -> Result<SpacesDeviceAPIResponse, Error> {
+        await Task.detached(priority: .userInitiated) { do { return .success(try operation(device)) } catch { return .failure(error) } }.value
+    }
+
+    nonisolated private static func activeDeviceWorkspaceCreateOptions(projectID: String, device: SpacesPairedDeviceRecord) async -> Result<
+        SpacesDeviceWorkspaceCreateOptions, Error
+    > {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                return .success(
+                    try SpacesActiveDeviceClient.workspaceCreateOptions(
+                        selectedProjectID: projectID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+                    ))
+            } catch { return .failure(error) }
+        }.value
+    }
+
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<WorkspaceOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -2201,52 +2146,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let didMutateWindows = try orchestrator.refreshWorkspaceWindows(workspaceID: workspaceID)
                 let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses()
                 return .success(.init(didMutateWindows: didMutateWindows, didUpdateProcesses: didUpdateProcesses))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func runWorkspaceLifecycleAction(_ action: WorkspaceLifecycleAction, workspaceID: String) async -> Result<
-        WorkspaceLifecycleOutcome, Error
-    > {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                var notice: String?
-                switch action {
-                case .launch: try orchestrator.launchWorkspace(workspaceID: workspaceID)
-                case .restart: try orchestrator.restartWorkspace(workspaceID: workspaceID)
-                case .stop:
-                    let outcome = try orchestrator.stopWorkspace(workspaceID: workspaceID)
-                    if outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing {
-                        notice = "Workspace directory is missing. Spaces stopped the workspace and skipped its stop script."
-                    }
-                case .archive(let deleteLocalBranch, let deleteRemoteBranch):
-                    let outcome = try orchestrator.archiveWorkspace(
-                        workspaceID: workspaceID, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch)
-                    notice = outcome.notice
-                }
-                return .success(.init(notice: notice))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func createWorkspaceSnapshot(input: WorkspaceCreateInput) async -> Result<WorkspaceRecord, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                var workspace = try orchestrator.createWorkspace(
-                    projectID: input.projectID, name: input.name, branch: input.branch, targetBranch: input.targetBranch,
-                    directoryName: input.directoryName, runSetupScript: false, allowRemoteBranchLookup: input.allowRemoteBranchLookup,
-                    allowExistingBranchReuse: input.allowExistingBranchReuse, replaceExistingManagedDirectory: input.replaceExistingManagedDirectory)
-                if let notes = input.notes {
-                    try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
-                    if let updated = try orchestrator.store.workspace(id: workspace.id) { workspace = updated }
-                }
-                return .success(workspace)
             } catch { return .failure(error) }
         }.value
     }
@@ -2288,51 +2187,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             try orchestrator.discardPreparedGitProject(prepared)
             return .success(())
         } catch { return .failure(error) }
-    }
-
-    nonisolated private static func createProjectSnapshot(input: ProjectCreateInput) async -> Result<ProjectRecord, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                let record: ProjectRecord
-                if let preparedGitProject = input.preparedGitProject {
-                    record = try orchestrator.addPreparedGitProject(preparedGitProject) { project in
-                        project.setupScript = input.setupScript
-                        project.stopScript = input.stopScript
-                        project.ports = input.ports
-                        project.processes = input.processes
-                        project.browserSessions = input.browserSessions
-                        project.agentLaunchers = input.agentLaunchers
-                    }
-                } else if let directoryPath = input.directoryPath {
-                    record = try orchestrator.addReviewedProject(dir: directoryPath) { project in
-                        project.setupScript = input.setupScript
-                        project.stopScript = input.stopScript
-                        project.ports = input.ports
-                        project.processes = input.processes
-                        project.browserSessions = input.browserSessions
-                        project.agentLaunchers = input.agentLaunchers
-                    }
-                } else {
-                    throw WorkspaceError.invalidArgument(message: "Project source is required.")
-                }
-                return .success(record)
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func deleteProjectSnapshot(projectDirectory: String) async -> Result<Void, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                try orchestrator.removeProject(dir: projectDirectory)
-                return .success(())
-            } catch { return .failure(error) }
-        }.value
     }
 
     nonisolated private static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<ExternalWindowAction, Error> {
@@ -2552,30 +2406,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
-    nonisolated private static func runWorkspaceSetupSnapshot(workspaceID: String) async -> Result<Void, Error> {
-        await Task.detached(priority: .utility) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
-                return .success(())
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func branchOptionsSnapshot(projectID: String) async -> Result<[String], Error> {
-        await Task.detached(priority: .utility) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                let options = try orchestrator.gitBranchOptions(projectID: projectID, includeLiveRemoteHeads: true)
-                return .success(options)
-            } catch { return .failure(error) }
-        }.value
-    }
-
     nonisolated private static func runProcessMonitorSnapshot() async -> Result<Bool, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -2716,36 +2546,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 logStartupSnapshotProfile("sidebar_snapshot_store_ready")
                 let config = try orchestrator.syncConfig()
                 logStartupSnapshotProfile("sidebar_snapshot_config_ready")
-                let projects = try orchestrator.listProjects()
-                logStartupSnapshotProfile("sidebar_snapshot_projects_ready", details: "project_count=\(projects.count)")
-                var workspacesByProject: [String: [WorkspaceSummary]] = [:]
-                var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
-                var workspaceCount = 0
-                let workspaceScanStartedAt = ProcessInfo.processInfo.systemUptime
-                var listWorkspacesMS = 0
-                var runtimeStatusMS = 0
-                for project in projects {
-                    let listStartedAt = ProcessInfo.processInfo.systemUptime
-                    let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
-                    listWorkspacesMS += Int((ProcessInfo.processInfo.systemUptime - listStartedAt) * 1000)
-                    workspacesByProject[project.id] = workspaces
-                    for workspace in workspaces {
-                        workspaceCount += 1
-                        let runtimeStatusStartedAt = ProcessInfo.processInfo.systemUptime
-                        workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
-                        runtimeStatusMS += Int((ProcessInfo.processInfo.systemUptime - runtimeStatusStartedAt) * 1000)
-                    }
-                }
-                let workspaceScanMS = Int((ProcessInfo.processInfo.systemUptime - workspaceScanStartedAt) * 1000)
+                let activeDeviceOverview = try SpacesActiveDeviceClient.overview(
+                    database: SpacesClientDatabase(), clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                let mapped = activeDeviceSidebarData(from: activeDeviceOverview.overview)
+                let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
-                    "sidebar_snapshot_workspace_scan_breakdown",
-                    details:
-                        "workspace_count=\(workspaceCount) list_ms=\(listWorkspacesMS) runtime_ms=\(runtimeStatusMS) git_ms=0 unaccounted_ms=\(workspaceScanMS - listWorkspacesMS - runtimeStatusMS)"
-                )
-                logStartupSnapshotProfile(
-                    "sidebar_snapshot_workspace_scan_ready", details: "workspace_count=\(workspaceCount) scan_ms=\(workspaceScanMS)")
-                let alertsGroups = try buildAlertsGroupsSnapshot(
-                    orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
+                    "sidebar_snapshot_active_device_ready",
+                    details: "device=\(activeDeviceOverview.device.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
+                let isLocalDevice = activeDeviceOverview.device.id == SpacesPairedDeviceRecord.localDeviceID
+                let alertsGroups =
+                    isLocalDevice
+                    ? try buildAlertsGroupsSnapshot(
+                        orchestrator: orchestrator, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject) : []
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_alerts_ready",
                     details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
@@ -2753,10 +2565,202 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     "sidebar_snapshot_complete", details: "total_ms=\(Int((ProcessInfo.processInfo.systemUptime - snapshotStartedAt) * 1000))")
                 return .success(
                     .init(
-                        config: config, projects: projects, workspacesByProject: workspacesByProject,
-                        workspaceRuntimeStatusByID: workspaceRuntimeStatusByID, alertsGroups: alertsGroups))
+                        config: config, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
+                        workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups,
+                        activeDeviceID: activeDeviceOverview.device.id, activeDeviceName: activeDeviceOverview.device.name,
+                        activeDeviceIsRemote: !isLocalDevice, activePairedDevice: activeDeviceOverview.device,
+                        activeDeviceOverview: activeDeviceOverview.overview))
             } catch { return .failure(error) }
         }.value
+    }
+
+    nonisolated static func activeDeviceSidebarData(from overview: SpacesDeviceOverviewPayload) -> (
+        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
+    ) {
+        let model = SpacesActiveDeviceOverviewViewModel(overview: overview)
+        let projects = model.projects.map {
+            ProjectSummary(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
+        }
+        let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
+            workspaces.map {
+                WorkspaceSummary(
+                    id: $0.id, title: $0.title, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
+                    isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
+            }
+        }
+        let workspaceRuntimeStatusByID = model.workspaceRuntimeStatusByID.mapValues { runtime in
+            WorkspaceRuntimeStatus(
+                workspaceID: runtime.workspaceID, lifecycleState: WorkspaceLifecycleState(isRunning: runtime.lifecycleState == .running),
+                runtimeHealth: .healthy, hasTrackedRuntimeIndicators: runtime.hasTrackedRuntimeIndicators,
+                runningProcessCount: runtime.runningProcessCount, exitedProcessCount: runtime.exitedProcessCount,
+                waitingAgentWindowCount: runtime.waitingAgentWindowCount, missingConfiguredProcessCount: runtime.missingConfiguredProcessCount,
+                missingConfiguredBrowserSessionCount: runtime.missingConfiguredBrowserSessionCount)
+        }
+
+        return (projects, workspacesByProject, workspaceRuntimeStatusByID)
+    }
+
+    struct SidebarProjectActions: Equatable, Sendable {
+        let showsSettings: Bool
+        let showsAddWorkspace: Bool
+    }
+
+    nonisolated static func sidebarProjectActions(isGitRepo: Bool) -> SidebarProjectActions {
+        let actions = SpacesActiveDeviceProjectActions(isGitRepo: isGitRepo)
+        return SidebarProjectActions(showsSettings: actions.showsSettings, showsAddWorkspace: actions.showsAddWorkspace)
+    }
+
+    nonisolated private static func localPortDefinition(from port: SpacesDevicePortDefinition) -> PortDefinition {
+        PortDefinition(id: port.id, name: port.name)
+    }
+
+    nonisolated private static func devicePortDefinition(from port: PortDefinition) -> SpacesDevicePortDefinition {
+        SpacesDevicePortDefinition(id: port.id, name: port.name)
+    }
+
+    nonisolated private static func localProcessTemplate(from process: SpacesDeviceProcessTemplate) -> ProcessTemplate {
+        ProcessTemplate(
+            id: process.id, name: process.name, command: process.command, kind: process.kind,
+            onExit: ProcessExitAction(rawValue: process.onExit) ?? .none)
+    }
+
+    nonisolated private static func deviceProcessTemplate(from process: ProcessTemplate) -> SpacesDeviceProcessTemplate {
+        SpacesDeviceProcessTemplate(id: process.id, name: process.name, command: process.command, kind: process.kind, onExit: process.onExit.rawValue)
+    }
+
+    nonisolated private static func localBrowserSession(from session: SpacesDeviceBrowserSession) -> BrowserSession {
+        BrowserSession(name: session.name, url: session.url)
+    }
+
+    nonisolated private static func deviceBrowserSession(from session: BrowserSession) -> SpacesDeviceBrowserSession {
+        SpacesDeviceBrowserSession(name: session.name, url: session.url)
+    }
+
+    nonisolated private static func localAgentLauncher(from launcher: SpacesDeviceAgentLauncher) -> AgentLauncher {
+        AgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
+    }
+
+    nonisolated private static func deviceAgentLauncher(from launcher: AgentLauncher) -> SpacesDeviceAgentLauncher {
+        SpacesDeviceAgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
+    }
+
+    nonisolated private static func localWorkspaceSettings(from config: SpacesDeviceWorkspaceConfig) -> WorkspaceSettings {
+        WorkspaceSettings(
+            stopScript: config.stopScript, ports: config.ports.map(localPortDefinition(from:)),
+            processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
+            agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:)))
+    }
+
+    nonisolated private static func deviceWorkspaceConfig(
+        from settings: WorkspaceSettings, resolvedBrowserSessions: [SpacesDeviceBrowserSession] = []
+    ) -> SpacesDeviceWorkspaceConfig {
+        SpacesDeviceWorkspaceConfig(
+            stopScript: settings.stopScript, ports: settings.ports.map(devicePortDefinition(from:)),
+            processes: settings.processes.map(deviceProcessTemplate(from:)),
+            browserSessions: settings.browserSessions.map(deviceBrowserSession(from:)), resolvedBrowserSessions: resolvedBrowserSessions,
+            agentLaunchers: settings.agentLaunchers.map(deviceAgentLauncher(from:)))
+    }
+
+    nonisolated private static func localProjectSettings(from config: SpacesDeviceProjectConfig) -> (
+        setupScript: String?, stopScript: String?, ports: [PortDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
+        agentLaunchers: [AgentLauncher]
+    ) {
+        (
+            setupScript: config.setupScript, stopScript: config.stopScript, ports: config.ports.map(localPortDefinition(from:)),
+            processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
+            agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:))
+        )
+    }
+
+    private static func deviceProjectConfig(from refs: ProjectFieldRefs) -> SpacesDeviceProjectConfig {
+        SpacesDeviceProjectConfig(
+            setupScript: refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue,
+            stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
+            ports: refs.portsSection.currentPorts.map(devicePortDefinition(from:)),
+            processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
+            browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
+            agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
+    }
+
+    private static func deviceProjectConfig(from refs: AddProjectFieldRefs) -> SpacesDeviceProjectConfig {
+        SpacesDeviceProjectConfig(
+            setupScript: refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue,
+            stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
+            ports: refs.portsSection.currentPorts.map(devicePortDefinition(from:)),
+            processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
+            browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
+            agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
+    }
+
+    nonisolated private static func localSetupStatus(from status: SpacesDeviceWorkspaceSetupStatus) -> WorkspaceSetupStatus {
+        switch status {
+        case .pending: return .pending
+        case .running: return .running
+        case .succeeded: return .succeeded
+        case .failed: return .failed
+        }
+    }
+
+    nonisolated private static func localSetupState(from state: SpacesDeviceWorkspaceSetupState?) -> WorkspaceSetupState {
+        guard let state else { return WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil) }
+        return WorkspaceSetupState(
+            status: localSetupStatus(from: state.status), errorMessage: state.errorMessage, startedAt: state.startedAt, finishedAt: state.finishedAt)
+    }
+
+    nonisolated private static func runningState(from state: SpacesDeviceRunState) -> RunningProcessState {
+        switch state {
+        case .notStarted: return .idle
+        case .running: return .running
+        case .exited: return .exited
+        }
+    }
+
+    nonisolated private static func statusKind(from state: SpacesDeviceRunState) -> RowPrimitives.StatusKind {
+        switch state {
+        case .notStarted: return .idle
+        case .running: return .running
+        case .exited: return .exited
+        }
+    }
+
+    nonisolated private static func agentStatus(from state: SpacesDeviceCodingAgentActivityState) -> AgentWindowStatus {
+        switch state {
+        case .idle: return .idle
+        case .spinning: return .spinning
+        case .waiting: return .waiting
+        case .done: return .done
+        }
+    }
+
+    nonisolated private static func runningProcesses(from rows: [SpacesDeviceWorkspaceProcessRow]) -> [RunningProcessRecord] {
+        rows.compactMap { row in
+            guard row.runState != .notStarted || row.processID != nil || row.sessionID != nil else { return nil }
+            return RunningProcessRecord(
+                id: row.processID ?? row.id, workspaceID: row.workspaceID, templateID: row.templateID, templateName: row.name, command: row.command,
+                runtimeTargetID: nil, terminalApp: nil, terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, pid: nil,
+                status: runningState(from: row.runState), logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil)
+        }
+    }
+
+    nonisolated private static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
+        let now = ISO8601DateFormatter().string(from: Date())
+        return rows.compactMap { row in
+            guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
+            return AgentWindowRecord(
+                id: row.agentID ?? row.id, workspaceID: row.workspaceID, provider: .spaces, label: row.name,
+                terminalTarget: row.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: row.launcherID,
+                claimedLauncherName: row.name, status: agentStatus(from: row.activityState), createdAt: now, updatedAt: now)
+        }
+    }
+
+    nonisolated static func activeDeviceTerminalWindows(from rows: [SpacesDeviceWorkspaceTerminalRow]) -> [WindowRecord] {
+        let now = ISO8601DateFormatter().string(from: Date())
+        return rows.enumerated().map { index, row in
+            WindowRecord(
+                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory, windowID: nil,
+                terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
+        }
     }
 
     nonisolated static func shouldHideAfterSuccessfulExternalWindowAction(_ succeeded: Bool, action: ExternalWindowAction) -> Bool {
@@ -2851,6 +2855,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     enum ManagedDirectoryReplacementDecision: Equatable, Sendable {
         case replace
         case cancel
+    }
+
+    enum WorkspacePathAction: String, Sendable {
+        case openEditor
+        case revealInFinder
+
+        var title: String {
+            switch self {
+            case .openEditor: "Open editor"
+            case .revealInFinder: "Reveal in Finder"
+            }
+        }
+    }
+
+    nonisolated static func remoteWorkspacePathActionErrorMessage(action: WorkspacePathAction, deviceName: String) -> String {
+        "\(action.title) requires a workspace path on this Mac. \(deviceName) workspaces live on the selected daemon; use an SSH-capable workflow for that remote path."
     }
 
     static func projectImportWorkspaceSyncDecision(for response: NSApplication.ModalResponse) -> ProjectImportWorkspaceSyncDecision {
@@ -3396,6 +3416,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alertsRow.translatesAutoresizingMaskIntoConstraints = false
         alertsRowView = alertsRow
 
+        let deviceSelector = makeActiveDeviceSelectorRow()
+        deviceSelector.translatesAutoresizingMaskIntoConstraints = false
+
         let sectionHeader = sidebarSectionHeader(
             title: "Projects", actions: [(symbol: "plus", tooltip: "New project", action: #selector(addProject))])
         sectionHeader.translatesAutoresizingMaskIntoConstraints = false
@@ -3439,6 +3462,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         container.addSubview(topBarRow)
         container.addSubview(alertsRow)
+        container.addSubview(deviceSelector)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
 
@@ -3451,9 +3475,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             alertsRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
 
+            deviceSelector.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            deviceSelector.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            deviceSelector.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
+
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
+            sectionHeader.topAnchor.constraint(equalTo: deviceSelector.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
@@ -3461,6 +3489,114 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ])
 
         return container
+    }
+
+    private func makeActiveDeviceSelectorRow() -> NSView {
+        let container = NSView()
+        activeDeviceSelectorContainer = container
+
+        let label = NSTextField(labelWithString: "Device")
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.setContentHuggingPriority(.required, for: .horizontal)
+
+        let popup = NSPopUpButton()
+        popup.target = self
+        popup.action = #selector(activeDeviceSelectionChanged(_:))
+        popup.controlSize = .small
+        popup.font = .systemFont(ofSize: 11)
+        popup.setAccessibilityIdentifier("sidebar-active-device-selector")
+        activeDevicePopUpButton = popup
+
+        let stack = NSStackView(views: [label, popup])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor), stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: container.topAnchor), stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            popup.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        refreshActiveDeviceSelector()
+        return container
+    }
+
+    private func refreshActiveDeviceSelector() {
+        guard let popup = activeDevicePopUpButton else { return }
+        let devices = connectedClientDevices()
+        popup.removeAllItems()
+        for device in devices {
+            popup.addItem(withTitle: device.name)
+            popup.lastItem?.representedObject = device.id
+            popup.lastItem?.toolTip = clientDeviceDetailText(device)
+            popup.lastItem?.isEnabled = device.isAvailable
+        }
+        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == activeDeviceID }) {
+            popup.select(item)
+        } else {
+            popup.selectItem(at: 0)
+        }
+        activeDeviceSelectorContainer?.isHidden = devices.count <= 1
+    }
+
+    @objc private func activeDeviceSelectionChanged(_ sender: NSPopUpButton) {
+        guard let deviceID = sender.selectedItem?.representedObject as? String, deviceID != activeDeviceID else { return }
+        guard connectedClientDevices().first(where: { $0.id == deviceID })?.isAvailable == true else {
+            refreshActiveDeviceSelector()
+            return
+        }
+        do {
+            let database = try SpacesClientDatabase()
+            try database.setActiveDeviceID(deviceID)
+            selectedProjectID = nil
+            selectedWorkspaceID = nil
+            showingAlerts = false
+            showingSettings = false
+            showLoadingPlaceholder(
+                message: "Loading \(sender.selectedItem?.title ?? "device")...", detail: "Spaces is loading projects and workspaces.")
+            requestSidebarReload(failurePlaceholderMessage: "Spaces couldn't load \(sender.selectedItem?.title ?? "device").")
+        } catch {
+            showError(error)
+            refreshActiveDeviceSelector()
+        }
+    }
+
+    private func connectedClientDevices(localStatus: SpacesDeviceAPIStatus? = nil, requireLocalStatus: Bool = false) -> [ClientConnectedDevice] {
+        let localHost = localStatus?.networkAddresses.first ?? localStatus?.host
+        let local = ClientConnectedDevice(
+            id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", host: localHost, port: localStatus?.port, sshHost: nil, sshUser: nil,
+            sshPort: nil, isLocal: true, isAvailable: !requireLocalStatus || localStatus != nil, requiresReconnect: false)
+        let remote = macPairedDevices().map {
+            let hasCredentials = Self.pairedDeviceHasRequiredCredentials(deviceID: $0.id)
+            return ClientConnectedDevice(
+                id: $0.id, name: $0.name, host: $0.host, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort, isLocal: false,
+                isAvailable: hasCredentials, requiresReconnect: !hasCredentials)
+        }
+        return [local] + remote
+    }
+
+    private func clientDeviceDetailText(_ device: ClientConnectedDevice) -> String {
+        var parts: [String] = []
+        if device.requiresReconnect { parts.append("Reconnect required") }
+        if let host = device.host, let port = device.port {
+            parts.append("\(host):\(port)")
+        } else if device.isLocal {
+            parts.append(device.isAvailable ? "Local daemon" : "Local daemon unavailable")
+        }
+        if let sshHost = device.sshHost {
+            let userPrefix = device.sshUser.map { "\($0)@" } ?? ""
+            let portSuffix = device.sshPort.map { ":\($0)" } ?? ""
+            parts.append("ssh: \(userPrefix)\(sshHost)\(portSuffix)")
+        }
+        return parts.joined(separator: "  ")
+    }
+
+    nonisolated private static func pairedDeviceHasRequiredCredentials(deviceID: String) -> Bool {
+        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: deviceID)) ?? false
+        let hasTransportKey = (try? SpacesDeviceCredentialStore.hasTransportKey(deviceID: deviceID)) ?? false
+        return hasToken && hasTransportKey
     }
 
     private func makeSidebarTopBarRow() -> NSView {
@@ -3479,12 +3615,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
-        let mobileButton = sidebarRowIconButton(
-            symbol: "iphone.gen3.radiowaves.left.and.right", tooltip: "Mobile connection", action: #selector(showMobileConnection))
-        mobileButton.setAccessibilityIdentifier("sidebar-mobile-connection")
-        let remoteHostsButton = sidebarRowIconButton(
-            symbol: "externaldrive.connected.to.line.below", tooltip: "Remote hosts", action: #selector(showRemoteHosts))
-        remoteHostsButton.setAccessibilityIdentifier("sidebar-remote-hosts")
+        let mobileButton = sidebarRowIconButton(symbol: "qrcode", tooltip: "Devices", action: #selector(showMobileConnection))
+        mobileButton.setAccessibilityIdentifier("sidebar-device-pairing")
         let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(showSettings))
         let reloadButton = sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
 
@@ -3497,7 +3629,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(iconView)
         stack.addArrangedSubview(NSView())
         stack.addArrangedSubview(mobileButton)
-        stack.addArrangedSubview(remoteHostsButton)
         stack.addArrangedSubview(settingsButton)
         stack.addArrangedSubview(reloadButton)
 
@@ -3820,32 +3951,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func invalidateCommandPaletteCache() { commandPaletteNeedsReload = true }
 
-    private func reloadData() {
-        do {
-            pendingWorktreeDiscoveryReload = false
-            invalidateCommandPaletteCache()
-            configCache = try orchestrator.syncConfig()
-            loadShortcutSpecs()
-            projects = try orchestrator.listProjects()
-            workspacesByProject = [:]
-            workspaceRuntimeStatusByID = [:]
-            for project in projects {
-                let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
-                workspacesByProject[project.id] = workspaces
-                for workspace in workspaces {
-                    workspaceRuntimeStatusByID[workspace.id] = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
-                }
-            }
-            alertsGroups = try Self.buildAlertsGroupsSnapshot(
-                orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
-            loadAlertsDismissedAttentionItemIDs()
-            pruneDismissedAlertsAttentionItemIDsIfNeeded()
-            outlineView.reloadData()
-            applySidebarProjectExpansionState()
-            refreshSelection()
-            updateAlertsSidebarBadge()
-        } catch { showError(error) }
-    }
+    private func reloadData() { requestSidebarReload() }
 
     private func startBackgroundServicesIfNeeded() {
         guard !didStartBackgroundServices else { return }
@@ -3868,6 +3974,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sidebarReloadTask?.cancel()
         sidebarReloadTask = nil
         pendingSidebarReloadRequest = false
+        pendingSidebarReloadFailureMessage = nil
         didStartBackgroundServices = false
     }
 
@@ -3976,23 +4083,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updateAlertsRowAppearance()
     }
 
-    private func requestSidebarReload() {
+    private func requestSidebarReload(failurePlaceholderMessage: String? = nil) {
         if let sidebarReloadTask, !sidebarReloadTask.isCancelled {
             pendingSidebarReloadRequest = true
+            pendingSidebarReloadFailureMessage = pendingSidebarReloadFailureMessage ?? failurePlaceholderMessage
             return
         }
+        let currentFailurePlaceholderMessage = failurePlaceholderMessage
         sidebarReloadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await Self.initialSidebarDataSnapshot()
             guard !Task.isCancelled else { return }
             switch result {
             case .success(let snapshot): self.applySidebarDataSnapshot(snapshot, preserveDetailPane: true)
-            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "sidebar_reload")
+            case .failure(let error):
+                if let currentFailurePlaceholderMessage {
+                    self.showError(error)
+                    self.showPlaceholder(message: currentFailurePlaceholderMessage)
+                    self.refreshActiveDeviceSelector()
+                } else {
+                    self.handleBackgroundRefreshFailure(error, source: "sidebar_reload")
+                }
             }
             self.sidebarReloadTask = nil
             if self.pendingSidebarReloadRequest {
+                let pendingFailurePlaceholderMessage = self.pendingSidebarReloadFailureMessage
                 self.pendingSidebarReloadRequest = false
-                self.requestSidebarReload()
+                self.pendingSidebarReloadFailureMessage = nil
+                self.requestSidebarReload(failurePlaceholderMessage: pendingFailurePlaceholderMessage)
             }
         }
     }
@@ -4007,10 +4125,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         projects = snapshot.projects
         workspacesByProject = snapshot.workspacesByProject
         workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
+        activeDeviceID = snapshot.activeDeviceID
+        activeDeviceName = snapshot.activeDeviceName
+        activeDeviceIsRemote = snapshot.activeDeviceIsRemote
+        activePairedDevice = snapshot.activePairedDevice
+        activeDeviceOverview = snapshot.activeDeviceOverview
         alertsGroups = snapshot.alertsGroups
         loadAlertsDismissedAttentionItemIDs()
         pruneDismissedAlertsAttentionItemIDsIfNeeded()
         outlineView.reloadData()
+        refreshActiveDeviceSelector()
         applySidebarProjectExpansionState()
         logStartupProfile("apply_snapshot_outline_ready")
         if !shouldPreserveDetailPane {
@@ -4027,6 +4151,92 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updateAlertsSidebarBadge()
         logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(alertsGroups.count)")
         if showingAlerts { showAlertsDetail() }
+    }
+
+    nonisolated static func daemonStateMutationDevice(
+        activePairedDevice: SpacesPairedDeviceRecord?, activeDeviceOverview _: SpacesDeviceOverviewPayload?
+    ) -> SpacesPairedDeviceRecord? { activePairedDevice }
+
+    private func activeDeviceForDaemonStateMutation() -> SpacesPairedDeviceRecord? {
+        Self.daemonStateMutationDevice(activePairedDevice: activePairedDevice, activeDeviceOverview: activeDeviceOverview)
+    }
+
+    private static func noActiveDeviceSelectedError() -> NSError {
+        NSError(
+            domain: "Spaces", code: 1001,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Spaces has not loaded an active device.",
+                NSLocalizedRecoverySuggestionErrorKey: "Choose a device from the sidebar device selector or reload Spaces.",
+            ])
+    }
+
+    private func showNoActiveDeviceSelectedError() { showError(Self.noActiveDeviceSelectedError()) }
+
+    private func activeDeviceProjectSummary(projectID: String) -> SpacesDeviceProjectSummary? {
+        activeDeviceOverview?.projects.first(where: { $0.id == projectID })
+    }
+
+    private func activeDeviceWorkspaceSummary(workspaceID: String) -> SpacesDeviceWorkspaceSummary? {
+        activeDeviceOverview?.workspaces.first(where: { $0.id == workspaceID })
+    }
+
+    private func applyActiveDeviceOverview(
+        _ overview: SpacesDeviceOverviewPayload, selectedProjectID preferredProjectID: String? = nil,
+        selectedWorkspaceID preferredWorkspaceID: String? = nil, preserveDetailPane: Bool = false
+    ) {
+        let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
+        activeDeviceOverview = overview
+        let mapped = Self.activeDeviceSidebarData(from: overview)
+        projects = mapped.projects
+        workspacesByProject = mapped.workspacesByProject
+        workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
+        if activeDeviceIsRemote {
+            alertsGroups = []
+        } else {
+            alertsGroups =
+                (try? Self.buildAlertsGroupsSnapshot(orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)) ?? []
+        }
+        if let preferredWorkspaceID, findWorkspace(id: preferredWorkspaceID) != nil {
+            selectedWorkspaceID = preferredWorkspaceID
+            selectedProjectID = findWorkspace(id: preferredWorkspaceID)?.0.id ?? preferredProjectID
+        } else if let preferredProjectID, projects.contains(where: { $0.id == preferredProjectID }) {
+            selectedProjectID = preferredProjectID
+            selectedWorkspaceID = nil
+        }
+        outlineView.reloadData()
+        refreshActiveDeviceSelector()
+        applySidebarProjectExpansionState()
+        if !shouldPreserveDetailPane { refreshSelection() }
+        updateAlertsSidebarBadge()
+        if showingAlerts { showAlertsDetail() }
+    }
+
+    private func applyActiveDeviceMutationResponse(
+        _ response: SpacesDeviceAPIResponse, selectedProjectID preferredProjectID: String? = nil,
+        selectedWorkspaceID preferredWorkspaceID: String? = nil
+    ) {
+        if let overview = response.overview {
+            applyActiveDeviceOverview(
+                overview, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID, preserveDetailPane: true)
+        } else {
+            if let preferredWorkspaceID { selectedWorkspaceID = preferredWorkspaceID }
+            if let preferredProjectID { selectedProjectID = preferredProjectID }
+            requestSidebarReload()
+        }
+    }
+
+    private func updateActiveDeviceWorkspaceConfig(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
+        guard let device = activeDeviceForDaemonStateMutation() else { throw Self.noActiveDeviceSelectedError() }
+        guard let workspace = activeDeviceWorkspaceSummary(workspaceID: workspaceID) else {
+            throw WorkspaceError.invalidArgument(message: "Workspace not found on the selected device.")
+        }
+        var settings = Self.localWorkspaceSettings(from: workspace.config)
+        update(&settings)
+        let response = try SpacesActiveDeviceClient.updateWorkspaceConfig(
+            workspaceID: workspaceID,
+            config: Self.deviceWorkspaceConfig(from: settings, resolvedBrowserSessions: workspace.config.resolvedBrowserSessions), device: device,
+            clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+        applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
     }
 
     /// Update the Alerts sidebar row badge with the current attention item count.
@@ -4112,33 +4322,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func refreshWorkspaceSetupDetailIfVisible(workspaceID: String) {
-        guard selectedWorkspaceID == workspaceID, !showingAlerts, !showingSettings, let (project, workspace) = findWorkspace(id: workspaceID) else {
+        guard selectedWorkspaceID == workspaceID, !showingAlerts, !showingSettings, findWorkspace(id: workspaceID) != nil else {
             stopWorkspaceSetupDetailRefreshTimer()
             return
         }
-        guard let setupState = try? orchestrator.workspaceSetupState(workspaceID: workspaceID) else { return }
-        if Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
+        guard activeDeviceForDaemonStateMutation() != nil else {
             stopWorkspaceSetupDetailRefreshTimer()
-            showWorkspaceDetail(project: project, workspace: workspace)
+            showNoActiveDeviceSelectedError()
             return
         }
-        if setupState.status != .running { stopWorkspaceSetupDetailRefreshTimer() }
-        // While still running and the detail view is already on screen, update only the log text in-place
-        // to avoid rebuilding the full view hierarchy (which causes flickering and resets scroll position).
-        if setupState.status == .running, let logTextView = workspaceSetupLogTextView {
-            let text = setupState.logPath.flatMap { Self.workspaceSetupLogTail(path: $0, maxBytes: 16_384) } ?? ""
-            let scrollView = logTextView.enclosingScrollView
-            let nearBottom =
-                scrollView.map { sv in
-                    let docHeight = sv.documentView?.frame.height ?? 0
-                    return sv.contentView.bounds.maxY >= docHeight - 40
-                } ?? true
-            logTextView.string = text.isEmpty ? "No setup log output." : text
-            if nearBottom { Task { @MainActor [weak logTextView] in logTextView?.scrollToEndOfDocument(nil) } }
-            return
-        }
-        prepareWorkspaceDetailContainer(workspaceID: workspace.id)
-        showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState)
+        requestSidebarReload()
     }
 
     private func showPlaceholder(message: String = "Select a project or workspace.") {
@@ -4152,7 +4345,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
-        computeHostFormRefsByTag.removeAll()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         let placeholder = NSTextField(labelWithString: message)
         placeholder.font = .systemFont(ofSize: 14)
@@ -4625,422 +4817,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func computeHostTextField(placeholder: String, value: String) -> NSTextField {
-        let field = NSTextField(string: value)
-        field.placeholderString = placeholder
-        field.font = .systemFont(ofSize: 12)
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return field
-    }
-
-    private func populateComputeHostForm(_ refs: ComputeHostFormRefs, host: ComputeHostRecord) {
-        refs.editingHostID = host.id
-        refs.hostField.stringValue = host.sshHost
-        refs.sshUserField.stringValue = host.sshUser ?? ""
-        refs.displayNameField.stringValue = host.name
-        refs.sshPortField.stringValue = host.sshPort.map(String.init) ?? ""
-    }
-
-    private func clearComputeHostForm(_ refs: ComputeHostFormRefs) {
-        refs.editingHostID = nil
-        refs.hostField.stringValue = ""
-        refs.sshUserField.stringValue = ""
-        refs.displayNameField.stringValue = ""
-        refs.sshPortField.stringValue = ""
-    }
-
-    private func computeHostDraft(from refs: ComputeHostFormRefs) throws -> ComputeHostDraft {
-        guard let host = Self.trimmedNonEmpty(refs.hostField.stringValue) else { throw WorkspaceError.invalidArgument(message: "Host is required.") }
-        let sshPort = try optionalComputeHostPort(refs.sshPortField.stringValue, label: "SSH port")
-        return ComputeHostDraft(
-            host: host, sshUser: Self.trimmedNonEmpty(refs.sshUserField.stringValue),
-            displayName: Self.trimmedNonEmpty(refs.displayNameField.stringValue), sshPort: sshPort)
-    }
-
-    private func computeHostPort(_ value: String, label: String) throws -> Int {
-        guard let portString = Self.trimmedNonEmpty(value), let port = Int(portString), (1...65_535).contains(port) else {
-            throw WorkspaceError.invalidArgument(message: "\(label) must be a number from 1 to 65535.")
-        }
-        return port
-    }
-
-    private func optionalComputeHostPort(_ value: String, label: String) throws -> Int? {
-        guard Self.trimmedNonEmpty(value) != nil else { return nil }
-        return try computeHostPort(value, label: label)
-    }
-
-    private func testComputeHostConnection(host: ComputeHostRecord, authToken: String?, sender: NSButton) {
-        sender.isEnabled = false
-        Task { @MainActor [weak self, weak sender] in
-            let result = await Self.testComputeHostConnection(host: host, authToken: authToken)
-            sender?.isEnabled = true
-            guard let self else { return }
-            switch result {
-            case .success(let report):
-                remoteHostStatusByID[host.id] = report.displayText
-                refreshVisibleRemoteHostsPanel()
-                showInfoMessage(title: "Remote host reachable", message: "\(host.name) responded over pinned TLS. \(report.displayText).")
-            case .failure(let error):
-                remoteHostStatusByID[host.id] = "Unreachable"
-                refreshVisibleRemoteHostsPanel()
-                showError(error)
-            }
-        }
-    }
-
-    nonisolated private static func testComputeHostConnection(host: ComputeHostRecord, authToken: String?) async -> Result<
-        ComputeHostDaemonStatusReport, Error
-    > {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let response = try remoteHostPingResponse(host: host, authToken: authToken)
-                guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                return .success(remoteHostStatusReport(host: host, daemonStatus: response.daemonStatus))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    private func startComputeHostConnection(host: ComputeHostRecord, authToken: String, sender: NSButton, refs: ComputeHostFormRefs?) {
-        sender.isEnabled = false
-        Task { @MainActor [weak self, weak sender] in
-            let result = await Self.startComputeHostConnection(host: host, authToken: authToken)
-            sender?.isEnabled = true
-            guard let self else { return }
-            switch result {
-            case .success(let result):
-                do {
-                    try orchestrator.upsertComputeHost(result.host)
-                    try ComputeHostCredentialStore.saveAuthToken(authToken, hostID: result.host.id)
-                    remoteHostStatusByID[result.host.id] = "Reachable"
-                    remoteHostSetupByID.removeValue(forKey: result.host.id)
-                    remoteHostSetupRetryByID.removeValue(forKey: result.host.id)
-                    if let refs { clearComputeHostForm(refs) }
-                    refreshVisibleRemoteHostsPanel()
-                    let started = result.outcome.processID.map { " Started pid \($0)." } ?? ""
-                    showInfoMessage(
-                        title: "Remote host ready", message: "\(result.host.name) responded over pinned TLS.\(started) Log: \(result.outcome.logPath)"
-                    )
-                } catch { showError(error) }
-            case .failure(let error):
-                remoteHostStatusByID[host.id] = "Unreachable"
-                if error is RemoteHostActiveSessionsError {
-                    remoteHostStatusByID[host.id] = "Reinstall blocked"
-                    refreshVisibleRemoteHostsPanel()
-                    showError(error)
-                } else {
-                    handleRemoteHostSetupFailure(
-                        error, fallbackHost: host, retryState: RemoteHostSetupRetryState(draft: nil, existingHost: host, authToken: authToken))
-                }
-            }
-        }
-    }
-
-    private func connectRemoteHost(
-        draft: ComputeHostDraft, existingHost: ComputeHostRecord?, authToken: String, sender: NSButton, refs: ComputeHostFormRefs?
-    ) {
-        sender.isEnabled = false
-        Task { @MainActor [weak self, weak sender] in
-            let result = await Self.connectRemoteHost(draft: draft, existingHost: existingHost, authToken: authToken)
-            sender?.isEnabled = true
-            guard let self else { return }
-            switch result {
-            case .success(let result):
-                do {
-                    try orchestrator.upsertComputeHost(result.host)
-                    try ComputeHostCredentialStore.saveAuthToken(authToken, hostID: result.host.id)
-                    remoteHostStatusByID[result.host.id] = "Reachable"
-                    remoteHostSetupByID.removeValue(forKey: result.host.id)
-                    remoteHostSetupRetryByID.removeValue(forKey: result.host.id)
-                    if let refs { clearComputeHostForm(refs) }
-                    refreshVisibleRemoteHostsPanel()
-                    let started = result.outcome.processID.map { " Started pid \($0)." } ?? ""
-                    showInfoMessage(
-                        title: "Remote host ready", message: "\(result.host.name) responded over pinned TLS.\(started) Log: \(result.outcome.logPath)"
-                    )
-                } catch { showError(error) }
-            case .failure(let error):
-                let fallbackHost =
-                    existingHost ?? (try? ComputeHostDraftBuilder.prepare(draft: draft, existing: existingHost, authToken: authToken))?.host
-                handleRemoteHostSetupFailure(
-                    error, fallbackHost: fallbackHost,
-                    retryState: RemoteHostSetupRetryState(draft: draft, existingHost: existingHost, authToken: authToken))
-            }
-        }
-    }
-
-    private func handleRemoteHostSetupFailure(_ error: Error, fallbackHost: ComputeHostRecord?, retryState: RemoteHostSetupRetryState) {
-        if let setupError = error as? ComputeHostSetupError {
-            remoteHostSetupByID[setupError.checklist.hostID] = setupError.checklist
-            remoteHostSetupRetryByID[setupError.checklist.hostID] = retryState
-            remoteHostStatusByID[setupError.checklist.hostID] = "Setup needed"
-            refreshVisibleRemoteHostsPanel()
-            return
-        }
-        if let fallbackHost {
-            let checklist = ComputeHostSetupChecklistBuilder.failure(
-                host: fallbackHost, failedCheck: .daemonLaunch, command: nil,
-                detail: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
-                fixHint: "Retry setup after fixing the remote host issue.")
-            remoteHostSetupByID[checklist.hostID] = checklist
-            remoteHostSetupRetryByID[checklist.hostID] = retryState
-            remoteHostStatusByID[checklist.hostID] = "Setup needed"
-            refreshVisibleRemoteHostsPanel()
-            return
-        }
-        refreshVisibleRemoteHostsPanel()
-        showError(error)
-    }
-
-    nonisolated private static func connectRemoteHost(draft: ComputeHostDraft, existingHost: ComputeHostRecord?, authToken: String) async -> Result<
-        ComputeHostBootstrapResult, Error
-    > {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let resolvedSSH = (try? SSHConfigurationResolver().resolve(host: draft.host)) ?? SSHResolvedConfiguration()
-                let prepared = try ComputeHostDraftBuilder.prepare(
-                    draft: draft, resolvedSSH: resolvedSSH, existing: existingHost, authToken: authToken)
-                return .success(try startAndValidateComputeHost(host: prepared.host, authToken: authToken))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func startComputeHostConnection(host: ComputeHostRecord, authToken: String) async -> Result<
-        ComputeHostBootstrapResult, Error
-    > {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                try shutdownRemoteHostIfReachableAndIdle(host: host, authToken: authToken, action: "reinstalling")
-                return .success(try startAndValidateComputeHost(host: host, authToken: authToken))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func startAndValidateComputeHost(host: ComputeHostRecord, authToken: String) throws -> ComputeHostBootstrapResult {
-        let outcome = try ComputeHostBootstrapper().startSpacesDaemon(host: host, authToken: authToken)
-        var updatedHost = host
-        updatedHost.workspaceRoot = outcome.workspaceRoot
-        updatedHost.daemonEndpoint = SpacesDaemonEndpoint(
-            host: outcome.daemonHost, port: outcome.daemonPort, certificateFingerprint: outcome.certificateFingerprint)
-        try validatePinnedTLSAndMobile(host: updatedHost, authToken: authToken)
-        return ComputeHostBootstrapResult(host: updatedHost, authToken: authToken, outcome: outcome)
-    }
-
-    nonisolated private static func validatePinnedTLSAndMobile(host: ComputeHostRecord, authToken: String) throws {
-        do {
-            let response = try remoteHostPingResponse(host: host, authToken: authToken)
-            guard response.ok else {
-                throw ComputeHostReachabilityError(
-                    host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, underlyingDescription: response.message)
-            }
-            try validateMobileCredentialProvisioning(host: host, authToken: authToken)
-        } catch let error as ComputeHostSetupError { throw error } catch let error as ComputeHostReachabilityError {
-            throw ComputeHostSetupError(
-                checklist: ComputeHostSetupChecklistBuilder.directTLSFailure(
-                    host: host, detail: error.errorDescription ?? error.localizedDescription), underlying: error)
-        } catch {
-            let reachability = ComputeHostReachabilityError(host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, underlying: error)
-            throw ComputeHostSetupError(
-                checklist: ComputeHostSetupChecklistBuilder.directTLSFailure(
-                    host: host, detail: reachability.errorDescription ?? reachability.localizedDescription), underlying: reachability)
-        }
-    }
-
-    nonisolated private static func validateMobileCredentialProvisioning(host: ComputeHostRecord, authToken: String) throws {
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(
-                command: "mobileCredential", mobileCredentialRequest: TerminalServiceMobileCredentialRequest(operation: .list)),
-            host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
-            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
-        guard response.ok else {
-            let checklist = ComputeHostSetupChecklistBuilder.failure(
-                host: host, failedCheck: .mobileCredentialProvisioning, command: "mobileCredential list over pinned TLS", detail: response.message,
-                fixHint: "Relaunch the managed remote spacesd from this Spaces version and retry setup.")
-            throw ComputeHostSetupError(checklist: checklist, underlyingDescription: response.message)
-        }
-    }
-
-    nonisolated private static func remoteHostPingResponse(host: ComputeHostRecord, authToken: String?, timeout: TimeInterval = 10) throws
-        -> TerminalServiceResponse
-    {
-        try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: "ping"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
-            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: timeout)
-    }
-
-    nonisolated private static func remoteHostStatusReport(host: ComputeHostRecord, daemonStatus: TerminalServiceDaemonStatus?)
-        -> ComputeHostDaemonStatusReport
-    {
-        ComputeHostDaemonStatusReport(
-            daemonVersion: daemonStatus?.version, artifactVersion: daemonStatus?.artifactVersion,
-            certificateFingerprint: daemonStatus?.certificateFingerprint, activeSessionCount: daemonStatus?.activeSessionCount,
-            savedCertificateFingerprint: host.daemonEndpoint.certificateFingerprint)
-    }
-
-    nonisolated private static func remoteHostStatusReport(host: ComputeHostRecord, authToken: String?, timeout: TimeInterval = 10) throws
-        -> ComputeHostDaemonStatusReport
-    {
-        let response = try remoteHostPingResponse(host: host, authToken: authToken, timeout: timeout)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        return remoteHostStatusReport(host: host, daemonStatus: response.daemonStatus)
-    }
-
-    nonisolated private static func remoteHostSessionSummaries(host: ComputeHostRecord, authToken: String, timeout: TimeInterval = 10) throws
-        -> [TerminalServiceSessionSummary]
-    {
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: "list"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
-            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: timeout)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        return response.sessions ?? []
-    }
-
-    nonisolated private static func remoteHostSessionSummariesForUpgrade(host: ComputeHostRecord, authToken: String) async throws
-        -> [TerminalServiceSessionSummary]
-    { try await Task.detached(priority: .userInitiated) { try remoteHostSessionSummaries(host: host, authToken: authToken) }.value }
-
-    nonisolated private static func terminateRemoteHostSession(
-        host: ComputeHostRecord, authToken: String, sessionID: String, timeout: TimeInterval = 10
-    ) throws {
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: "terminate", sessionID: sessionID), host: host.daemonEndpoint.host,
-            port: host.daemonEndpoint.port, authToken: authToken, certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: timeout
-        )
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-    }
-
-    nonisolated private static func terminateRemoteHostSessionForUpgrade(host: ComputeHostRecord, authToken: String, sessionID: String) async throws {
-        try await Task.detached(priority: .userInitiated) { try terminateRemoteHostSession(host: host, authToken: authToken, sessionID: sessionID) }
-            .value
-    }
-
-    nonisolated private static func requireRemoteHostIdle(host: ComputeHostRecord, authToken: String, action: String) throws
-        -> ComputeHostDaemonStatusReport
-    { try requireRemoteHostIdle(host: host, authToken: authToken, action: action, report: remoteHostStatusReport(host: host, authToken: authToken)) }
-
-    nonisolated private static func requireRemoteHostIdle(
-        host: ComputeHostRecord, authToken: String, action: String, report: ComputeHostDaemonStatusReport
-    ) throws -> ComputeHostDaemonStatusReport {
-        guard let activeSessionCount = report.activeSessionCount else {
-            throw WorkspaceError.invalidArgument(
-                message: "\(host.name) did not report active session state. Stop remote sessions and the managed daemon before \(action).")
-        }
-        guard activeSessionCount == 0 else {
-            if let sessions = try? remoteHostSessionSummaries(host: host, authToken: authToken), !sessions.isEmpty {
-                throw RemoteHostActiveSessionsError(host: host, action: action, activeSessionCount: activeSessionCount, sessions: sessions)
-            }
-            throw WorkspaceError.invalidArgument(
-                message:
-                    "\(host.name) has \(activeSessionCount) active remote session\(activeSessionCount == 1 ? "" : "s"). Stop those sessions before \(action)."
-            )
-        }
-        return report
-    }
-
-    nonisolated private static func shutdownRemoteHostIfReachableAndIdle(host: ComputeHostRecord, authToken: String, action: String) throws {
-        guard let report = try? remoteHostStatusReport(host: host, authToken: authToken, timeout: 3) else { return }
-        _ = try requireRemoteHostIdle(host: host, authToken: authToken, action: action, report: report)
-        try shutdownRemoteHostIfIdle(host: host, authToken: authToken)
-    }
-
-    nonisolated private static func shutdownRemoteHostIfIdle(host: ComputeHostRecord, authToken: String) throws {
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: "shutdownIfIdle"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port,
-            authToken: authToken, certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        guard waitForRemoteHostDaemonExit(ping: { _ = try remoteHostPingResponse(host: host, authToken: authToken, timeout: 1) }) else {
-            throw WorkspaceError.invalidArgument(
-                message:
-                    "\(host.name) accepted shutdown but is still reachable on \(host.daemonEndpoint.host):\(host.daemonEndpoint.port). Wait for the managed spacesd to exit, then retry."
-            )
-        }
-    }
-
-    nonisolated static func waitForRemoteHostDaemonExit(
-        attempts: Int = 50, pollInterval: TimeInterval = 0.2, sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
-        ping: () throws -> Void
-    ) -> Bool {
-        let attemptCount = max(attempts, 1)
-        for attempt in 0..<attemptCount {
-            do { try ping() } catch { return true }
-            if attempt < attemptCount - 1 { sleep(pollInterval) }
-        }
-        return false
-    }
-
-    nonisolated static func shouldRequireRemoteHostIdleBeforeUpgrade(report: ComputeHostDaemonStatusReport) -> Bool {
-        report.upgradeState != .current
-    }
-
-    nonisolated private static func upgradeComputeHost(host: ComputeHostRecord, authToken: String) async -> Result<RemoteHostUpgradeResult, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let report = try remoteHostStatusReport(host: host, authToken: authToken)
-                if !shouldRequireRemoteHostIdleBeforeUpgrade(report: report) {
-                    return .success(RemoteHostUpgradeResult(host: host, authToken: authToken, outcome: nil, report: report, alreadyCurrent: true))
-                }
-                _ = try requireRemoteHostIdle(host: host, authToken: authToken, action: "upgrading", report: report)
-                try shutdownRemoteHostIfIdle(host: host, authToken: authToken)
-                let outcome = try ComputeHostBootstrapper().upgradeManagedSpacesDaemon(host: host, authToken: authToken)
-                var updatedHost = host
-                updatedHost.workspaceRoot = outcome.workspaceRoot
-                updatedHost.daemonEndpoint = SpacesDaemonEndpoint(
-                    host: outcome.daemonHost, port: outcome.daemonPort, certificateFingerprint: outcome.certificateFingerprint)
-                try validatePinnedTLSAndMobile(host: updatedHost, authToken: authToken)
-                let updatedResponse = try remoteHostPingResponse(host: updatedHost, authToken: authToken)
-                let updatedReport = remoteHostStatusReport(host: updatedHost, daemonStatus: updatedResponse.daemonStatus)
-                return .success(
-                    RemoteHostUpgradeResult(host: updatedHost, authToken: authToken, outcome: outcome, report: updatedReport, alreadyCurrent: false))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func uninstallComputeHost(host: ComputeHostRecord, authToken: String?) async -> Result<Void, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                if let authToken, !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    try shutdownRemoteHostIfReachableAndIdle(host: host, authToken: authToken, action: "uninstalling")
-                }
-                try ComputeHostBootstrapper().uninstallManagedSpacesDaemon(host: host)
-                return .success(())
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated static func upgradeActiveRemoteSessionsAlertTitle(activeSessionCount: Int) -> String {
-        activeSessionCount == 1 ? "Stop Active Remote Session?" : "Stop Active Remote Sessions?"
-    }
-
-    nonisolated static func upgradeActiveRemoteSessionsActionTitle(activeSessionCount: Int) -> String {
-        activeSessionCount == 1 ? "Stop Session and Upgrade" : "Stop Sessions and Upgrade"
-    }
-
-    nonisolated static func upgradeActiveRemoteSessionsAlertDetail(
-        hostName: String, activeSessionCount: Int, sessions: [TerminalServiceSessionSummary]
-    ) -> String {
-        let shownSessions = Array(sessions.prefix(3))
-        let remainingCount = max(activeSessionCount, sessions.count) - shownSessions.count
-        var lines = ["\(hostName) has \(activeSessionCount) active remote session\(activeSessionCount == 1 ? "" : "s")."]
-        if !shownSessions.isEmpty {
-            lines.append("")
-            lines.append(contentsOf: shownSessions.map { "- \(upgradeActiveRemoteSessionSummary($0))" })
-            if remainingCount > 0 { lines.append("- \(remainingCount) more") }
-        }
-        lines.append("")
-        lines.append("Spaces can stop \(activeSessionCount == 1 ? "the session" : "these sessions") and continue upgrading, or you can cancel.")
-        return lines.joined(separator: "\n")
-    }
-
-    nonisolated private static func upgradeActiveRemoteSessionSummary(_ session: TerminalServiceSessionSummary) -> String {
-        let title = nonisolatedTrimmedNonEmpty(session.title) ?? "Terminal"
-        guard let workingDirectory = nonisolatedTrimmedNonEmpty(session.workingDirectory) else { return title }
-        return "\(title) (\(workingDirectory))"
-    }
-
-    nonisolated private static func nonisolatedTrimmedNonEmpty(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-        return trimmed
-    }
-
     private func buildShortcutRowsContainer() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -5133,6 +4909,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
 
         let fullProject = (try? orchestrator.project(id: project.id))
+        let projectSettings:
+            (
+                setupScript: String?, stopScript: String?, ports: [PortDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
+                agentLaunchers: [AgentLauncher]
+            )
+        if let activeProject = activeDeviceProjectSummary(projectID: project.id).map({ SpacesActiveDeviceProjectSettingsViewModel(project: $0) }) {
+            projectSettings = Self.localProjectSettings(from: activeProject.config)
+        } else {
+            projectSettings = (
+                setupScript: fullProject?.setupScript, stopScript: fullProject?.stopScript, ports: fullProject?.ports ?? [],
+                processes: fullProject?.processes ?? [], browserSessions: fullProject?.browserSessions ?? [],
+                agentLaunchers: fullProject?.agentLaunchers ?? []
+            )
+        }
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -5178,17 +4968,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         // --- Fields ---
         let setupScriptSection = SetupScriptSection(
-            value: fullProject?.setupScript ?? "", subtitle: "Runs when each new workspace is created or revived from archive.")
+            value: projectSettings.setupScript ?? "", subtitle: "Runs when each new workspace is created or revived from archive.")
         let stopScriptSection = StopScriptSection(
-            value: fullProject?.stopScript ?? "", subtitle: "Runs on stop/restart/archive after process termination.")
+            value: projectSettings.stopScript ?? "", subtitle: "Runs on stop/restart/archive after process termination.")
         let portsSection = PortsSection(
-            ports: fullProject?.ports ?? [], subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.")
+            ports: projectSettings.ports, subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.")
         let processesSection = ProcessesSection(
-            processes: fullProject?.processes ?? [], subtitle: "Define the commands that run inside your workspace.", showsRuntimeControls: false)
+            processes: projectSettings.processes, subtitle: "Define the commands that run inside your workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(
-            sessions: fullProject?.browserSessions ?? [], subtitle: "Optional names with URL prefixes to open automatically.")
+            sessions: projectSettings.browserSessions, subtitle: "Optional names with URL prefixes to open automatically.")
         let agentLaunchersSection = AgentLaunchersSection(
-            launchers: fullProject?.agentLaunchers ?? [], subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.",
+            launchers: projectSettings.agentLaunchers, subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.",
             showsRuntimeControls: false)
 
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -5475,7 +5265,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         // --- Fields ---
         let sourceSegmented = NSSegmentedControl(
             labels: ["Pick folder", "Clone repo"], trackingMode: .selectOne, target: self, action: #selector(projectSourceChanged(_:)))
-        sourceSegmented.selectedSegment = 0
+        sourceSegmented.selectedSegment = activeDeviceIsRemote ? 1 : 0
+        if activeDeviceIsRemote { sourceSegmented.setEnabled(false, forSegment: 0) }
         sourceSegmented.setAccessibilityIdentifier("add-project-source-mode")
 
         let dirField = NSTextField(labelWithString: "")
@@ -5817,9 +5608,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         guard project.isGitRepo else { return }
         let formTag = createButton.tag
+        guard let activeDevice = activeDeviceForDaemonStateMutation() else {
+            showNoActiveDeviceSelectedError()
+            return
+        }
         Task { @MainActor [weak self, weak targetBranchField, weak existingBranchField] in
             guard let self else { return }
-            let result = await Self.branchOptionsSnapshot(projectID: project.id)
+            let result = await Self.activeDeviceWorkspaceCreateOptions(projectID: project.id, device: activeDevice).map(\.branchOptions)
             guard activeAddWorkspaceFormTag == formTag else { return }
             guard let targetBranchField else { return }
             guard case .success(let options) = result else { return }
@@ -5861,15 +5656,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
-        let setupState =
-            (try? orchestrator.workspaceSetupState(workspaceID: workspace.id))
-            ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil)
+        guard let deviceWorkspaceSummary = activeDeviceWorkspaceSummary(workspaceID: workspace.id) else {
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+            showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
+            requestSidebarReload()
+            return
+        }
+        let deviceWorkspace = SpacesActiveDeviceWorkspaceDetailViewModel(workspace: deviceWorkspaceSummary)
+        let setupState = Self.localSetupState(from: deviceWorkspace.setupState)
         prepareWorkspaceDetailContainer(workspaceID: workspace.id)
         if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
             showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState)
             return
         }
-        requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "workspace_detail_shown")
         stopWorkspaceSetupDetailRefreshTimer()
 
         let stack = NSStackView()
@@ -6037,13 +5836,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             headerAndActionsRow.addArrangedSubview(warningLabel)
         }
 
-        let sectionConfig = try? orchestrator.workspaceSettings(workspaceID: workspace.id)
-        let trackedWindows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
-        let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
-        let agentWindows = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-        let browserSessions = (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
-        let configuredProcesses = sectionConfig?.processes ?? []
-        let configuredAgentLaunchers = sectionConfig?.agentLaunchers ?? []
+        let sectionConfig = Self.localWorkspaceSettings(from: deviceWorkspace.config)
+        let trackedWindows: [WindowRecord] = Self.activeDeviceTerminalWindows(from: deviceWorkspace.terminalRows)
+        let runningProcesses = Self.runningProcesses(from: deviceWorkspace.processRows)
+        let agentWindows = Self.agentWindows(from: deviceWorkspace.codingAgentRows)
+        let browserSessions = deviceWorkspace.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:))
+        let configuredProcesses = sectionConfig.processes
+        let configuredAgentLaunchers = sectionConfig.agentLaunchers
         let processEntries = Self.orderedWorkspaceRunProcessEntries(
             configuredProcesses: configuredProcesses, windows: trackedWindows, processes: runningProcesses, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: runningProcesses.map { ($0.id, $0) })
@@ -6055,14 +5854,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
         let processStatusByName = Self.workspaceProcessStatusByName(runningProcesses)
         let processesSection = workspaceProcessesSection(
-            workspace: workspace, trackedWindows: trackedWindows, processEntries: processEntries, shortcutTargets: shortcutTargets,
-            shortcutIndicesByName: shortcutIndices.processesByName, statusByName: processStatusByName)
+            workspace: workspace, config: sectionConfig, runningProcesses: runningProcesses, trackedWindows: trackedWindows,
+            processEntries: processEntries, shortcutTargets: shortcutTargets, shortcutIndicesByName: shortcutIndices.processesByName,
+            statusByName: processStatusByName)
         let agentLaunchersSection = workspaceAgentLaunchersSection(
-            workspace: workspace, shortcutIndicesByIdentity: shortcutIndices.codingAgentsByIdentity, agentWindows: agentWindows,
-            trackedWindows: trackedWindows)
-        let browserSessionsSection = workspaceBrowserSessionsSection(workspace: workspace, shortcutIndicesByURL: shortcutIndices.browserSessionsByURL)
-        let portsSection = workspacePortsSection(workspace: workspace)
-        let stopScriptSection = workspaceStopScriptSection(workspace: workspace)
+            workspace: workspace, config: sectionConfig, shortcutIndicesByIdentity: shortcutIndices.codingAgentsByIdentity,
+            agentWindows: agentWindows, trackedWindows: trackedWindows)
+        let browserSessionsSection = workspaceBrowserSessionsSection(
+            workspace: workspace, config: sectionConfig, resolvedSessions: browserSessions, shortcutIndicesByURL: shortcutIndices.browserSessionsByURL
+        )
+        let portsSection = workspacePortsSection(workspace: workspace, config: sectionConfig, assignedPorts: deviceWorkspace.assignedPorts)
+        let stopScriptSection = workspaceStopScriptSection(workspace: workspace, config: sectionConfig)
 
         stack.addArrangedSubview(headerAndActionsRow)
         stack.addArrangedSubview(inlineNotesRow)
@@ -6084,6 +5886,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
         showScrollableDetailStack(stack)
         detailContainer.layoutSubtreeIfNeeded()
+    }
+
+    private func showWorkspaceDetailLoadingPlaceholder(workspace: WorkspaceSummary) {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+        stack.addArrangedSubview(spinner)
+
+        let title = NSTextField(labelWithString: "Loading \(workspace.title)...")
+        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        let detail = NSTextField(labelWithString: "Spaces is loading workspace details from \(activeDeviceName).")
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        detail.alignment = .center
+        stack.addArrangedSubview(detail)
+
+        detailContainer.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
+        ])
     }
 
     private func showWorkspaceSetupDetail(project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState) {
@@ -6194,15 +6027,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         if Self.shouldShowWorkspaceSetupScriptEditor(status: setupState.status) {
             let fullProject = (try? orchestrator.project(id: project.id))
+            let activeProjectConfig = activeDeviceProjectSummary(projectID: project.id)?.config
             let setupScriptSection = SetupScriptSection(
-                value: fullProject?.setupScript ?? "", subtitle: "Edit the project setup script, then run setup again.")
+                value: activeProjectConfig?.setupScript ?? fullProject?.setupScript ?? "",
+                subtitle: "Edit the project setup script, then run setup again.")
             setupScriptSection.onCommit = { [weak self] value in
                 guard let self else { return }
                 do {
-                    try orchestrator.updateProjectConfig(projectID: project.id) { config in
-                        config.setupScript = value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+                    if let device = activeDeviceForDaemonStateMutation(), let current = activeDeviceProjectSummary(projectID: project.id)?.config {
+                        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let updated = SpacesDeviceProjectConfig(
+                            setupScript: trimmed.isEmpty ? nil : value, stopScript: current.stopScript, ports: current.ports,
+                            processes: current.processes, browserSessions: current.browserSessions, agentLaunchers: current.agentLaunchers)
+                        let response = try SpacesActiveDeviceClient.updateProjectConfig(
+                            projectID: project.id, config: updated, device: device,
+                            clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                    } else {
+                        showNoActiveDeviceSelectedError()
                     }
-                    reloadData()
                 } catch { showError(error) }
             }
             stack.addArrangedSubview(setupScriptSection.view)
@@ -6322,11 +6165,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func workspaceProcessesSection(
-        workspace: WorkspaceSummary, trackedWindows: [WindowRecord], processEntries: [WorkspaceRunProcessEntry],
-        shortcutTargets: [WorkspaceRunShortcutTarget], shortcutIndicesByName: [String: Int], statusByName: [String: RowPrimitives.StatusKind]
+        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil,
+        runningProcesses providedRunningProcesses: [RunningProcessRecord]? = nil, trackedWindows: [WindowRecord],
+        processEntries: [WorkspaceRunProcessEntry], shortcutTargets: [WorkspaceRunShortcutTarget], shortcutIndicesByName: [String: Int],
+        statusByName: [String: RowPrimitives.StatusKind]
     ) -> NSView? {
-        guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
-        let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
+        guard let config = providedConfig else { return nil }
+        let runningProcesses = providedRunningProcesses ?? []
         let runningProcessIDByName = Dictionary(uniqueKeysWithValues: runningProcesses.map { (Self.processRuntimeKey(name: $0.templateName), $0.id) })
         let section = ProcessesSection(processes: config.processes)
         section.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
@@ -6334,19 +6179,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
-                if workspace.isRunning {
-                    switch Self.runningWorkspaceProcessEditDecision(previous: config.processes, updated: updated) {
-                    case .applyImmediately:
-                        try orchestrator.updateRunningWorkspaceProcesses(workspaceID: workspace.id, processes: updated, restartChangedCommands: false)
-                    case .confirmRestart(let processNames):
-                        guard confirmRunningWorkspaceProcessCommandChanges(processNames: processNames) else {
-                            reloadData()
-                            return
-                        }
-                        try orchestrator.updateRunningWorkspaceProcesses(workspaceID: workspace.id, processes: updated, restartChangedCommands: true)
-                    }
+                if activeDeviceForDaemonStateMutation() != nil {
+                    try updateActiveDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.processes = updated }
                 } else {
-                    try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.processes = updated }
+                    showNoActiveDeviceSelectedError()
+                    return
                 }
                 reloadData()
             } catch {
@@ -6358,8 +6195,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let self else { return }
             let key = Self.processTemplateKey(for: process)
             do {
-                try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: key)
-                reloadData()
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.runWorkspaceProcess(
+                        workspaceID: workspace.id, processKey: key, processTemplateID: process.id, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch {
                 reloadData()
                 showError(error)
@@ -6370,8 +6213,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let key = Self.processTemplateKey(for: process)
             guard let processID = runningProcessIDByName[key] else { return }
             do {
-                try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
-                reloadData()
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.stopWorkspaceProcess(
+                        workspaceID: workspace.id, processID: processID, processKey: key, processTemplateID: process.id, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch {
                 reloadData()
                 showError(error)
@@ -6382,8 +6231,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let key = Self.processTemplateKey(for: process)
             guard let processID = runningProcessIDByName[key] else { return }
             do {
-                try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: processID)
-                reloadData()
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.restartWorkspaceProcess(
+                        workspaceID: workspace.id, processID: processID, processKey: key, processTemplateID: process.id, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch {
                 reloadData()
                 showError(error)
@@ -6492,24 +6347,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func workspaceAgentLaunchersSection(
-        workspace: WorkspaceSummary, shortcutIndicesByIdentity: [String: Int], agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord]
+        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil, shortcutIndicesByIdentity: [String: Int],
+        agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord]
     ) -> NSView? {
-        guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
+        guard let config = providedConfig else { return nil }
         let section = AgentLaunchersSection(launchers: config.agentLaunchers)
         section.runtimeAgentWindows = agentWindows
         section.runtimeWindowTitleByAgentWindowID = Self.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: trackedWindows)
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
-                try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.agentLaunchers = updated }
-                reloadData()
+                if activeDeviceForDaemonStateMutation() != nil {
+                    try updateActiveDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.agentLaunchers = updated }
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch { showError(error) }
         }
         section.onRunLauncher = { [weak self] launcher in
             guard let self else { return }
             do {
-                _ = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: launcher.name)
-                reloadData()
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.runCodingAgent(
+                        workspaceID: workspace.id, agentName: launcher.name, agentLauncherID: launcher.id, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch {
                 reloadData()
                 showError(error)
@@ -6518,8 +6383,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         section.onStopAgentWindow = { [weak self] agentWindow in
             guard let self else { return }
             do {
-                try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: agentWindow.id)
-                reloadData()
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.stopCodingAgent(
+                        workspaceID: workspace.id, agentID: agentWindow.id, agentName: agentWindow.claimedLauncherName ?? agentWindow.label,
+                        agentLauncherID: agentWindow.claimedLauncherID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch {
                 reloadData()
                 showError(error)
@@ -6528,8 +6400,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         section.onRestartAgentWindow = { [weak self] agentWindow in
             guard let self else { return }
             do {
-                try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: agentWindow.id)
-                reloadData()
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.restartCodingAgent(
+                        workspaceID: workspace.id, agentID: agentWindow.id, agentName: agentWindow.claimedLauncherName ?? agentWindow.label,
+                        agentLauncherID: agentWindow.claimedLauncherID, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch {
                 reloadData()
                 showError(error)
@@ -6564,16 +6443,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return section.view
     }
 
-    private func workspaceBrowserSessionsSection(workspace: WorkspaceSummary, shortcutIndicesByURL: [String: Int]) -> NSView? {
-        guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
-        let resolvedSessions = (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
+    private func workspaceBrowserSessionsSection(
+        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil,
+        resolvedSessions providedResolvedSessions: [BrowserSession]? = nil, shortcutIndicesByURL: [String: Int]
+    ) -> NSView? {
+        guard let config = providedConfig else { return nil }
+        let resolvedSessions = providedResolvedSessions ?? []
         let displayURLs = Self.browserSessionDisplayURLs(configuredSessions: config.browserSessions, resolvedSessions: resolvedSessions)
         let section = BrowserSessionsSection(sessions: config.browserSessions, collapsedDisplayURLs: displayURLs)
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
-                try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.browserSessions = updated }
-                reloadData()
+                if activeDeviceForDaemonStateMutation() != nil {
+                    try updateActiveDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.browserSessions = updated }
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch { showError(error) }
         }
         var urlToIndex: [String: Int] = [:]
@@ -6642,28 +6527,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func workspacePortsSection(workspace: WorkspaceSummary) -> NSView? {
-        guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
-        let reservedPorts = (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id).map(\.port)) ?? []
+    private func workspacePortsSection(
+        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil,
+        assignedPorts providedAssignedPorts: [SpacesDeviceAssignedPort]? = nil
+    ) -> NSView? {
+        guard let config = providedConfig else { return nil }
+        let reservedPorts = providedAssignedPorts?.map(\.port) ?? []
         let section = PortsSection(ports: config.ports, collapsedDisplayPorts: reservedPorts.map(Optional.some))
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
-                try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.ports = updated }
-                reloadData()
+                if activeDeviceForDaemonStateMutation() != nil {
+                    try updateActiveDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.ports = updated }
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch { showError(error) }
         }
         return section.view
     }
 
-    private func workspaceStopScriptSection(workspace: WorkspaceSummary) -> NSView? {
-        guard let config = try? orchestrator.workspaceSettings(workspaceID: workspace.id) else { return nil }
+    private func workspaceStopScriptSection(workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil) -> NSView? {
+        guard let config = providedConfig else { return nil }
         let section = StopScriptSection(value: config.stopScript ?? "")
         section.onCommit = { [weak self] value in
             guard let self else { return }
             do {
-                try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { $0.stopScript = value.isEmpty ? nil : value }
-                reloadData()
+                if activeDeviceForDaemonStateMutation() != nil {
+                    try updateActiveDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.stopScript = value.isEmpty ? nil : value }
+                } else {
+                    showNoActiveDeviceSelectedError()
+                }
             } catch { showError(error) }
         }
         return section.view
@@ -6951,25 +6845,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func saveInlineWorkspaceMetadata(tag: Int) {
         guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
         do {
-            switch refs.field {
-            case .title:
-                let title = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-                try orchestrator.updateWorkspaceName(workspaceID: refs.workspaceID, name: title)
-                refs.originalValue = title
-            case .branch:
-                let branch = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-                try orchestrator.updateWorkspaceMetadata(workspaceID: refs.workspaceID, branch: branch)
-                refs.originalValue = branch
-            case .notes:
-                let trimmedNotes = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-                let notes = trimmedNotes.isEmpty ? nil : trimmedNotes
-                try orchestrator.updateWorkspaceNotes(workspaceID: refs.workspaceID, notes: notes)
-                refs.originalValue = notes ?? ""
+            if let device = activeDeviceForDaemonStateMutation() {
+                let response: SpacesDeviceAPIResponse
+                switch refs.field {
+                case .title:
+                    let title = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
+                    response = try SpacesActiveDeviceClient.updateWorkspaceMetadata(
+                        workspaceID: refs.workspaceID, title: title, updatesTitle: true, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    refs.originalValue = title
+                case .branch:
+                    let branch = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
+                    response = try SpacesActiveDeviceClient.updateWorkspaceMetadata(
+                        workspaceID: refs.workspaceID, branch: branch, updatesBranch: true, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    refs.originalValue = branch
+                case .notes:
+                    let trimmedNotes = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let notes = trimmedNotes.isEmpty ? nil : trimmedNotes
+                    response = try SpacesActiveDeviceClient.updateWorkspaceMetadata(
+                        workspaceID: refs.workspaceID, notes: notes, updatesNotes: true, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    refs.originalValue = notes ?? ""
+                }
+                refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
+                inlineWorkspaceFieldRefsByTag[tag] = refs
+                endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: true)
+                applyActiveDeviceMutationResponse(response, selectedWorkspaceID: refs.workspaceID)
+                return
             }
-            refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
-            inlineWorkspaceFieldRefsByTag[tag] = refs
-            endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: true)
-            reloadData()
+            showNoActiveDeviceSelectedError()
         } catch { showError(error) }
     }
 
@@ -7604,6 +7509,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             .init(pointSize: 12, weight: .semibold))
         button.contentTintColor = .secondaryLabelColor
         button.toolTip = tooltip
+        button.setAccessibilityLabel(tooltip)
         return button
     }
 
@@ -7799,323 +7705,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return id
     }
 
-    @objc private func reloadTapped() { reloadData() }
-
-    @objc private func showRemoteHosts() { presentRemoteHostsPanel() }
-
-    private func presentRemoteHostsPanel() {
-        let panel: NSPanel
-        if let existing = remoteHostsPanel {
-            panel = existing
-        } else {
-            let created = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 620), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered,
-                defer: false)
-            created.title = "Remote Hosts"
-            created.isReleasedWhenClosed = false
-            created.minSize = NSSize(width: 500, height: 480)
-            created.center()
-            remoteHostsPanel = created
-            panel = created
-        }
-        panel.contentView = buildRemoteHostsPanelContent()
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func refreshVisibleRemoteHostsPanel() {
-        guard let panel = remoteHostsPanel, panel.isVisible else { return }
-        panel.contentView = buildRemoteHostsPanelContent()
-    }
-
-    private func buildRemoteHostsPanelContent() -> NSView {
-        computeHostFormRefsByTag.removeAll()
-
-        let root = NSView()
-        root.translatesAutoresizingMaskIntoConstraints = false
-        root.wantsLayer = true
-        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = content
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(stack)
-
-        let title = NSTextField(labelWithString: "Remote Hosts")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
-        title.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-        stack.addArrangedSubview(title)
-
-        let connectSection = remoteHostConnectSection()
-        stack.addArrangedSubview(connectSection)
-        constrainFormFieldToFillWidth(connectSection, in: stack)
-
-        for checklist in remoteHostSetupByID.values.sorted(by: { $0.hostName.localizedStandardCompare($1.hostName) == .orderedAscending })
-        where checklist.shouldShow {
-            let setupSection = remoteHostSetupSection(checklist)
-            stack.addArrangedSubview(setupSection)
-            constrainFormFieldToFillWidth(setupSection, in: stack)
-        }
-
-        let savedSection = remoteHostSavedHostsSection()
-        stack.addArrangedSubview(savedSection)
-        constrainFormFieldToFillWidth(savedSection, in: stack)
-
-        let bottomSpacer = NSView()
-        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
-        bottomSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
-        bottomSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        stack.addArrangedSubview(bottomSpacer)
-        constrainFormFieldToFillWidth(bottomSpacer, in: stack)
-
-        root.addSubview(scroll)
-        let contentBottomFollowsStack = content.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 24)
-        contentBottomFollowsStack.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: root.topAnchor), scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            content.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
-            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24), contentBottomFollowsStack,
-        ])
-        return root
-    }
-
-    private func remoteHostConnectSection() -> NSView {
-        let hostField = computeHostTextField(placeholder: "lab-mac.local", value: "")
-        hostField.setAccessibilityIdentifier("remote-hosts-host")
-        let sshUserField = computeHostTextField(placeholder: NSUserName(), value: "")
-        sshUserField.setAccessibilityIdentifier("remote-hosts-ssh-user")
-        let displayNameField = computeHostTextField(placeholder: "Lab Mac", value: "")
-        displayNameField.setAccessibilityIdentifier("remote-hosts-display-name")
-        let sshPortField = computeHostTextField(placeholder: "22", value: "")
-        sshPortField.setAccessibilityIdentifier("remote-hosts-ssh-port")
-
-        let refs = ComputeHostFormRefs(
-            hostField: hostField, sshUserField: sshUserField, displayNameField: displayNameField, sshPortField: sshPortField)
-        let tag = UUID().uuidString.hashValue
-        computeHostFormRefsByTag[tag] = refs
-
-        let connectButton = actionButton(
-            title: "Connect", symbol: "bolt.horizontal.circle", tooltip: "Connect over SSH and validate spacesd access",
-            action: #selector(connectRemoteHostForm(_:)), primary: true)
-        connectButton.tag = tag
-        connectButton.setAccessibilityIdentifier("remote-hosts-connect")
-
-        let disclosureSymbol = remoteHostAdvancedVisible ? "chevron.down" : "chevron.right"
-        let advancedButton = actionButton(
-            title: "Advanced", symbol: disclosureSymbol, tooltip: "Show SSH port option", action: #selector(toggleRemoteHostAdvanced), primary: false)
-        advancedButton.setAccessibilityIdentifier("remote-hosts-advanced")
-
-        let fields: [NSView] = [
-            labeledInputRow(label: "Host", input: hostField, labelWidth: 112),
-            labeledInputRow(label: "SSH user", input: sshUserField, labelWidth: 112),
-            labeledInputRow(label: "Display name", input: displayNameField, labelWidth: 112),
-        ]
-        var rows = fields
-        rows.append(advancedButton)
-        if remoteHostAdvancedVisible { rows.append(labeledInputRow(label: "SSH port", input: sshPortField, labelWidth: 112)) }
-        rows.append(mobilePanelButtonRow([connectButton]))
-        return mobilePanelSection(icon: "externaldrive.connected.to.line.below", title: "Connect to a Mac or VM", rows: rows)
-    }
-
-    private func remoteHostSavedHostsSection() -> NSView {
-        let hosts = Self.savedRemoteHosts((try? orchestrator.listComputeHosts()) ?? [])
-        let rows: [NSView]
-        if hosts.isEmpty { rows = [helpTextLabel("No remote hosts are configured.")] } else { rows = hosts.map { remoteHostRow($0) } }
-        return mobilePanelSection(icon: "externaldrive.badge.checkmark", title: "Saved Hosts", rows: rows)
-    }
-
-    private func remoteHostSetupSection(_ checklist: ComputeHostSetupChecklist) -> NSView {
-        var rows = checklist.rows.map { remoteHostSetupCheckRow($0) }
-        let retryButton = actionButton(
-            title: "Retry", symbol: "arrow.clockwise", tooltip: "Retry remote host setup", action: #selector(retryRemoteHostSetup(_:)), primary: true)
-        retryButton.identifier = NSUserInterfaceItemIdentifier(checklist.hostID)
-        retryButton.setAccessibilityIdentifier("remote-hosts-setup-retry-\(checklist.hostID)")
-
-        let copyButton = actionButton(
-            title: "Copy Diagnostics", symbol: "doc.on.doc", tooltip: "Copy setup diagnostics", action: #selector(copyRemoteHostSetupDiagnostics(_:)),
-            primary: false)
-        copyButton.identifier = NSUserInterfaceItemIdentifier(checklist.hostID)
-        copyButton.setAccessibilityIdentifier("remote-hosts-setup-copy-\(checklist.hostID)")
-
-        let sshButton = actionButton(
-            title: "Open SSH Command", symbol: "terminal", tooltip: "Open the SSH command for this host",
-            action: #selector(openRemoteHostSetupSSHCommand(_:)), primary: false)
-        sshButton.identifier = NSUserInterfaceItemIdentifier(checklist.hostID)
-        sshButton.setAccessibilityIdentifier("remote-hosts-setup-ssh-\(checklist.hostID)")
-
-        rows.append(mobilePanelButtonRow([retryButton, copyButton, sshButton]))
-        return mobilePanelSection(icon: "checklist", title: "Setup \(checklist.hostName)", rows: rows)
-    }
-
-    private func remoteHostSetupCheckRow(_ row: ComputeHostSetupCheckRow) -> NSView {
-        let symbol: String
-        let color: NSColor
-        switch row.status {
-        case .passed:
-            symbol = "checkmark.circle.fill"
-            color = .systemGreen
-        case .failed:
-            symbol = "exclamationmark.triangle.fill"
-            color = .systemOrange
-        case .skipped:
-            symbol = "minus.circle"
-            color = .tertiaryLabelColor
-        case .pending:
-            symbol = "circle"
-            color = .tertiaryLabelColor
-        }
-
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: row.status.rawValue)
-        icon.contentTintColor = color
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 14), icon.heightAnchor.constraint(equalToConstant: 14)])
-
-        let titleLabel = NSTextField(labelWithString: row.title)
-        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        titleLabel.textColor = row.status == .failed ? .labelColor : .secondaryLabelColor
-
-        let detailParts = [row.detail, row.command.map { "Check: \($0)" }, row.fixHint.map { "Fix: \($0)" }].compactMap { value -> String? in
-            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return value
-        }
-        let detailLabel = helpTextLabel(detailParts.joined(separator: "\n"))
-
-        let textStack = NSStackView()
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = 2
-        textStack.addArrangedSubview(titleLabel)
-        textStack.addArrangedSubview(detailLabel)
-        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let rowView = NSStackView()
-        rowView.orientation = .horizontal
-        rowView.alignment = .top
-        rowView.spacing = 8
-        rowView.addArrangedSubview(icon)
-        rowView.addArrangedSubview(textStack)
-        return rowView
-    }
-
-    private func remoteHostRow(_ host: ComputeHostRecord) -> NSView {
-        let titleLabel = NSTextField(labelWithString: host.name)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        titleLabel.lineBreakMode = .byTruncatingMiddle
-        titleLabel.maximumNumberOfLines = 1
-
-        let status = remoteHostStatusByID[host.id] ?? "Saved"
-        let detailLabel = NSTextField(labelWithString: "\(remoteHostSSHSummary(host)) · \(status)")
-        detailLabel.font = .systemFont(ofSize: 11)
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.lineBreakMode = .byTruncatingTail
-        detailLabel.maximumNumberOfLines = 1
-
-        let textStack = NSStackView()
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = 2
-        textStack.addArrangedSubview(titleLabel)
-        textStack.addArrangedSubview(detailLabel)
-        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let checkButton = actionButton(
-            title: "Check", symbol: "checkmark.seal", tooltip: "Check direct spacesd reachability", action: #selector(testSavedComputeHost(_:)),
-            primary: false)
-        checkButton.identifier = NSUserInterfaceItemIdentifier(host.id)
-        checkButton.setAccessibilityIdentifier("remote-hosts-check-\(host.id)")
-
-        let reconnectButton = actionButton(
-            title: "Reinstall", symbol: "arrow.triangle.2.circlepath", tooltip: "Reinstall over SSH and validate spacesd access",
-            action: #selector(startSavedComputeHost(_:)), primary: false)
-        reconnectButton.identifier = NSUserInterfaceItemIdentifier(host.id)
-        reconnectButton.setAccessibilityIdentifier("remote-hosts-reinstall-\(host.id)")
-
-        let upgradeButton = actionButton(
-            title: "Upgrade", symbol: "arrow.up.circle", tooltip: "Upgrade the managed spacesd when no remote sessions are active",
-            action: #selector(upgradeSavedComputeHost(_:)), primary: false)
-        upgradeButton.identifier = NSUserInterfaceItemIdentifier(host.id)
-        upgradeButton.setAccessibilityIdentifier("remote-hosts-upgrade-\(host.id)")
-
-        let editButton = actionButton(
-            title: "Edit", symbol: "pencil", tooltip: "Edit this remote host", action: #selector(editComputeHost(_:)), primary: false)
-        editButton.identifier = NSUserInterfaceItemIdentifier(host.id)
-        editButton.setAccessibilityIdentifier("remote-hosts-edit-\(host.id)")
-
-        let uninstallButton = actionButton(
-            title: "Uninstall", symbol: "trash", tooltip: "Uninstall managed spacesd and remove this host",
-            action: #selector(removeSavedComputeHost(_:)), primary: false)
-        uninstallButton.identifier = NSUserInterfaceItemIdentifier(host.id)
-        uninstallButton.setAccessibilityIdentifier("remote-hosts-uninstall-\(host.id)")
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.addArrangedSubview(textStack)
-        row.addArrangedSubview(checkButton)
-        row.addArrangedSubview(reconnectButton)
-        row.addArrangedSubview(upgradeButton)
-        row.addArrangedSubview(editButton)
-        row.addArrangedSubview(uninstallButton)
-        return row
-    }
-
-    private func remoteHostSSHSummary(_ host: ComputeHostRecord) -> String {
-        let authority = [host.sshUser, host.sshHost].compactMap { Self.trimmedNonEmpty($0) }.joined(separator: "@")
-        guard let sshPort = host.sshPort else { return authority.isEmpty ? host.sshHost : authority }
-        return "\(authority.isEmpty ? host.sshHost : authority):\(sshPort)"
-    }
-
-    private func remoteHostSSHURL(for sshCommand: String) -> URL? {
-        let parts = sshCommand.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard let authority = parts.last, authority != "ssh" else { return nil }
-        var components = URLComponents()
-        components.scheme = "ssh"
-        let userAndHost = authority.split(separator: "@", maxSplits: 1).map(String.init)
-        if userAndHost.count == 2 {
-            components.user = userAndHost[0]
-            components.host = userAndHost[1]
-        } else {
-            components.host = authority
-        }
-        if let portIndex = parts.firstIndex(of: "-p"), parts.indices.contains(portIndex + 1), let port = Int(parts[portIndex + 1]) {
-            components.port = port
-        }
-        return components.url
-    }
-
-    nonisolated static func savedRemoteHosts(_ hosts: [ComputeHostRecord]) -> [ComputeHostRecord] { hosts.filter { !$0.isLocal } }
-
-    @objc private func toggleRemoteHostAdvanced() {
-        remoteHostAdvancedVisible.toggle()
-        refreshVisibleRemoteHostsPanel()
-    }
+    @objc private func reloadTapped() { requestSidebarReload() }
 
     @objc private func showMobileConnection() {
-        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService() }
+        devicePanelStatusMessage = nil
+        presentMobileConnectionPanelOrShowError { try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() }
     }
 
-    private func presentMobileConnectionPanelOrShowError(_ loadResponse: () throws -> SpacesMobileBridgeControlResponse) {
+    private func presentMobileConnectionPanelOrShowError(_ loadResponse: () throws -> SpacesDeviceAPIControlResponse) {
         do { presentMobileConnectionPanel(try loadResponse()) } catch {
             if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) {
                 presentMobileConnectionPanel(unavailableResponse)
@@ -8125,17 +7722,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func mobileConnectionUnavailableResponse(for error: Error) -> SpacesMobileBridgeControlResponse? {
-        guard SpacesMobileBridgeControlClient.isControlEndpointUnavailable(error) else { return nil }
-        return SpacesMobileBridgeControlResponse(
+    private func mobileConnectionUnavailableResponse(for error: Error) -> SpacesDeviceAPIControlResponse? {
+        guard SpacesDeviceAPIControlClient.isControlEndpointUnavailable(error) else { return nil }
+        return SpacesDeviceAPIControlResponse(
             ok: false,
-            message:
-                "Mobile bridge control is unavailable for this profile. Relaunch Spaces without the disabled bridge environment override, or use the standalone bridge from a terminal."
-        )
+            message: "Device API control is unavailable for this profile. Relaunch Spaces without the disabled Device API environment override.")
     }
 
-    private func presentMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
-        let pairingWindow = visibleMobilePairingWindow(for: response)
+    private func presentMobileConnectionPanel(_ response: SpacesDeviceAPIControlResponse) {
+        let pairingWindow = visibleDevicePairingWindow(for: response)
         let panel: NSPanel
         if let existing = mobileConnectionPanel {
             panel = existing
@@ -8143,7 +7738,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let created = NSPanel(
                 contentRect: NSRect(x: 0, y: 0, width: 540, height: 680), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered,
                 defer: false)
-            created.title = "Mobile Connection"
+            created.title = "Devices"
             created.isReleasedWhenClosed = false
             created.minSize = NSSize(width: 500, height: 520)
             created.center()
@@ -8156,18 +7751,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         startMobileConnectionTimer()
     }
 
-    private func refreshVisibleMobileConnectionPanel(_ response: SpacesMobileBridgeControlResponse) {
+    private func refreshVisibleMobileConnectionPanel(_ response: SpacesDeviceAPIControlResponse) {
         guard let panel = mobileConnectionPanel, panel.isVisible else { return }
-        let pairingWindow = visibleMobilePairingWindow(for: response)
+        let pairingWindow = visibleDevicePairingWindow(for: response)
         panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
     }
 
-    private func visibleMobilePairingWindow(for response: SpacesMobileBridgeControlResponse) -> SpacesMobilePairingWindowSnapshot? {
+    private func visibleDevicePairingWindow(for response: SpacesDeviceAPIControlResponse) -> SpacesDevicePairingWindowSnapshot? {
         if let pairingWindow = response.pairingWindow, pairingWindow.expiresAt > Date() { return pairingWindow }
         return nil
     }
 
-    private func buildMobileConnectionPanelContent(response: SpacesMobileBridgeControlResponse, pairingWindow: SpacesMobilePairingWindowSnapshot?)
+    private func buildMobileConnectionPanelContent(response: SpacesDeviceAPIControlResponse, pairingWindow: SpacesDevicePairingWindowSnapshot?)
         -> NSView
     {
         let root = NSView()
@@ -8192,18 +7787,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
-        let title = NSTextField(labelWithString: "Mobile Connection")
+        let title = NSTextField(labelWithString: "Devices")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         stack.addArrangedSubview(title)
 
-        let pairingSection = mobilePairingSection(response: response, pairingWindow: pairingWindow)
-        stack.addArrangedSubview(pairingSection)
-        constrainFormFieldToFillWidth(pairingSection, in: stack)
+        if let status = devicePanelStatusMessage {
+            let statusLabel = helpTextLabel(status.message)
+            statusLabel.textColor = status.isError ? .systemRed : .secondaryLabelColor
+            stack.addArrangedSubview(statusLabel)
+            constrainFormFieldToFillWidth(statusLabel, in: stack)
+        }
 
-        let devicesSection = mobileDevicesSection(devices: response.devices ?? [])
+        if let displayWindow = visibleClientDevicePairingWindow(response: response, pairingWindow: pairingWindow) {
+            let qrSection = clientDevicePairingQRCodeSection(displayWindow)
+            stack.addArrangedSubview(qrSection)
+            constrainFormFieldToFillWidth(qrSection, in: stack)
+        }
+
+        let devicesSection = connectedDevicesSection(response: response)
         stack.addArrangedSubview(devicesSection)
         constrainFormFieldToFillWidth(devicesSection, in: stack)
+
+        let remotePairingSection = remoteDevicePairingSection()
+        stack.addArrangedSubview(remotePairingSection)
+        constrainFormFieldToFillWidth(remotePairingSection, in: stack)
 
         // Flexible trailing spacer absorbs any extra vertical space so the sections
         // keep their natural height instead of one card stretching to fill the panel.
@@ -8233,48 +7841,98 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return root
     }
 
-    private func mobilePairingSection(response: SpacesMobileBridgeControlResponse, pairingWindow: SpacesMobilePairingWindowSnapshot?) -> NSView {
-        var rows: [NSView] = []
-
-        if let window = pairingWindow, window.expiresAt > Date() {
-            rows.append(mobilePairingInstructionLabel("Scan this QR code with the Spaces app on your phone to pair it."))
-            rows.append(mobileQRCodeView(link: window.linkString))
-            let countdownLabel = NSTextField(labelWithString: mobileCountdownText(expiresAt: window.expiresAt))
-            countdownLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-            countdownLabel.textColor = .secondaryLabelColor
-            let refreshButton = NSButton(title: "", target: self, action: #selector(openMobilePairingWindow))
-            refreshButton.bezelStyle = .texturedRounded
-            refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "New Code")
-            refreshButton.imagePosition = .imageOnly
-            refreshButton.toolTip = "Replace the current code with a fresh one"
-            let timerRow = NSStackView(views: [countdownLabel, refreshButton])
-            timerRow.orientation = .horizontal
-            timerRow.alignment = .centerY
-            timerRow.spacing = 6
-            timerRow.translatesAutoresizingMaskIntoConstraints = false
-            let timerContainer = NSView()
-            timerContainer.translatesAutoresizingMaskIntoConstraints = false
-            timerContainer.addSubview(timerRow)
-            NSLayoutConstraint.activate([
-                timerRow.centerXAnchor.constraint(equalTo: timerContainer.centerXAnchor),
-                timerRow.topAnchor.constraint(equalTo: timerContainer.topAnchor),
-                timerRow.bottomAnchor.constraint(equalTo: timerContainer.bottomAnchor),
-            ])
-            rows.append(timerContainer)
-        } else {
-            rows.append(mobilePairingInstructionLabel("Start pairing to show a QR code you can scan with the Spaces app on your phone."))
-            let pairButton = actionButton(
-                title: "Pair a Device", symbol: "qrcode", tooltip: "Show a QR code to pair a phone", action: #selector(openMobilePairingWindow),
-                primary: true)
-            pairButton.isEnabled = response.ok || response.status != nil
-            rows.append(mobilePanelButtonRow([pairButton]))
-            if !response.ok { rows.append(helpTextLabel(response.message)) }
-        }
-
-        return mobilePanelSection(icon: "qrcode", title: "Pair a Device", rows: rows)
+    private func visibleClientDevicePairingWindow(response: SpacesDeviceAPIControlResponse, pairingWindow: SpacesDevicePairingWindowSnapshot?)
+        -> ClientDevicePairingWindow?
+    {
+        if let currentDevicePairingWindow, currentDevicePairingWindow.isVisible { return currentDevicePairingWindow }
+        currentDevicePairingWindow = nil
+        guard let pairingWindow, pairingWindow.expiresAt > Date() else { return nil }
+        let deviceName = response.status?.bonjourServiceName ?? "This Mac"
+        let window = ClientDevicePairingWindow(
+            deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: deviceName, linkString: pairingWindow.linkString,
+            expiresAt: pairingWindow.expiresAt)
+        currentDevicePairingWindow = window
+        return window
     }
 
-    private func mobilePairingInstructionLabel(_ text: String) -> NSTextField {
+    private func clientDevicePairingQRCodeSection(_ window: ClientDevicePairingWindow) -> NSView {
+        var rows: [NSView] = []
+        rows.append(devicePairingInstructionLabel("Scan this QR code with Spaces on iPhone or iPad to pair it with \(window.deviceName)."))
+        rows.append(mobileQRCodeView(link: window.linkString))
+        let countdownLabel = NSTextField(labelWithString: mobileCountdownText(expiresAt: window.expiresAt))
+        countdownLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        countdownLabel.textColor = .secondaryLabelColor
+        rows.append(centeredPanelRow(countdownLabel))
+        return mobilePanelSection(icon: "qrcode", title: "Pair iPhone or iPad", rows: rows)
+    }
+
+    private func centeredPanelRow(_ view: NSView) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.centerXAnchor.constraint(equalTo: container.centerXAnchor), view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        return container
+    }
+
+    private func connectedDevicesSection(response: SpacesDeviceAPIControlResponse) -> NSView {
+        var rows: [NSView] = []
+        let devices = connectedClientDevices(localStatus: response.status, requireLocalStatus: true)
+        rows.append(contentsOf: devices.map(connectedDeviceRow(_:)))
+        if !response.ok { rows.append(helpTextLabel(response.message)) }
+        return mobilePanelSection(icon: "desktopcomputer.and.macbook", title: "Connected Devices", rows: rows)
+    }
+
+    private func connectedDeviceRow(_ device: ClientConnectedDevice) -> NSView {
+        let title = NSTextField(labelWithString: device.name)
+        title.font = .systemFont(ofSize: 12, weight: .medium)
+        title.textColor = .labelColor
+        title.lineBreakMode = .byTruncatingTail
+
+        let detail = NSTextField(labelWithString: clientDeviceDetailText(device))
+        detail.font = .systemFont(ofSize: 10.5)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingMiddle
+
+        let textStack = NSStackView(views: [title, detail])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let activeImageName = device.id == activeDeviceID ? "checkmark.circle.fill" : "circle"
+        let activeButton = iconButton(
+            symbol: activeImageName, tooltip: device.id == activeDeviceID ? "Active device" : "Use this device",
+            action: #selector(useConnectedDevice(_:)))
+        activeButton.identifier = NSUserInterfaceItemIdentifier(device.id)
+        activeButton.isEnabled = device.id != activeDeviceID && device.isAvailable
+
+        let pairButton = iconButton(
+            symbol: "qrcode", tooltip: "Pair iPhone or iPad with \(device.name)", action: #selector(pairIOSWithConnectedDevice(_:)))
+        pairButton.identifier = NSUserInterfaceItemIdentifier(device.id)
+        pairButton.isEnabled = device.isAvailable
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addArrangedSubview(textStack)
+        row.addArrangedSubview(NSView())
+        row.addArrangedSubview(activeButton)
+        row.addArrangedSubview(pairButton)
+        if !device.isLocal {
+            let removeButton = iconButton(symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(removeMacPairedDevice(_:)))
+            removeButton.identifier = NSUserInterfaceItemIdentifier(device.id)
+            row.addArrangedSubview(removeButton)
+        }
+        return row
+    }
+
+    private func devicePairingInstructionLabel(_ text: String) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = .systemFont(ofSize: 12)
         label.textColor = .secondaryLabelColor
@@ -8305,18 +7963,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return container
     }
 
-    private func mobileDevicesSection(devices: [SpacesMobilePairedDevice]) -> NSView {
+    private func remoteDevicePairingSection() -> NSView {
         var rows: [NSView] = []
-        if devices.isEmpty {
-            rows.append(helpTextLabel("No devices are paired yet."))
-        } else {
-            rows.append(contentsOf: devices.map { mobileDeviceRow($0) })
-            let resetButton = actionButton(
-                title: "Remove All", symbol: "trash", tooltip: "Remove all paired mobile devices and rotate the transport key",
-                action: #selector(resetAllMobilePairings), primary: false)
-            rows.append(mobilePanelButtonRow([resetButton]))
-        }
-        return mobilePanelSection(icon: "iphone", title: "Paired Devices", rows: rows)
+        rows.append(
+            devicePairingInstructionLabel(
+                "Enter the SSH target for a Mac or Linux device running spacesd. Spaces validates SSH, opens a remote pairing window, and adds that daemon to Connected Devices."
+            ))
+
+        let sshHostField = NSTextField()
+        sshHostField.placeholderString = "SSH host"
+        sshHostField.setAccessibilityIdentifier("remote-device-ssh-host")
+        remoteDeviceSSHHostField = sshHostField
+
+        let sshUserField = NSTextField()
+        sshUserField.placeholderString = "username"
+        sshUserField.setAccessibilityIdentifier("remote-device-ssh-user")
+        remoteDeviceSSHUserField = sshUserField
+
+        let sshPortField = NSTextField()
+        sshPortField.placeholderString = "port"
+        sshPortField.setAccessibilityIdentifier("remote-device-ssh-port")
+        remoteDeviceSSHPortField = sshPortField
+
+        let sshRow = NSStackView(views: [sshHostField, sshUserField, sshPortField])
+        sshRow.orientation = .horizontal
+        sshRow.alignment = .centerY
+        sshRow.spacing = 8
+        sshRow.translatesAutoresizingMaskIntoConstraints = false
+        sshHostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        sshUserField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        sshPortField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        rows.append(sshRow)
+
+        let connectButton = actionButton(
+            title: "Connect Remote Device", symbol: "link", tooltip: "Pair this Mac with a remote spacesd over SSH",
+            action: #selector(connectRemoteDeviceFromPairingPanel), primary: true)
+        rows.append(mobilePanelButtonRow([connectButton]))
+
+        let statusLabel = helpTextLabel("")
+        statusLabel.isHidden = true
+        remoteDevicePairingStatusLabel = statusLabel
+        rows.append(statusLabel)
+
+        return mobilePanelSection(icon: "link.badge.plus", title: "Add Remote Device", rows: rows)
     }
 
     private func mobilePanelSection(icon: String, title: String, rows: [NSView]) -> NSView {
@@ -8414,50 +8103,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func mobileDeviceRow(_ device: SpacesMobilePairedDevice) -> NSView {
-        let titleLabel = NSTextField(labelWithString: device.deviceName)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        titleLabel.lineBreakMode = .byTruncatingMiddle
-        titleLabel.maximumNumberOfLines = 1
-
-        let platformText = [device.platform, device.appVersion].compactMap { value -> String? in
-            guard let value, !value.isEmpty else { return nil }
-            return value
-        }.joined(separator: " ")
-        let detailPrefix = platformText.isEmpty ? "" : "\(platformText) · "
-        let detailLabel = NSTextField(labelWithString: "\(detailPrefix)Last used \(mobilePanelDateText(device.lastUsedAt))")
-        detailLabel.font = .systemFont(ofSize: 11)
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.lineBreakMode = .byTruncatingTail
-        detailLabel.maximumNumberOfLines = 1
-
-        let textStack = NSStackView()
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = 2
-        textStack.addArrangedSubview(titleLabel)
-        textStack.addArrangedSubview(detailLabel)
-        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let revokeButton = iconButton(symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(revokeMobileDevice(_:)))
-        revokeButton.identifier = NSUserInterfaceItemIdentifier(device.installationID)
-        revokeButton.setContentHuggingPriority(.required, for: .horizontal)
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 12
-        row.addArrangedSubview(textStack)
-        row.addArrangedSubview(revokeButton)
-        return row
-    }
-
-    private func mobilePanelDateText(_ value: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: value) else { return value }
-        return date.formatted(date: .abbreviated, time: .shortened)
-    }
-
     private func mobileCountdownText(expiresAt: Date) -> String {
         let remaining = max(Int(expiresAt.timeIntervalSince(Date()).rounded(.down)), 0)
         let minutes = remaining / 60
@@ -8481,19 +8126,140 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             mobileConnectionTimer = nil
             return
         }
-        do { refreshVisibleMobileConnectionPanel(try SpacesMobileBridgeControlClient.status(timeout: 1)) } catch {}
+        do { refreshVisibleMobileConnectionPanel(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
     }
 
-    @objc private func openMobilePairingWindow() {
-        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.openPairingWindow() }
+    @objc private func openDevicePairingWindow() {
+        do {
+            let response = try SpacesDeviceAPIControlClient.openPairingWindow()
+            if let window = response.pairingWindow {
+                currentDevicePairingWindow = ClientDevicePairingWindow(
+                    deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: response.status?.bonjourServiceName ?? "This Mac",
+                    linkString: window.linkString, expiresAt: window.expiresAt)
+            }
+            devicePanelStatusMessage = nil
+            presentMobileConnectionPanel(response)
+        } catch {
+            if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) {
+                presentMobileConnectionPanel(unavailableResponse)
+            } else {
+                showError(error)
+            }
+        }
     }
 
-    @objc private func revokeMobileDevice(_ sender: NSButton) {
-        guard let installationID = sender.identifier?.rawValue else { return }
-        presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.revokeDevice(installationID: installationID) }
+    @objc private func useConnectedDevice(_ sender: NSButton) {
+        guard let deviceID = sender.identifier?.rawValue else { return }
+        guard connectedClientDevices().first(where: { $0.id == deviceID })?.isAvailable == true else {
+            devicePanelStatusMessage = (message: "Remove and reconnect this device before using it.", isError: true)
+            refreshMobileConnectionPanelAfterClientDeviceChange()
+            return
+        }
+        do {
+            let database = try SpacesClientDatabase()
+            try database.setActiveDeviceID(deviceID)
+            devicePanelStatusMessage = nil
+            refreshActiveDeviceSelector()
+            refreshMobileConnectionPanelAfterClientDeviceChange()
+            selectedProjectID = nil
+            selectedWorkspaceID = nil
+            showLoadingPlaceholder(message: "Loading device...", detail: "Spaces is loading projects and workspaces.")
+            requestSidebarReload(failurePlaceholderMessage: "Spaces couldn't load this device.")
+        } catch { showError(error) }
     }
 
-    @objc private func resetAllMobilePairings() { presentMobileConnectionPanelOrShowError { try SpacesMobileBridgeControlClient.resetAllPairings() } }
+    @objc private func pairIOSWithConnectedDevice(_ sender: NSButton) {
+        guard let deviceID = sender.identifier?.rawValue else { return }
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID {
+            openDevicePairingWindow()
+            return
+        }
+        guard let device = macPairedDevices().first(where: { $0.id == deviceID }) else { return }
+        devicePanelStatusMessage = (message: "Opening pairing window on \(device.name)...", isError: false)
+        refreshMobileConnectionPanelAfterClientDeviceChange()
+        Task { [weak self] in
+            do {
+                let result = try await Task.detached(priority: .userInitiated) { try SpacesDevicePairingClient.openRemotePairingWindow(for: device) }
+                    .value
+                let expiresAt = result.expiresAt.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date().addingTimeInterval(300)
+                self?.currentDevicePairingWindow = ClientDevicePairingWindow(
+                    deviceID: device.id, deviceName: result.name, linkString: result.linkString, expiresAt: expiresAt)
+                self?.devicePanelStatusMessage = nil
+                self?.refreshMobileConnectionPanelAfterClientDeviceChange()
+            } catch {
+                self?.devicePanelStatusMessage = (message: error.localizedDescription, isError: true)
+                self?.refreshMobileConnectionPanelAfterClientDeviceChange()
+            }
+        }
+    }
+
+    @objc private func connectRemoteDeviceFromPairingPanel() {
+        let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
+        let deviceName = Host.current().localizedName ?? "Mac"
+        let appVersion = AppVersion.short
+        setRemoteDevicePairingStatus("Validating SSH and pairing...", isError: false)
+        Task { [weak self] in
+            do {
+                let sshPort = try Self.parsedSSHPort(sshPortText)
+                let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID()
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try SpacesDevicePairingClient.pairRemoteDevice(
+                        SpacesRemoteDevicePairingRequest(
+                            sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
+                            clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
+                            clientAppVersion: appVersion))
+                }.value
+                self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
+                self?.refreshActiveDeviceSelector()
+                self?.refreshMobileConnectionPanelAfterClientDeviceChange()
+                self?.requestSidebarReload()
+            } catch { self?.setRemoteDevicePairingStatus(error.localizedDescription, isError: true) }
+        }
+    }
+
+    @objc private func removeMacPairedDevice(_ sender: NSButton) {
+        guard let deviceID = sender.identifier?.rawValue else { return }
+        do {
+            let database = try SpacesClientDatabase()
+            try database.deletePairedDevice(id: deviceID)
+            try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
+            try SpacesDeviceCredentialStore.deleteTransportKey(deviceID: deviceID)
+            refreshActiveDeviceSelector()
+            refreshMobileConnectionPanelAfterClientDeviceChange()
+            requestSidebarReload()
+        } catch { showError(error) }
+    }
+
+    private func setRemoteDevicePairingStatus(_ message: String, isError: Bool) {
+        guard let label = remoteDevicePairingStatusLabel else { return }
+        label.stringValue = message
+        label.textColor = isError ? .systemRed : .secondaryLabelColor
+        label.isHidden = message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func refreshMobileConnectionPanelAfterClientDeviceChange() {
+        do { refreshVisibleMobileConnectionPanel(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
+    }
+
+    private func macPairedDevices() -> [SpacesPairedDeviceRecord] {
+        ((try? SpacesClientDatabase().pairedDevices()) ?? []).filter { $0.id != SpacesPairedDeviceRecord.localDeviceID }
+    }
+
+    nonisolated private static func normalizedPanelField(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    nonisolated private static func parsedSSHPort(_ value: String) throws -> Int? {
+        guard let normalized = normalizedPanelField(value) else { return nil }
+        guard let port = Int(normalized), (1...65_535).contains(port) else {
+            throw WorkspaceError.invalidArgument(message: "SSH port must be between 1 and 65535.")
+        }
+        return port
+    }
 
     private func qrImage(for value: String, size: CGFloat) -> NSImage? {
         let filter = CIFilter(name: "CIQRCodeGenerator")
@@ -8555,14 +8321,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func runWorkspaceSetupFromDetail(_ sender: NSButton) {
         guard let workspaceID = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
-        startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: workspaceID)
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
-            let result = await Self.runWorkspaceSetupSnapshot(workspaceID: workspaceID)
+            let result: Result<SpacesDeviceAPIResponse, Error>?
+            if let device = activeDeviceForDaemonStateMutation() {
+                result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.runWorkspaceSetup(
+                        workspaceID: workspaceID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+            } else {
+                result = nil
+            }
             sender?.isEnabled = true
-            reloadData()
-            if case .failure(let error) = result, (try? orchestrator.workspaceSetupState(workspaceID: workspaceID).status) != .failed {
-                showError(error)
+            if let result {
+                switch result {
+                case .success(let response): applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                case .failure(let error): showError(error)
+                }
+            } else {
+                showNoActiveDeviceSelectedError()
             }
         }
     }
@@ -8608,216 +8385,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let g = Int((rgb.greenComponent * 255).rounded())
         let b = Int((rgb.blueComponent * 255).rounded())
         do { try orchestrator.setWindowFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
-    }
-
-    @objc private func editComputeHost(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue, let host = try? orchestrator.store.computeHost(id: hostID),
-            let refs = computeHostFormRefsByTag.values.first
-        else { return }
-        if !remoteHostAdvancedVisible {
-            remoteHostAdvancedVisible = true
-            refreshVisibleRemoteHostsPanel()
-            guard let refreshedRefs = computeHostFormRefsByTag.values.first else { return }
-            populateComputeHostForm(refreshedRefs, host: host)
-            return
-        }
-        populateComputeHostForm(refs, host: host)
-    }
-
-    @objc private func connectRemoteHostForm(_ sender: NSButton) {
-        commitEditing()
-        guard let refs = computeHostFormRefsByTag[sender.tag] else { return }
-        do {
-            let draft = try computeHostDraft(from: refs)
-            let existingHost = try refs.editingHostID.flatMap { try orchestrator.store.computeHost(id: $0) }
-            let token =
-                try existingHost.flatMap { try ComputeHostCredentialStore.resolvedAuthToken(hostID: $0.id) }
-                ?? ComputeHostCredentialStore.generateAuthToken()
-            connectRemoteHost(draft: draft, existingHost: existingHost, authToken: token, sender: sender, refs: refs)
-        } catch { showError(error) }
-    }
-
-    @objc private func testSavedComputeHost(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue else { return }
-        do {
-            guard let host = try orchestrator.store.computeHost(id: hostID) else {
-                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
-            }
-            testComputeHostConnection(host: host, authToken: try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id), sender: sender)
-        } catch { showError(error) }
-    }
-
-    @objc private func startSavedComputeHost(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue else { return }
-        do {
-            guard let host = try orchestrator.store.computeHost(id: hostID) else {
-                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
-            }
-            let token = try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id) ?? ComputeHostCredentialStore.generateAuthToken()
-            startComputeHostConnection(host: host, authToken: token, sender: sender, refs: nil)
-        } catch { showError(error) }
-    }
-
-    @objc private func upgradeSavedComputeHost(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue else { return }
-        do {
-            guard let host = try orchestrator.store.computeHost(id: hostID) else {
-                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
-            }
-            let token = try resolvedSavedComputeHostAuthToken(host: host)
-            performSavedComputeHostUpgrade(host: host, authToken: token, sender: sender, stopActiveSessions: false)
-        } catch { showError(error) }
-    }
-
-    private func resolvedSavedComputeHostAuthToken(host: ComputeHostRecord) throws -> String {
-        guard let token = try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id) else {
-            throw WorkspaceError.invalidArgument(message: "Saved daemon token not found for \(host.name). Reinstall the host first.")
-        }
-        return token
-    }
-
-    private func performSavedComputeHostUpgrade(host: ComputeHostRecord, authToken: String, sender: NSButton?, stopActiveSessions: Bool) {
-        sender?.isEnabled = false
-        Task { @MainActor [weak self, weak sender] in
-            guard let self else {
-                sender?.isEnabled = true
-                return
-            }
-            if stopActiveSessions {
-                do { try await stopRemoteHostSessionsForUpgrade(host: host, authToken: authToken) } catch {
-                    sender?.isEnabled = true
-                    showError(error)
-                    return
-                }
-            }
-            let result = await Self.upgradeComputeHost(host: host, authToken: authToken)
-            sender?.isEnabled = true
-            switch result {
-            case .success(let result):
-                do {
-                    try orchestrator.upsertComputeHost(result.host)
-                    try ComputeHostCredentialStore.saveAuthToken(result.authToken, hostID: result.host.id)
-                    remoteHostStatusByID[result.host.id] = result.report.displayText
-                    remoteHostSetupByID.removeValue(forKey: result.host.id)
-                    remoteHostSetupRetryByID.removeValue(forKey: result.host.id)
-                    refreshVisibleRemoteHostsPanel()
-                    if result.alreadyCurrent {
-                        showInfoMessage(
-                            title: "Remote host current", message: "\(result.host.name) is already running the current managed spacesd artifact.")
-                    } else {
-                        let started = result.outcome?.processID.map { " Started pid \($0)." } ?? ""
-                        showInfoMessage(
-                            title: "Remote host upgraded", message: "\(result.host.name) upgraded and responded over pinned TLS.\(started)")
-                    }
-                } catch { showError(error) }
-            case .failure(let error):
-                remoteHostStatusByID[host.id] = "Upgrade blocked"
-                if !stopActiveSessions, let activeSessionsError = error as? RemoteHostActiveSessionsError {
-                    presentUpgradeActiveSessionsAlert(host: host, authToken: authToken, error: activeSessionsError, sender: sender)
-                } else if error is ComputeHostSetupError {
-                    handleRemoteHostSetupFailure(
-                        error, fallbackHost: host, retryState: RemoteHostSetupRetryState(draft: nil, existingHost: host, authToken: authToken))
-                } else {
-                    refreshVisibleRemoteHostsPanel()
-                    showError(error)
-                }
-            }
-        }
-    }
-
-    private func presentUpgradeActiveSessionsAlert(
-        host: ComputeHostRecord, authToken: String, error: RemoteHostActiveSessionsError, sender: NSButton?
-    ) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = Self.upgradeActiveRemoteSessionsAlertTitle(activeSessionCount: error.activeSessionCount)
-        alert.informativeText = Self.upgradeActiveRemoteSessionsAlertDetail(
-            hostName: host.name, activeSessionCount: error.activeSessionCount, sessions: error.sessions)
-        alert.addButton(withTitle: Self.upgradeActiveRemoteSessionsActionTitle(activeSessionCount: error.activeSessionCount))
-        let cancelButton = alert.addButton(withTitle: "Cancel")
-        cancelButton.keyEquivalent = "\u{1b}"
-        cancelButton.keyEquivalentModifierMask = []
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            refreshVisibleRemoteHostsPanel()
-            return
-        }
-        performSavedComputeHostUpgrade(host: host, authToken: authToken, sender: sender, stopActiveSessions: true)
-    }
-
-    private func stopRemoteHostSessionsForUpgrade(host: ComputeHostRecord, authToken: String) async throws {
-        var stoppedSessionIDs = Set<String>()
-        for session in try await Self.remoteHostSessionSummariesForUpgrade(host: host, authToken: authToken) {
-            guard stoppedSessionIDs.insert(session.id).inserted else { continue }
-            let plan = Self.remoteHostUpgradeSessionStopPlan(
-                sessionID: session.id, descriptor: terminalRuntimeControlDescriptor(forSessionID: session.id))
-            try stopLocalRemoteHostSessionForUpgrade(plan.localStop)
-            try await Self.terminateRemoteHostSessionForUpgrade(host: host, authToken: authToken, sessionID: plan.remoteSessionID)
-        }
-        reloadData()
-    }
-
-    private func stopLocalRemoteHostSessionForUpgrade(_ localStop: RemoteHostUpgradeSessionStopPlan.LocalStop?) throws {
-        guard let localStop else { return }
-        switch localStop {
-        case .process(let workspaceID, let processID): try orchestrator.stopWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-        case .codingAgent(let workspaceID, let agentID): try orchestrator.stopCodingAgent(workspaceID: workspaceID, agentID: agentID)
-        case .workspaceTerminal(let workspaceID, let sessionID):
-            _ = try orchestrator.stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID)
-        }
-    }
-
-    @objc private func retryRemoteHostSetup(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue, let retry = remoteHostSetupRetryByID[hostID] else { return }
-        sender.isEnabled = false
-        if let draft = retry.draft {
-            connectRemoteHost(draft: draft, existingHost: retry.existingHost, authToken: retry.authToken, sender: sender, refs: nil)
-        } else if let host = retry.existingHost {
-            startComputeHostConnection(host: host, authToken: retry.authToken, sender: sender, refs: nil)
-        } else {
-            sender.isEnabled = true
-        }
-    }
-
-    @objc private func copyRemoteHostSetupDiagnostics(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue, let checklist = remoteHostSetupByID[hostID] else { return }
-        copyToPasteboard(checklist.diagnosticsText)
-    }
-
-    @objc private func openRemoteHostSetupSSHCommand(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue, let checklist = remoteHostSetupByID[hostID] else { return }
-        copyToPasteboard(checklist.sshCommand)
-        if let url = remoteHostSSHURL(for: checklist.sshCommand) {
-            NSWorkspace.shared.open(url)
-        } else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app", isDirectory: true))
-        }
-    }
-
-    @objc private func removeSavedComputeHost(_ sender: NSButton) {
-        guard let hostID = sender.identifier?.rawValue else { return }
-        do {
-            guard let host = try orchestrator.store.computeHost(id: hostID) else {
-                throw WorkspaceError.invalidArgument(message: "Compute host not found.")
-            }
-            try orchestrator.validateComputeHostDeletion(id: hostID)
-            presentComputeHostRemoveConfirmation(host: host) { [weak self] confirmed in
-                guard confirmed, let self else { return }
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    do {
-                        try orchestrator.validateComputeHostDeletion(id: hostID)
-                        let token = try ComputeHostCredentialStore.resolvedAuthToken(hostID: host.id)
-                        let result = await Self.uninstallComputeHost(host: host, authToken: token)
-                        if case .failure(let error) = result { throw error }
-                        try orchestrator.deleteComputeHost(id: hostID)
-                        remoteHostStatusByID.removeValue(forKey: hostID)
-                        remoteHostSetupByID.removeValue(forKey: hostID)
-                        remoteHostSetupRetryByID.removeValue(forKey: hostID)
-                        refreshVisibleRemoteHostsPanel()
-                    } catch { showError(error) }
-                }
-            }
-        } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }
@@ -8866,8 +8433,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         do {
-            let url = try orchestrator.exportSpacesYAML(projectID: refs.projectID)
-            showInfoMessage(title: "Exported spaces.yaml", message: url.path)
+            if let device = activeDeviceForDaemonStateMutation() {
+                let response = try SpacesActiveDeviceClient.exportProjectSpacesYAML(
+                    projectID: refs.projectID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                applyActiveDeviceMutationResponse(response, selectedProjectID: refs.projectID)
+                showInfoMessage(title: "Exported spaces.yaml", message: response.message)
+                return
+            }
+            showNoActiveDeviceSelectedError()
         } catch { showError(error) }
     }
 
@@ -8875,31 +8448,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let document = try orchestrator.loadSpacesYAML(projectID: refs.projectID)
-            let preview = try orchestrator.previewProjectConfig(projectID: refs.projectID) { record in document.applying(to: &record) }
-            hydrateProjectSettings(refs, from: preview)
-            refs.hasPendingImportedConfig = true
-            refs.pendingImportUpdateAllWorkspaces = false
-            refs.importButton.isHidden = true
-            refs.exportButton.isHidden = true
-            refs.discardImportedConfigButton.isHidden = false
-            projectHasUnsavedChanges = true
+            if let device = activeDeviceForDaemonStateMutation() {
+                let decision = presentProjectImportWorkspaceSyncPrompt()
+                guard decision != .cancel else { return }
+                let updateAllWorkspaces = decision == .updateAllWorkspaces
+                let response = try SpacesActiveDeviceClient.importProjectSpacesYAML(
+                    projectID: refs.projectID, updateAllWorkspaces: updateAllWorkspaces, device: device,
+                    clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                refs.hasPendingImportedConfig = false
+                refs.pendingImportUpdateAllWorkspaces = false
+                refs.importButton.isHidden = false
+                refs.exportButton.isHidden = false
+                refs.discardImportedConfigButton.isHidden = true
+                projectHasUnsavedChanges = false
+                applyActiveDeviceMutationResponse(response, selectedProjectID: refs.projectID)
+                return
+            }
+            showNoActiveDeviceSelectedError()
         } catch { showError(error) }
     }
 
     @objc private func discardProjectConfigChanges(_ sender: NSButton) {
         commitEditing()
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
-        do {
-            guard let project = try orchestrator.project(id: refs.projectID) else { throw WorkspaceError.missingProject(dir: refs.projectID) }
-            hydrateProjectSettings(refs, from: project)
+        if let config = activeDeviceProjectSummary(projectID: refs.projectID)?.config {
+            hydrateProjectSettings(refs, from: config)
             refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
             refs.importButton.isHidden = false
             refs.exportButton.isHidden = false
             refs.discardImportedConfigButton.isHidden = true
             projectHasUnsavedChanges = false
-        } catch { showError(error) }
+            return
+        }
+        showNoActiveDeviceSelectedError()
     }
 
     private func hydrateProjectSettings(_ refs: ProjectFieldRefs, from project: ProjectRecord) {
@@ -8909,6 +8491,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.processesSection.replace(processes: project.processes)
         refs.browserSessionsSection.replace(sessions: project.browserSessions)
         refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
+    }
+
+    private func hydrateProjectSettings(_ refs: ProjectFieldRefs, from config: SpacesDeviceProjectConfig) {
+        let settings = Self.localProjectSettings(from: config)
+        refs.setupScriptSection.replace(value: settings.setupScript ?? "")
+        refs.stopScriptSection.replace(value: settings.stopScript ?? "")
+        refs.portsSection.replace(ports: settings.ports)
+        refs.processesSection.replace(processes: settings.processes)
+        refs.browserSessionsSection.replace(sessions: settings.browserSessions)
+        refs.agentLaunchersSection.replace(launchers: settings.agentLaunchers)
     }
 
     private func confirmProjectImportWorkspaceSyncIfNeeded(_ refs: ProjectFieldRefs) -> Bool {
@@ -8946,7 +8538,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     @objc private func deleteProject(_ sender: NSButton) {
-        guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
+        guard let projectID = sender.identifier?.rawValue, projects.contains(where: { $0.id == projectID }) else { return }
 
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -8969,12 +8561,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 sender?.isEnabled = true
                 hideOperationProgressOverlay()
             }
-            let result = await Self.deleteProjectSnapshot(projectDirectory: project.dir)
-            switch result {
-            case .success:
-                projectHasUnsavedChanges = false
-                reloadData()
-            case .failure(let error): showError(error)
+            if let device = activeDeviceForDaemonStateMutation() {
+                let result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.deleteProject(
+                        projectID: projectID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+                switch result {
+                case .success(let response):
+                    projectHasUnsavedChanges = false
+                    selectedProjectID = nil
+                    selectedWorkspaceID = nil
+                    applyActiveDeviceMutationResponse(response)
+                case .failure(let error): showError(error)
+                }
+            } else {
+                showNoActiveDeviceSelectedError()
             }
         }
     }
@@ -8982,66 +8583,65 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func createProject(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
-            let stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
-            let input: ProjectCreateInput
-            let progressDetail: String
-            let preparedGitProjectForSave: WorkspaceOrchestrator.PreparedGitProjectImport?
-            let preparedGitURLForSave: String?
-            if refs.sourceSegmented.selectedSegment == 1 {
-                let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !repoURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
-                guard let preparedGitProject = refs.preparedGitProject, refs.preparedGitURL == repoURL else {
-                    throw WorkspaceError.invalidArgument(message: "Clone the repository before creating the project.")
+            if let device = activeDeviceForDaemonStateMutation() {
+                let projectDir: String?
+                let gitURL: String?
+                if refs.sourceSegmented.selectedSegment == 1 {
+                    let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !repoURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
+                    projectDir = nil
+                    gitURL = repoURL
+                } else {
+                    guard !activeDeviceIsRemote else {
+                        throw WorkspaceError.invalidArgument(message: "Remote project creation requires a Git repository URL.")
+                    }
+                    let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    guard !dir.isEmpty else { return }
+                    guard refs.preparedLocalDirectoryPath == dir else {
+                        throw WorkspaceError.invalidArgument(message: "Choose the project directory before creating the project.")
+                    }
+                    projectDir = dir
+                    gitURL = nil
                 }
-                input = ProjectCreateInput(
-                    directoryPath: nil, preparedGitProject: preparedGitProject, setupScript: setupScript, stopScript: stopScript,
-                    ports: refs.portsSection.currentPorts, processes: refs.processesSection.currentProcesses,
-                    browserSessions: refs.browserSessionsSection.currentSessions, agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
+                let config = Self.deviceProjectConfig(from: refs)
+                let preparedGitProjectForDiscard = refs.preparedGitProject
+                let preparedGitURLForDiscard = refs.preparedGitURL
                 refs.preparedGitProject = nil
                 refs.preparedGitURL = nil
                 refs.gitPreparationID = nil
-                preparedGitProjectForSave = preparedGitProject
-                preparedGitURLForSave = repoURL
-                progressDetail = "Saving cloned repository and project settings."
-            } else {
-                let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard !dir.isEmpty else { return }
-                guard refs.preparedLocalDirectoryPath == dir else {
-                    throw WorkspaceError.invalidArgument(message: "Choose the project directory before creating the project.")
-                }
-                input = ProjectCreateInput(
-                    directoryPath: dir, preparedGitProject: nil, setupScript: setupScript, stopScript: stopScript,
-                    ports: refs.portsSection.currentPorts, processes: refs.processesSection.currentProcesses,
-                    browserSessions: refs.browserSessionsSection.currentSessions, agentLaunchers: refs.agentLaunchersSection.currentLaunchers)
-                preparedGitProjectForSave = nil
-                preparedGitURLForSave = nil
-                progressDetail = "Registering project and applying project settings."
-            }
-            let originalTitle = sender.title
-            sender.isEnabled = false
-            sender.title = "Creating..."
-            showOperationProgressOverlay(message: "Creating project...", detail: progressDetail)
-            Task { @MainActor [weak self, weak sender] in
-                guard let self else { return }
-                defer {
-                    sender?.isEnabled = true
-                    sender?.title = originalTitle
-                    hideOperationProgressOverlay()
-                    if isActiveAddProjectForm(refs) { updateAddProjectSourceUI(refs) }
-                }
-                let result = await Self.createProjectSnapshot(input: input)
-                switch result {
-                case .success:
-                    activeAddProjectFormTag = nil
-                    reloadData()
-                case .failure(let error):
-                    if let preparedGitProjectForSave, let preparedGitURLForSave {
-                        await handleFailedPreparedGitProjectSave(preparedGitProjectForSave, repoURL: preparedGitURLForSave, refs: refs)
+                let originalTitle = sender.title
+                sender.isEnabled = false
+                sender.title = "Creating..."
+                showOperationProgressOverlay(message: "Creating project...", detail: "Creating the project on \(activeDeviceName).")
+                Task { @MainActor [weak self, weak sender] in
+                    guard let self else { return }
+                    defer {
+                        sender?.isEnabled = true
+                        sender?.title = originalTitle
+                        hideOperationProgressOverlay()
+                        if isActiveAddProjectForm(refs) { updateAddProjectSourceUI(refs) }
                     }
-                    showError(error)
+                    if let preparedGitProjectForDiscard {
+                        _ = await beginPreparedGitProjectDiscard(preparedGitProjectForDiscard, repoURL: preparedGitURLForDiscard).value
+                    }
+                    let result = await Self.activeDeviceMutation(device: device) { device in
+                        try SpacesActiveDeviceClient.createProject(
+                            projectDir: projectDir, gitURL: gitURL, config: config, device: device,
+                            clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    }
+                    switch result {
+                    case .success(let response):
+                        activeAddProjectFormTag = nil
+                        activeAddWorkspaceFormTag = nil
+                        selectedProjectID = response.projectID
+                        selectedWorkspaceID = response.workspaceID
+                        applyActiveDeviceMutationResponse(response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
+                    case .failure(let error): showError(error)
+                    }
                 }
+                return
             }
+            showNoActiveDeviceSelectedError()
         } catch { showError(error) }
     }
 
@@ -9076,13 +8676,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func updateAddProjectSourceUI(_ refs: AddProjectFieldRefs) {
         let cloneSelected = refs.sourceSegmented.selectedSegment == 1
+        let usesActiveDeviceCreate = activeDeviceForDaemonStateMutation() != nil
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
         let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let gitPrepared = refs.preparedGitProject != nil && refs.preparedGitURL == repoURL
         let gitPreparing = refs.gitPreparationID != nil
+        refs.prepareButton.isHidden = usesActiveDeviceCreate
         refs.prepareButton.title = gitPreparing ? "Cloning..." : (gitPrepared ? "Cloned" : "Clone")
-        refs.prepareButton.isEnabled = cloneSelected && !repoURL.isEmpty && !gitPrepared && !gitPreparing
+        refs.prepareButton.isEnabled = !usesActiveDeviceCreate && cloneSelected && !repoURL.isEmpty && !gitPrepared && !gitPreparing
         updateAddProjectProgressiveDisclosure(refs)
     }
 
@@ -9095,6 +8697,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func isAddProjectSourcePrepared(_ refs: AddProjectFieldRefs) -> Bool {
         if refs.sourceSegmented.selectedSegment == 1 {
             let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if activeDeviceForDaemonStateMutation() != nil { return !repoURL.isEmpty && refs.gitPreparationID == nil }
             return refs.gitPreparationID == nil && refs.preparedGitProject != nil && refs.preparedGitURL == repoURL
         }
         let directoryPath = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -9114,10 +8717,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let key = repoURL?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
         return key
     }
-
-    nonisolated static func preparedGitProjectCanBeRestoredAfterFailedSave(
-        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, preparedRepoURL: String, sourceExists: Bool
-    ) -> Bool { sourceExists && isActiveForm && selectedSegment == 1 && currentRepoURL == preparedRepoURL }
 
     private func isActiveAddProjectForm(_ refs: AddProjectFieldRefs) -> Bool {
         activeAddProjectFormTag == refs.createButton.tag && AddProjectFieldCache.shared.cache[refs.createButton.tag] === refs
@@ -9244,31 +8843,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.processesSection.replace(processes: project.processes)
         refs.browserSessionsSection.replace(sessions: project.browserSessions)
         refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
-    }
-
-    private func handleFailedPreparedGitProjectSave(
-        _ prepared: WorkspaceOrchestrator.PreparedGitProjectImport, repoURL: String, refs: AddProjectFieldRefs
-    ) async {
-        let currentRepoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if Self.preparedGitProjectCanBeRestoredAfterFailedSave(
-            isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment, currentRepoURL: currentRepoURL,
-            preparedRepoURL: repoURL, sourceExists: Self.preparedGitProjectSourceExists(prepared))
-        {
-            refs.preparedGitProject = prepared
-            refs.preparedGitURL = repoURL
-        } else {
-            _ = await beginPreparedGitProjectDiscard(prepared, repoURL: repoURL).value
-        }
-    }
-
-    nonisolated private static func preparedGitProjectSourceExists(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport) -> Bool {
-        var projectIsDirectory = ObjCBool(false)
-        guard FileManager.default.fileExists(atPath: prepared.project.dir, isDirectory: &projectIsDirectory), projectIsDirectory.boolValue else {
-            return false
-        }
-        var workspaceIsDirectory = ObjCBool(false)
-        return FileManager.default.fileExists(atPath: prepared.defaultWorkspace.dir, isDirectory: &workspaceIsDirectory)
-            && workspaceIsDirectory.boolValue
     }
 
     private func discardPreparedAddProjectGitSourceIfNeeded(_ refs: AddProjectFieldRefs) {
@@ -9444,50 +9018,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
-            let replacementCandidates: [WorkspaceOrchestrator.ManagedDirectoryReplacementCandidate]
-            if refs.isGitRepo, let resolvedDirectoryName {
-                if let replacementCandidate = try orchestrator.managedWorkspaceReplacementCandidate(
-                    projectID: refs.projectID, directoryName: resolvedDirectoryName)
-                {
-                    replacementCandidates = [replacementCandidate]
-                } else {
-                    replacementCandidates = []
+            if let device = activeDeviceForDaemonStateMutation() {
+                let input = WorkspaceCreateInput(
+                    projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
+                    notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing,
+                    replaceExistingManagedDirectory: false)
+                let originalTitle = sender.title
+                sender.isEnabled = false
+                sender.title = "Creating..."
+                showOperationProgressOverlay(message: "Creating workspace...", detail: "Creating the workspace on \(activeDeviceName).")
+                Task { @MainActor [weak self, weak sender] in
+                    guard let self else { return }
+                    defer {
+                        sender?.isEnabled = true
+                        sender?.title = originalTitle
+                        hideOperationProgressOverlay()
+                    }
+                    let result = await Self.activeDeviceMutation(device: device) { device in
+                        try SpacesActiveDeviceClient.createWorkspace(
+                            projectID: input.projectID, title: input.name, branch: input.branch, targetBranch: input.targetBranch,
+                            directoryName: input.directoryName, notes: input.notes, allowExistingBranchReuse: input.allowExistingBranchReuse,
+                            device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    }
+                    switch result {
+                    case .success(let response):
+                        activeAddWorkspaceFormTag = nil
+                        activeAddProjectFormTag = nil
+                        selectedProjectID = refs.projectID
+                        selectedWorkspaceID = response.workspaceID
+                        lastSelectedRow = -1
+                        applyActiveDeviceMutationResponse(response, selectedProjectID: refs.projectID, selectedWorkspaceID: response.workspaceID)
+                    case .failure(let error): showError(error)
+                    }
                 }
-            } else {
-                replacementCandidates = []
+                return
             }
-            if !replacementCandidates.isEmpty, !presentManagedDirectoryReplacementPrompt(candidates: replacementCandidates) { return }
-            let input = WorkspaceCreateInput(
-                projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
-                notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing,
-                replaceExistingManagedDirectory: !replacementCandidates.isEmpty)
-            let originalTitle = sender.title
-            sender.isEnabled = false
-            sender.title = "Creating..."
-            showOperationProgressOverlay(message: "Creating workspace...", detail: "Validating fields and creating the workspace.")
-            Task { @MainActor [weak self, weak sender] in
-                guard let self else { return }
-                defer {
-                    sender?.isEnabled = true
-                    sender?.title = originalTitle
-                    hideOperationProgressOverlay()
-                }
-                let result = await Self.createWorkspaceSnapshot(input: input)
-                switch result {
-                case .success(let workspace):
-                    activeAddWorkspaceFormTag = nil
-                    activeAddProjectFormTag = nil
-                    selectedProjectID = refs.projectID
-                    selectedWorkspaceID = workspace.id
-                    lastSelectedRow = -1
-                    reloadData()
-                    showOperationProgressOverlay(message: "Preparing workspace...", detail: "Running setup for the new workspace.")
-                    let setupResult = await Self.runWorkspaceSetupSnapshot(workspaceID: workspace.id)
-                    reloadData()
-                    if case .failure(let error) = setupResult { showError(error) }
-                case .failure(let error): showError(error)
-                }
-            }
+            showNoActiveDeviceSelectedError()
         } catch { showError(error) }
     }
 
@@ -9577,11 +9143,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
-            let result = await Self.runWorkspaceLifecycleAction(.launch, workspaceID: id)
+            let result: Result<SpacesDeviceAPIResponse, Error>?
+            if let device = activeDeviceForDaemonStateMutation() {
+                result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.launchWorkspace(
+                        workspaceID: id, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+            } else {
+                result = nil
+            }
             sender?.isEnabled = true
-            switch result {
-            case .success: reloadData()
-            case .failure(let error): showError(error)
+            if let result {
+                switch result {
+                case .success(let response): applyActiveDeviceMutationResponse(response, selectedWorkspaceID: id)
+                case .failure(let error): showError(error)
+                }
+            } else {
+                showNoActiveDeviceSelectedError()
             }
         }
     }
@@ -9591,11 +9169,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
-            let result = await Self.runWorkspaceLifecycleAction(.restart, workspaceID: id)
+            let result: Result<SpacesDeviceAPIResponse, Error>?
+            if let device = activeDeviceForDaemonStateMutation() {
+                result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.restartWorkspace(
+                        workspaceID: id, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+            } else {
+                result = nil
+            }
             sender?.isEnabled = true
-            switch result {
-            case .success: reloadData()
-            case .failure(let error): showError(error)
+            if let result {
+                switch result {
+                case .success(let response): applyActiveDeviceMutationResponse(response, selectedWorkspaceID: id)
+                case .failure(let error): showError(error)
+                }
+            } else {
+                showNoActiveDeviceSelectedError()
             }
         }
     }
@@ -9605,13 +9195,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
-            let result = await Self.runWorkspaceLifecycleAction(.stop, workspaceID: id)
+            let result: Result<SpacesDeviceAPIResponse, Error>?
+            if let device = activeDeviceForDaemonStateMutation() {
+                result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.stopWorkspace(
+                        workspaceID: id, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+            } else {
+                result = nil
+            }
             sender?.isEnabled = true
-            switch result {
-            case .success(let outcome):
-                reloadData()
-                if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
-            case .failure(let error): showError(error)
+            if let result {
+                switch result {
+                case .success(let response): applyActiveDeviceMutationResponse(response, selectedWorkspaceID: id)
+                case .failure(let error): showError(error)
+                }
+            } else {
+                showNoActiveDeviceSelectedError()
             }
         }
     }
@@ -9635,31 +9235,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         button?.isEnabled = false
         Task { @MainActor [weak self, weak button] in
             guard let self else { return }
-            if targetIsHidden, workspace.isRunning {
-                let stopResult = await Self.runWorkspaceLifecycleAction(.stop, workspaceID: id)
-                switch stopResult {
-                case .success(let outcome): if let notice = outcome.notice { showInfoMessage(title: "Workspace Stopped", message: notice) }
-                case .failure(let error):
-                    button?.isEnabled = true
-                    showError(error)
-                    return
+            if let device = activeDeviceForDaemonStateMutation() {
+                if targetIsHidden, workspace.isRunning {
+                    let stopResult = await Self.activeDeviceMutation(device: device) { device in
+                        try SpacesActiveDeviceClient.stopWorkspace(
+                            workspaceID: id, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    }
+                    switch stopResult {
+                    case .success(let response): applyActiveDeviceMutationResponse(response, selectedWorkspaceID: id)
+                    case .failure(let error):
+                        button?.isEnabled = true
+                        showError(error)
+                        return
+                    }
                 }
-            }
-            do {
-                try orchestrator.updateWorkspaceHidden(workspaceID: id, isHidden: targetIsHidden)
-                button?.isEnabled = true
-                if targetIsHidden, selectedWorkspaceID == id {
-                    selectedWorkspaceID = nil
-                    selectedProjectID = project.id
-                    suppressOutlineSelectionChanges = true
-                    outlineView.deselectAll(nil)
-                    suppressOutlineSelectionChanges = false
+                let result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.updateWorkspaceMetadata(
+                        workspaceID: id, isHidden: targetIsHidden, updatesHidden: true, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                 }
-                reloadData()
-            } catch {
                 button?.isEnabled = true
-                showError(error)
+                switch result {
+                case .success(let response):
+                    if targetIsHidden, selectedWorkspaceID == id {
+                        selectedWorkspaceID = nil
+                        selectedProjectID = project.id
+                        suppressOutlineSelectionChanges = true
+                        outlineView.deselectAll(nil)
+                        suppressOutlineSelectionChanges = false
+                    }
+                    applyActiveDeviceMutationResponse(response, selectedProjectID: selectedProjectID)
+                case .failure(let error): showError(error)
+                }
+                return
             }
+            button?.isEnabled = true
+            showNoActiveDeviceSelectedError()
         }
     }
 
@@ -9707,21 +9318,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, weak button] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
-            let result = await Self.runWorkspaceLifecycleAction(
-                .archive(deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch), workspaceID: id)
-            switch result {
-            case .success(let outcome):
-                if didOptimisticallyArchive {
-                    requestSidebarReload()
-                } else {
-                    button?.isEnabled = true
-                    reloadData()
+            if let device = activeDeviceForDaemonStateMutation() {
+                let result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.archiveWorkspace(
+                        workspaceID: id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                 }
-                if let notice = outcome.notice { showInfoMessage(title: "Workspace Archived", message: notice) }
-            case .failure(let error):
-                reloadData()
+                switch result {
+                case .success(let response):
+                    button?.isEnabled = true
+                    applyActiveDeviceMutationResponse(response, selectedProjectID: project.id)
+                case .failure(let error):
+                    requestSidebarReload()
+                    button?.isEnabled = true
+                    showError(error)
+                }
+            } else {
+                if didOptimisticallyArchive { requestSidebarReload() }
                 button?.isEnabled = true
-                showError(error)
+                showNoActiveDeviceSelectedError()
             }
         }
     }
@@ -9733,6 +9348,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     @objc func revealDirectoryInFinder(_ sender: Any) {
+        if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
         guard let path = Self.senderIdentifier(sender) else { return }
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
     }
@@ -9819,7 +9435,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.runModal()
     }
 
+    private func showRemoteWorkspacePathActionErrorIfNeeded(_ action: WorkspacePathAction) -> Bool {
+        guard activeDeviceForDaemonStateMutation() != nil, activeDeviceIsRemote else { return false }
+        showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: activeDeviceName)))
+        return true
+    }
+
     private func openWorkspaceEditor(workspaceID: String) {
+        if showRemoteWorkspacePathActionErrorIfNeeded(.openEditor) { return }
         do {
             try orchestrator.openWorkspaceEditor(workspaceID: workspaceID)
             reloadData()
@@ -9838,42 +9461,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { completion?() }
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
-                let opensRemoteSession = try orchestrator.workspaceRuntimePlan(workspaceID: workspaceID).selection.isRemote
-                if opensRemoteSession {
-                    let sessionID = try await Task.detached(priority: .userInitiated) {
-                        let store = try SQLiteStore(path: db)
-                        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
-                        return try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
-                    }.value
-                    if let windowID = openTerminalSessionWindow(sessionID: sessionID, mode: .owner) {
-                        try? orchestrator.persistBuiltInTerminalWindowID(sessionID: sessionID, windowID: windowID)
-                    }
-                } else {
-                    Task.detached(priority: .userInitiated) {
-                        do {
-                            let store = try SQLiteStore(path: db)
-                            let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowOpener: { _, _ in })
-                            try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
-                        } catch { NSLog("spaces: workspace terminal launch failed: \(String(describing: error))") }
-                    }
-                    if let windowID = openTerminalSessionWindow(sessionID: reservation.sessionID, mode: .owner) {
-                        try? orchestrator.persistBuiltInTerminalWindowID(sessionID: reservation.sessionID, windowID: windowID)
-                    }
+            if let device = activeDeviceForDaemonStateMutation() {
+                let result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.openWorkspaceTerminal(
+                        workspaceID: workspaceID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                 }
-                reloadData()
-                hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
-                logPerfMetric(
-                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                    success: true, detail: "route=\(route.rawValue)")
-            } catch {
-                logPerfMetric(
-                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                    success: false, detail: "route=\(route.rawValue)")
-                showError(error)
+                switch result {
+                case .success(let response):
+                    if !activeDeviceIsRemote, let sessionID = response.sessionID { _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner) }
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
+                    logPerfMetric(
+                        "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: true, detail: "route=\(route.rawValue)")
+                case .failure(let error):
+                    logPerfMetric(
+                        "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: false, detail: "route=\(route.rawValue)")
+                    showError(error)
+                }
+                return
             }
+            logPerfMetric(
+                "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                success: false, detail: "route=\(route.rawValue)")
+            showNoActiveDeviceSelectedError()
         }
     }
 
@@ -9881,21 +9493,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let startedAt = Date()
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let result = await Self.performWindowFocusSnapshot(.workspaceMissingConfiguredProcess(workspaceID: workspaceID, processKey: processName))
-            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
-            switch result {
-            case .success(let action):
-                logPerfMetric(
-                    "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
-                    detail: "route=ipc name=\(processName)")
-                reloadData()
-                hideAfterSuccessfulExternalWindowAction(action)
-            case .failure(let error):
-                logPerfMetric(
-                    "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
-                    detail: "route=ipc name=\(processName)")
-                showError(error)
+            if let device = activeDeviceForDaemonStateMutation() {
+                let result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.runWorkspaceProcess(
+                        workspaceID: workspaceID, processKey: processName, processTemplateID: nil, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+                switch result {
+                case .success(let response):
+                    logPerfMetric(
+                        "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: true, detail: "route=ipc name=\(processName)")
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
+                case .failure(let error):
+                    logPerfMetric(
+                        "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: false, detail: "route=ipc name=\(processName)")
+                    showError(error)
+                }
+                return
             }
+            logPerfMetric(
+                "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                success: false, detail: "route=ipc name=\(processName)")
+            showNoActiveDeviceSelectedError()
         }
     }
 
@@ -9904,18 +9526,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                guard let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.templateName == processName })
-                else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
-                try orchestrator.stopWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.stopWorkspaceProcess(
+                        workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    logPerfMetric(
+                        "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: true, detail: "route=ipc name=\(processName)")
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    return
+                }
                 logPerfMetric(
                     "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                    success: true, detail: "route=ipc name=\(processName)")
-                reloadData()
+                    success: false, detail: "route=ipc name=\(processName)")
+                showNoActiveDeviceSelectedError()
             } catch {
                 logPerfMetric(
                     "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                     success: false, detail: "route=ipc name=\(processName)")
-                fputs("spaces: workspace process stop IPC failed for \(processName): \(error)\n", stderr)
                 showError(error)
             }
         }
@@ -9926,18 +9554,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                guard let process = try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.templateName == processName })
-                else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
-                try orchestrator.restartWorkspaceProcess(workspaceID: workspaceID, processID: process.id)
+                if let device = activeDeviceForDaemonStateMutation() {
+                    let response = try SpacesActiveDeviceClient.restartWorkspaceProcess(
+                        workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    logPerfMetric(
+                        "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: true, detail: "route=ipc name=\(processName)")
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    return
+                }
                 logPerfMetric(
                     "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                    success: true, detail: "route=ipc name=\(processName)")
-                reloadData()
+                    success: false, detail: "route=ipc name=\(processName)")
+                showNoActiveDeviceSelectedError()
             } catch {
                 logPerfMetric(
                     "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                     success: false, detail: "route=ipc name=\(processName)")
-                fputs("spaces: workspace process restart IPC failed for \(processName): \(error)\n", stderr)
                 showError(error)
             }
         }
@@ -9947,25 +9581,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let startedAt = Date()
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let result = await Self.performWindowFocusSnapshot(.workspaceAgentLauncher(workspaceID: workspaceID, name: launcherName))
-            let elapsedMS = windowShortcutElapsedMS(since: startedAt)
-            switch result {
-            case .success(let action):
-                logPerfMetric(
-                    "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: true,
-                    detail: "route=ipc name=\(launcherName)")
-                reloadData()
-                hideAfterSuccessfulExternalWindowAction(action)
-            case .failure(let error):
-                logPerfMetric(
-                    "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: elapsedMS, success: false,
-                    detail: "route=ipc name=\(launcherName)")
-                showError(error)
+            if let device = activeDeviceForDaemonStateMutation() {
+                let result = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.runCodingAgent(
+                        workspaceID: workspaceID, agentName: launcherName, agentLauncherID: nil, device: device,
+                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+                switch result {
+                case .success(let response):
+                    logPerfMetric(
+                        "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: true, detail: "route=ipc name=\(launcherName)")
+                    applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
+                case .failure(let error):
+                    logPerfMetric(
+                        "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                        success: false, detail: "route=ipc name=\(launcherName)")
+                    showError(error)
+                }
+                return
             }
+            logPerfMetric(
+                "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail: "route=ipc name=\(launcherName)")
+            showNoActiveDeviceSelectedError()
         }
     }
 
     private func openWorkspaceFinder(workspaceID: String) {
+        if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
         if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
@@ -11255,6 +10900,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func projectRowCell(project: ProjectSummary, isSelected: Bool, isExpanded: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
+        cell.setAccessibilityIdentifier("sidebar-project-\(project.id)")
 
         let rowBackground = NSView()
         rowBackground.translatesAutoresizingMaskIntoConstraints = false
@@ -11268,6 +10914,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
         titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setAccessibilityIdentifier("sidebar-project-title-\(project.id)")
 
         let leadingStack = NSStackView()
         leadingStack.orientation = .horizontal
@@ -11288,7 +10935,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(showProjectSettings(_:)))
         settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
         settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
-        accessoryStack.addArrangedSubview(settingsButton)
+        let projectActions = Self.sidebarProjectActions(isGitRepo: project.isGitRepo)
+        if projectActions.showsSettings { accessoryStack.addArrangedSubview(settingsButton) }
 
         let chevron = NSImageView()
         chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
@@ -11319,7 +10967,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             contentRow.topAnchor.constraint(equalTo: rowBackground.topAnchor, constant: 3),
             contentRow.bottomAnchor.constraint(equalTo: rowBackground.bottomAnchor, constant: -3),
         ])
-        if project.isGitRepo {
+        if projectActions.showsAddWorkspace {
             let addButton = sidebarRowIconButton(symbol: "plus", tooltip: "New workspace in \(project.name)", action: #selector(addWorkspace(_:)))
             addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
             addButton.setAccessibilityIdentifier("sidebar-project-add-workspace-\(project.id)")
@@ -11876,17 +11524,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func persistProjectFields(_ refs: ProjectFieldRefs) throws {
-        try orchestrator.updateProjectConfig(projectID: refs.projectID, updateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces) { config in
-            config.setupScript = refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue
-            config.stopScript = refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue
-            config.ports = refs.portsSection.currentPorts
-            config.processes = refs.processesSection.currentProcesses
-            config.browserSessions = refs.browserSessionsSection.currentSessions
-            config.agentLaunchers = refs.agentLaunchersSection.currentLaunchers
+        if let device = activeDeviceForDaemonStateMutation() {
+            let response = try SpacesActiveDeviceClient.updateProjectConfig(
+                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces,
+                device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            refs.hasPendingImportedConfig = false
+            refs.pendingImportUpdateAllWorkspaces = false
+            refs.discardImportedConfigButton.isHidden = true
+            applyActiveDeviceMutationResponse(response, selectedProjectID: refs.projectID)
+            return
         }
-        refs.hasPendingImportedConfig = false
-        refs.pendingImportUpdateAllWorkspaces = false
-        refs.discardImportedConfigButton.isHidden = true
+        throw Self.noActiveDeviceSelectedError()
     }
 
     private func unsavedChangesPrompt() -> NSApplication.ModalResponse {
@@ -11949,16 +11597,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         confirm(alert.runModal() == .alertFirstButtonReturn)
     }
 
-    private func presentComputeHostRemoveConfirmation(host: ComputeHostRecord, confirm: @escaping (Bool) -> Void) {
-        let alert = NSAlert()
-        alert.messageText = "Uninstall \(host.name)?"
-        alert.informativeText =
-            "This stops an idle managed spacesd, removes managed daemon binaries and uploads, and deletes the saved host and daemon token. Workspace roots and remote worktrees are preserved. Workspaces assigned to this host must be removed first."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Uninstall")
-        alert.addButton(withTitle: "Cancel")
-        confirm(alert.runModal() == .alertFirstButtonReturn)
-    }
 }
 
 struct CommandPaletteItem: Sendable {
@@ -12392,29 +12030,35 @@ extension AppKitController {
         }
     }
 
-    nonisolated fileprivate static func buildCommandPaletteItems(
-        orchestrator: WorkspaceOrchestrator, projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]]
-    ) throws -> [CommandPaletteItem] {
-        let alertsGroups = try buildAlertsGroupsSnapshot(orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)
+    nonisolated private static func buildCommandPaletteItems(overview: SpacesDeviceOverviewPayload, alertsGroups: [AlertsGroup] = [])
+        -> [CommandPaletteItem]
+    {
         var items: [CommandPaletteItem] = buildCommandPaletteAlertsItems(alertsGroups: alertsGroups)
+        items.append(contentsOf: activeDeviceCommandPaletteWorkspaceItems(from: overview))
+        return items
+    }
 
-        for project in projects {
-            for workspace in workspacesByProject[project.id] ?? [] {
-                let windows = (try? orchestrator.windows(workspaceID: workspace.id)) ?? []
-                let processes = (try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []
-                let agentWindows = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                let settings = try orchestrator.workspaceSettings(workspaceID: workspace.id)
-                let browserSessions =
-                    shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspace.isRunning)
-                    ? ((try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []) : []
+    nonisolated static func activeDeviceCommandPaletteWorkspaceItems(from overview: SpacesDeviceOverviewPayload) -> [CommandPaletteItem] {
+        let mapped = activeDeviceSidebarData(from: overview)
+        var items: [CommandPaletteItem] = []
+
+        for project in mapped.projects {
+            for workspace in mapped.workspacesByProject[project.id] ?? [] {
+                guard let deviceWorkspace = overview.workspaces.first(where: { $0.id == workspace.id }) else { continue }
+                let detail = SpacesActiveDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
+                let windows = activeDeviceTerminalWindows(from: detail.terminalRows)
+                let processes = runningProcesses(from: detail.processRows)
+                let agentWindows = agentWindows(from: detail.codingAgentRows)
+                let settings = localWorkspaceSettings(from: detail.config)
+                let browserSessions = detail.config.resolvedBrowserSessions.map(localBrowserSession(from:))
                 let processEntries = orderedWorkspaceRunProcessEntries(
-                    configuredProcesses: settings?.processes ?? [], windows: windows, processes: processes, agentWindows: agentWindows)
+                    configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
                 let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
                 let shortcutTargets = orderedWorkspaceRunShortcutTargets(
                     browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-                    configuredAgentLaunchers: settings?.agentLaunchers ?? [], agentWindows: agentWindows)
+                    configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows)
                 let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
-                let configuredAgentByName = Dictionary(uniqueKeysWithValues: (settings?.agentLaunchers ?? []).map { ($0.name, $0) })
+                let configuredAgentByName = Dictionary(uniqueKeysWithValues: settings.agentLaunchers.map { ($0.name, $0) })
 
                 for (offset, target) in shortcutTargets.enumerated() {
                     let itemID = "\(workspace.id)::\(offset)"
@@ -12500,19 +12144,13 @@ extension AppKitController {
         return items
     }
 
-    nonisolated private static func commandPaletteItemsSnapshot() async -> Result<[CommandPaletteItem], Error> {
+    nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AlertsGroup]) async -> Result<[CommandPaletteItem], Error> {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                let projects = try orchestrator.listProjects()
-                var workspacesByProject: [String: [WorkspaceSummary]] = [:]
-                for project in projects {
-                    workspacesByProject[project.id] = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
-                }
-                return .success(
-                    try buildCommandPaletteItems(orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject))
+                let activeOverview = try SpacesActiveDeviceClient.overview(
+                    database: SpacesClientDatabase(), clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                let isLocalDevice = activeOverview.device.id == SpacesPairedDeviceRecord.localDeviceID
+                return .success(buildCommandPaletteItems(overview: activeOverview.overview, alertsGroups: isLocalDevice ? alertsGroups : []))
             } catch { return .failure(error) }
         }.value
     }
@@ -12847,7 +12485,7 @@ extension AppKitController {
         logHotkeyDebug("reload_palette_items begin")
         commandPaletteLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let result = await Self.commandPaletteItemsSnapshot()
+            let result = await Self.commandPaletteItemsSnapshot(alertsGroups: self.alertsGroups)
             guard !Task.isCancelled else { return }
             self.commandPaletteLoadTask = nil
             self.setCommandPaletteLoading(false)

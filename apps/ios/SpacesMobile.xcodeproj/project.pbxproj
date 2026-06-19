@@ -11,13 +11,14 @@
 		07BF7831235AE0F2E2CA97B3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B0B57F94C61B24E0729B79F1 /* Assets.xcassets */; };
 		0E7F176A6DFB6F22E4C67688 /* RowPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6930FB499F3E9C3B13AA59E /* RowPrimitives.swift */; };
 		1BF92F57C51FD34F3F9B3E05 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 5C91403688DCC6A2B90B5AC8 /* spacesterminalmobileghostty */; };
-		1CEC201CDB2F0F869548081A /* spacesmobilecore in Frameworks */ = {isa = PBXBuildFile; productRef = 69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */; };
+		1CEC201CDB2F0F869548081A /* spacesdevicecore in Frameworks */ = {isa = PBXBuildFile; productRef = 69AE1995F1B3C38E8A9708D4 /* spacesdevicecore */; };
 		1FD461D6B580B89F2B990F8C /* spacesdatabase in Frameworks */ = {isa = PBXBuildFile; productRef = 39586518454D31E78B33E510 /* spacesdatabase */; };
 		246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */; };
 		317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */; };
 		33641B9B5F7C4A0AE09EEA5D /* ConnectionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */; };
 		3A856B3C563D5D2DEB3746F0 /* SpacesMobileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */; };
-		3E6556FA28213E142655B870 /* SpacesMobileBridgeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */; };
+		3E6556FA28213E142655B870 /* SpacesDeviceAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAC519ED5515A6509CAD7C1F /* SpacesDeviceAPIClient.swift */; };
+		4A3E67B5A90C4D9E8A6F3210 /* SpacesMobileDeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B6D78E2F03A4B1C9D8E7F60 /* SpacesMobileDeviceStore.swift */; };
 		4073E59B929A6A3937DC57A8 /* GhosttyMobileAppServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */; };
 		63CAF57DC64D2ABDDFFD193A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9747BD35A2E71FC54E592EEA /* ContentView.swift */; };
 		8446707E173682AE97504D83 /* QRCodeScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D39F7C8719D39204E9BF41F2 /* QRCodeScannerView.swift */; };
@@ -27,7 +28,6 @@
 		CC7C2A2DA9176A2A7993FCD5 /* spacesterminalmobileghostty in Frameworks */ = {isa = PBXBuildFile; productRef = 822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */; };
 		D26F853567EBC3D143DD54F2 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99364D0D95BDF6680EFCD26D /* Theme.swift */; };
 		E39F851FA52BA68F47E8B904 /* spacesdatabase in Frameworks */ = {isa = PBXBuildFile; productRef = F8CB9D01F0F2F551F80BD63B /* spacesdatabase */; };
-		EB899C843473EE91D4A36B96 /* SpacesMobileBridgeDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */; };
 		ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */; };
 		EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 43EB21BA2206002F56560C15 /* spacesterminalcore */; };
 		F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */; };
@@ -52,12 +52,12 @@
 
 /* Begin PBXFileReference section */
 		160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileUITests.swift; sourceTree = "<group>"; };
-		1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBridgeDiscovery.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModelTests.swift; sourceTree = "<group>"; };
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
 		5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5B6D78E2F03A4B1C9D8E7F60 /* SpacesMobileDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDeviceStore.swift; sourceTree = "<group>"; };
 		7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDetailView.swift; sourceTree = "<group>"; };
 		89218A663F7CADB785794197 /* GhosttyMobileAppServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyMobileAppServiceTests.swift; sourceTree = "<group>"; };
 		963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileConnectionSettings.swift; sourceTree = "<group>"; };
@@ -67,7 +67,7 @@
 		B0B57F94C61B24E0729B79F1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BEBBC1D6B0751E287CF24826 /* ConnectionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettingsView.swift; sourceTree = "<group>"; };
 		C6930FB499F3E9C3B13AA59E /* RowPrimitives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowPrimitives.swift; sourceTree = "<group>"; };
-		CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileBridgeClient.swift; sourceTree = "<group>"; };
+		CAC519ED5515A6509CAD7C1F /* SpacesDeviceAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceAPIClient.swift; sourceTree = "<group>"; };
 		D39F7C8719D39204E9BF41F2 /* QRCodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerView.swift; sourceTree = "<group>"; };
 		E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F242C1DB3E9B92832963F8A6 /* ghostty */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ghostty; path = ../macos/.local/ghosttykit/Resources/ghostty; sourceTree = SOURCE_ROOT; };
@@ -79,7 +79,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1CEC201CDB2F0F869548081A /* spacesmobilecore in Frameworks */,
+				1CEC201CDB2F0F869548081A /* spacesdevicecore in Frameworks */,
 				1FD461D6B580B89F2B990F8C /* spacesdatabase in Frameworks */,
 				A09A88A72DBD3C5715B03A0D /* spacesterminalcore in Frameworks */,
 				CC7C2A2DA9176A2A7993FCD5 /* spacesterminalmobileghostty in Frameworks */,
@@ -116,9 +116,9 @@
 				C6930FB499F3E9C3B13AA59E /* RowPrimitives.swift */,
 				A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */,
 				35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */,
-				CAC519ED5515A6509CAD7C1F /* SpacesMobileBridgeClient.swift */,
-				1C274F10D0826B130F984E6E /* SpacesMobileBridgeDiscovery.swift */,
+				CAC519ED5515A6509CAD7C1F /* SpacesDeviceAPIClient.swift */,
 				963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */,
+				5B6D78E2F03A4B1C9D8E7F60 /* SpacesMobileDeviceStore.swift */,
 				7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */,
 				F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */,
 				99364D0D95BDF6680EFCD26D /* Theme.swift */,
@@ -242,7 +242,7 @@
 			);
 			name = SpacesMobile;
 			packageProductDependencies = (
-				69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */,
+				69AE1995F1B3C38E8A9708D4 /* spacesdevicecore */,
 				39586518454D31E78B33E510 /* spacesdatabase */,
 				496FCCD383CAF3E9BD137D1B /* spacesterminalcore */,
 				822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */,
@@ -341,9 +341,9 @@
 				0E7F176A6DFB6F22E4C67688 /* RowPrimitives.swift in Sources */,
 				317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */,
 				ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */,
-				3E6556FA28213E142655B870 /* SpacesMobileBridgeClient.swift in Sources */,
-				EB899C843473EE91D4A36B96 /* SpacesMobileBridgeDiscovery.swift in Sources */,
+				3E6556FA28213E142655B870 /* SpacesDeviceAPIClient.swift in Sources */,
 				BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */,
+				4A3E67B5A90C4D9E8A6F3210 /* SpacesMobileDeviceStore.swift in Sources */,
 				246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */,
 				F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */,
 				D26F853567EBC3D143DD54F2 /* Theme.swift in Sources */,
@@ -703,9 +703,9 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = spacesterminalmobileghostty;
 		};
-		69AE1995F1B3C38E8A9708D4 /* spacesmobilecore */ = {
+		69AE1995F1B3C38E8A9708D4 /* spacesdevicecore */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = spacesmobilecore;
+			productName = spacesdevicecore;
 		};
 		822087096353D1C543E2C4F3 /* spacesterminalmobileghostty */ = {
 			isa = XCSwiftPackageProductDependency;

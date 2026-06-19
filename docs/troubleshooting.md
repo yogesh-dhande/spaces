@@ -29,7 +29,7 @@ yabai -m query --windows --window
 List projects and create an explicit workspace:
 ```bash
 spaces project list
-spaces workspace create --project <project-id> --branch debug --host local --title "debug"
+spaces workspace create --project <project-id> --branch debug --title "debug"
 ```
 
 Force a clean runtime restart:

@@ -388,7 +388,7 @@
             renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
             renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
             renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
-            SpacesMobileTerminalPerformanceLogger.emit(
+            SpacesDeviceTerminalPerformanceLogger.emit(
                 .init(
                     sessionID: payload.sessionID, source: "mac-mirror", name: "render_frame_payload_receive",
                     elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt), count: incomingPayload.renderUpdate?.count,

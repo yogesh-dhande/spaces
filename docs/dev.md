@@ -49,7 +49,7 @@ apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces --help
 apps/macos/.build/debug/spacese2e --help
 apps/macos/.build/debug/spaces project list
-apps/macos/.build/debug/spaces workspace create --project <project-id> --branch debug --host local --title "debug"
+apps/macos/.build/debug/spaces workspace create --project <project-id> --branch debug --title "debug"
 apps/macos/.build/debug/spaces workspace restart --workspace <workspace-id>
 ```
 
@@ -151,31 +151,22 @@ For maintained simulator E2E coverage of the mobile terminal path:
 apps/macos/Tests/e2e_mobile.sh
 ```
 
-The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with a local Beacon workspace and a remote Scout workspace, and then runs selected scenarios against the local project and remote-compatible scenarios against the remote project. Codex-backed scenarios run on the local target because they use the local signed-in Codex CLI and generated Codex home. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon bridge port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon bridge, and verifies the spacesd daemon PID and live session remain stable.
+The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against the local daemon. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon Device API port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon Device API, and verifies the spacesd daemon PID and live session remain stable.
 
-The mobile E2E suite requires remote compute-host configuration. The macOS and mobile E2E scripts load `.env` by default before reading remote settings; use `SPACES_ENV_FILE=<path>` for another env file or `SPACES_SKIP_ENV_FILE=1` to ignore it. Set `SPACES_E2E_REMOTE_SSH_HOST`, optional `SPACES_E2E_REMOTE_SSH_USER`, optional `SPACES_E2E_REMOTE_SSH_PORT`, `SPACES_E2E_REMOTE_DAEMON_HOST`, optional `SPACES_E2E_REMOTE_DAEMON_PORT`, optional `SPACES_E2E_REMOTE_AUTH_TOKEN`, optional `SPACES_E2E_REMOTE_WORKSPACE_ROOT`, optional `SPACES_E2E_REMOTE_GIT_ROOT`, optional `SPACES_E2E_REMOTE_HOST_ID`, and optional `SPACES_E2E_REMOTE_NAME` when running against a real host. The shared demo prepares the matching managed Linux `spacesd` artifact, uploads it to the remote host, prepares the remote Git origin, registers the compute host through `spacese2e remote-compute-host-smoke`, and keeps both companion sessions live while scenario-specific sessions are created and cleaned up.
+The macOS and mobile E2E scripts load `.env` by default; use `SPACES_ENV_FILE=<path>` for another env file or `SPACES_SKIP_ENV_FILE=1` to ignore it.
 
 Remote mobile terminal latency sweeps use `spacese2e terminal-service-tls-session` for direct daemon commands so input and scroll samples reuse one pinned-TLS command connection while a separate direct subscribe stream observes render visibility. The sweep reports `direct_command_request` for the direct daemon round trip and validates that each direct command receives the expected response shape before recording the sample.
 
-The daemon-hosted mobile bridge is the first-party seam for that proof of concept. Treat it as a paired Spaces-only bridge rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone bridge process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone bridge processes reject daemon-only recovery commands such as `launchSpacesApp`.
+The daemon-hosted Device API is a paired Spaces-only transport rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone Device API process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same TLS-PSK transport as the iOS app. Standalone Device API processes reject daemon-only recovery commands such as `launchSpacesApp`.
 
-Remote compute-host E2E coverage uses a reachable Ubuntu 24.04 host where the suite can upload the matching Linux `spacesd` artifact over SSH. App-level remote E2E supports the managed daemon artifacts `spacesd-ubuntu-24.04-x86_64.tar.gz` and `spacesd-ubuntu-24.04-arm64.tar.gz`, selected from the remote host's probed architecture. Compute-host bootstrap, status, and test automation belongs in `spacese2e` so the product `spaces` CLI remains workspace-oriented. Use `upsert-compute-host` and `list-compute-hosts` to seed and inspect host records, `remote-compute-host-smoke` to exercise a configured host, and `plan-workspace-runtime` to inspect the workspace's immutable host binding, daemon target, Remote SSH URI, and runtime manifest.
-
-Prepare the managed Linux daemon artifact for the configured remote E2E host:
+Focused paired-device parity checks use one shared Device API flow for local and remote daemons:
 
 ```bash
-apps/macos/scripts/deploy_linux_spacesd_e2e.sh
+apps/macos/Tests/e2e_local_device_api.sh
+apps/macos/Tests/e2e_remote_device_api.sh
 ```
 
-The deploy script loads the same `.env` remote settings used by the E2E suites, probes the remote Ubuntu 24.04 architecture, builds the matching artifact in the Swift Noble Docker image, uploads it over SSH to `~/.spaces/remote-artifact-e2e/`, and prints `artifact_*=` shell exports that the E2E suites feed into `spacese2e remote-compute-host-smoke`. Remote-capable E2E scripts run this preparation step before remote compute-host provisioning.
-
-Clean up the configured remote E2E host:
-
-```bash
-apps/macos/scripts/cleanup_linux_spacesd_e2e.sh
-```
-
-The cleanup script stops E2E-owned remote `spacesd` and workspace processes, stops the configured daemon-port listener when it belongs to the E2E managed host/profile, removes uploaded E2E artifacts plus legacy `~/bin/spacesd` and `~/bin/spaces` symlinks when they point into an E2E root, and removes the configured E2E profile, workspace, and Git roots. Remote-capable E2E scripts run this cleanup step from their exit traps.
+Both scripts create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. The remote script keeps one SSH session open while the Linux user service is under test so hosts without user lingering do not stop `spacesd.service` between short SSH setup commands.
 
 The lower-level Linux artifact build command is:
 
@@ -187,57 +178,20 @@ docker run --rm --platform linux/amd64 \
   bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch x86_64'
 ```
 
-Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. Release builds publish these archives through the signed remote artifact manifest; product setup installs them under `~/.spaces/compute-hosts/<host-id>/daemon/releases/<version>/` through the managed bootstrapper.
+Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, creates `~/.spaces/runtime` and `~/.spaces/workspaces`, installs `~/.config/systemd/user/spacesd.service`, enables the user service, and restarts it.
 
-For a real SSH smoke that exercises bootstrap, pinned-TLS status, runtime planning, remote terminal launch, and workspace stop through production orchestration:
-
-```bash
-eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"
-apps/macos/.build/debug/spacese2e remote-compute-host-smoke \
-  --project-dir <local-git-project-dir> \
-  --host-id lab-host \
-  --ssh-host <ssh-host-or-alias> \
-  --ssh-user <ssh-user> \
-  --daemon-host <daemon-ip-or-dns-name>
-```
-
-The command tears down the named remote E2E profile and requested daemon port, starts the remote daemon through `ComputeHostBootstrapper`, saves the host token for the current profile when it generated one, creates a host-scoped remote workspace, opens one remote ad hoc Spaces terminal, stops the workspace, and prints JSON with the host, bootstrap metadata, daemon status, runtime plan, terminal session ID, and stop outcome.
-
-A remote daemon listener uses pinned TLS. Print the daemon certificate fingerprint with the same profile environment used to run the listener:
+Install an artifact on a reachable Linux device with:
 
 ```bash
-export SPACES_DB_PATH=/tmp/spaces-remote/spaces.db
-export SPACES_RUNTIME_DIR=/tmp/spaces-remote/runtime
-SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 <path-to-spacesd>
+scp .build/artifacts/spacesd-ubuntu-24.04-x86_64.tar.gz <host>:/tmp/
+ssh <host> 'mkdir -p /tmp/spacesd-install && tar -xzf /tmp/spacesd-ubuntu-24.04-x86_64.tar.gz -C /tmp/spacesd-install && /tmp/spacesd-install/install.sh'
 ```
 
-Start the remote listener with the configured private/LAN/VPN bind address and a shared token:
+After install, verify the remote pairing command over strict SSH. The Mac app uses the same path when connecting a remote device:
 
 ```bash
-export SPACESD_LISTEN_HOST=0.0.0.0
-export SPACESD_LISTEN_PORT=7443
-export SPACESD_AUTH_TOKEN=<shared-token>
-<path-to-spacesd>
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <host> '~/.spaces/bin/spaces pair --json'
 ```
-
-The listener fails closed without a non-empty `SPACESD_AUTH_TOKEN`. Register that endpoint from the Mac-side profile. Mac-side clients do not use the global `SPACESD_AUTH_TOKEN` as a compute-host fallback; the host-specific token environment key is the uppercased compute host ID with non-alphanumeric characters replaced by `_`:
-
-```bash
-eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"
-export SPACESD_AUTH_TOKEN_LAB_MAC=<shared-token>
-apps/macos/.build/debug/spacese2e upsert-compute-host \
-  --id lab-mac \
-  --name "Lab Mac" \
-  --ssh-host <ssh-host> \
-  --workspace-root /tmp/spaces-remote/workspaces \
-  --daemon-host <remote-ip-or-dns-name> \
-  --daemon-port 7443 \
-  --certificate-fingerprint 'SHA256:<fingerprint-hex>'
-```
-
-The Mac-side host record can be created through the app. Open Remote Hosts from the sidebar, enter the SSH host and SSH user, optionally set a display name, and use Advanced only for SSH port. The remote host must accept non-interactive SSH from the Mac with a pinned known-host entry and provide the required setup tools (`curl`, `tar`, `gzip`, `lsof`, `python3`, `git`, and `sha256sum` or `shasum`). Connect probes the remote platform, verifies the signed remote artifact manifest for the current release, installs the exact matching managed daemon artifact, starts the remote listener with an internally selected port, stores the auth token in Keychain, saves the returned certificate fingerprint, verifies direct pinned-TLS reachability, and checks scoped mobile credential readiness before saving the host. Saved hosts expose Check for daemon status and upgrade state, Reinstall to rerun managed setup for the current build after an idle reachable daemon exits or when SSH setup finds the saved port free, Upgrade for idle managed-daemon replacement, and Uninstall for managed daemon cleanup plus saved host/token removal after idle shutdown or already-unreachable daemon cleanup. Workspaces choose a host at creation time, and that host assignment is immutable. Manual workspace root, daemon host, daemon port, and certificate fingerprint fields are available only through `spacese2e` setup commands.
-
-For real-system automation of the running app's upgrade flow, `spacese2e trigger-compute-host-upgrade --host-id <id>` posts the same UI-controller path used by the Remote Hosts Upgrade button, including the active-session confirmation dialog when the daemon is busy.
 
 For focused terminal latency probes:
 
@@ -252,7 +206,7 @@ apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --netwo
 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --network-profile ios-constrained
 ```
 
-The latency scripts are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, visible render frame mix, median visible render-update bytes, and render payload rates. Input scenarios fail on gross latency regressions, render-frame decode failures, or measured typed echoes that arrive as full, missing, or `explicit_resync` frames instead of live stream deltas; report-only targets stay visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-frame-apply, scroll totals are wheel-event-to-frame-apply with alternating directions across samples, and command-catchup totals use command-submit-to-frame-apply from one warmed shell session across samples. `mac-scrollback-latency` uses large scroll deltas and `mac-scrollback-partial-latency` uses smaller within-screen deltas. Mac summaries also split owner input activity to state change, state change to frame export, frame export to mirror apply, and frame apply to dumped-state visibility. Mobile summaries split host publish to relay read, relay read to network send begin, network send begin to stream-visible, full versus delta visible sample counts, and average plus peak stream bytes per second. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes standalone bridge requests with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks unless `SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS`, `SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS`, or `SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES` override those values; normal terminal stream frames remain ordered but are not per-frame delayed by the shaper.
+The latency scripts are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, visible render frame mix, median visible render-update bytes, and render payload rates. Input scenarios fail on gross latency regressions, render-frame decode failures, or measured typed echoes that arrive as full, missing, or `explicit_resync` frames instead of live stream deltas; report-only targets stay visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-frame-apply, scroll totals are wheel-event-to-frame-apply with alternating directions across samples, and command-catchup totals use command-submit-to-frame-apply from one warmed shell session across samples. `mac-scrollback-latency` uses large scroll deltas and `mac-scrollback-partial-latency` uses smaller within-screen deltas. Mac summaries also split owner input activity to state change, state change to frame export, frame export to mirror apply, and frame apply to dumped-state visibility. Mobile summaries split host publish to relay read, relay read to network send begin, network send begin to stream-visible, full versus delta visible sample counts, and average plus peak stream bytes per second. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes standalone Device API requests with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks unless `SPACES_DEVICE_API_NETWORK_RTT_MS`, `SPACES_DEVICE_API_NETWORK_BANDWIDTH_BPS`, or `SPACES_DEVICE_API_NETWORK_CHUNK_BYTES` override those values; normal terminal stream frames remain ordered but are not per-frame delayed by the shaper.
 
 For render-update profiling, run the latency scenario with a fixed sample count, terminal size, fixture command, target, and network profile. The scripts exercise the production v2 stream: self-contained full v2 updates for initial baselines, state fetches, and resyncs, plus delta updates with native scroll-rectangle operations for steady output, live `state_change`, and scrollback.
 
@@ -306,7 +260,7 @@ It also writes `summary.txt` and `metrics.json` under its temp work root so base
 For repeatable profiling of the first-party iOS bridge and ownership transfer path:
 
 ```bash
-apps/macos/Tests/profile_mobile_bridge.sh
+apps/macos/Tests/profile_device_api.sh
 ```
 
 That profiler runs against an isolated `SPACES_DB_PATH`, pairs a first-party iOS-shaped installation, attaches a local-window owner plus remote client, measures time-to-owner-render, ownership transfer to iOS, ownership transfer back to the macOS owner, and the streamed visibility latency for both iOS-side and macOS-side input.
@@ -323,8 +277,8 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-On first launch, the iOS client opens its connection sheet. Open Mobile Connection in the Mac sidebar, open a pairing window, then scan the QR code or paste the full `spacesmobile://` link. The `run_mobile_terminal_demo.sh` harness opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The client is terminal-only: it lists workspaces and live terminal sessions through the Mac bridge, never stores remote daemon auth tokens, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
-For the iOS simulator, a pairing link with `127.0.0.1` still works because the daemon bridge binds all IPv4 interfaces by default. A real device can scan the Mac QR code or open the deep link from the Mobile Connection panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
+On first launch, the iOS client opens its Devices sheet. Open Devices in the Mac sidebar or run `spaces pair`, then scan the QR code. The `run_mobile_terminal_demo.sh` harness opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. The harness stores Mac client metadata in an isolated SQLite file by exporting `SPACES_CLIENT_DB_PATH` and stores harness-only Mac client secrets under `SPACES_CLIENT_SECRET_DIR`; these overrides are for E2E and demo profiles so test pairings do not mix with the user client database or Keychain. When `SPACES_E2E_REMOTE_SSH_HOST` is set, the harness also pairs the Mac client and both iOS simulators with that remote daemon over SSH-backed pairing windows before launching the apps. The demo keeps a local SSH forward to the remote daemon Device API and seeds the demo clients with that forwarded endpoint so the demo works from networks where the remote daemon port is not directly reachable. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The client lists workspaces and live terminal sessions from the selected daemon, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
+For the iOS simulator, a seeded pairing link with `127.0.0.1` works because the daemon Device API binds all IPv4 interfaces by default. A real device scans the Mac QR code from the Devices panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
 
 For manual real-device verification of the iOS client:
 
@@ -343,8 +297,8 @@ $EDITOR .env
 scripts/install-ios-device.sh
 ```
 
-4. If Xcode reports that `dev.usespaces.spacesmobile` cannot be signed by the selected team, stop there and widen the first-party bundle policy before changing the bundle identifier. The current bridge accepts only that bundle identifier for pairing and reconnect. Set `SPACES_IOS_DEVELOPMENT_TEAM` in `.env` when the command-line build should override the project signing team.
-5. Keep the Mac app and mobile bridge on the same `SPACES_DB_PATH`; the daemon bridge binds all IPv4 interfaces on port `47847` by default and persists a profile-specific fallback port if that port is already occupied.
+4. If Xcode reports that `dev.usespaces.spacesmobile` cannot be signed by the selected team, stop there and widen the first-party bundle policy before changing the bundle identifier. The Device API accepts only that bundle identifier for pairing and reconnect. Set `SPACES_IOS_DEVELOPMENT_TEAM` in `.env` when the command-line build should override the project signing team.
+5. Keep the Mac app and Device API on the same `SPACES_DB_PATH`; the daemon Device API binds all IPv4 interfaces on port `47847` by default.
 
 ```bash
 export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
@@ -354,16 +308,16 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal com
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 ```
 
-6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Mobile Connection, open a pairing window, and scan the QR code or send the full pairing link to the device.
-7. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the Mac bridge.
+6. On the Mac, allow the incoming-network prompt if macOS shows one. In the Mac app, open Devices, choose Pair iPhone or iPad for the target daemon, and scan the QR code from the iPhone or iPad.
+7. The first connection attempt should trigger the iOS local-network permission prompt; accept it so the app can reach the daemon Device API.
 
-For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted mobile bridge, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
+For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted Device API, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
 ```bash
 apps/macos/Tests/run_mobile_terminal_demo.sh
 ```
 
-The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, then installs that same app bundle on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The launcher stops the current-profile app owner, current-profile terminal service, and stale repo-local listeners on the selected bridge port before launch. It provisions one live local Beacon workspace terminal session and one live remote Scout workspace terminal session, waits for their owner attachments before launching the mobile clients, then reads the daemon bridge details through `spacese2e mobile-status`. It prints the demo root, profile mode, PIDs, logs, screenshots, local and remote project directories, local and remote terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, then installs that same app bundle on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The launcher stops the current-profile app owner, current-profile terminal service, and stale repo-local listeners on the selected Device API port before launch. It provisions one live local Beacon workspace terminal session and one live remote Scout workspace terminal session, waits for their owner attachments before launching the device clients, then reads the daemon Device API details through `spacese2e mobile-status`. It prints the demo root, profile mode, PIDs, logs, screenshots, local and remote project directories, local and remote terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
 The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E suite consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback behavior.
 
 Useful overrides:
@@ -373,7 +327,7 @@ Useful overrides:
 - `SPACES_MOBILE_DEMO_BUILD_MACOS=0` skips the scripted macOS debug build when the existing repo-local binaries should be used.
 - `SPACES_MOBILE_DEMO_IPAD_NAME=...` and `SPACES_MOBILE_DEMO_IPHONE_NAME=...` target different simulator names when the defaults are unavailable.
 - `SPACES_MOBILE_DEMO_APP_PATH=...` skips the scripted `xcodebuild` and installs an explicit `SpacesMobile.app` bundle.
-- `SPACES_MOBILE_DEMO_PORT=...` sets the daemon bridge port for the demo profile.
+- `SPACES_MOBILE_DEMO_PORT=...` sets the daemon Device API port for the demo profile.
 - `SPACES_MOBILE_E2E_DEVICE_KEY=iphone|ipad` and `SPACES_MOBILE_E2E_DEVICE_NAME=...` select the simulator used by `e2e_mobile.sh`; the default E2E target is `iPhone 17 Pro`.
 
 For targeted mobile E2E runs, use `--scenario`:
@@ -391,7 +345,7 @@ apps/macos/Tests/e2e_mobile.sh --scenario ownership-guard
 apps/macos/Tests/e2e_mobile.sh --scenario app-recovery
 ```
 
-`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex`, `codex-resume-reopen`, and `ctrl-c-final-frame-codex-survivor` are skipped on the remote target. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ctrl-c-final-frame` creates `interrupt-target` and `survivor-peer` process-style sessions, sends `ctrl+c` to `interrupt-target` from the iOS owner path, checks the persisted final Ghostty frame on iOS and Mac, and verifies the `survivor-peer` session remains running. `ctrl-c-final-frame-codex-survivor` uses the same interrupt path with a real Codex TUI as the survivor session. `ownership-guard` exercises the mobile bridge ownership rules without UI automation. `app-recovery` exercises iOS-to-daemon Mac app recovery without UI automation by keeping the service and session alive while replacing the profile app-owner process.
+`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ctrl-c-final-frame` creates `interrupt-target` and `survivor-peer` process-style sessions, sends `ctrl+c` to `interrupt-target` from the iOS owner path, checks the persisted final Ghostty frame on iOS and Mac, and verifies the `survivor-peer` session remains running. `ctrl-c-final-frame-codex-survivor` uses the same interrupt path with a real Codex TUI as the survivor session. `ownership-guard` exercises the Device API ownership rules without UI automation. `app-recovery` exercises iOS-to-daemon Mac app recovery without UI automation by keeping the service and session alive while replacing the profile app-owner process.
 
 Useful overrides:
 - `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command for the `codex` scenario.
@@ -529,7 +483,7 @@ apps/macos/Tests/e2e_macos_app.sh
 
 Before the suite launches its isolated app instance, it waits for desktop-global control. A timeout from that wait is an environment-contention result and should be retried without killing unrelated running Spaces instances.
 
-The macOS E2E suite requires remote compute-host configuration. It seeds the shared Beacon, Scout, and Prism fixture repositories, pins Beacon and Prism to the local Mac, prepares and uploads the matching managed Linux `spacesd` E2E artifact to the remote host, prepares a remote Git origin for Scout, registers the remote host through `spacese2e remote-compute-host-smoke`, and runs the app-level launch, focus, cycling, mixed-workspace, and agent-status assertions with local Beacon and remote Scout workspaces active together.
+The macOS E2E suite seeds the shared Beacon, Scout, and Prism fixture repositories and runs the app-level launch, focus, cycling, workspace, and agent-status assertions against the current profile's same-machine daemon.
 
 To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
 

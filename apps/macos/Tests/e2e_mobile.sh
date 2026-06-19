@@ -8,6 +8,7 @@ source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
 spaces_e2e_load_env "$ROOT_DIR"
 
 DEMO_SCRIPT="$ROOT_DIR/apps/macos/Tests/run_mobile_terminal_demo.sh"
+REMOTE_DEVICE_E2E_SCRIPT="${REMOTE_DEVICE_E2E_SCRIPT:-$ROOT_DIR/apps/macos/Tests/e2e_remote_device_api.sh}"
 SPACES_CLI_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 TERMINAL_SERVICE_BIN="${SPACESD_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/spacesd}"
@@ -35,14 +36,10 @@ TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-s
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
 SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
+REMOTE_UI_SCENARIOS=(takeover two-session)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
-REMOTE_HOST_ID="${SPACES_E2E_REMOTE_HOST_ID:-mobile-demo-remote}"
-REMOTE_AUTH_TOKEN="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
-REMOTE_SSH_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
-REMOTE_SSH_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
-REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
 
 SUITE_ROOT=""
 IOS_DERIVED_DATA=""
@@ -51,19 +48,36 @@ IOS_BUILD_LOG=""
 DEMO_STDOUT_LOG=""
 DEMO_PID=""
 DEMO_APP_PID=""
-DEMO_BRIDGE_PID=""
+DEMO_DEVICE_API_PID=""
 DEMO_TERMINAL_SERVICE_PID=""
 DEMO_ROOT=""
 PROJECT_DIR=""
 DEMO_PROJECT_DIR=""
 LOCAL_PROJECT_DIR=""
-REMOTE_PROJECT_DIR=""
 LOCAL_SESSION_ID=""
-REMOTE_SESSION_ID=""
 DB_PATH=""
 RUNTIME_DIR=""
-BRIDGE_HOST=""
-BRIDGE_PORT=""
+DEVICE_API_HOST=""
+DEVICE_API_PORT=""
+REMOTE_DEVICE_RESULT_JSON=""
+REMOTE_DEVICE_ID=""
+REMOTE_DEVICE_NAME=""
+REMOTE_DEVICE_API_HOST=""
+REMOTE_DEVICE_API_PORT=""
+REMOTE_DEVICE_AUTH_TOKEN=""
+REMOTE_DEVICE_TRANSPORT_KEY=""
+REMOTE_DEVICE_CERTIFICATE_FINGERPRINT=""
+REMOTE_DEVICE_PROJECT_DIR=""
+REMOTE_DEVICE_WORKSPACE_ID=""
+TARGET_DEVICE_ID=""
+TARGET_DEVICE_NAME=""
+TARGET_DEVICE_API_HOST=""
+TARGET_DEVICE_API_PORT=""
+TARGET_DEVICE_AUTH_TOKEN=""
+TARGET_DEVICE_TRANSPORT_KEY=""
+TARGET_DEVICE_CERTIFICATE_FINGERPRINT=""
+TARGET_DEVICE_INSTALLATION_ID=""
+TARGET_WORKSPACE_ID=""
 IPAD_UDID=""
 IPHONE_UDID=""
 MOBILE_UDID=""
@@ -85,7 +99,7 @@ Options:
   --list                 List available mobile E2E scenarios.
   --scenario NAME        Run only one scenario. May be passed multiple times.
   --keep-root            Preserve the shared demo root after a successful run.
-  --port PORT            Use a specific daemon mobile bridge port.
+  --port PORT            Use a specific daemon device API port.
   --help                 Show this help text.
 
 Scenarios:
@@ -149,61 +163,6 @@ parse_args() {
   fi
 }
 
-require_remote_configuration() {
-  [[ -n "$REMOTE_SSH_HOST" ]] || fail "SPACES_E2E_REMOTE_SSH_HOST is required for mixed local/remote mobile E2E runs."
-}
-
-remote_auth_token_env_key() {
-  printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$REMOTE_HOST_ID" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
-}
-
-ensure_remote_auth_token() {
-  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then
-    return 0
-  fi
-  REMOTE_AUTH_TOKEN="$(python3 - <<'PY'
-import base64
-import os
-print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))
-PY
-)"
-  export SPACES_E2E_REMOTE_AUTH_TOKEN="$REMOTE_AUTH_TOKEN"
-}
-
-export_remote_auth_token() {
-  [[ -n "$REMOTE_AUTH_TOKEN" ]] || return 0
-  local key
-  key="$(remote_auth_token_env_key)"
-  export "$key=$REMOTE_AUTH_TOKEN"
-}
-
-shell_quote() {
-  python3 - "$1" <<'PY'
-import shlex
-import sys
-print(shlex.quote(sys.argv[1]))
-PY
-}
-
-remote_ssh_destination() {
-  if [[ -n "$REMOTE_SSH_USER" ]]; then
-    printf '%s@%s' "$REMOTE_SSH_USER" "$REMOTE_SSH_HOST"
-  else
-    printf '%s' "$REMOTE_SSH_HOST"
-  fi
-}
-
-remote_ssh() {
-  [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
-  local destination
-  destination="$(remote_ssh_destination)"
-  local -a args=(-o BatchMode=yes)
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then
-    args+=(-p "$REMOTE_SSH_PORT")
-  fi
-  ssh "${args[@]}" "$destination" "$@"
-}
-
 run_demo_env() {
   env \
     -u NO_COLOR \
@@ -226,12 +185,9 @@ demo_env() {
     SPACES_RUNTIME_DIR="$RUNTIME_DIR"
     SPACESD_EXECUTABLE="$TERMINAL_SERVICE_BIN"
     SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT"
-    SPACES_MOBILE_BRIDGE_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}"
-    SPACES_MOBILE_BRIDGE_PORT="$BRIDGE_PORT"
+    SPACES_DEVICE_API_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}"
+    SPACES_DEVICE_API_PORT="$DEVICE_API_PORT"
   )
-  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then
-    env_args+=("$(remote_auth_token_env_key)=$REMOTE_AUTH_TOKEN")
-  fi
   run_demo_env "${env_args[@]}" "$@"
 }
 
@@ -266,10 +222,21 @@ fail() {
   tail_if_present "iOS build-for-testing output tail" "$IOS_BUILD_LOG" 120
   if [[ -n "$DEMO_ROOT" ]]; then
     tail_if_present "Mac app log tail" "$DEMO_ROOT/app.log" 160
-    tail_if_present "Bridge log tail" "$DEMO_ROOT/bridge.log" 160
+    tail_if_present "Device API log tail" "$DEMO_ROOT/device-api.log" 160
     tail_if_present "$MOBILE_DEVICE_LABEL app stderr tail" "$DEMO_ROOT/$MOBILE_ARTIFACT_NAME-app.stderr.log" 160
   fi
   exit 1
+}
+
+device_api_connect_host() {
+  case "$1" in
+    "" | "0.0.0.0" | "::")
+      printf '127.0.0.1'
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
 }
 
 terminate_pid_if_command_matches() {
@@ -308,8 +275,8 @@ cleanup() {
     fi
   fi
   terminate_pid_if_command_matches "$DEMO_APP_PID" "demo app" "SpacesApp"
-  if [[ "$DEMO_BRIDGE_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
-    terminate_pid_if_command_matches "$DEMO_BRIDGE_PID" "demo bridge" "spacesd"
+  if [[ "$DEMO_DEVICE_API_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
+    terminate_pid_if_command_matches "$DEMO_DEVICE_API_PID" "demo Device API" "spacesd"
   fi
   terminate_pid_if_command_matches "$DEMO_TERMINAL_SERVICE_PID" "spacesd" "spacesd"
   if [[ -n "$IPAD_UDID" ]]; then
@@ -431,7 +398,7 @@ while True:
         index = start + 1
         continue
     if isinstance(payload, dict) and payload.get("root") and payload.get("sessionID"):
-        required_keys = ["localProjectDir", "remoteProjectDir", "localSessionID", "remoteSessionID"]
+        required_keys = ["localProjectDir", "localSessionID"]
         missing = [key for key in required_keys if not payload.get(key)]
         if missing:
             print(f"DEMO_METADATA_ERROR={shlex.quote('Mobile demo metadata is missing: ' + ', '.join(missing))}")
@@ -440,17 +407,15 @@ while True:
             "DEMO_ROOT": payload["root"],
             "PROJECT_DIR": payload["projectDir"],
             "LOCAL_PROJECT_DIR": payload["localProjectDir"],
-            "REMOTE_PROJECT_DIR": payload["remoteProjectDir"],
             "LOCAL_SESSION_ID": payload["localSessionID"],
-            "REMOTE_SESSION_ID": payload["remoteSessionID"],
             "DB_PATH": payload["dbPath"],
             "RUNTIME_DIR": payload.get("runtimeDir") or str(pathlib.Path(payload["root"]) / "runtime"),
-            "BRIDGE_HOST": payload["bridgeHost"],
-            "BRIDGE_PORT": str(payload["bridgePort"]),
+            "DEVICE_API_HOST": payload["deviceAPIHost"],
+            "DEVICE_API_PORT": str(payload["deviceAPIPort"]),
             "IPAD_UDID": payload["ipadSimulatorUDID"],
             "IPHONE_UDID": payload["iphoneSimulatorUDID"],
             "DEMO_APP_PID": str(payload.get("appPID") or ""),
-            "DEMO_BRIDGE_PID": str(payload.get("bridgePID") or ""),
+            "DEMO_DEVICE_API_PID": str(payload.get("deviceAPIPID") or ""),
             "DEMO_TERMINAL_SERVICE_PID": str(payload.get("terminalServicePID") or ""),
             "PERFORMANCE_LOG_PATH": payload.get("performanceLogPath") or str(pathlib.Path(payload["root"]) / "mobile-terminal-performance.jsonl"),
         }
@@ -471,6 +436,7 @@ PY
   if [[ -n "${DEMO_METADATA_ERROR:-}" ]]; then
     fail "$DEMO_METADATA_ERROR"
   fi
+  DEVICE_API_HOST="$(device_api_connect_host "$DEVICE_API_HOST")"
 }
 
 start_demo() {
@@ -491,7 +457,6 @@ start_demo() {
     SPACES_MOBILE_DEMO_IPHONE_NAME="$demo_iphone_name" \
     SPACES_MOBILE_DEMO_IPAD_NAME="$demo_ipad_name" \
     SPACES_MOBILE_DEMO_PORT="$DEMO_PORT" \
-    SPACES_E2E_REMOTE_AUTH_TOKEN="$REMOTE_AUTH_TOKEN" \
     SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
     CODEX_HOME="$E2E_CODEX_HOME" \
     XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
@@ -500,9 +465,105 @@ start_demo() {
   wait_for_demo_metadata
   DEMO_PROJECT_DIR="$LOCAL_PROJECT_DIR"
   PROJECT_DIR="$LOCAL_PROJECT_DIR"
-  [[ -n "$REMOTE_PROJECT_DIR" ]] || fail "Mobile demo metadata did not include remoteProjectDir."
-  [[ -n "$REMOTE_SESSION_ID" ]] || fail "Mobile demo metadata did not include remoteSessionID."
   printf 'Shared demo root: %s\n' "$DEMO_ROOT"
+}
+
+run_remote_device_e2e() {
+  local remote_result="$SUITE_ROOT/remote-device-e2e.json"
+  local remote_stdout="$SUITE_ROOT/remote-device-e2e.stdout"
+  local remote_log="$SUITE_ROOT/remote-device-e2e.log"
+  printf 'Running remote paired-device Device API parity flow...\n'
+  SPACES_E2E="$SPACES_E2E_BIN" \
+    SPACES_E2E_REMOTE_DEVICE_RESULT_JSON="$remote_result" \
+    "$REMOTE_DEVICE_E2E_SCRIPT" >"$remote_stdout" 2>"$remote_log" \
+    || fail "Remote paired-device E2E failed. See $remote_log"
+  REMOTE_DEVICE_RESULT_JSON="$remote_result"
+  local parsed
+  parsed="$(
+    python3 - "$REMOTE_DEVICE_RESULT_JSON" <<'PY'
+import json
+import shlex
+import sys
+payload = json.load(open(sys.argv[1]))
+fields = {
+    "REMOTE_DEVICE_ID": "deviceID",
+    "REMOTE_DEVICE_NAME": "name",
+    "REMOTE_DEVICE_API_HOST": "remoteDaemonHost",
+    "REMOTE_DEVICE_API_PORT": "remoteDaemonPort",
+    "REMOTE_DEVICE_AUTH_TOKEN": "authToken",
+    "REMOTE_DEVICE_TRANSPORT_KEY": "transportKey",
+    "REMOTE_DEVICE_CERTIFICATE_FINGERPRINT": "certificateFingerprint",
+    "REMOTE_DEVICE_PROJECT_DIR": "projectDir",
+    "REMOTE_DEVICE_WORKSPACE_ID": "workspaceID",
+}
+for env_name, json_name in fields.items():
+    value = payload.get(json_name)
+    if value is None or str(value).strip() == "":
+        raise SystemExit(f"remote device result missing {json_name}")
+    print(f"{env_name}={shlex.quote(str(value))}")
+PY
+  )"
+  eval "$parsed"
+}
+
+create_device_api_parity_fixture() {
+  local project_dir="$1"
+  rm -rf "$project_dir"
+  mkdir -p "$project_dir"
+  printf 'local device api sentinel\n' >"$project_dir/README.txt"
+  cat >"$project_dir/spaces.yaml" <<'YAML'
+version: 1
+processes:
+  - name: parity-process
+    command: >-
+      python3 -c "import time; print('device-api-process-ready', flush=True); time.sleep(120)"
+    on_exit: none
+agent_launchers:
+  - name: parity-agent
+    command: >-
+      python3 -c "import time; print('device-api-agent-ready', flush=True); time.sleep(120)"
+YAML
+  git -C "$project_dir" init >/dev/null
+  git -C "$project_dir" config user.email "spaces-e2e@example.invalid"
+  git -C "$project_dir" config user.name "Spaces E2E"
+  git -C "$project_dir" add README.txt spaces.yaml
+  git -C "$project_dir" commit -m "Initial device API parity fixture" >/dev/null
+}
+
+run_local_device_api_parity() {
+  local parity_project_dir="$DEMO_ROOT/device-api-parity/local"
+  local parity_result="$SUITE_ROOT/local-device-api-parity.json"
+  local parity_stdout="$SUITE_ROOT/local-device-api-parity.stdout"
+  local parity_log="$SUITE_ROOT/local-device-api-parity.log"
+  local parsed auth_token transport_key installation_id
+  create_device_api_parity_fixture "$parity_project_dir"
+  parsed="$(
+    python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" <<'PY'
+import json
+import shlex
+import sys
+payload = json.load(open(sys.argv[1]))[sys.argv[2]]
+for key, name in (("authToken", "auth_token"), ("transportKey", "transport_key"), ("installationID", "installation_id")):
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"pairing payload missing {key}")
+    print(f"{name}={shlex.quote(value)}")
+PY
+  )"
+  eval "$parsed"
+  printf 'Running local paired-device Device API parity flow...\n'
+  "$ROOT_DIR/apps/macos/Tests/device_api_parity.py" \
+    --spacese2e "$SPACES_E2E_BIN" \
+    --host "$DEVICE_API_HOST" \
+    --port "$DEVICE_API_PORT" \
+    --transport-key "$transport_key" \
+    --auth-token "$auth_token" \
+    --project-dir "$parity_project_dir" \
+    --label "local-device" \
+    --client-installation-id "$installation_id" \
+    --client-device-name "$MOBILE_DEVICE_LABEL Device API E2E" \
+    --result-json "$parity_result" >"$parity_stdout" 2>"$parity_log" \
+    || fail "Local Device API parity flow failed. See $parity_log"
 }
 
 configure_target() {
@@ -510,12 +571,27 @@ configure_target() {
   case "$CURRENT_TARGET" in
     local)
       PROJECT_DIR="$LOCAL_PROJECT_DIR"
+      TARGET_DEVICE_ID="local"
+      TARGET_DEVICE_NAME="This Mac"
+      TARGET_DEVICE_API_HOST="$DEVICE_API_HOST"
+      TARGET_DEVICE_API_PORT="$DEVICE_API_PORT"
+      TARGET_WORKSPACE_ID=""
       ;;
     remote)
-      PROJECT_DIR="$REMOTE_PROJECT_DIR"
+      [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "remote target requested before remote Device API E2E result was available"
+      PROJECT_DIR="$REMOTE_DEVICE_PROJECT_DIR"
+      TARGET_DEVICE_ID="$REMOTE_DEVICE_ID"
+      TARGET_DEVICE_NAME="$REMOTE_DEVICE_NAME"
+      TARGET_DEVICE_API_HOST="$REMOTE_DEVICE_API_HOST"
+      TARGET_DEVICE_API_PORT="$REMOTE_DEVICE_API_PORT"
+      TARGET_DEVICE_AUTH_TOKEN="$REMOTE_DEVICE_AUTH_TOKEN"
+      TARGET_DEVICE_TRANSPORT_KEY="$REMOTE_DEVICE_TRANSPORT_KEY"
+      TARGET_DEVICE_CERTIFICATE_FINGERPRINT="$REMOTE_DEVICE_CERTIFICATE_FINGERPRINT"
+      TARGET_DEVICE_INSTALLATION_ID="REMOTE-DEVICE-E2E"
+      TARGET_WORKSPACE_ID="$REMOTE_DEVICE_WORKSPACE_ID"
       ;;
     *)
-      fail "unknown target: $CURRENT_TARGET"
+      fail "unsupported mobile E2E target without a paired remote-daemon harness: $CURRENT_TARGET"
       ;;
   esac
   printf '\n[%s] Using mobile E2E target: %s project=%s\n' "$(date +%H:%M:%S)" "$CURRENT_TARGET" "$PROJECT_DIR"
@@ -636,10 +712,10 @@ PY
   DEMO_APP_PID="$owner_pid"
 }
 
-mobile_bridge_request() {
+mobile_device_api_request() {
   local request_json="$1"
   [[ -f "$DEMO_ROOT/pairing.json" ]] || return 1
-  demo_env python3 - "$SPACES_E2E_BIN" "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$BRIDGE_HOST" "$BRIDGE_PORT" "$request_json" <<'PY'
+  demo_env python3 - "$SPACES_E2E_BIN" "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$request_json" <<'PY'
 import json
 import os
 import subprocess
@@ -651,8 +727,8 @@ pairing_path = Path(sys.argv[2])
 device_key = sys.argv[3]
 bundle_id = sys.argv[4]
 device_name = sys.argv[5]
-bridge_host = sys.argv[6]
-bridge_port = int(sys.argv[7])
+device_api_host = sys.argv[6]
+device_api_port = int(sys.argv[7])
 request = json.loads(sys.argv[8])
 pairing = json.loads(pairing_path.read_text())[device_key]
 client_app = {
@@ -662,14 +738,27 @@ client_app = {
     "deviceName": device_name,
     "appVersion": "1.0",
 }
+
+def typed_device_request(request):
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
+request = typed_device_request(request)
 completed = subprocess.run(
     [
         str(spacese2e),
         "mobile-request",
         "--host",
-        bridge_host,
+        device_api_host,
         "--port",
-        str(bridge_port),
+        str(device_api_port),
         "--transport-key=" + pairing["transportKey"],
         "--request-json",
         json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
@@ -684,9 +773,79 @@ print(completed.stdout, end="")
 PY
 }
 
+remote_device_api_request() {
+  local request_json="$1"
+  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || return 1
+  python3 - "$SPACES_E2E_BIN" "$REMOTE_DEVICE_RESULT_JSON" "$BUNDLE_ID" "$request_json" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+spacese2e = Path(sys.argv[1])
+remote_result_path = Path(sys.argv[2])
+bundle_id = sys.argv[3]
+request = json.loads(sys.argv[4])
+remote = json.loads(remote_result_path.read_text())
+client_app = {
+    "installationID": "REMOTE-DEVICE-E2E",
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": "Remote Device E2E",
+    "appVersion": "1.0",
+}
+
+def typed_device_request(request):
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
+request = typed_device_request(request)
+completed = subprocess.run(
+    [
+        str(spacese2e),
+        "mobile-request",
+        "--host",
+        str(remote["remoteDaemonHost"]),
+        "--port",
+        str(remote["remoteDaemonPort"]),
+        "--transport-key=" + remote["transportKey"],
+        "--request-json",
+        json.dumps({"authToken": remote["authToken"], "clientApp": client_app, **request}),
+    ],
+    capture_output=True,
+    text=True,
+    env=os.environ,
+    timeout=20,
+    check=True,
+)
+print(completed.stdout, end="")
+PY
+}
+
+device_api_response_ok() {
+  local response_json="$1"
+  python3 - "$response_json" <<'PY'
+import json
+import sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if payload.get("ok") else 1)
+PY
+}
+
 wait_for_mobile_overview_sessions() {
   local overview_log="$SCENARIO_DIR/mobile-overview-wait.log"
-  demo_env python3 - "$SPACES_E2E_BIN" "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$BRIDGE_HOST" "$BRIDGE_PORT" "$UI_TEST_CONFIG" "$overview_log" <<'PY'
+  demo_env python3 - "$SPACES_E2E_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$UI_TEST_CONFIG" "$overview_log" <<'PY'
 import json
 import os
 import subprocess
@@ -695,14 +854,10 @@ import time
 from pathlib import Path
 
 spacese2e = Path(sys.argv[1])
-pairing_path = Path(sys.argv[2])
-device_key = sys.argv[3]
-bundle_id = sys.argv[4]
-device_name = sys.argv[5]
-bridge_host = sys.argv[6]
-bridge_port = int(sys.argv[7])
-config_path = Path(sys.argv[8])
-log_path = Path(sys.argv[9])
+bundle_id = sys.argv[2]
+fallback_device_name = sys.argv[3]
+config_path = Path(sys.argv[4])
+log_path = Path(sys.argv[5])
 
 config = json.loads(config_path.read_text())
 required_session_ids = [
@@ -712,24 +867,23 @@ required_session_ids = [
 if not required_session_ids:
     raise SystemExit(0)
 
-pairing = json.loads(pairing_path.read_text())[device_key]
 client_app = {
-    "installationID": pairing["installationID"],
+    "installationID": config["installationID"],
     "bundleID": bundle_id,
     "platform": "ios",
-    "deviceName": device_name,
+    "deviceName": config.get("deviceName") or fallback_device_name,
     "appVersion": "1.0",
 }
 command = [
     str(spacese2e),
     "mobile-request",
     "--host",
-    bridge_host,
+    config["host"],
     "--port",
-    str(bridge_port),
-    "--transport-key=" + pairing["transportKey"],
+    str(config["port"]),
+    "--transport-key=" + config["transportKey"],
     "--request-json",
-    json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, "command": "overview"}),
+    json.dumps({"authToken": config["authToken"], "clientApp": client_app, "command": {"overview": {}}}),
 ]
 
 def session_id_for_row(row):
@@ -765,7 +919,7 @@ while time.time() < deadline:
             last_detail = f"attempt {attempt}: invalid JSON: {error}\nstdout={completed.stdout}\nstderr={completed.stderr}"
         else:
             terminal_rows = []
-            collect_terminal_rows(payload.get("overview", {}), terminal_rows)
+            collect_terminal_rows(((payload.get("result") or {}).get("overview") or {}), terminal_rows)
             visible_ids = {session_id_for_row(row) for row in terminal_rows}
             missing = [session_id for session_id in required_session_ids if session_id not in visible_ids]
             missing_direct_credentials = []
@@ -793,7 +947,7 @@ while time.time() < deadline:
     time.sleep(1)
 
 log_path.write_text(last_detail + "\n")
-raise SystemExit(f"Mobile bridge overview did not include required sessions before UI test.\n{last_detail}")
+raise SystemExit(f"Device API overview did not include required sessions before UI test.\n{last_detail}")
 PY
 }
 
@@ -840,9 +994,9 @@ ensure_profile_app_owner() {
 
   local launch_response
   {
-    printf 'No live profile app owner; requesting launchSpacesApp through the daemon bridge.\n'
+    printf 'No live profile app owner; requesting launchSpacesApp through the daemon Device API.\n'
   } >>"$log_path" || true
-  if ! launch_response="$(mobile_bridge_request '{"command":"launchSpacesApp"}' 2>&1)"; then
+  if ! launch_response="$(mobile_device_api_request '{"command":"launchSpacesApp"}' 2>&1)"; then
     {
       printf 'launchSpacesApp request failed:\n'
       printf '%s\n' "$launch_response"
@@ -856,7 +1010,103 @@ ensure_profile_app_owner() {
   wait_for_profile_app_owner 20 "$log_path"
 }
 
+new_remote_workspace_terminal_session() {
+  local title="${1:-e2e-$CURRENT_SCENARIO}"
+  local command_text="${2:-}"
+  [[ -z "$command_text" ]] || fail "remote mobile E2E terminal creation does not support scenario-specific launch commands: $CURRENT_SCENARIO"
+  [[ -n "$TARGET_WORKSPACE_ID" ]] || fail "remote mobile E2E target is missing a workspace ID"
+  local create_request create_response session_id primer_request primer_response seed_request seed_response
+  create_request="$(
+    python3 - "$TARGET_WORKSPACE_ID" <<'PY'
+import json
+import sys
+print(json.dumps({"command": "openWorkspaceTerminal", "workspaceID": sys.argv[1]}, separators=(",", ":")))
+PY
+  )"
+  create_response="$(remote_device_api_request "$create_request")" || fail "Failed to create remote workspace terminal for $CURRENT_SCENARIO."
+  session_id="$(
+    python3 - "$create_response" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+mutation = ((payload.get("result") or {}).get("mutation") or {})
+session_id = mutation.get("sessionID")
+if not payload.get("ok") or not session_id:
+    raise SystemExit(f"openWorkspaceTerminal did not return a session ID: {payload}")
+print(session_id)
+PY
+  )" || fail "Unable to parse remote workspace terminal session ID for $CURRENT_SCENARIO."
+  primer_request="$(
+    python3 - "$session_id" "$title" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+session_id, title = sys.argv[1:3]
+client_id = f"mobile-e2e-primer-{session_id}"
+payload = {
+    "command": "attach",
+    "sessionID": session_id,
+    "client": {
+        "id": client_id,
+        "kind": "remoteViewer",
+        "identity": {
+            "label": "Remote E2E Primer",
+            "deviceName": "Remote E2E Primer",
+            "networkAddress": "127.0.0.1",
+        },
+        "connectedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    },
+    "attachmentMode": "owner",
+}
+print(json.dumps(payload, separators=(",", ":")))
+PY
+  )"
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    primer_response="$(remote_device_api_request "$primer_request" 2>&1 || true)"
+    if device_api_response_ok "$primer_response"; then
+      break
+    fi
+    if [[ "$attempt" == "10" ]]; then
+      printf '%s\n' "$primer_response" >>"$SCENARIO_LOG" || true
+      fail "Remote primer owner attach failed for mobile E2E."
+    fi
+    sleep 0.5
+  done
+  seed_request="$(
+    python3 - "$session_id" "$title" <<'PY'
+import json
+import sys
+session_id, title = sys.argv[1:3]
+client_id = f"mobile-e2e-primer-{session_id}"
+command = f"printf '__spaces_remote_mobile_ready__ {title}\\n'; pwd"
+print(json.dumps({
+    "command": "send",
+    "sessionID": session_id,
+    "clientID": client_id,
+    "text": command,
+    "appendNewline": True,
+}, separators=(",", ":")))
+PY
+  )"
+  for attempt in 1 2 3 4 5; do
+    seed_response="$(remote_device_api_request "$seed_request" 2>&1 || true)"
+    if device_api_response_ok "$seed_response"; then
+      break
+    fi
+    if [[ "$attempt" == "5" ]]; then
+      printf '%s\n' "$seed_response" >>"$SCENARIO_LOG" || true
+      fail "Remote terminal output seed failed for mobile E2E."
+    fi
+    sleep 0.5
+  done
+  printf '%s\n' "$session_id"
+}
+
 new_terminal_session() {
+  if [[ "$CURRENT_TARGET" == "remote" ]]; then
+    new_remote_workspace_terminal_session "$@"
+    return
+  fi
   local title="${1:-e2e-$CURRENT_SCENARIO}"
   local command_text="${2:-}"
   local create_log="$SCENARIO_DIR/start-terminal-session.log"
@@ -866,11 +1116,7 @@ new_terminal_session() {
   for attempt in 1 2 3 4 5; do
     local attempt_log="$SCENARIO_DIR/start-terminal-session-attempt-$attempt.log"
     local -a create_args
-    if [[ "$CURRENT_TARGET" == "remote" ]]; then
-      create_args=(start-workspace-terminal-session --workspace-dir "$PROJECT_DIR" --title "$title")
-    else
-      create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
-    fi
+    create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
     if [[ -n "$command_text" ]]; then
       create_args+=(--command "$command_text")
     fi
@@ -1004,6 +1250,30 @@ cleanup_current_scenario_sessions() {
       continue
     fi
     seen+=" $session_id "
+    if [[ "$CURRENT_TARGET" == "remote" ]]; then
+      local stop_request
+      stop_request="$(
+        python3 - "$TARGET_WORKSPACE_ID" "$session_id" <<'PY'
+import json
+import sys
+workspace_id, session_id = sys.argv[1:3]
+print(json.dumps({
+    "command": "stopWorkspaceTerminal",
+    "workspaceID": workspace_id,
+    "sessionID": session_id,
+}, separators=(",", ":")))
+PY
+      )"
+      if [[ -n "$SCENARIO_LOG" ]]; then
+        {
+          printf -- '--- stop remote workspace terminal %s ---\n' "$session_id"
+          remote_device_api_request "$stop_request"
+        } >>"$SCENARIO_LOG" 2>&1 || true
+      else
+        remote_device_api_request "$stop_request" >/dev/null 2>&1 || true
+      fi
+      continue
+    fi
     if [[ -n "$SCENARIO_LOG" ]]; then
       {
         printf -- '--- terminate session %s ---\n' "$session_id"
@@ -1044,6 +1314,32 @@ for json_key, environment_key in mapping.items():
     value = payload.get(json_key)
     if value is not None and str(value).strip():
         print(f"SIMCTL_CHILD_{environment_key}={value}")
+required_seed_keys = [
+    "host",
+    "port",
+    "authToken",
+    "transportKey",
+    "certificateFingerprint",
+]
+if all(str(payload.get(key, "")).strip() for key in required_seed_keys):
+    device_id = str(payload.get("deviceID") or "").strip()
+    device_name = str(payload.get("deviceName") or "This Mac").strip() or "This Mac"
+    device = {
+        "name": device_name,
+        "host": payload["host"],
+        "port": int(payload["port"]),
+        "authToken": payload["authToken"],
+        "transportKey": payload["transportKey"],
+        "certificateFingerprint": payload["certificateFingerprint"],
+    }
+    if device_id:
+        device["id"] = device_id
+    seed = {
+        "devices": [device]
+    }
+    if device_id:
+        seed["activeDeviceID"] = device_id
+    print(f"SIMCTL_CHILD_SPACES_MOBILE_TEST_DEVICE_SEED_JSON={json.dumps(seed, separators=(',', ':'))}")
 print(f"SIMCTL_CHILD_SPACES_MOBILE_UI_TEST_CONFIG_PATH={config_path}")
 PY
   )
@@ -1060,7 +1356,7 @@ write_ui_test_config() {
   local scenario="$1"
   local session_id="$2"
   local secondary_session_id="${3:-}"
-  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" <<'PY'
+  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" "$CURRENT_TARGET" "$TARGET_DEVICE_ID" "$TARGET_DEVICE_NAME" "$TARGET_DEVICE_API_HOST" "$TARGET_DEVICE_API_PORT" "$TARGET_DEVICE_AUTH_TOKEN" "$TARGET_DEVICE_TRANSPORT_KEY" "$TARGET_DEVICE_CERTIFICATE_FINGERPRINT" "$TARGET_DEVICE_INSTALLATION_ID" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1070,8 +1366,8 @@ from pathlib import Path
     scenario,
     session_id,
     secondary_session_id,
-    bridge_host,
-    bridge_port_raw,
+    device_api_host,
+    device_api_port_raw,
     mobile_udid,
     mobile_device_key,
     mobile_artifact_name,
@@ -1081,23 +1377,45 @@ from pathlib import Path
     scrollback_swipe_count_raw,
     terminal_link_preview_image_name,
     terminal_link_preview_path,
+    current_target,
+    target_device_id,
+    target_device_name,
+    target_device_api_host,
+    target_device_api_port_raw,
+    target_device_auth_token,
+    target_device_transport_key,
+    target_device_certificate_fingerprint,
+    target_device_installation_id,
 ) = sys.argv[1:]
 
 demo_root = Path(demo_root_raw)
 artifacts_dir = Path(scenario_config_raw).parent
-bridge_port = int(bridge_port_raw)
+device_api_port = int(device_api_port_raw)
 scrollback_swipe_count = int(scrollback_swipe_count_raw)
 config_paths = [Path(scenario_config_raw), Path(default_config_raw)]
 pairing = json.loads((demo_root / "pairing.json").read_text())
 mobile_pairing = pairing[mobile_device_key]
+if current_target == "remote":
+    device_api_host = target_device_api_host
+    device_api_port = int(target_device_api_port_raw)
+    mobile_pairing = {
+        "authToken": target_device_auth_token,
+        "transportKey": target_device_transport_key,
+        "certificateFingerprint": target_device_certificate_fingerprint,
+        "installationID": target_device_installation_id,
+    }
+    if not all(str(mobile_pairing.get(key, "")).strip() for key in ("authToken", "transportKey", "certificateFingerprint", "installationID")):
+        raise SystemExit("remote UI test target credentials are incomplete")
 prefix = scenario
 artifact_prefix = f"{prefix}-{mobile_artifact_name}"
 
 payload = {
     "sessionID": session_id,
     "secondarySessionID": None,
-    "host": bridge_host,
-    "port": bridge_port,
+    "deviceID": target_device_id or None,
+    "deviceName": target_device_name or ("This Mac" if current_target == "local" else "Remote Device"),
+    "host": device_api_host,
+    "port": device_api_port,
     "authToken": mobile_pairing["authToken"],
     "transportKey": mobile_pairing["transportKey"],
     "certificateFingerprint": mobile_pairing["certificateFingerprint"],
@@ -1754,7 +2072,7 @@ run_roundtrip_scenario() {
   write_ui_test_config "roundtrip" "$session_id"
   wait_for_mobile_overview_sessions
   reset_mobile_app
-  python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" "$MOBILE_DEVICE_LABEL" "$MOBILE_ARTIFACT_NAME" <<'PY'
+  python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" "$MOBILE_DEVICE_LABEL" "$MOBILE_ARTIFACT_NAME" <<'PY'
 import json
 import os
 import re
@@ -1767,8 +2085,8 @@ from pathlib import Path
 repo_root = Path(sys.argv[1])
 demo_root = Path(sys.argv[2])
 session_id = sys.argv[3]
-bridge_host = sys.argv[4]
-bridge_port = int(sys.argv[5])
+device_api_host = sys.argv[4]
+device_api_port = int(sys.argv[5])
 mobile_udid = sys.argv[6]
 spaces_cli = Path(sys.argv[7])
 spacese2e = Path(sys.argv[8])
@@ -2891,15 +3209,6 @@ path.parent.mkdir(parents=True, exist_ok=True)
 path.write_bytes(base64.b64decode(sys.argv[2]))
 PY
 
-  if [[ "$CURRENT_TARGET" != "remote" ]]; then
-    return 0
-  fi
-
-  local quoted_path
-  local quoted_image_base64
-  quoted_path="$(shell_quote "$TERMINAL_LINK_PREVIEW_PATH")"
-  quoted_image_base64="$(shell_quote "$image_base64")"
-  remote_ssh "python3 -c 'import base64, sys; from pathlib import Path; path = Path(sys.argv[1]); path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(base64.b64decode(sys.argv[2]))' $quoted_path $quoted_image_base64"
 }
 
 run_terminal_link_preview_scenario() {
@@ -2934,7 +3243,7 @@ assert_ctrl_c_final_frame_scenario() {
   local session_id="$1"
   local secondary_session_id="$2"
   local expected_service_pid="$3"
-  python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$session_id" "$secondary_session_id" "$expected_service_pid" "$BRIDGE_HOST" "$BRIDGE_PORT" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" "$CURRENT_TARGET" <<'PY'
+  python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$session_id" "$secondary_session_id" "$expected_service_pid" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" "$CURRENT_TARGET" <<'PY'
 import json
 import os
 import shlex
@@ -2952,8 +3261,8 @@ spacese2e = Path(sys.argv[5])
 session_id = sys.argv[6]
 secondary_session_id = sys.argv[7]
 expected_service_pid = int(sys.argv[8])
-bridge_host = sys.argv[9]
-bridge_port = int(sys.argv[10])
+device_api_host = sys.argv[9]
+device_api_port = int(sys.argv[10])
 bundle_id = sys.argv[11]
 mobile_device_key = sys.argv[12]
 mobile_device_name = sys.argv[13]
@@ -2987,31 +3296,29 @@ def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
 
-def remote_ssh(remote_command: str) -> subprocess.CompletedProcess[str]:
-    remote_host = os.environ.get("SPACES_E2E_REMOTE_SSH_HOST", "").strip()
-    remote_user = os.environ.get("SPACES_E2E_REMOTE_SSH_USER", "").strip()
-    remote_port = os.environ.get("SPACES_E2E_REMOTE_SSH_PORT", "").strip()
-    require(remote_host, "Remote target assertions require SPACES_E2E_REMOTE_SSH_HOST.")
-    destination = f"{remote_user}@{remote_host}" if remote_user else remote_host
-    command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
-    if remote_port:
-        command += ["-p", remote_port]
-    command += [destination, remote_command]
-    return subprocess.run(command, capture_output=True, text=True, timeout=20)
-
 def process_is_alive(pid: int) -> bool:
-    if current_target == "remote":
-        return remote_ssh(f"/bin/kill -0 {pid}").returncode == 0
     return subprocess.run(["/bin/kill", "-0", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
+def typed_device_request(request: dict) -> dict:
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
 def send_mobile_request(request: dict, attempts: int = 3) -> dict:
+    request = typed_device_request(request)
     command = [
         str(spacese2e),
         "mobile-request",
         "--host",
-        bridge_host,
+        device_api_host,
         "--port",
-        str(bridge_port),
+        str(device_api_port),
         "--transport-key=" + pairing["transportKey"],
         "--request-json",
         json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
@@ -3029,23 +3336,9 @@ def send_mobile_request(request: dict, attempts: int = 3) -> dict:
                 f"attempt {attempt}: exit={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
             )
         time.sleep(1)
-    raise RuntimeError(f"Mobile bridge request failed after {attempts} attempts: {request}\n{last_detail}")
+    raise RuntimeError(f"Device API request failed after {attempts} attempts: {request}\n{last_detail}")
 
 def terminal_tail(session: str) -> str:
-    if current_target == "remote":
-        host_id = os.environ.get("SPACES_E2E_REMOTE_HOST_ID", "mobile-demo-remote").strip() or "mobile-demo-remote"
-        session_root = (
-            "$HOME/.spaces/compute-hosts/"
-            + shlex.quote(host_id)
-            + "/runtime/terminal/sessions/"
-            + shlex.quote(session)
-        )
-        completed = remote_ssh(f'path={session_root}/output.log; if [ -f "$path" ]; then tail -c 200000 "$path"; fi')
-        require(
-            completed.returncode == 0,
-            f"Failed to read remote terminal output for {session}: stdout={completed.stdout}\nstderr={completed.stderr}",
-        )
-        return completed.stdout
     output_path = runtime_root / "terminal" / "sessions" / session / "output.log"
     if output_path.exists():
         return output_path.read_text(errors="replace")
@@ -3120,11 +3413,11 @@ persisted_final_payload = json.loads(persisted_final[1])
 require(bool(persisted_final_payload.get("renderUpdate")), "Persisted final payload did not include an encoded render update.")
 
 overview_response = send_mobile_request({"command": "overview"})
-require(overview_response.get("ok"), f"Bridge overview failed after ctrl+c: {overview_response}")
-overview_sessions = overview_response.get("overview", {}).get("sessions", [])
+require(overview_response.get("ok"), f"Device API overview failed after ctrl+c: {overview_response}")
+overview_sessions = ((overview_response.get("result") or {}).get("overview") or {}).get("sessions", [])
 require(
     any(session.get("id") == secondary_session_id for session in overview_sessions),
-    f"Bridge overview did not include the surviving session after ctrl+c: {json.dumps(overview_response, indent=2)}",
+    f"Device API overview did not include the surviving session after ctrl+c: {json.dumps(overview_response, indent=2)}",
 )
 
 def wait_for_terminal_window_dump(session: str, output_path: Path, predicate, timeout: float) -> dict:
@@ -3249,7 +3542,7 @@ run_ownership_guard_scenario() {
   local session_id
   session_id="$(new_terminal_session)"
   track_current_scenario_session "$session_id"
-  python3 - "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$SCENARIO_DIR" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
+  python3 - "$DEMO_ROOT" "$session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$SCENARIO_DIR" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
 import json
 import os
 import socket
@@ -3262,8 +3555,8 @@ from pathlib import Path
 
 demo_root = Path(sys.argv[1])
 session_id = sys.argv[2]
-bridge_host = sys.argv[3]
-bridge_port = int(sys.argv[4])
+device_api_host = sys.argv[3]
+device_api_port = int(sys.argv[4])
 spaces_cli = Path(sys.argv[5])
 spacese2e = Path(sys.argv[6])
 scenario_dir = Path(sys.argv[7])
@@ -3297,15 +3590,27 @@ mobile_client = {
     "disconnectedAt": None,
 }
 
+def typed_device_request(request: dict) -> dict:
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
 def send_mobile_request(request: dict) -> dict:
+    request = typed_device_request(request)
     completed = subprocess.run(
         [
             str(spacese2e),
             "mobile-request",
             "--host",
-            bridge_host,
+            device_api_host,
             "--port",
-            str(bridge_port),
+            str(device_api_port),
             "--transport-key=" + pairing["transportKey"],
             "--request-json",
             json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
@@ -3442,7 +3747,7 @@ if not takeover.get("ok"):
     raise RuntimeError(f"Mobile takeover failed: {takeover}")
 owner_after_takeover = active_owner(excluded={initial_owner}, timeout=20)
 if owner_after_takeover != mobile_client["id"]:
-    raise RuntimeError(f"Expected mobile client to own the session, found {owner_after_takeover}")
+    raise RuntimeError(f"Expected device client to own the session, found {owner_after_takeover}")
 
 sent = send_mobile_request({
     "command": "send",
@@ -3497,7 +3802,7 @@ run_app_recovery_scenario() {
   track_current_scenario_session "$session_id"
 
   local new_app_pid
-  if ! new_app_pid="$(python3 - "$DEMO_ROOT" "$DB_PATH" "$RUNTIME_DIR" "$session_id" "$DEMO_TERMINAL_SERVICE_PID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$BRIDGE_HOST" "$BRIDGE_PORT" "$TERMINAL_SERVICE_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$SCENARIO_DIR" <<'PY' 2>>"$SCENARIO_LOG"
+  if ! new_app_pid="$(python3 - "$DEMO_ROOT" "$DB_PATH" "$RUNTIME_DIR" "$session_id" "$DEMO_TERMINAL_SERVICE_PID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$TERMINAL_SERVICE_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$SCENARIO_DIR" <<'PY' 2>>"$SCENARIO_LOG"
 import json
 import os
 import shlex
@@ -3514,8 +3819,8 @@ session_id = sys.argv[4]
 metadata_terminal_service_pid = sys.argv[5]
 spaces_cli = Path(sys.argv[6])
 spacese2e = Path(sys.argv[7])
-bridge_host = sys.argv[8]
-bridge_port = int(sys.argv[9])
+device_api_host = sys.argv[8]
+device_api_port = int(sys.argv[9])
 terminal_service_bin = sys.argv[10]
 bundle_id = sys.argv[11]
 mobile_device_key = sys.argv[12]
@@ -3591,15 +3896,27 @@ def wait_for_app_owner_absent(timeout: float = 10) -> None:
         time.sleep(0.2)
     raise RuntimeError(f"Timed out waiting for app-owner lease to disappear.\nlast={json.dumps(last_payload, indent=2)}")
 
+def typed_device_request(request: dict) -> dict:
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
 def send_mobile_request(request: dict) -> dict:
+    request = typed_device_request(request)
     completed = subprocess.run(
         [
             str(spacese2e),
             "mobile-request",
             "--host",
-            bridge_host,
+            device_api_host,
             "--port",
-            str(bridge_port),
+            str(device_api_port),
             "--transport-key=" + pairing["transportKey"],
             "--request-json",
             json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
@@ -3667,7 +3984,10 @@ assert_session_live(expected_service_pid, "after app owner termination")
 overview_before = send_mobile_request({"command": "overview"})
 require(overview_before.get("ok"), f"Overview failed after app owner termination: {overview_before}")
 require(
-    any(session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid for session in overview_before.get("overview", {}).get("sessions", [])),
+    any(
+        session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid
+        for session in ((overview_before.get("result") or {}).get("overview") or {}).get("sessions", [])
+    ),
     f"Overview after app owner termination did not include the live session: {json.dumps(overview_before, indent=2)}",
 )
 
@@ -3692,7 +4012,10 @@ assert_session_live(expected_service_pid, "after app recovery")
 overview_after = send_mobile_request({"command": "overview"})
 require(overview_after.get("ok"), f"Overview failed after app recovery: {overview_after}")
 require(
-    any(session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid for session in overview_after.get("overview", {}).get("sessions", [])),
+    any(
+        session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid
+        for session in ((overview_after.get("result") or {}).get("overview") or {}).get("sessions", [])
+    ),
     f"Overview after app recovery did not include the live session: {json.dumps(overview_after, indent=2)}",
 )
 
@@ -3724,34 +4047,9 @@ PY
   printf 'Mobile scenario passed: app-recovery\n'
 }
 
-scenario_remote_skip_reason() {
-  case "$1" in
-    codex|codex-resume-reopen|ctrl-c-final-frame-codex-survivor)
-      printf 'requires local Codex'
-      return 0
-      ;;
-    ownership-guard)
-      printf 'uses Mac-local terminal service direct-control assertions'
-      return 0
-      ;;
-    app-recovery)
-      printf 'validates Mac app-owner recovery for the local profile'
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
-    local remote_skip_reason=""
-    if [[ "$CURRENT_TARGET" == "remote" ]] && remote_skip_reason="$(scenario_remote_skip_reason "$scenario")"; then
-      printf '[%s] Skipping mobile scenario on remote target: %s (%s).\n' "$(date +%H:%M:%S)" "$scenario" "$remote_skip_reason"
-      continue
-    fi
     case "$scenario" in
       takeover)
         run_takeover_scenario
@@ -3791,10 +4089,33 @@ run_selected_scenarios() {
   done
 }
 
+run_remote_ui_scenarios() {
+  local scenario
+  local ran=0
+  for scenario in "${REMOTE_UI_SCENARIOS[@]}"; do
+    if [[ " ${SELECTED_SCENARIOS[*]} " != *" $scenario "* ]]; then
+      continue
+    fi
+    case "$scenario" in
+      takeover)
+        run_takeover_scenario
+        ;;
+      two-session)
+        run_two_session_scenario
+        ;;
+      *)
+        fail "unknown remote UI scenario: $scenario"
+        ;;
+    esac
+    cleanup_current_scenario_sessions
+    ran=1
+  done
+  if (( ran == 0 )); then
+    printf 'No selected mobile scenarios have a remote UI parity path.\n'
+  fi
+}
+
 parse_args "$@"
-require_remote_configuration
-ensure_remote_auth_token
-export_remote_auth_token
 case "$MOBILE_DEVICE_KEY" in
   iphone|ipad)
     ;;
@@ -3805,15 +4126,17 @@ esac
 SUITE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-e2e.XXXXXX")"
 MOBILE_UDID="$(resolve_simulator_udid "$MOBILE_DEVICE_NAME")"
 build_macos_debug_products
+run_remote_device_e2e
 build_ios_for_testing "$MOBILE_UDID"
 start_demo
+run_local_device_api_parity
 case "$MOBILE_DEVICE_KEY" in
   iphone) MOBILE_UDID="$IPHONE_UDID" ;;
   ipad) MOBILE_UDID="$IPAD_UDID" ;;
 esac
-for target in local remote; do
-  configure_target "$target"
-  run_selected_scenarios
-done
+configure_target "local"
+run_selected_scenarios
+configure_target "remote"
+run_remote_ui_scenarios
 
-printf '\nMobile E2E passed: scenarios=%s targets=local remote\n' "${SELECTED_SCENARIOS[*]}"
+printf '\nMobile E2E passed: scenarios=%s targets=local,remote-device-api,remote-ui\n' "${SELECTED_SCENARIOS[*]}"

@@ -187,11 +187,12 @@ else:
 PY
 }
 
-attach_remote_viewer_client() {
+attach_control_client() {
   local session_id="$1"
+  local attachment_mode="$2"
   local socket_path
   socket_path="$(control_socket_path "$session_id")"
-  python3 - "$socket_path" <<'PY'
+  python3 - "$socket_path" "$attachment_mode" <<'PY'
 import json
 import socket
 import sys
@@ -199,6 +200,7 @@ import uuid
 from datetime import datetime, timezone
 
 socket_path = sys.argv[1]
+attachment_mode = sys.argv[2]
 client_id = str(uuid.uuid4()).upper()
 request = {
     "command": "attach",
@@ -212,7 +214,7 @@ request = {
         },
         "connectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     },
-    "attachmentMode": "viewer",
+    "attachmentMode": attachment_mode,
     "appendNewline": False,
 }
 
@@ -270,7 +272,12 @@ session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
 SERVICE_PID="$(terminal_service_pid "$session_id")"
 
-owner_client_id="$(wait_for_active_attachment_client_id "$session_id" owner)"
+wait_for_control_socket "$session_id"
+owner_client_id="$(attach_control_client "$session_id" owner)"
+[[ "$(wait_for_active_attachment_client_id "$session_id" owner)" == "$owner_client_id" ]] || {
+  echo "Attached owner client did not become the active owner attachment" >&2
+  exit 1
+}
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send "$session_id" "abc" >/dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal key "$session_id" up >/dev/null
@@ -282,7 +289,7 @@ printf '%s\n' "$tail_output" | grep -Fq "\\x1b[A"
 printf '%s\n' "$tail_output" | grep -Eq "\\\\r'|\\\\n'"
 
 wait_for_control_socket "$session_id"
-viewer_client_id="$(attach_remote_viewer_client "$session_id")"
+viewer_client_id="$(attach_control_client "$session_id" viewer)"
 [[ "$(wait_for_active_attachment_client_id "$session_id" viewer)" == "$viewer_client_id" ]] || {
   echo "Attached viewer client did not become the active viewer attachment" >&2
   exit 1

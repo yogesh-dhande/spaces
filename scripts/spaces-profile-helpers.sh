@@ -81,11 +81,22 @@ PY
 import pathlib
 import sys
 
-terminal_root = pathlib.Path(sys.argv[1]) / "terminal"
-hash_value = 5381
-for byte in str(terminal_root).encode():
-    hash_value = (((hash_value << 5) + hash_value) + byte) & 0xFFFFFFFFFFFFFFFF
-print(f"/tmp/spaces-terminal-sockets/service-{hash_value:016x}.sock")
+runtime_dir = pathlib.Path(sys.argv[1])
+runtime_dirs = [runtime_dir]
+runtime_text = str(runtime_dir)
+if runtime_text.startswith("/private/tmp/"):
+    runtime_dirs.append(pathlib.Path("/tmp") / runtime_text[len("/private/tmp/"):])
+
+seen = set()
+for runtime in runtime_dirs:
+    terminal_root = runtime / "terminal"
+    hash_value = 5381
+    for byte in str(terminal_root).encode():
+        hash_value = (((hash_value << 5) + hash_value) + byte) & 0xFFFFFFFFFFFFFFFF
+    socket_path = f"/tmp/spaces-terminal-sockets/service-{hash_value:016x}.sock"
+    if socket_path not in seen:
+        print(socket_path)
+        seen.add(socket_path)
 PY
 }
 
@@ -99,11 +110,19 @@ spaces_profile_socket_owner_pids() {
 spaces_profile_stop_terminal_service() {
   local cli="$1"
   local timeout="${2:-20}"
-  local socket_path
-  if ! socket_path="$(spaces_profile_terminal_service_socket_path "$cli")"; then
+  local socket_paths
+  if ! socket_paths="$(spaces_profile_terminal_service_socket_path "$cli")"; then
     return 0
   fi
-  [[ -e "$socket_path" ]] || return 0
+  local socket_path=""
+  local candidate_socket_path
+  while IFS= read -r candidate_socket_path; do
+    if [[ -e "$candidate_socket_path" ]]; then
+      socket_path="$candidate_socket_path"
+      break
+    fi
+  done <<<"$socket_paths"
+  [[ -n "$socket_path" ]] || return 0
 
   local candidate_pids
   candidate_pids="$(spaces_profile_socket_owner_pids "$socket_path")"

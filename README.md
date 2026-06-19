@@ -31,9 +31,10 @@ The `spaces` CLI is workspace-oriented and ID-based:
 ```
 spaces project list
 spaces workspace list
-spaces workspace create --project <id> --branch feature/demo --host local
+spaces workspace create --project <id> --branch feature/demo
 spaces workspace start --workspace <id>
 spaces workspace restart --workspace <id>
+spaces pair                                 # open a short-lived same-device pairing window
 spaces agent signal --workspace <id> --session <terminal-session-id> waiting
 spaces terminal command --command "cat"   # start a Spaces terminal session
 spaces terminal list                      # inspect live session IDs and working directories
@@ -64,10 +65,11 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 ## How it works
 
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
-- Built-in process and ad hoc terminals run through `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
-- Workspace identity is scoped to project, branch, and host. The local Mac is a first-class host, and remote hosts run pinned-TLS `spacesd` execution with each workspace storing its runtime path directly.
-- Remote Hosts installs signed `spacesd` release artifacts over strict known-host SSH for macOS 14+ and Ubuntu 24.04 remotes, then validates the daemon with pinned TLS before saving the host.
-- The first-party iOS client discovers the Mac bridge advertised by `spacesd`, pairs through a Mac-approved QR/deep link, browses live Spaces terminal sessions, auto-takes ownership when opening one for live rendering, and can ask the still-running daemon to launch the Mac app after an app quit or crash.
+- Built-in process and ad hoc terminals run through the paired device's `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
+- Every Mac or Linux `spacesd` owns its own database, projects, workspaces, runtime rows, terminal sessions, and workspace filesystem. macOS and iOS apps are thin clients connected to one active paired device.
+- iOS pairing uses the short-lived QR/deep link from `spaces pair` or the Mac Devices panel. Mac remote-device pairing validates SSH, opens the remote daemon's pairing window over `~/.spaces/bin/spaces pair --json`, pins the daemon TLS identity, and stores the client token in Keychain.
+- The `spaces` CLI targets the same-machine daemon. Remote macOS terminal attach, browser forwarding, and editor opening use SSH to the paired device when those features are invoked from the Mac app.
+- The first-party iOS client pairs through QR/deep link, selects among paired devices, browses live Spaces terminal sessions, auto-takes ownership when opening one for live rendering, and can ask a paired macOS daemon to launch the Mac app after an app quit or crash.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
 
 ## Requirements
@@ -79,7 +81,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 
 ## Install
 
-Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/spaces/releases/latest). The installer drops `Spaces.app` and the `spaces` CLI together. In-app updates are delivered via Sparkle.
+Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/spaces/releases/latest). The installer drops `Spaces.app`, `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and a per-user LaunchAgent that keeps `spacesd` available after login. In-app updates are delivered via Sparkle.
 
 ## Development
 

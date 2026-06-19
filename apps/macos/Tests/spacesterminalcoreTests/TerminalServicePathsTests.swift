@@ -9,16 +9,77 @@ final class TerminalServicePathsTests: XCTestCase {
             String(repeating: "nested-", count: 18), isDirectory: true)
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         let databasePath = tempRoot.appendingPathComponent("spaces.db").path
-        let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        let originalRuntimePath = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
         setenv("SPACES_DB_PATH", databasePath, 1)
+        unsetenv("SPACES_RUNTIME_DIR")
+        SpacesProfile.resetCacheForTesting()
         defer {
-            if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            restoreEnvironmentValue(originalDatabasePath, name: SpacesProfile.databasePathEnvironmentVariable)
+            restoreEnvironmentValue(originalRuntimePath, name: SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            SpacesProfile.resetCacheForTesting()
             try? FileManager.default.removeItem(at: tempRoot)
         }
 
         let socketPath = try TerminalServicePaths.socketPath()
+        let lockPath = try TerminalServicePaths.instanceLockPath()
 
         XCTAssertTrue(socketPath.hasPrefix("/tmp/spaces-terminal-sockets/service-"))
+        XCTAssertTrue(lockPath.hasPrefix("/tmp/spaces-terminal-sockets/daemon-"))
         XCTAssertLessThan(socketPath.utf8.count, 104)
+        XCTAssertLessThan(lockPath.utf8.count, 104)
     }
+
+    func testSocketPathsAreStableAcrossSymlinkedProfilePaths() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let realRoot = root.appendingPathComponent("real", isDirectory: true)
+        let linkedRoot = root.appendingPathComponent("linked", isDirectory: true)
+        try FileManager.default.createDirectory(at: realRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: linkedRoot, withDestinationURL: realRoot)
+
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        let originalRuntimePath = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        defer {
+            restoreEnvironmentValue(originalDatabasePath, name: SpacesProfile.databasePathEnvironmentVariable)
+            restoreEnvironmentValue(originalRuntimePath, name: SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            SpacesProfile.resetCacheForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let realPaths = try terminalPaths(
+            databasePath: realRoot.appendingPathComponent("spaces.db").path,
+            runtimeDirectory: realRoot.appendingPathComponent("runtime", isDirectory: true).path)
+        let linkedPaths = try terminalPaths(
+            databasePath: linkedRoot.appendingPathComponent("spaces.db").path,
+            runtimeDirectory: linkedRoot.appendingPathComponent("runtime", isDirectory: true).path)
+
+        XCTAssertEqual(linkedPaths.serviceSocketPath, realPaths.serviceSocketPath)
+        XCTAssertEqual(linkedPaths.serviceLockPath, realPaths.serviceLockPath)
+        XCTAssertEqual(linkedPaths.sessionControlSocketPath, realPaths.sessionControlSocketPath)
+        XCTAssertEqual(linkedPaths.sessionSubscriptionSocketPath, realPaths.sessionSubscriptionSocketPath)
+        XCTAssertEqual(linkedPaths.terminalRoot, realPaths.terminalRoot)
+        XCTAssertFalse(linkedPaths.terminalRoot.contains("/linked/"))
+    }
+
+    private func terminalPaths(databasePath: String, runtimeDirectory: String) throws -> TerminalPathSnapshot {
+        setenv(SpacesProfile.databasePathEnvironmentVariable, databasePath, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeDirectory, 1)
+        SpacesProfile.resetCacheForTesting()
+
+        let sessionPaths = try TerminalSessionPaths.forSession(id: "session-symlink")
+        return TerminalPathSnapshot(
+            serviceSocketPath: try TerminalServicePaths.socketPath(), serviceLockPath: try TerminalServicePaths.instanceLockPath(),
+            sessionControlSocketPath: sessionPaths.controlSocketPath, sessionSubscriptionSocketPath: sessionPaths.subscriptionSocketPath,
+            terminalRoot: try TerminalServicePaths.terminalRootDirectory().path)
+    }
+
+    private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+}
+
+private struct TerminalPathSnapshot {
+    let serviceSocketPath: String
+    let serviceLockPath: String
+    let sessionControlSocketPath: String
+    let sessionSubscriptionSocketPath: String
+    let terminalRoot: String
 }

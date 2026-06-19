@@ -1,14 +1,14 @@
 #if canImport(UIKit)
     import XCTest
     import spacesterminalcore
-    import spacesmobilecore
+    import spacesdevicecore
     @testable import SpacesMobile
 
     private actor SpacesMobileRequestRecorder {
-        private var requests: [SpacesMobileBridgeRequest] = []
+        private var requests: [SpacesDeviceAPIRequest] = []
 
-        func append(_ request: SpacesMobileBridgeRequest) { requests.append(request) }
-        func snapshot() -> [SpacesMobileBridgeRequest] { requests }
+        func append(_ request: SpacesDeviceAPIRequest) { requests.append(request) }
+        func snapshot() -> [SpacesDeviceAPIRequest] { requests }
     }
 
     private actor AsyncGate {
@@ -48,7 +48,7 @@
     @MainActor
     final class SpacesMobileAppModelTests: XCTestCase {
         func testWorkspaceGroupsFilterByTypeStateAndSearch() {
-            let model = SpacesMobileAppModel()
+            let model = makeModel()
             model.overview = makeOverview()
 
             XCTAssertEqual(model.workspaceGroups.count, 2)
@@ -69,7 +69,7 @@
         }
 
         func testRuntimeRowActionAvailabilitySurvivesModelMapping() {
-            let model = SpacesMobileAppModel()
+            let model = makeModel()
             model.overview = makeOverview()
 
             let rows = model.workspaceGroups.flatMap(\.rows)
@@ -86,37 +86,41 @@
         func testStopTerminalRowSendsWorkspaceTerminalStopMutation() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesMobileBridgeClient(settings: settings) { request in
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                return SpacesMobileBridgeResponse(ok: true, message: "stopped")
+                return SpacesDeviceAPIResponse(ok: true, message: "stopped")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             let row = SpacesMobileWorkspaceRuntimeRow(
                 source: .terminal(
-                    SpacesMobileWorkspaceTerminalRow(
+                    SpacesDeviceWorkspaceTerminalRow(
                         id: "terminal-shell", workspaceID: "workspace-docs", title: "shell", workingDirectory: "/repo/docs",
                         sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)))
 
             await model.stop(row: row)
 
             let request = await recorder.snapshot().first
-            XCTAssertEqual(request?.command, "stopWorkspaceTerminal")
-            XCTAssertEqual(request?.workspaceID, "workspace-docs")
-            XCTAssertEqual(request?.sessionID, "session-shell")
+            XCTAssertEqual(request?.commandName, "stopWorkspaceTerminal")
+            guard case .stopWorkspaceTerminal(let payload)? = request?.command else {
+                XCTFail("Expected stopWorkspaceTerminal request.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-docs")
+            XCTAssertEqual(payload.sessionID, "session-shell")
             XCTAssertFalse(model.isMutating)
         }
 
         func testRunRowWithExistingSessionSendsRunMutation() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesMobileBridgeClient(settings: settings) { request in
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                return SpacesMobileBridgeResponse(ok: true, message: "running")
+                return SpacesDeviceAPIResponse(ok: true, message: "running")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             let row = SpacesMobileWorkspaceRuntimeRow(
                 source: .process(
-                    SpacesMobileWorkspaceProcessRow(
+                    SpacesDeviceWorkspaceProcessRow(
                         id: "template-api",
                         workspaceID: "workspace-feature",
                         name: "api",
@@ -132,15 +136,19 @@
             _ = await model.run(row: row)
 
             let request = await recorder.snapshot().first
-            XCTAssertEqual(request?.command, "runWorkspaceProcess")
-            XCTAssertEqual(request?.workspaceID, "workspace-feature")
-            XCTAssertEqual(request?.processKey, "api")
-            XCTAssertEqual(request?.processTemplateID, "template-api")
+            XCTAssertEqual(request?.commandName, "runWorkspaceProcess")
+            guard case .runWorkspaceProcess(let payload)? = request?.command else {
+                XCTFail("Expected runWorkspaceProcess request.")
+                return
+            }
+            XCTAssertEqual(payload.workspaceID, "workspace-feature")
+            XCTAssertEqual(payload.processKey, "api")
+            XCTAssertEqual(payload.processTemplateID, "template-api")
             XCTAssertFalse(model.isMutating)
         }
 
         func testRunProcessTimeoutRequiresFreshSessionWhenRowRetainsExitedSession() async {
-            let oldRow = SpacesMobileWorkspaceProcessRow(
+            let oldRow = SpacesDeviceWorkspaceProcessRow(
                 id: "template-api",
                 workspaceID: "workspace-feature",
                 name: "api",
@@ -152,7 +160,7 @@
                 canRun: true,
                 canStop: false,
                 canRestart: false)
-            let newRow = SpacesMobileWorkspaceProcessRow(
+            let newRow = SpacesDeviceWorkspaceProcessRow(
                 id: "template-api",
                 workspaceID: "workspace-feature",
                 name: "api",
@@ -167,12 +175,12 @@
             let refreshedOverview = makeOverview(sessions: [makeSession(id: "session-api-new")], featureProcessRows: [newRow])
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesMobileBridgeClient(settings: settings) { request in
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if request.command == "runWorkspaceProcess" {
-                    throw SpacesMobileBridgeClientError.requestTimedOut
+                if request.commandName == "runWorkspaceProcess" {
+                    throw SpacesDeviceAPIClientError.requestTimedOut
                 }
-                return SpacesMobileBridgeResponse(ok: true, message: "loaded", overview: refreshedOverview)
+                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.overview = makeOverview(sessions: [makeSession(id: "session-api-old")], featureProcessRows: [oldRow])
@@ -181,13 +189,13 @@
             let requests = await recorder.snapshot()
 
             XCTAssertEqual(session?.id, "session-api-new")
-            XCTAssertEqual(requests.map(\.command), ["runWorkspaceProcess", "overview"])
+            XCTAssertEqual(requests.map(\.commandName), ["runWorkspaceProcess", "overview"])
             XCTAssertNil(model.errorMessage)
             XCTAssertFalse(model.isMutating)
         }
 
         func testRunAgentTimeoutRequiresFreshSessionWhenRowRetainsExitedSession() async {
-            let oldRow = SpacesMobileWorkspaceCodingAgentRow(
+            let oldRow = SpacesDeviceWorkspaceCodingAgentRow(
                 id: "agent-codex",
                 workspaceID: "workspace-feature",
                 name: "Codex",
@@ -201,7 +209,7 @@
                 canRun: true,
                 canStop: false,
                 canRestart: false)
-            let newRow = SpacesMobileWorkspaceCodingAgentRow(
+            let newRow = SpacesDeviceWorkspaceCodingAgentRow(
                 id: "agent-codex",
                 workspaceID: "workspace-feature",
                 name: "Codex",
@@ -219,12 +227,12 @@
                 sessions: [makeSession(id: "session-codex-new")], featureProcessRows: [], featureCodingAgentRows: [newRow])
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesMobileBridgeClient(settings: settings) { request in
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if request.command == "runCodingAgent" {
-                    throw SpacesMobileBridgeClientError.requestTimedOut
+                if request.commandName == "runCodingAgent" {
+                    throw SpacesDeviceAPIClientError.requestTimedOut
                 }
-                return SpacesMobileBridgeResponse(ok: true, message: "loaded", overview: refreshedOverview)
+                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             model.overview = makeOverview(sessions: [makeSession(id: "session-codex-old")], featureProcessRows: [], featureCodingAgentRows: [oldRow])
@@ -233,13 +241,13 @@
             let requests = await recorder.snapshot()
 
             XCTAssertEqual(session?.id, "session-codex-new")
-            XCTAssertEqual(requests.map(\.command), ["runCodingAgent", "overview"])
+            XCTAssertEqual(requests.map(\.commandName), ["runCodingAgent", "overview"])
             XCTAssertNil(model.errorMessage)
             XCTAssertFalse(model.isMutating)
         }
 
         func testRefreshedSessionLookupIgnoresVisibleFilters() {
-            let model = SpacesMobileAppModel()
+            let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api")])
             model.visibleRunStates = [.notStarted]
 
@@ -248,7 +256,7 @@
         }
 
         func testRuntimeRowLookupBySessionIgnoresVisibleFilters() {
-            let model = SpacesMobileAppModel()
+            let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api")])
             model.visibleRunStates = [.notStarted]
 
@@ -256,9 +264,17 @@
             XCTAssertEqual(model.runtimeRow(forSessionID: "session-api")?.title, "api")
         }
 
+        func testTerminalGroupsExcludeSessionsRepresentedByWorkspaceRows() {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-api"), makeSession(id: "session-orphan")])
+
+            XCTAssertEqual(model.workspaceGroups.flatMap(\.rows).compactMap(\.sessionID), ["session-api", "session-codex"])
+            XCTAssertEqual(model.terminalGroups.flatMap(\.sessions).map(\.id), ["session-orphan"])
+        }
+
         func testMutationCancellationDoesNotShowConnectionError() async {
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesMobileBridgeClient(settings: settings) { _ in
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 throw CancellationError()
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
@@ -277,15 +293,15 @@
             settings.transportKey = "transport-key"
             settings.certificateFingerprint = "SHA256:test"
             settings.installationID = "INSTALLATION-LAUNCH"
-            let client = SpacesMobileBridgeClient(settings: settings) { request in
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                return SpacesMobileBridgeResponse(ok: true, message: "Launched Spaces on Mac.")
+                return SpacesDeviceAPIResponse(ok: true, message: "Launched Spaces on Mac.")
             }
 
             try await client.launchSpacesApp()
 
             let request = await recorder.snapshot().first
-            XCTAssertEqual(request?.command, "launchSpacesApp")
+            XCTAssertEqual(request?.commandName, "launchSpacesApp")
             XCTAssertEqual(request?.authToken, "auth-token")
             XCTAssertEqual(request?.clientApp?.installationID, "INSTALLATION-LAUNCH")
             XCTAssertEqual(request?.clientApp?.platform, "ios")
@@ -299,11 +315,11 @@
             settings.authToken = "auth-token"
             settings.transportKey = "transport-key"
             settings.certificateFingerprint = "SHA256:test"
-            let client = SpacesMobileBridgeClient(settings: settings) { request in
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
                 await gate.markStarted()
                 await gate.waitUntilReleased()
-                return SpacesMobileBridgeResponse(ok: true, message: "Launched Spaces on Mac.")
+                return SpacesDeviceAPIResponse(ok: true, message: "Launched Spaces on Mac.")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
             let overview = makeOverview(sessions: [makeSession(id: "session-api")])
@@ -319,7 +335,7 @@
             await task.value
 
             let requests = await recorder.snapshot()
-            XCTAssertEqual(requests.map(\.command), ["launchSpacesApp"])
+            XCTAssertEqual(requests.map(\.commandName), ["launchSpacesApp"])
             XCTAssertFalse(model.isLaunchingSpacesApp)
             XCTAssertEqual(model.overview, overview)
             XCTAssertNil(model.errorMessage)
@@ -330,8 +346,8 @@
             settings.authToken = "auth-token"
             settings.transportKey = "transport-key"
             settings.certificateFingerprint = "SHA256:test"
-            let client = SpacesMobileBridgeClient(settings: settings) { _ in
-                SpacesMobileBridgeResponse(ok: false, message: "Unable to find SpacesApp.")
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: false, message: "Unable to find SpacesApp.")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
 
@@ -342,48 +358,48 @@
         }
 
         private func makeOverview(
-            sessions: [SpacesMobileTerminalSessionSummary] = [],
-            featureProcessRows: [SpacesMobileWorkspaceProcessRow]? = nil,
-            featureCodingAgentRows: [SpacesMobileWorkspaceCodingAgentRow]? = nil
-        ) -> SpacesMobileOverviewPayload {
-            let project = SpacesMobileProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+            sessions: [SpacesDeviceTerminalSessionSummary] = [],
+            featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
+            featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil
+        ) -> SpacesDeviceOverviewPayload {
+            let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
             let processRows =
                 featureProcessRows
                 ?? [
-                    SpacesMobileWorkspaceProcessRow(
+                    SpacesDeviceWorkspaceProcessRow(
                         id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
                         sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)
                 ]
             let codingAgentRows =
                 featureCodingAgentRows
                 ?? [
-                    SpacesMobileWorkspaceCodingAgentRow(
+                    SpacesDeviceWorkspaceCodingAgentRow(
                         id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", agentID: "runtime-codex",
                         sessionID: "session-codex", isConfigured: true, runState: .running, activityState: .spinning, canRun: false,
                         canStop: true, canRestart: true)
                 ]
-            let feature = SpacesMobileWorkspaceSummary(
+            let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, title: "Feature", branch: "feature",
                 targetBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
                 sessionCount: 1,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
                 terminalRows: [])
-            let docs = SpacesMobileWorkspaceSummary(
+            let docs = SpacesDeviceWorkspaceSummary(
                 id: "workspace-docs", projectID: project.id, projectName: project.name, title: "Docs", branch: "docs", targetBranch: "main",
                 dir: "/repo/docs", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
                 processRows: [],
                 codingAgentRows: [],
                 terminalRows: [
-                    SpacesMobileWorkspaceTerminalRow(
+                    SpacesDeviceWorkspaceTerminalRow(
                         id: "terminal-shell", workspaceID: "workspace-docs", title: "shell", workingDirectory: "/repo/docs", sessionID: nil,
                         runState: .exited, canOpenTerminal: false)
                 ])
-            return SpacesMobileOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions)
+            return SpacesDeviceOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions)
         }
 
-        private func makeSession(id: String) -> SpacesMobileTerminalSessionSummary {
-            SpacesMobileTerminalSessionSummary(
+        private func makeSession(id: String) -> SpacesDeviceTerminalSessionSummary {
+            SpacesDeviceTerminalSessionSummary(
                 id: id,
                 title: "api",
                 workingDirectory: "/repo/feature",
@@ -402,6 +418,14 @@
                 isSubscriptionAvailable: true,
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot()
             )
+        }
+
+        private func makeModel() -> SpacesMobileAppModel {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            return SpacesMobileAppModel(settings: settings, bridgeClient: client)
         }
     }
 #endif

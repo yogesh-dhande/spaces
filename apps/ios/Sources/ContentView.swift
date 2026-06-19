@@ -1,5 +1,5 @@
 import SwiftUI
-import spacesmobilecore
+import spacesdevicecore
 import spacesterminalcore
 
 struct ContentView: View {
@@ -52,11 +52,20 @@ struct ContentView: View {
             ConnectionSettingsView(
                 initialSettings: model.settings,
                 initialPairingLink: model.pendingPairingLink,
+                pairedDevices: model.pairedDevices,
+                activeDeviceID: model.activeDeviceID,
                 noticeMessage: model.connectionNotice,
                 onPairingLinkConsumed: { model.clearPendingPairingLink() },
-                onLaunchSpaces: { await model.launchSpacesAppIfNeeded() }
-            ) { settings in
-                model.applyConnectionSettings(settings)
+                onLaunchSpaces: { await model.launchSpacesAppIfNeeded() },
+                onSelectDevice: { deviceID in
+                    model.selectDevice(id: deviceID)
+                    Task { await model.refresh() }
+                },
+                onRemoveDevice: { deviceID in
+                    model.removeDevice(id: deviceID)
+                }
+            ) { settings, deviceName in
+                model.applyConnectionSettings(settings, deviceName: deviceName)
                 Task { await model.refresh() }
             }
         }
@@ -136,6 +145,7 @@ struct ContentView: View {
             scenePhase == .active ? "active" : "inactive",
             model.isShowingConnectionSettings ? "settings" : "home",
             activeTerminalRouteID ?? "list",
+            model.activeDeviceID ?? "no-device",
             "\(terminalListRefreshGeneration)",
         ].joined(separator: "|")
     }
@@ -146,9 +156,9 @@ struct ContentView: View {
                 ContentUnavailableView {
                     Label("Pair This Device", systemImage: "iphone.gen3.radiowaves.left.and.right")
                 } description: {
-                    Text(model.connectionNotice ?? "Open Connection and pair this device again.")
+                    Text(model.connectionNotice ?? "Open Devices and pair this device again.")
                 } actions: {
-                    Button("Open Connection") {
+                    Button("Open Devices") {
                         model.isShowingConnectionSettings = true
                     }
                 }
@@ -236,6 +246,27 @@ struct ContentView: View {
 
     private var homeControls: some View {
         HStack(spacing: 8) {
+            if model.pairedDevices.count > 1 {
+                Menu {
+                    ForEach(model.pairedDevices) { device in
+                        Button {
+                            model.selectDevice(id: device.id)
+                            Task { await model.refresh() }
+                        } label: {
+                            Label(device.name, systemImage: device.id == model.activeDeviceID ? "checkmark" : "desktopcomputer")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(model.activeDeviceName ?? "Device")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent)
+                Divider()
+            }
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Theme.mutedSecondary)
@@ -276,7 +307,7 @@ struct ContentView: View {
             Text("State")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.muted)
-            ForEach([SpacesMobileRunState.notStarted, .running, .exited], id: \.self) { state in
+            ForEach([SpacesDeviceRunState.notStarted, .running, .exited], id: \.self) { state in
                 Toggle(isOn: Binding(get: { model.visibleRunStates.contains(state) }, set: { _ in model.toggleRunStateFilter(state) })) {
                     Text(state.mobileLabel)
                 }
@@ -347,7 +378,7 @@ struct ContentView: View {
             Button {
                 model.isShowingConnectionSettings = true
             } label: {
-                Label("Connection", systemImage: "slider.horizontal.3")
+                Label("Devices", systemImage: "desktopcomputer")
             }
         }
     }
@@ -441,7 +472,7 @@ struct ContentView: View {
         .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
     }
 
-    private func terminalSessionRow(_ session: SpacesMobileTerminalSessionSummary) -> some View {
+    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {
         Button {
             selectedSession = SelectedTerminalSessionRoute(session: session)
         } label: {
@@ -540,7 +571,7 @@ struct ContentView: View {
         }
     }
 
-    private func statusKind(for state: SpacesMobileRunState) -> StatusDot.Kind {
+    private func statusKind(for state: SpacesDeviceRunState) -> StatusDot.Kind {
         switch state {
         case .running: .running
         case .exited: .exited
@@ -563,7 +594,7 @@ struct ContentView: View {
 }
 
 private struct SelectedTerminalSessionRoute: Identifiable, Hashable {
-    let session: SpacesMobileTerminalSessionSummary
+    let session: SpacesDeviceTerminalSessionSummary
 
     var id: String { session.id }
 
@@ -602,7 +633,7 @@ private struct PendingTerminalLaunch: Identifiable, Sendable, Hashable {
         workspaceID = nil
     }
 
-    init(workspace: SpacesMobileWorkspaceSummary) {
+    init(workspace: SpacesDeviceWorkspaceSummary) {
         id = "workspace-terminal:\(workspace.id)"
         title = "Workspace Terminal"
         detail = workspace.dir
@@ -647,7 +678,7 @@ private struct TerminalLaunchPendingView: View {
 
     let launch: PendingTerminalLaunch
     let model: SpacesMobileAppModel
-    let onSessionReady: @MainActor (SpacesMobileTerminalSessionSummary?) -> Void
+    let onSessionReady: @MainActor (SpacesDeviceTerminalSessionSummary?) -> Void
     let onBack: @MainActor () -> Void
 
     @State private var hasStarted = false
@@ -724,7 +755,7 @@ private struct TerminalLaunchPendingView: View {
         .frame(height: Self.chromeControlHeight)
     }
 
-    private func runLaunch() async -> SpacesMobileTerminalSessionSummary? {
+    private func runLaunch() async -> SpacesDeviceTerminalSessionSummary? {
         switch launch.action {
         case .primary:
             guard let row = launch.row else { return nil }
@@ -750,7 +781,7 @@ private struct WorkspaceCreateSheet: View {
     @State private var branch = ""
     @State private var name = ""
 
-    private var project: SpacesMobileProjectSummary? {
+    private var project: SpacesDeviceProjectSummary? {
         let projects = model.workspaceCreateOptions?.projects ?? model.overview?.projects ?? []
         return projects.first(where: { $0.id == projectID })
     }

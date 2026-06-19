@@ -1,12 +1,17 @@
 import ArgumentParser
-import Darwin
 import Dispatch
 import Foundation
-import spacesmobilebridge
-import spacesmobilecore
+import spacesdeviceapi
+import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
 import workspacecore
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 extension TerminalSessionBackendKind: ExpressibleByArgument {}
 
@@ -20,12 +25,15 @@ public struct SpacesCommand: ParsableCommand {
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
               - Workspace and agent commands require explicit IDs.
-              - `workspace create` requires project, branch, and host so workspace identity is host-scoped.
+              - `workspace create` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
             """, version: AppVersion.current,
-        subcommands: [ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, MobileCommand.self, MCPCommand.self])
+        subcommands: [
+            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, PairCommand.self, MobileCommand.self,
+            MCPCommand.self,
+        ])
 
     public init() {}
 }
@@ -63,18 +71,16 @@ struct WorkspaceListCommand: ParsableCommand {
             try TerminalService.sendProfileCommand(.init(operation: .workspaceList, projectID: project, includeArchived: includeArchived)).workspaces
             ?? []
         try context.output.emitLines(
-            text: workspaces.map {
-                "\($0.id)\tproject=\($0.projectID)\thost=\($0.hostID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\ttitle=\($0.title)"
-            }, json: workspaces)
+            text: workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\ttitle=\($0.title)" },
+            json: workspaces)
     }
 }
 
 struct WorkspaceCreateCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create an explicit host-scoped workspace.")
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a workspace on this device.")
 
     @Option(name: .long, help: "Project ID.") var project: String
     @Option(name: .long, help: "Workspace branch.") var branch: String
-    @Option(name: .long, help: "Host ID, or local for the Mac.") var host: String
     @Option(name: .long, help: "Workspace title. Defaults to the branch name.") var title: String?
     @Option(name: .long, help: "Target branch for new branch creation.") var targetBranch: String?
     @Flag(name: .long, help: "Use an existing branch instead of creating a new branch.") var existingBranch = false
@@ -84,10 +90,10 @@ struct WorkspaceCreateCommand: ParsableCommand {
         let workspace = try requireProfileWorkspace(
             try TerminalService.sendProfileCommand(
                 .init(
-                    operation: .workspaceCreate, projectID: project, branch: branch, hostID: host, title: title, targetBranch: targetBranch,
+                    operation: .workspaceCreate, projectID: project, branch: branch, title: title, targetBranch: targetBranch,
                     existingBranch: existingBranch)))
         try context.output.emit(
-            text: "Created workspace \(workspace.id)\tproject=\(workspace.projectID)\thost=\(workspace.hostID)\tbranch=\(workspace.branch ?? "-")",
+            text: "Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")",
             json: MutationResultPayload(message: "Created workspace.", resource: workspace))
     }
 }
@@ -101,8 +107,7 @@ struct WorkspaceStartCommand: ParsableCommand {
         let context = CLIContext()
         let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceStart, workspaceID: workspace)))
         try context.output.emit(
-            text: "Workspace is running \(workspace)\thost=\(updated.hostID)",
-            json: MutationResultPayload(message: "Workspace is running.", resource: updated))
+            text: "Workspace is running \(workspace)", json: MutationResultPayload(message: "Workspace is running.", resource: updated))
     }
 }
 
@@ -115,8 +120,7 @@ struct WorkspaceRestartCommand: ParsableCommand {
         let context = CLIContext()
         let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceRestart, workspaceID: workspace)))
         try context.output.emit(
-            text: "Workspace restarted \(workspace)\thost=\(updated.hostID)",
-            json: MutationResultPayload(message: "Workspace restarted.", resource: updated))
+            text: "Workspace restarted \(workspace)", json: MutationResultPayload(message: "Workspace restarted.", resource: updated))
     }
 }
 
@@ -149,6 +153,74 @@ struct MCPCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "mcp", abstract: "Run the Spaces MCP stdio server.")
 
     func run() throws { try SpacesMCPStdioServer().run() }
+}
+
+struct PairCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "pair", abstract: "Open a pairing window for this device's spacesd daemon.")
+
+    @Flag(name: .long, help: "Print structured pairing metadata for SSH-assisted Mac pairing.") var json = false
+
+    func run() throws { if json { try emitPairCommandJSON() } else { for line in try pairCommandLines() { print(line) } } }
+}
+
+struct PairingWindowPayload: Codable, Sendable, Equatable {
+    let name: String
+    let host: String
+    let port: Int
+    let pairingNonce: String
+    let pairingCode: String
+    let transportKey: String
+    let certificateFingerprint: String
+    let expiresAt: String
+    let pairingLink: String
+}
+
+func pairCommandLines(
+    loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = {
+        _ = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService()
+        return try SpacesDeviceAPIControlClient.openPairingWindow()
+    }
+) throws -> [String] {
+    let response = try loadControlResponse()
+    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+    guard let window = response.pairingWindow else { throw WorkspaceError.invalidArgument(message: "spacesd did not return a pairing window.") }
+    return pairingWindowLines(window)
+}
+
+func pairCommandPayload(
+    loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = {
+        _ = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService()
+        return try SpacesDeviceAPIControlClient.openPairingWindow()
+    }
+) throws -> PairingWindowPayload {
+    let response = try loadControlResponse()
+    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+    guard let window = response.pairingWindow else { throw WorkspaceError.invalidArgument(message: "spacesd did not return a pairing window.") }
+    return try pairingWindowPayload(window)
+}
+
+func pairingWindowLines(_ window: SpacesDevicePairingWindowSnapshot) -> [String] {
+    [
+        "Spaces pairing window", "link=\(window.linkString)", "code=\(window.code)",
+        "expires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))",
+    ]
+}
+
+func pairingWindowPayload(_ window: SpacesDevicePairingWindowSnapshot) throws -> PairingWindowPayload {
+    let link = try SpacesDevicePairingLink.parse(window.linkString)
+    return PairingWindowPayload(
+        name: link.name, host: link.host, port: link.port, pairingNonce: link.nonce, pairingCode: link.code, transportKey: link.transportKey,
+        certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
+        pairingLink: window.linkString)
+}
+
+private func emitPairCommandJSON() throws {
+    let payload = try pairCommandPayload()
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = try encoder.encode(payload)
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
 }
 
 private func requireProfileWorkspace(_ response: TerminalServiceProfileCommandResponse) throws -> TerminalServiceProfileWorkspaceRecord {
@@ -199,7 +271,7 @@ struct TerminalCommandCommand: ParsableCommand {
 
     @Option(name: .long, help: "Working directory. Defaults to the current directory.") var cwd: String?
 
-    @Option(name: .long, help: "Shell executable path. Defaults to $SHELL or /bin/zsh.") var shell: String?
+    @Option(name: .long, help: "Shell executable path. Defaults to $SHELL or the platform login shell.") var shell: String?
 
     @Option(name: .long, help: "Terminal backend. Defaults to ghostty-embedded.") var backend: TerminalSessionBackendKind = .ghosttyEmbedded
 
@@ -210,15 +282,7 @@ struct TerminalCommandCommand: ParsableCommand {
         let context = CLIContext()
         let launchConfiguration = terminalCommandLaunchConfiguration(
             sessionID: UUID().uuidString, backend: backend, command: command, title: title, cwd: cwd, shell: shell, context: context)
-        let sessionID = launchConfiguration.sessionID
         let session = try TerminalService.createSession(launchConfiguration)
-
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [
-                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-            ], options: [.deliverImmediately])
 
         print(
             "Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tlocation=local\tcwd=\(session.workingDirectory)"
@@ -300,19 +364,23 @@ struct TerminalShowCommand: ParsableCommand {
     @Argument(help: "Terminal session ID.") var sessionID: String
 
     func run() throws {
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil else {
-            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
-        }
-        let requestID = UUID().uuidString
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [
-                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-                IPCNotification.focusRequestIDUserInfoKey: requestID,
-            ], options: [.deliverImmediately])
-        print("Requested owner terminal window for session \(sessionID)")
+        #if os(macOS)
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            guard (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil else {
+                throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
+            }
+            let requestID = UUID().uuidString
+            try postCLIIPCNotification(
+                name: IPCNotification.openTerminalSessionWindow,
+                userInfo: [
+                    IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                    IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                    IPCNotification.focusRequestIDUserInfoKey: requestID,
+                ])
+            print("Requested owner terminal window for session \(sessionID)")
+        #else
+            throw WorkspaceError.invalidArgument(message: "Native Spaces terminal windows are only available on macOS.")
+        #endif
     }
 }
 
@@ -363,115 +431,47 @@ struct TerminalProxyCommand: ParsableCommand {
             }
         }
         try server.start()
-        print("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)")
-        fflush(stdout)
+        FileHandle.standardOutput.write(Data("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)\n".utf8))
         dispatchMain()
     }
 }
 
 struct MobileCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "mobile", abstract: "Expose first-party workspace and terminal browsing for the iOS client.",
-        subcommands: [MobileStatusCommand.self, MobileServeCommand.self], defaultSubcommand: MobileStatusCommand.self)
+        commandName: "mobile", abstract: "Inspect the same-machine Spaces Device API.", subcommands: [MobileStatusCommand.self],
+        defaultSubcommand: MobileStatusCommand.self)
 }
 
 struct MobileStatusCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the first-party mobile bridge address.")
+    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the same-machine Spaces Device API address.")
 
     func run() throws { for line in try mobileStatusLines() { print(line) } }
 }
 
 func mobileStatusLines(
-    loadControlResponse: () throws -> SpacesMobileBridgeControlResponse = {
-        try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()
-    }
+    loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = { try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() }
 ) throws -> [String] {
     let response = try loadControlResponse()
     guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
     guard let status = response.status else {
-        throw WorkspaceError.invalidArgument(message: "Mobile bridge status response did not include address details.")
+        throw WorkspaceError.invalidArgument(message: "Device API status response did not include address details.")
     }
     return mobileStatusLines(status: status)
 }
 
-func mobileStatusLines(status: SpacesMobileBridgeStatus) -> [String] {
-    var lines = ["Spaces mobile bridge", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)"]
+func mobileStatusLines(status: SpacesDeviceAPIStatus) -> [String] {
+    var lines = [
+        "Spaces Device API", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)",
+        "fingerprint=\(status.certificateFingerprint)",
+    ]
     if status.networkAddresses.isEmpty {
         lines.append("addresses=(none)")
     } else {
         lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
     }
-    lines.append("iphone=Open Mobile Connection in the Mac app to show a QR code to scan with the Spaces iOS app.")
+    lines.append("pair=Run `spaces pair` to show iOS pairing details, or `spaces pair --json` for SSH-assisted Mac pairing.")
     return lines
 }
-
-struct MobileServeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run a standalone first-party mobile bridge for the iOS client.")
-
-    @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
-        SpacesMobileBridgeDefaults.host
-    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
-    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 8-digit code.") var pairingCode:
-        String?
-    @Option(name: .long, help: "Number of one-time pairing windows to emit in standalone harness mode.") var pairingWindowCount = 1
-
-    func run() throws {
-        guard pairingWindowCount > 0 else { throw ValidationError("--pairing-window-count must be greater than zero.") }
-        let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedPairingCode =
-            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
-                SpacesMobilePairingCoordinator.generatePairingCode()
-            }
-        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
-        let pairingWindowEmitter = MobileServePairingWindowEmitter(
-            bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
-        let server = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey) { _ in
-            pairingWindowEmitter.openNextWindow(label: "Spaces mobile pairing window")
-        }
-        pairingWindowEmitter.server = server
-        try server.start()
-        pairingWindowEmitter.linkHost = mobileServePairingLinkHost(host: host)
-        pairingWindowEmitter.openNextWindow(label: "Spaces mobile bridge ready")
-        withExtendedLifetime(server) { dispatchMain() }
-    }
-}
-
-private final class MobileServePairingWindowEmitter: @unchecked Sendable {
-    weak var server: SpacesMobileBridgeServer?
-    var linkHost = SpacesMobileBridgeDefaults.loopbackHost
-
-    private let lock = NSLock()
-    private let bindHost: String
-    private let totalWindowCount: Int
-    private var emittedWindowCount = 0
-    private var nextPairingCode: String?
-
-    init(bindHost: String, totalWindowCount: Int, firstPairingCode: String) {
-        self.bindHost = bindHost
-        self.totalWindowCount = totalWindowCount
-        nextPairingCode = firstPairingCode
-    }
-
-    func openNextWindow(label: String) {
-        lock.lock()
-        guard emittedWindowCount < totalWindowCount, let server else {
-            lock.unlock()
-            return
-        }
-        emittedWindowCount += 1
-        let code = nextPairingCode ?? SpacesMobilePairingCoordinator.generatePairingCode()
-        nextPairingCode = nil
-        lock.unlock()
-
-        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
-        print(
-            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
-        )
-        fflush(stdout)
-    }
-}
-
-func mobileServePairingLinkHost(host: String) -> String { SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: host) }
 
 enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
     case `init` = "init"
@@ -498,7 +498,11 @@ private func terminalShellPath(_ explicitPath: String?) -> String {
     if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
         return configured
     }
-    return "/bin/zsh"
+    #if os(Linux)
+        return "/bin/bash"
+    #else
+        return "/bin/zsh"
+    #endif
 }
 
 private func terminalDefaultTitle(command: String?, cwd: String) -> String {
@@ -506,3 +510,9 @@ private func terminalDefaultTitle(command: String?, cwd: String) -> String {
     let name = URL(fileURLWithPath: cwd).lastPathComponent
     return name.isEmpty ? "Terminal" : name
 }
+
+#if os(macOS)
+    private func postCLIIPCNotification(name: Notification.Name, userInfo: [String: String]? = nil) throws {
+        try IPCNotification.post(name, userInfo: userInfo)
+    }
+#endif

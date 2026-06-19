@@ -25,13 +25,12 @@ final class SpacesMCPStdioServer {
                 properties: ["project": stringSchema("Project ID filter."), "includeArchived": boolSchema("Include archived workspaces.")],
                 required: []),
             tool(
-                name: "spaces_workspace_create", description: "Create an explicit host-scoped workspace.",
+                name: "spaces_workspace_create", description: "Create a workspace on this device.",
                 properties: [
-                    "project": stringSchema("Project ID."), "branch": stringSchema("Workspace branch."),
-                    "host": stringSchema("Host ID, or local for the Mac."), "title": stringSchema("Workspace title."),
+                    "project": stringSchema("Project ID."), "branch": stringSchema("Workspace branch."), "title": stringSchema("Workspace title."),
                     "targetBranch": stringSchema("Target branch for new branch creation."),
                     "existingBranch": boolSchema("Use an existing branch instead of creating a new branch."),
-                ], required: ["project", "branch", "host"]),
+                ], required: ["project", "branch"]),
             tool(
                 name: "spaces_workspace_start", description: "Ensure a workspace is running.",
                 properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]),
@@ -121,9 +120,8 @@ final class SpacesMCPStdioServer {
             return try TerminalService.sendProfileCommand(
                 .init(
                     operation: .workspaceCreate, projectID: try requiredString(arguments["project"], field: "project"),
-                    branch: try requiredString(arguments["branch"], field: "branch"), hostID: try requiredString(arguments["host"], field: "host"),
-                    title: optionalString(arguments["title"]), targetBranch: optionalString(arguments["targetBranch"]),
-                    existingBranch: optionalBool(arguments["existingBranch"]) ?? false))
+                    branch: try requiredString(arguments["branch"], field: "branch"), title: optionalString(arguments["title"]),
+                    targetBranch: optionalString(arguments["targetBranch"]), existingBranch: optionalBool(arguments["existingBranch"]) ?? false))
         case "spaces_workspace_start":
             return try TerminalService.sendProfileCommand(
                 .init(operation: .workspaceStart, workspaceID: try requiredString(arguments["workspace"], field: "workspace")))

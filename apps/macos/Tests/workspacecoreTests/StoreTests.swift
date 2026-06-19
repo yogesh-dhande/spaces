@@ -35,7 +35,6 @@ final class StoreTests: XCTestCase {
         let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state")
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
-        let computeHostColumns = try readTableColumns(dbURL: dbURL, table: "compute_hosts")
         let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
         let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
         let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
@@ -60,12 +59,11 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
-        XCTAssertTrue(workspaceColumns.contains("host_id"))
+        XCTAssertFalse(workspaceColumns.contains("host_id"))
         XCTAssertTrue(workspaceColumns.contains("runtime_path"))
         XCTAssertFalse(workspaceColumns.contains("compute_host_override_id"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
         XCTAssertFalse(projectColumns.contains("default_compute_host_id"))
-        XCTAssertTrue(computeHostColumns.contains("daemon_certificate_fingerprint"))
         XCTAssertFalse(workspaceProcessColumns.contains("execution_mode"))
         XCTAssertFalse(projectProcessColumns.contains("execution_mode"))
         XCTAssertTrue(runningProcessColumns.contains("template_id"))
@@ -116,7 +114,8 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
         XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
         XCTAssertFalse(agentSessionColumns.contains("yabai_window_id"))
-        XCTAssertEqual(workspaceForeignKeys, 2)
+        XCTAssertEqual(workspaceForeignKeys, 1)
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "compute_hosts"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "windows"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "agent_windows"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "terminal_targets"))
@@ -124,7 +123,6 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "workspace_status_checks"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "status_results"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "workspace_compute_bindings"))
-        XCTAssertEqual(try readRows(dbURL: dbURL, sql: "SELECT id, kind, name FROM compute_hosts"), [["local", "local", "Local Mac"]])
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
@@ -164,8 +162,8 @@ final class StoreTests: XCTestCase {
             dbURL: dbURL,
             sql: """
                 INSERT INTO projects(id, name, dir, is_git, is_collapsed) VALUES ('project-1', 'Project', '/tmp/project', 0, 0);
-                INSERT INTO workspaces(id, project_id, host_id, title, dir, runtime_path, is_default, is_archived, is_hidden, is_running)
-                VALUES ('workspace-1', 'project-1', 'local', 'feature', '/tmp/project/feature', '/tmp/project/feature', 0, 0, 0, 0);
+                INSERT INTO workspaces(id, project_id, title, dir, runtime_path, is_default, is_archived, is_hidden, is_running)
+                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', '/tmp/project/feature', 0, 0, 0, 0);
                 """)
 
         XCTAssertThrowsError(

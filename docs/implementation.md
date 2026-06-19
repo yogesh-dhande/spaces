@@ -22,10 +22,10 @@ flowchart LR
   app["SpacesApp"] --> spacesui["spacesui"]
   spacesui --> stream
   spacesui --> terminalservice
-  ios["SpacesMobile"] --> mobilecore["spacesmobilecore"]
-  mobilecore --> mobilebridge["spacesmobilebridge"]
-  mobilebridge --> terminalservice
-  mobilebridge --> spacescli
+  ios["SpacesMobile"] --> devicecore["spacesdevicecore"]
+  devicecore --> deviceapi["spacesdeviceapi"]
+  deviceapi --> terminalservice
+  deviceapi --> spacescli
 
   stream --> store["SQLite store"]
   stream --> systembridge["systembridge adapters"]
@@ -42,110 +42,85 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  subgraph mac["Mac profile"]
-    app["SpacesApp / spacesui"]
-    cli["spaces CLI"]
+  subgraph device["spacesd device (macOS or Linux)"]
+    spacesd["spacesd\nDevice API + TerminalService"]
     core["workspacecore"]
-    db[("SQLite profile database")]
-    keychain["macOS Keychain"]
-    spacesd["spacesd\nTerminalService + mobile bridge supervisor"]
-    mobileControl["Mobile bridge control socket"]
-    mobileBridge["Mobile bridge TCP listener"]
+    db[("~/.spaces/spaces.db")]
+    runtimeFiles[("~/.spaces/runtime")]
+    workspaces[("~/.spaces/workspaces")]
+    tlsIdentity["TLS identity"]
+    pairedClients["paired-client token hashes"]
     terminal["Ghostty session core\nper terminal session"]
     child["Shell / process / coding-agent child"]
-    runtimeFiles[("Runtime files\nlogs, sockets, terminal output, mobile JSON")]
+  end
+
+  subgraph macClient["macOS client"]
+    app["Spaces.app / spacesui"]
+    clientDB[("Application Support/Spaces/Client/spaces-client.db")]
+    keychain["Keychain\npaired-device tokens"]
     yabai["yabai"]
     chrome["Google Chrome"]
-    sshForward["ssh -N -L browser forward"]
-    terminalProxy["spaces terminal proxy\noptional TCP bridge"]
+    ssh["OpenSSH\nterminal, browser forward, editor"]
   end
 
-  subgraph ios["iOS"]
+  subgraph ios["iOS client"]
     iosApp["SpacesMobile"]
+    iosKeychain["Keychain\npaired-device tokens"]
+    iosContainer[("client DB in app container")]
   end
 
-  subgraph remote["Remote compute host"]
-    sshd["sshd"]
-    remoteSpacesd["spacesd\nTerminalService TLS listener"]
-    remoteTerminal["Ghostty headless session core"]
-    remoteChild["Remote shell / process / agent child"]
-    remoteRuntime[("Remote profile runtime\nSQLite, logs, terminal state")]
-    signalHelper["remote spaces helper\nbin/spaces agent signal"]
-  end
-
+  cli["spaces CLI\nsame-machine only"]
   bonjour["Bonjour / NetService"]
 
-  app --> core
-  cli --> core
+  spacesd --> core
   core <--> db
-  core --> keychain
-  app --> mobileControl
-  mobileControl --> spacesd
-  app --> yabai
-  app --> chrome
-  core --> yabai
-  core --> chrome
-
-  app -->|TerminalService JSON: create/list/state/terminate/runWorkspaceCommand\nprofile Unix socket; auth by local user + 0600 socket| spacesd
-  cli -->|TerminalService JSON for terminal create/list\nprofile Unix socket; auth by local user + 0600 socket| spacesd
-  spacesd -->|launch config, runtime state, clients, attachments, final render| db
   spacesd --> runtimeFiles
+  spacesd --> workspaces
+  spacesd --> tlsIdentity
+  spacesd --> pairedClients
   spacesd --> terminal
   terminal <-->|PTY bytes, resize, input, foreground process samples\nSPACES_* environment| child
-  terminal <-->|TerminalControl JSON: attach, detach, heartbeat, takeover, send, key, resize, scroll\nper-session Unix socket; auth by local user + 0600 socket; owner commands require clientID| app
-  cli -->|TerminalControl JSON: send, key, takeover, tail\nper-session Unix socket; auth by local user + 0600 socket| terminal
-  terminal -->|newline-delimited GhosttyRemoteSessionStatePayload\nper-session Unix subscription socket; auth by local user + 0600 socket| app
 
-  cli --> terminalProxy
-  terminalProxy -->|TerminalControl JSON over TCP; --auth-token checked in request| terminal
-
-  spacesd --> mobileBridge
-  mobileBridge -->|publishes service name, port, TXT metadata only; no authorization data| bonjour
+  app --> clientDB
+  app --> keychain
+  app --> yabai
+  app --> chrome
+  app -->|Device API JSON\nTLS pinned daemon identity + paired-client token| spacesd
+  iosApp --> iosContainer
+  iosApp --> iosKeychain
+  iosApp -->|Device API JSON\nTLS pinned daemon identity + paired-client token| spacesd
+  cli -->|TerminalService/profile JSON\nlocal Unix socket, same-machine daemon only| spacesd
+  spacesd -->|publishes endpoint metadata only| bonjour
+  app -->|discovers host and port| bonjour
   iosApp -->|discovers host and port| bonjour
-  iosApp -->|SpacesMobileBridge JSON commands and state subscription\nTLS-PSK using pairing transport key; app auth token bound to first-party bundle + installation ID| mobileBridge
-  mobileBridge -->|overview, create/run/stop/restart, terminal state for local and remote sessions| core
-  mobileBridge -->|TerminalControl JSON and state-stream relay for local sessions\nper-session Unix sockets; paired device token required before relay| terminal
-  mobileBridge -->|TerminalService JSON for remote provisioning and session discovery\nhost admin token stays Mac-side| remoteSpacesd
-  mobileBridge -->|paired device token hashes and bridge settings| runtimeFiles
-  iosApp -->|terminal-safe TerminalService JSON for provisioned remote sessions\nTLS pinned to daemon fingerprint; scoped mobile token only| remoteSpacesd
 
-  app -->|SSH BatchMode setup over stdin\nstrict known-host checking; probes platform; installs signed release artifact; passes token outside argv| sshd
-  sshd --> remoteSpacesd
-  app -->|TerminalService JSON: ping, prepareWorkspace, create, state, control, terminate, runWorkspaceCommand\nTLS 1.2/1.3 with pinned SHA-256 certificate fingerprint; bearer auth token from Keychain or SPACESD_AUTH_TOKEN_*| remoteSpacesd
-  core -->|same pinned-TLS TerminalService requests for remote launch/stop/setup| remoteSpacesd
-  remoteSpacesd --> remoteRuntime
-  remoteSpacesd --> remoteTerminal
-  remoteTerminal <-->|PTY bytes, resize, input, foreground process samples\nmanifest SPACES_* environment| remoteChild
-  signalHelper -->|TerminalService agentSignal request with session/workspace context\nremote profile Unix socket; auth by remote user + 0600 socket| remoteSpacesd
-  remoteSpacesd -->|pending remote agent signal events| remoteRuntime
-  app -->|state polling fetches pending agent signals; ackAgentSignals after Mac profile update\npinned TLS + host auth token| remoteSpacesd
-
-  app -->|allocates local ephemeral port and starts ssh -L\nOpenSSH auth; forwards Mac 127.0.0.1:local to remote 127.0.0.1:namedPort| sshForward
-  sshForward --> sshd
-  chrome -->|loads rewritten localhost URL through SSH tunnel| sshForward
+  app -->|remote macOS terminal attach\nSSH BatchMode + known-host validation| ssh
+  chrome -->|remote browser URL through ssh -L| ssh
+  app -->|remote worktree URI through SSH-capable editor| ssh
 ```
 
-- `spacesd` is per profile. On macOS it always serves the profile Unix socket; when `SPACESD_LISTEN_PORT` is set it also serves the pinned-TLS TerminalService endpoint used by compute hosts and requires a non-empty `SPACESD_AUTH_TOKEN`.
-- The mobile bridge is hosted inside `spacesd`. Its control socket is local-only and used by the Mac UI to inspect bridge status, open pairing windows, revoke devices, and rotate pairing state.
-- Mobile bridge transport has two authentication layers: TLS-PSK proves possession of the pairing transport key from the QR/deep link, and the per-device auth token proves a paired first-party iOS installation. Tokens are stored only as hashes in the profile runtime.
-- Mobile bridge latency shaping applies configured delay and throughput limits to discrete request/response sends and stream-final sends. Normal terminal state-stream relay frames remain ordered but are not individually delayed or throttled, so high-output terminal streams do not accumulate an artificial stop-and-wait backlog under constrained-profile tests.
-- Remote mobile terminal credentials are provisioned through the authenticated Mac bridge after pairing. The Mac asks each configured remote daemon to mint a terminal-only token for the iOS installation, includes that scoped token with the pinned daemon endpoint in authorized mobile overview payloads, and never serializes the compute-host admin token.
-- Remote `spacesd` transport has two authentication layers: clients pin the daemon's self-signed certificate fingerprint from `compute_hosts.daemon_certificate_fingerprint`, then include an accepted bearer token in each TerminalService request. Mac-side orchestration uses the host auth token from Keychain or the host-specific `SPACESD_AUTH_TOKEN_<HOST_ID>` environment override. iOS direct terminal access uses a scoped mobile token minted by the remote daemon for the paired installation; the remote daemon stores only token hashes and rejects that token for workspace, profile, shutdown, create, and other admin/runtime mutation commands.
-- iOS direct remote terminal control uses one serialized pinned-TLS command channel per daemon endpoint. Non-stream TerminalService requests are newline-framed on that channel and must receive the expected response shape, such as `controlResponse` for control commands or `sessionState` for explicit state reads. Live render and ownership updates are delivered by the separate direct `subscribe` stream, so input, key, resize, and scroll control responses do not carry session snapshots.
+- `spacesd` is per device. On macOS and Linux it owns the daemon database, runtime files, workspace root, TLS identity, projects, workspaces, terminal sessions, process rows, agent rows, alerts, notes, and paired-client records.
+- The Device API is hosted inside `spacesd`. It exposes device info, pairing, paired-client management, project and workspace CRUD, terminal lifecycle and control, process lifecycle, coding-agent lifecycle, notes, setup state, alerts, and configuration import/export.
+- Device API transport uses two authentication layers: clients pin the daemon's self-signed TLS identity from pairing metadata, then include a per-client token issued during the short-lived pairing window. Tokens are stored only as hashes by the daemon and as secrets in the client Keychain.
+- macOS and iOS clients keep only client-local metadata in SQLite: paired device list, active device, local device label, editor preference, keyboard bindings, local window IDs, browser/editor window mappings, and focus history.
+- Before a client database migration, the client creates a timestamped metadata-only backup. If migration fails, it restores the latest backup and surfaces a startup error. Pairing tokens stay in Keychain and are not copied into SQLite backups.
+- Direct Device API reachability is required through LAN, VPN, Tailscale, or equivalent network configuration. There is no relay transport.
+- macOS remote-device pairing, terminal attach, browser forwarding, and editor opening require SSH to the same device. Remote pairing validates SSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, runs `~/.spaces/bin/spaces pair --json` on the remote device, and then pairs with the Device API at the validated SSH host and returned API port.
+- iOS direct terminal control uses one serialized pinned-TLS command channel per daemon endpoint. Non-stream TerminalService requests are newline-framed on that channel and must receive the expected response shape, such as `controlResponse` for control commands or `sessionState` for explicit state reads. Live render and ownership updates are delivered by the separate direct `subscribe` stream, so input, key, resize, and scroll control responses do not carry session snapshots.
 - Local Unix socket transports rely on profile-scoped paths under `/tmp/spaces-terminal-sockets` and `0600` permissions. They are not cross-user or cross-profile APIs.
-- Bonjour advertises only discoverability metadata for the mobile bridge. It is not used for trust or authorization.
+- Bonjour advertises only discoverability metadata for the Device API. It is not used for trust or authorization.
 - `spaces terminal proxy` is an explicit CLI-run TCP bridge for one terminal session. It forwards TerminalControl JSON to the local per-session socket and requires the configured shared token.
 
 ## Module Responsibilities
 - `SpacesApp`: minimal app entry point that boots AppKit.
-- `spacesd`: per-profile background executable for local and remote built-in terminal sessions plus the first-party mobile bridge; terminal behavior lives in [terminal.md](terminal.md).
+- `spacesd`: per-device background executable for the Device API, daemon-owned project/workspace state, built-in terminal sessions, process and agent runtimes, pairing, and paired-client control; terminal behavior lives in [terminal.md](terminal.md).
 - `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon/text tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline notes editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
 - `spaces`: executable shim that boots the declarative CLI parser.
 - `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, translation from CLI inputs into orchestration calls, terminal and mobile subcommands, and profile or desktop-control inspection helpers used by dev and real-system workflows.
 - `spacesterminalcore`: shared terminal runtime primitives and protocols; the built-in terminal control, persistence, rendering, and CLI-tail details live in [terminal.md](terminal.md).
-- `spacesmobilecore`: first-party mobile bridge request and response types shared between the macOS bridge and the iOS client. The shared DTOs expose project summaries, workspace summaries, configured process rows, coding-agent rows, workspace-terminal rows, run-state values, agent activity values, workspace-creation options, mutation outputs, and legacy decode defaults without depending on `workspacecore`.
-- `spacesmobilebridge`: daemon and CLI-hosted first-party TLS-PSK bridge for the iOS client. It assembles mobile overview data from `workspacecore` records and spacesd session catalogs, and routes authenticated mutation commands back through the same orchestration paths used by macOS. Terminal transport behavior lives in [terminal.md](terminal.md).
-- `spacesruntimecore`: daemon-safe runtime helpers that avoid workspace, UI, Keychain, Bonjour, and AppKit dependencies. Remote daemon worktree preparation uses this target for Git command execution and fast-forward-only refresh checks.
+- `spacesdevicecore`: first-party Device API request and response types shared by macOS, iOS, and daemon Device API code. Requests use a typed command envelope with command-specific payloads, and responses use a typed result envelope for overview, mutation, terminal state, workspace-create options, auth-token, and terminal-link payloads. The shared DTOs expose project summaries, workspace summaries, configured process rows, coding-agent rows, workspace-terminal rows, run-state values, agent activity values, workspace-creation options, mutation outputs, and compatibility decode defaults without depending on `workspacecore`.
+- `spacesdeviceapi`: daemon-hosted first-party Device API transport and local daemon control socket. It assembles overview data from `workspacecore` records and spacesd session catalogs, routes authenticated mutation commands back through the same orchestration paths used by local daemon operations, and uses typed control commands for status, pairing windows, paired-device administration, and local-client bootstrap. Terminal transport behavior lives in [terminal.md](terminal.md).
+- `spacesruntimecore`: daemon-safe runtime helpers that avoid workspace, UI, Keychain, Bonjour, and AppKit dependencies. Device-local worktree preparation uses this target for Git command execution and fast-forward-only refresh checks.
 - `spacesterminalmobileghostty`: iOS terminal adapter for Ghostty-backed mobile rendering and input mapping; details live in [terminal.md](terminal.md).
 - `spacesterminalghostty`: embedded libghostty integration and app-side host adapters; details live in [terminal.md](terminal.md).
 - `spacesterminalui`: native terminal-session window controllers owned by the Spaces app; details live in [terminal.md](terminal.md).
@@ -153,23 +128,23 @@ flowchart TD
 - `systembridge`: system adapters for shell commands, yabai, Chrome, and related OS integrations.
 
 ### Terminal Architecture Reference
-- Built-in terminal ownership, session layout, Ghostty compatibility, macOS and iOS rendering, mobile bridge behavior, scroll rendering, CLI controls, and terminal validation live in [terminal.md](terminal.md). This document references terminal modules only where they connect to non-terminal systems.
+- Built-in terminal ownership, session layout, Ghostty compatibility, macOS and iOS rendering, Device API terminal behavior, scroll rendering, CLI controls, and terminal validation live in [terminal.md](terminal.md). This document references terminal modules only where they connect to non-terminal systems.
 - Ghostty action callbacks are decoded into typed events before reaching UI surfaces. `OPEN_URL` is handled only as terminal link opening, and `MOUSE_OVER_LINK` drives pointer affordance. App, window, tab, and config actions remain outside Spaces' terminal surface contract.
 - macOS terminal link opening converts `http` and `https` strings to URL opens, and converts `file://` plus absolute filesystem paths to file URLs before handing them to the system workspace opener.
 - The iOS Ghostty mirror registers a per-surface action handler. A terminal tap is first offered to Ghostty at the tapped cell coordinate so Ghostty can emit an `OPEN_URL` action for detected links; taps without a detected link continue through the normal input-focus path.
 
-### Mobile Workspace Bridge
+### Device API Workspace Transport
 - Mobile overview construction reads projects, non-archived workspaces, workspace settings, running-process records, agent-window records, tracked terminal windows, and live terminal sessions. The builder returns project summaries plus per-workspace runtime rows that are safe for local filtering by row type, run state, and search text.
 - Process rows are keyed by configured process identity and annotate live or exited runtime when a matching running-process record exists. Coding-agent rows keep configured launcher slots stable and append unmatched live agent rows after configured rows. Workspace-terminal rows exclude terminal sessions already claimed by process or agent runtime records.
-- Mutation responses carry `ok`, a user-facing message, a refreshed overview, and action-specific identifiers such as `workspaceID` or `sessionID`. The refreshed overview keeps iOS state synchronized after create, run, stop, restart, or terminal-open actions without requiring the client to infer affected rows.
-- Workspace creation requests use the same project and git semantics as the macOS GUI. The bridge supplies per-project creation options and accepts title, branch mode, branch name, target branch, optional directory name, and existing-branch reuse intent.
+- Mutation responses carry `ok`, a user-facing message, and a typed mutation result containing a refreshed overview plus action-specific identifiers such as `workspaceID` or `sessionID`. The refreshed overview keeps clients synchronized after create, run, stop, restart, or terminal-open actions without requiring the client to infer affected rows.
+- Workspace creation requests use the same project and git semantics as the macOS GUI. The Device API supplies per-project creation options and accepts title, branch mode, branch name, target branch, optional directory name, and existing-branch reuse intent.
 - Mobile workspace-terminal creation reserves and finishes a service-owned terminal session at the workspace root while using a no-op native window opener. This keeps the Mac window layer out of mobile-only terminal creation.
 - Mobile workspace-terminal stop requests pass workspace ID and session ID into workspacecore's ad hoc built-in terminal stop path. The path rejects process- and agent-owned sessions, terminates the matching service session, removes tracked terminal rows, and can resolve live sessions by working directory when a tracked window row is already gone.
 - Mobile process mutations call configured-process recovery for missing runtimes and running-process stop or restart for live runtimes.
 - Mobile coding-agent mutations call the workspace agent lifecycle methods. Stop removes runtime state and terminates the backing Spaces terminal session while preserving configured launchers. Restart resolves the claimed or configured launcher ID first, falls back to launcher names only for records without an ID claim, and launches that configured row again.
-- Mobile app recovery is hosted inside `spacesmobilebridge` because the daemon bridge remains reachable when `SpacesApp` has quit while `spacesd` is still running. Only the daemon-hosted bridge installs the recovery launcher; standalone `spacese2e mobile-serve` bridges reject `launchSpacesApp` because they do not have a spacesd executable context. The launcher checks `SpacesLeaseCoordinator.currentProfileAppOwner(profile:)` before spawning and treats an existing owner as success, so the command is launch-if-needed rather than force-relaunch.
+- Mobile app recovery is hosted inside `spacesdeviceapi` because the daemon Device API remains reachable when `SpacesApp` has quit while `spacesd` is still running. Only the daemon-hosted Device API installs the recovery launcher; standalone `spacese2e mobile-serve` servers reject `launchSpacesApp` because they do not have a spacesd executable context. The launcher checks `SpacesLeaseCoordinator.currentProfileAppOwner(profile:)` before spawning and treats an existing owner as success, so the command is launch-if-needed rather than force-relaunch.
 - `SpacesApp` recovery resolves executables from the running service location only: sibling `SpacesApp` for SwiftPM builds, the app bundle's `Contents/MacOS/SpacesApp` when the service is in `Contents/Resources`, `/Applications/Spaces.app/Contents/MacOS/SpacesApp` for `/usr/local/bin/spacesd`, and `~/Applications/Spaces.app/Contents/MacOS/SpacesApp` for `~/.local/bin/spacesd`. The resolver intentionally avoids process-name scans, current-directory searches, `open`, service restarts, and relaunch fallbacks so recovery stays scoped to the intended install relationship.
-- Terminal link preview uses authenticated bridge commands. `resolveTerminalLink` classifies direct HTTPS URLs or readable Mac files and returns metadata for image and video media; `readTerminalLinkChunk` streams approved local files by stable link ID and byte range. Relative paths resolve against the session working directory, `~` resolves to the Mac user home directory, and resolved paths must be regular readable files. The bridge records a short-lived in-memory approval for each resolved local link, chunk reads require an exact link ID and session match against that approval, and successful chunk reads refresh the approval while the transfer is active.
+- Terminal link preview uses authenticated Device API commands. `resolveTerminalLink` classifies direct HTTPS URLs or readable Mac files and returns metadata for image and video media; `readTerminalLinkChunk` streams approved local files by stable link ID and byte range. Relative paths resolve against the session working directory, `~` resolves to the Mac user home directory, and resolved paths must be regular readable files. The Device API records a short-lived in-memory approval for each resolved local link, chunk reads require an exact link ID and session match against that approval, and successful chunk reads refresh the approval while the transfer is active.
 - Mac file serving for iOS previews is limited after symlink resolution. User home paths, workspace paths, `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, `/opt`, and `/usr/local` are allowed; system and protected roots such as `/System`, `/Applications`, `/Library`, `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/etc`, `/dev`, `/cores`, `/Network`, `/Volumes`, `/private/etc`, `/private/var/db`, and `/private/var/root` are rejected.
 - The iOS client sends preview metadata and chunk requests over a preview-specific command connection so file transfer cannot interleave with terminal input RPCs. Each preview request carries a generation token so overlapping taps cannot present stale metadata, downloads, or errors. Downloaded preview files are stored in a temporary cache keyed by a SHA-256 digest of the session and link metadata, direct HTTPS media URLs are downloaded to disk before being moved into that cache, stale direct-media downloads are cancelled on preview invalidation, and stale preview files are removed opportunistically. Preview files are presented with Quick Look. Direct non-media web URLs and cleartext HTTP URLs bypass the preview cache and open through UIKit.
 - The recovery launch environment overwrites `SPACES_DB_PATH`, `SPACES_RUNTIME_DIR`, and `SPACESD_EXECUTABLE` with the current profile database path, runtime directory, and service executable path. This binds the relaunched app to the same profile and keeps app-side terminal prewarm pointed at the still-running service binary instead of deriving a different profile or service path from the app process environment.
@@ -177,39 +152,30 @@ flowchart TD
 - User window close detaches process and coding-agent terminal windows while ad hoc terminal window close uses the ad hoc session stop path. Terminal-toolbar stop uses the process, coding-agent, or ad hoc lifecycle path for the selected runtime. Programmatic closes produced by stop or restart carry a termination marker through IPC so AppKit window cleanup does not recursively run close cleanup.
 - Runtime-target refresh preserves live process-owned and agent-owned Spaces terminal sessions by service runtime state after their native window detaches. Preserved agent sessions clear dead native window IDs during refresh and rebind to the replacement native window when focused. Ad hoc terminal rows require an active or pending attachment and are pruned when their final local or remote attachment is gone.
 
-### Compute Host Planning
-- The Mac profile remains authoritative for projects, workspaces, host configuration, workspace creation, compute-host selection, and browser forwarding decisions.
-- `compute_hosts` stores named remote hosts with SSH control fields, remote workspace root, daemon endpoint, and the daemon endpoint fingerprint carried to direct clients.
-- `spacesd` creates or loads a profile-scoped self-signed TLS identity under the terminal runtime root's `daemon-tls` directory. Remote daemon clients verify the pinned SHA-256 certificate fingerprint from `SpacesDaemonEndpoint` during TLS handshake before sending newline-framed JSON requests with the configured host auth token. The Mac app stores generated per-host daemon auth tokens in Keychain under the active Spaces profile root and host ID; host-specific environment variables remain the automation override.
-- `SSHConfigurationResolver` parses `ssh -G` output so Remote Hosts can treat the entered SSH alias as user-facing input while storing the resolved `HostName` as the internal daemon host when OpenSSH provides one.
-- `RemoteSpacesArtifactManifestVerifier` verifies the signed `spaces-remote-artifacts.json` manifest from the current `v<AppVersion.short>` GitHub Release with the generated Ed25519 public key in `AppVersion.remoteArtifactPublicKey`. The manifest maps supported platforms to archive URLs and SHA-256 digests. The app rejects unsigned, mismatched-version, unsupported-platform, missing-artifact, and archive-checksum-mismatch states before a host record is saved.
-- `ComputeHostBootstrapper` runs the Remote Hosts connect path over SSH with non-interactive host access and strict known-host checking. It probes `uname`, `sw_vers`, and `/etc/os-release`, selects only `spacesd-macos-universal`, `spacesd-ubuntu-24.04-x86_64`, or `spacesd-ubuntu-24.04-arm64`, verifies the signed manifest locally, checks remote tools and install-root writability, then feeds bootstrap input over stdin. A small remote shell wrapper reads the first stdin line into the token environment, then executes the install/start script from the remaining stdin. This keeps the daemon token out of local SSH argv and the remote daemon argv.
-- Managed remote installs live under `~/.spaces/compute-hosts/<host-id>/daemon/releases/<artifact-version>/`. The bootstrap downloads the selected archive from the GitHub Release, verifies the archive SHA-256 from the signed manifest, verifies the archive's internal `SHA256SUMS`, updates stable `daemon/current`, `daemon/bin`, and profile `bin/spaces` symlinks, resolves the workspace root, prints the daemon TLS fingerprint, starts that managed `spacesd` with the selected port and token when the selected port is not already listening, and returns the fingerprint, workspace root, selected port, artifact version, and log metadata for the Mac app to verify with pinned TLS before saving the host.
-- Remote daemon `ping` responses include daemon version, managed artifact version, daemon certificate fingerprint, and active session count. Remote Hosts uses that status for Check display, upgrade availability, certificate-pin reporting, and the idle precondition for lifecycle actions. When Upgrade is blocked by active remote sessions, the controller fetches the live session list over pinned TLS, presents those sessions in a confirmation alert, stops known process, agent, and ad hoc terminal runtimes through the existing orchestration paths, falls back to direct remote session termination for unmanaged sessions, then uses `shutdownIfIdle` over the pinned-TLS admin channel and polls until the daemon endpoint exits before installing the current artifact and relaunching through SSH with the saved daemon port required to be free. Reinstall applies the same reachable-idle shutdown before SSH setup and never terminates an existing listener from the setup script. Uninstall uses reachable-idle shutdown when available, still runs SSH cleanup when the daemon is already unreachable, and removes `daemon`, profile `bin/spaces`, upload artifacts, and the recorded PID file only after the remote pid and port checks confirm the daemon is stopped; profile data, workspace roots, and remote worktrees stay in place.
-- Remote artifact archives contain `bin/spacesd`, `bin/spaces`, `manifest.json`, and `SHA256SUMS`. Ubuntu archives also carry `spacesd-bin`, `libghostty-vt`, and Swift runtime libraries needed on stock Ubuntu 24.04 so headless Ghostty rendering does not require a display server or Swift toolchain installation on the host.
-- `compute_hosts` includes the first-class local Mac host record with ID `local`.
-- `workspaces.host_id` stores immutable host assignment, and `workspaces.runtime_path` stores the runtime path used by that workspace on its assigned host.
-- `ComputeHostPlanner` owns deterministic selection and manifest planning from the workspace host ID; remote daemon targets carry endpoint metadata, and local daemon targets use the profile service socket.
-- Runtime manifests carry workspace ID, project ID, location, local path, remote path, branch, target branch, Git remote URL, named ports, process environment, and allowed file roots. The Mac sends that manifest to the selected remote daemon before launch.
-- Remote workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts are sent to the selected `spacesd` endpoint with the runtime manifest and fast-forward refresh request. Synchronous workspace command logs are allocated under the daemon terminal runtime, and daemon/listener token environment keys are scrubbed from launched child commands. The Mac persists the returned daemon session IDs and log paths in the same process, agent, and window records used for local sessions. Daemon ownership for those records is resolved from the workspace host at operation time; `runtime_target_id` remains reserved for UI and window focus targets.
-- Remote configured process and coding-agent launch paths mirror returned terminal launch, runtime, attachment, and render-state metadata into the Mac profile before opening a native owner window. The native window resolves the workspace's effective daemon endpoint at open time and sends attach, takeover, input, resize, scroll, and state refresh requests to that endpoint while keeping the Mac-side terminal tables as a local mirror for window chrome, ownership UI, and ended-session reopening.
-- Remote `spaces agent signal` events are queued by the remote daemon with the terminal session identity and workspace manifest context. Mac remote terminal windows fetch pending signal events during state refresh, apply them to the Mac profile's coding-agent rows, and acknowledge only the events that were handled so remote agent lifecycle state remains database-backed.
-- Remote `spacesd` requires a runtime manifest for workspace commands and worktree refreshes, validates working directories against manifest allowed roots, clones a missing empty Git worktree from the provided remote URL and branch, refreshes existing worktrees through the fast-forward-only `RemoteWorkspaceGitClient` path in `spacesruntimecore`, starts Ghostty-backed sessions, and runs synchronous workspace commands with daemon-side logs. Existing non-empty non-Git paths, dirty worktrees, missing branches, divergent histories, overwrite risks, fetch failures, and checkout failures block execution instead of resetting or cleaning remote state.
-- Remote worktree refresh is modeled as a fast-forward-only preflight. `RemoteWorkspaceGitClient.refreshWorktreeFastForwardOnly` fetches the workspace branch, checks for tracked dirty state and untracked overwrite risks, requires `HEAD` to be an ancestor of `origin/<branch>`, and advances with `merge --ff-only`. `RemoteWorkspaceRefreshBlock` reports dirty worktrees, overwrite risks, divergent histories, missing branches, fetch failures, and checkout failures with host, path, branch, and guidance. Destructive repair paths such as reset, stash, forced checkout, or cleanup are outside the launch path.
-- The mobile overview builder attaches terminal ownership metadata to process rows, coding-agent rows, workspace terminal rows, and terminal session summaries. The Mac bridge remains the metadata and mutation authority. Remote terminal detail requests go directly from iOS to the daemon that owns the session with the scoped terminal credential provisioned through the Mac bridge.
-- Direct remote terminal latency measurement keeps the command channel open across samples, validates direct response shape per command, and avoids readiness probes that enqueue state responses ahead of input/control commands. The visible-latency metric is therefore command enqueue to subscribed render visibility, with `direct_command_request` reporting only the direct pinned-TLS command round trip.
-- Terminal link preview resolution lives in `spacesmobilecore` so the owning local or remote daemon can resolve file and external media links without importing the Mac mobile bridge server. Remote `spacesd` terminal service commands are scoped to terminal/session/preview operations. Project, workspace, host, and lifecycle mutations continue to enter through the Mac bridge, which resolves the effective host and forwards launch or stop requests through the compute-host runtime path.
-- Editor integration derives Remote SSH URIs from host SSH metadata and the bound remote path.
-- The product `spaces` CLI exposes grouped project, workspace, agent, terminal, and MCP commands. Workspace creation requires explicit project, branch, and host IDs. Grouped CLI commands and `spaces mcp` send explicit profile commands to the adjacent Mac `spacesd` over the profile service socket. MCP exposes project, workspace, and terminal list/tail/send tools; terminal send forwards either UTF-8 text or validated raw bytes through the same daemon-owned control path. Agent lifecycle signaling remains a CLI-only hook path. `spaces import` is not a public command because workspace creation creates profile state, port allocations, and setup state rather than passively discovering a directory. Automation setup, host selection, and runtime-plan inspection for compute hosts belong in `spacese2e`.
+### Device API and Remote Access
+- Each daemon creates or loads a self-signed TLS identity under `~/.spaces/runtime/daemon-tls`. Pairing links carry the daemon endpoint, nonce, short code, transport key material, and certificate fingerprint so clients can pin identity before receiving a long-lived token.
+- The daemon stores paired-client token hashes and device metadata under daemon-owned state. macOS and iOS store the issued token in Keychain and store non-secret paired-device metadata in the client database.
+- The active paired device controls the macOS and iOS home surface. The client database stores the active device selection independently from daemon state so switching clients does not mutate any daemon's workspace records.
+- Project and workspace creation run on the selected daemon. Git project creation can clone from a daemon-side Git URL into the daemon workspace root, and existing-path project creation validates a daemon-local path.
+- Workspace planning is local to the owning daemon. Runtime manifests carry workspace ID, project ID, daemon-local path, branch, target branch, named ports, process environment, and allowed file roots.
+- Workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts execute on the owning daemon. Synchronous workspace command logs are allocated under the daemon runtime root, and daemon listener token environment keys are scrubbed from launched child commands.
+- `spaces agent signal` writes agent lifecycle events to the daemon database for the workspace that owns the terminal session.
+- Worktree refresh is modeled as a fast-forward-only preflight. `RemoteWorkspaceGitClient.refreshWorktreeFastForwardOnly` fetches the workspace branch, checks for tracked dirty state and untracked overwrite risks, requires `HEAD` to be an ancestor of `origin/<branch>`, and advances with `merge --ff-only`. `RemoteWorkspaceRefreshBlock` reports dirty worktrees, overwrite risks, divergent histories, missing branches, fetch failures, and checkout failures with path, branch, and guidance. Destructive repair paths such as reset, stash, forced checkout, or cleanup are outside the launch path.
+- The Device API overview builder attaches terminal ownership metadata to process rows, coding-agent rows, workspace terminal rows, and terminal session summaries. Project, workspace, terminal, process, and agent mutations all enter the owning daemon through authenticated Device API requests.
+- Terminal link preview resolution lives in `spacesdevicecore` so the owning daemon can resolve file and external media links without importing AppKit or UIKit surfaces.
+- macOS remote-device terminal attach, browser forwarding, and editor opening use SSH to the paired device. Browser sessions that target a daemon-local service allocate a local ephemeral port and start `ssh -L`; unrelated URLs open unchanged. Editor integration derives SSH URIs from validated SSH metadata and the daemon-local workspace path.
+- The product `spaces` CLI exposes grouped project, workspace, agent, terminal, pairing, and MCP commands for the same-machine daemon. Workspace creation requires explicit project and branch IDs. Grouped CLI commands and `spaces mcp` send profile commands to the adjacent `spacesd` over the profile service socket. MCP exposes project, workspace, and terminal list/tail/send tools; terminal send forwards either UTF-8 text or validated raw bytes through the same daemon-owned control path. Agent lifecycle signaling remains a CLI-only hook path. `spaces import` is not a public command because workspace creation creates daemon state, port allocations, and setup state rather than passively discovering a directory.
 
 ## Persistence
 
 ### Database
-- Installed/default path: `~/.spaces/spaces.db`
+- Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- SQLite stores projects, workspaces, runtime state, terminal metadata, and global settings.
+- Daemon SQLite stores projects, workspaces, runtime state, terminal metadata, paired-client metadata, daemon settings, and global settings.
+- macOS client SQLite stores metadata at `~/Library/Application Support/Spaces/Client/spaces-client.db`, with timestamped backups under `~/Library/Application Support/Spaces/Client/Backups/`.
+- E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the default client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active schema is version `1`.
+- `migration_state.current_version` records the canonical schema version. The active daemon schema is version `2`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -230,10 +196,11 @@ flowchart TD
 - Store startup validates `migration_state.current_version` against the canonical schema version and fails closed when they do not match.
 - There is no compatibility migration ladder for retired schema versions.
 - Startup runs `PRAGMA integrity_check` and fails if validation does not return `ok`.
+- Client database migrations create a timestamped backup before applying schema steps. A failed migration restores the latest backup and reports a startup error. Client backups contain metadata only; paired-device tokens stay in Keychain.
 
 ## Data Model
 
-The canonical schema is `DatabaseSchema.currentVersion == 1`. Foreign keys below reflect the SQLite schema. Terminal tables also correlate by `session_id` and `root_directory` because they are shared by local and daemon-hosted terminal persistence paths.
+The canonical daemon schema is `DatabaseSchema.currentVersion == 2`. Foreign keys below reflect the SQLite schema. Terminal tables also correlate by `session_id` and `root_directory` because they are shared by local and daemon-hosted terminal persistence paths.
 
 ```mermaid
 erDiagram
@@ -282,7 +249,6 @@ erDiagram
   workspaces {
     TEXT id PK
     TEXT project_id FK
-    TEXT host_id FK
     TEXT title
     TEXT dir
     TEXT runtime_path
@@ -421,21 +387,6 @@ erDiagram
     TEXT created_at
   }
 
-  compute_hosts {
-    TEXT id PK
-    TEXT name
-    TEXT kind
-    TEXT ssh_host
-    TEXT ssh_user
-    INTEGER ssh_port
-    TEXT workspace_root
-    TEXT daemon_host
-    INTEGER daemon_port
-    TEXT daemon_certificate_fingerprint
-    TEXT created_at
-    TEXT updated_at
-  }
-
   terminal_sessions {
     TEXT session_id PK
     TEXT root_directory
@@ -553,7 +504,6 @@ erDiagram
   projects ||--o{ project_agent_launchers : owns
   projects ||--o{ workspaces : owns
   projects ||--o{ ignored_worktrees : owns
-  compute_hosts ||--o{ workspaces : owns_runtime
   workspaces ||--o{ workspace_ports : allocates
   workspaces ||--o{ workspace_port_definitions : configures
   workspaces ||--o| workspace_settings : has
@@ -579,8 +529,8 @@ erDiagram
 ```
 
 Notable uniqueness outside primary keys:
-- `projects.dir` and `compute_hosts.name` are unique.
-- `workspaces(project_id, branch, host_id)` is unique for active non-empty branch names.
+- `projects.dir` is unique.
+- `workspaces(project_id, branch)` is unique for active non-empty branch names.
 - `terminal_sessions.root_directory`, `terminal_runtime_states.root_directory`, and `terminal_remote_session_states.root_directory` are unique.
 - `terminal_attachments` enforces at most one active owner per root and at most one active attachment per root/client pair through partial unique indexes.
 
@@ -618,7 +568,7 @@ Workspaces persist:
 - default and archived flags
 - hidden sidebar visibility state
 - explicit lifecycle state (`running` vs `stopped`)
-- nullable compute-host override
+- daemon-local runtime path
 - seeded per-workspace copies of launch-time settings, including port definitions, process rows, browser sessions, agent launchers, stop script, and setup result metadata
 
 ### Runtime Records
@@ -631,7 +581,7 @@ Runtime state persists separately from project and workspace templates:
 - remote terminal agent-signal queue entries
 - browser target details
 - agent sessions
-- compute-host records and per-workspace remote path bindings
+- paired-client metadata and daemon identity settings
 
 This separation lets template edits coexist with current runtime state and per-workspace overrides.
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.

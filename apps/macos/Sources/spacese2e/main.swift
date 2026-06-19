@@ -6,8 +6,9 @@ import Dispatch
 import Foundation
 import Network
 import Security
-import spacesmobilebridge
-import spacesmobilecore
+import spacesclientcore
+import spacesdeviceapi
+import spacesdevicecore
 import spacesterminalcore
 import systembridge
 import workspacecore
@@ -19,19 +20,19 @@ struct SpacesE2ECommand: ParsableCommand {
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
             SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
-            ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, TriggerComputeHostUpgradeCommand.self,
-            SelectWorkspaceDetailCommand.self, OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self,
-            RestartWorkspaceProcessCommand.self, LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self,
-            ArchiveWorkspaceCommand.self, HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self,
-            SetWorkspaceBrowserSessionURLsCommand.self, SetWorkspaceAgentLaunchersCommand.self, ClearWorkspaceAgentWindowsCommand.self,
-            SetWorkspaceStopScriptCommand.self, AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
+            ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
+            OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
+            LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
+            HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
+            SetWorkspaceAgentLaunchersCommand.self, ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self,
+            AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
             FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self,
             RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
             CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             StartTerminalSessionCommand.self, TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self,
-            TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, UpsertComputeHostCommand.self,
-            ListComputeHostsCommand.self, DeleteComputeHostCommand.self, PlanWorkspaceRuntimeCommand.self, RemoteComputeHostSmokeCommand.self,
-            OpenMobilePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
+            TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self,
+            PlanWorkspaceRuntimeCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
+            OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
             ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self,
             MobileRequestCommand.self, TerminalServiceTLSRequestCommand.self, TerminalServiceTLSSessionCommand.self,
             ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
@@ -42,8 +43,7 @@ private struct ShowMainWindowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "show-main-window")
 
     func run() throws {
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.showMainWindow, object: try IPCNotification.currentObject(), userInfo: nil, options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.showMainWindow)
         try emitJSON(["success": true])
     }
 }
@@ -52,8 +52,7 @@ private struct HideMainWindowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "hide-main-window")
 
     func run() throws {
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.hideMainWindow, object: try IPCNotification.currentObject(), userInfo: nil, options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.hideMainWindow)
         try emitJSON(["success": true])
     }
 }
@@ -170,23 +169,8 @@ private struct ShowWindowIssueModalCommand: ParsableCommand {
     func run() throws {
         var userInfo = [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: detail]
         if let outputPath { userInfo[IPCNotification.outputPathUserInfoKey] = outputPath }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.showWindowIssueModal, object: try IPCNotification.currentObject(), userInfo: userInfo, options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.showWindowIssueModal, userInfo: userInfo)
         try emitJSON(["success": true])
-    }
-}
-
-private struct TriggerComputeHostUpgradeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "trigger-compute-host-upgrade")
-
-    @Option(name: .long) var hostID: String
-
-    func run() throws {
-        let trimmedHostID = try required(hostID, label: "host-id")
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.triggerComputeHostUpgrade, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.computeHostIDUserInfoKey: trimmedHostID], options: [.deliverImmediately])
-        try emitJSON(["success": "true", "hostID": trimmedHostID])
     }
 }
 
@@ -204,9 +188,7 @@ private struct SelectWorkspaceDetailCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.selectWorkspaceDetail, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id], options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.selectWorkspaceDetail, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id])
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -229,9 +211,7 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openWorkspaceTerminal, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id], options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.openWorkspaceTerminal, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id])
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -272,8 +252,8 @@ private struct StartWorkspaceTerminalSessionCommand: ParsableCommand {
 
     /// Creates a workspace-owned Spaces terminal session without opening a Mac
     /// window. The production orchestrator resolves the workspace's effective
-    /// compute host, so the helper exercises the same local or remote daemon
-    /// routing as app and mobile entry points.
+    /// daemon, so the helper exercises the same local or paired-device routing
+    /// as app and mobile entry points.
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedWorkspaceDir = normalizePath(workspaceDir)
@@ -374,24 +354,69 @@ private struct TerminalServiceControlCommand: ParsableCommand {
     }
 }
 
-private struct OpenMobilePairingWindowCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "open-mobile-pairing-window")
+private struct OpenDevicePairingWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "open-device-pairing-window")
 
     @Option(name: .long) var timeoutSeconds: Double = 5
 
     func run() throws {
-        _ = try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService(timeout: timeoutSeconds)
-        let response = try SpacesMobileBridgeControlClient.openPairingWindow(timeout: timeoutSeconds)
+        _ = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService(timeout: timeoutSeconds)
+        let response = try SpacesDeviceAPIControlClient.openPairingWindow(timeout: timeoutSeconds)
         guard response.ok else { throw ValidationError(response.message) }
-        guard let status = response.status else { throw ValidationError("Mobile bridge response did not include address details.") }
-        guard let window = response.pairingWindow else { throw ValidationError("Mobile bridge response did not include a pairing window.") }
-        let link = try SpacesMobilePairingLink.parse(window.linkString)
+        guard let status = response.status else { throw ValidationError("Device API response did not include address details.") }
+        guard let window = response.pairingWindow else { throw ValidationError("Device API response did not include a pairing window.") }
+        let link = try SpacesDevicePairingLink.parse(window.linkString)
         try emitJSON(
-            MobilePairingWindowPayload(
+            DevicePairingWindowPayload(
                 host: status.host, port: status.port, bonjourServiceName: status.bonjourServiceName, pairingLink: window.linkString,
                 pairingCode: window.code, pairingNonce: window.nonce, transportKey: link.transportKey,
                 certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
                 message: response.message))
+    }
+}
+
+private struct PairRemoteDeviceCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "pair-remote-device", abstract: "Pair this Mac client with a remote spacesd over SSH.")
+
+    @Option(name: .long, help: "Remote SSH host.") var sshHost: String
+
+    @Option(name: .long, help: "Remote SSH user. Defaults to ssh_config or the current user.") var sshUser: String?
+
+    @Option(name: .long, help: "Remote SSH port. Defaults to ssh_config or port 22.") var sshPort: Int?
+
+    func run() throws {
+        let result = try SpacesDevicePairingClient.pairRemoteDevice(
+            SpacesRemoteDevicePairingRequest(
+                sshHost: sshHost, sshUser: normalizedOptional(sshUser), sshPort: sshPort,
+                clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
+                clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: Host.current().localizedName ?? "Mac",
+                clientAppVersion: AppVersion.short))
+        try emitJSON(RemoteDevicePairingPayload(deviceID: result.deviceID, name: result.name, host: result.host, port: result.port))
+    }
+}
+
+private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "open-remote-device-pairing-window", abstract: "Open a remote spacesd pairing window over SSH for harnesses.")
+
+    @Option(name: .long, help: "Remote SSH host.") var sshHost: String
+
+    @Option(name: .long, help: "Remote SSH user. Defaults to ssh_config or the current user.") var sshUser: String?
+
+    @Option(name: .long, help: "Remote SSH port. Defaults to ssh_config or port 22.") var sshPort: Int?
+
+    func run() throws {
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-pairing-window", name: "Remote Device", platform: "remote", host: sshHost, port: SpacesDeviceAPIEndpointDefaults.port,
+            certificateFingerprint: "", sshHost: sshHost, sshUser: normalizedOptional(sshUser), sshPort: sshPort, createdAt: nowISO8601(),
+            updatedAt: nowISO8601())
+        let result = try SpacesDevicePairingClient.openRemotePairingWindow(for: device)
+        let link = try SpacesDevicePairingLink.parse(result.linkString)
+        try emitJSON(
+            RemoteDevicePairingWindowPayload(
+                name: result.name, host: result.host, port: result.port, pairingLink: result.linkString, transportKey: link.transportKey,
+                certificateFingerprint: link.certificateFingerprint, expiresAt: result.expiresAt))
     }
 }
 
@@ -495,22 +520,22 @@ private struct ProfileWaitForDesktopControlCommand: ParsableCommand {
 }
 
 private struct MobileStatusCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "mobile-status", abstract: "Show daemon mobile bridge status for harnesses.")
+    static let configuration = CommandConfiguration(commandName: "mobile-status", abstract: "Show daemon Device API status for harnesses.")
 
     func run() throws {
-        let response = try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()
+        let response = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService()
         guard response.ok else { throw ValidationError(response.message) }
-        guard let status = response.status else { throw ValidationError("Mobile bridge status response did not include address details.") }
+        guard let status = response.status else { throw ValidationError("Device API status response did not include address details.") }
         try emitJSON(status)
     }
 }
 
 private struct MobileServeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "mobile-serve", abstract: "Run a standalone mobile bridge for harnesses.")
+    static let configuration = CommandConfiguration(commandName: "mobile-serve", abstract: "Run a standalone Device API server for harnesses.")
 
     @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
-        SpacesMobileBridgeDefaults.host
-    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
+        SpacesDeviceAPIDefaults.host
+    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party Device API port.") var port = SpacesDeviceAPIDefaults.port
     @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 8-digit code.") var pairingCode:
         String?
     @Option(name: .long, help: "Number of one-time pairing windows to emit in standalone harness mode.") var pairingWindowCount = 1
@@ -520,34 +545,34 @@ private struct MobileServeCommand: ParsableCommand {
         let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedPairingCode =
             if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
-                SpacesMobilePairingCoordinator.generatePairingCode()
+                SpacesDevicePairingCoordinator.generatePairingCode()
             }
-        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
+        let transportKey = SpacesDeviceAPISettings.generateTransportKey()
         let pairingWindowEmitter = MobileServePairingWindowEmitter(
             bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
-        let server = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey) { _ in
-            pairingWindowEmitter.openNextWindow(label: "Spaces mobile pairing window")
+        let server = try SpacesDeviceAPIServer(host: host, port: port, transportKey: transportKey) { _ in
+            pairingWindowEmitter.openNextWindow(label: "Spaces device pairing window")
         }
         pairingWindowEmitter.server = server
         try server.start()
         pairingWindowEmitter.linkHost = mobileServePairingLinkHost(host: host)
-        pairingWindowEmitter.openNextWindow(label: "Spaces mobile bridge ready")
+        pairingWindowEmitter.openNextWindow(label: "Spaces Device API ready")
         withExtendedLifetime(server) { dispatchMain() }
     }
 }
 
 private struct MobileRequestCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "mobile-request", abstract: "Send a TLS-PSK mobile bridge JSON request.")
+    static let configuration = CommandConfiguration(commandName: "mobile-request", abstract: "Send a TLS-PSK Device API JSON request.")
 
-    @Option(help: "Full spacesmobile:// pairing link. Supplies host, port, transport key, code, and nonce.") var pairingLink: String?
-    @Option(help: "Mobile bridge host. Defaults to the pairing link host or 127.0.0.1.") var host: String?
-    @Option(help: "Mobile bridge port. Defaults to the pairing link port.") var port: Int?
-    @Option(help: "Base64url mobile bridge transport key. Defaults to the pairing link PSK.") var transportKey: String?
-    @Option(help: "JSON bridge request. Reads stdin when omitted.") var requestJSON: String?
-    @Flag(help: "Keep the connection open and print newline-delimited bridge messages.") var stream = false
+    @Option(help: "Full spaces:// pairing link. Supplies host, port, transport key, code, and nonce.") var pairingLink: String?
+    @Option(help: "Device API host. Defaults to the pairing link host or 127.0.0.1.") var host: String?
+    @Option(help: "Device API port. Defaults to the pairing link port.") var port: Int?
+    @Option(help: "Base64url Device API transport key. Defaults to the pairing link PSK.") var transportKey: String?
+    @Option(help: "JSON Device API request. Reads stdin when omitted.") var requestJSON: String?
+    @Flag(help: "Keep the connection open and print newline-delimited Device API messages.") var stream = false
 
     func run() throws {
-        let link = try pairingLink.map { try SpacesMobilePairingLink.parse($0) }
+        let link = try pairingLink.map { try SpacesDevicePairingLink.parse($0) }
         let resolvedHost = host ?? link?.host ?? "127.0.0.1"
         guard let resolvedPort = port ?? link?.port else { throw ValidationError("Provide --port or a pairing link.") }
         guard (1...65_535).contains(resolvedPort) else { throw ValidationError("Port must be between 1 and 65535.") }
@@ -558,7 +583,7 @@ private struct MobileRequestCommand: ParsableCommand {
         var requestData = try readRequestData()
         if let link { requestData = try requestDataByApplying(pairingLink: link, to: requestData) }
 
-        let client = MobileBridgeRequestClient(host: resolvedHost, port: UInt16(resolvedPort), transportKey: resolvedTransportKey)
+        let client = DeviceAPIRequestClient(host: resolvedHost, port: UInt16(resolvedPort), transportKey: resolvedTransportKey)
         if stream {
             try client.stream(requestData: requestData)
         } else {
@@ -575,7 +600,7 @@ private struct MobileRequestCommand: ParsableCommand {
         return data
     }
 
-    private func requestDataByApplying(pairingLink link: SpacesMobilePairingLink, to data: Data) throws -> Data {
+    private func requestDataByApplying(pairingLink link: SpacesDevicePairingLink, to data: Data) throws -> Data {
         guard var payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ValidationError("Request JSON must be an object.")
         }
@@ -826,10 +851,9 @@ private struct RunWorkspaceProcessCommand: ParsableCommand {
         }
         let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.runWorkspaceProcess, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
-            options: [.deliverImmediately])
+        try IPCNotification.post(
+            IPCNotification.runWorkspaceProcess,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName])
         try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
     }
 }
@@ -848,10 +872,9 @@ private struct StopWorkspaceProcessCommand: ParsableCommand {
         }
         let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.stopWorkspaceProcess, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
-            options: [.deliverImmediately])
+        try IPCNotification.post(
+            IPCNotification.stopWorkspaceProcess,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName])
         try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
     }
 }
@@ -870,10 +893,9 @@ private struct RestartWorkspaceProcessCommand: ParsableCommand {
         }
         let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.restartWorkspaceProcess, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName],
-            options: [.deliverImmediately])
+        try IPCNotification.post(
+            IPCNotification.restartWorkspaceProcess,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName])
         try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
     }
 }
@@ -894,10 +916,9 @@ private struct LaunchWorkspaceAgentCommand: ParsableCommand {
         }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw ValidationError("Missing coding agent name.") }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.launchWorkspaceAgent, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedName],
-            options: [.deliverImmediately])
+        try IPCNotification.post(
+            IPCNotification.launchWorkspaceAgent,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedName])
         try emitJSON(["workspaceID": workspace.id, "name": trimmedName])
     }
 }
@@ -976,58 +997,6 @@ private struct StopFixturesCommand: ParsableCommand {
     }
 }
 
-private struct UpsertComputeHostCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "upsert-compute-host")
-
-    @Option(name: .long) var id: String
-    @Option(name: .long) var name: String
-    @Option(name: .long) var sshHost: String
-    @Option(name: .long) var sshUser: String?
-    @Option(name: .long) var sshPort: Int?
-    @Option(name: .long) var workspaceRoot: String
-    @Option(name: .long) var daemonHost: String
-    @Option(name: .long) var daemonPort: Int
-    @Option(name: .long) var certificateFingerprint: String
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let hostID = try required(id, label: "id")
-        let now = nowISO8601()
-        let existing = try orchestrator.store.computeHost(id: hostID)
-        let host = ComputeHostRecord(
-            id: hostID, name: try required(name, label: "name"), sshHost: try required(sshHost, label: "ssh-host"),
-            sshUser: normalizedOptional(sshUser), sshPort: try validOptionalPort(sshPort, label: "ssh-port"),
-            workspaceRoot: normalizeRemoteRoot(try required(workspaceRoot, label: "workspace-root")),
-            daemonEndpoint: SpacesDaemonEndpoint(
-                host: try required(daemonHost, label: "daemon-host"), port: try validPort(daemonPort, label: "daemon-port"),
-                certificateFingerprint: try required(certificateFingerprint, label: "certificate-fingerprint")),
-            createdAt: existing?.createdAt ?? now, updatedAt: now)
-        try orchestrator.upsertComputeHost(host)
-        try emitJSON(computeHostPayload(host))
-    }
-}
-
-private struct ListComputeHostsCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "list-compute-hosts")
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        try emitJSON(ComputeHostListPayload(hosts: try orchestrator.listComputeHosts().map(computeHostPayload)))
-    }
-}
-
-private struct DeleteComputeHostCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "delete-compute-host")
-
-    @Option(name: .long) var id: String
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let result = try orchestrator.deleteComputeHost(id: try required(id, label: "id"))
-        try emitJSON(deleteComputeHostPayload(result))
-    }
-}
-
 private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "plan-workspace-runtime")
 
@@ -1043,121 +1012,8 @@ private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
         try emitJSON(
             WorkspaceRuntimePlanPayload(
                 projectID: plan.project.id, workspace: workspaceSummaryPayload(plan.workspace),
-                selection: computeHostSelectionPayload(plan.selection), daemonTarget: daemonTargetPayload(plan.daemonTarget), manifest: plan.manifest,
-                remoteSSHURI: plan.remoteSSHURI))
-    }
-}
-
-private struct RemoteComputeHostSmokeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "remote-compute-host-smoke")
-
-    @Option(name: .long) var projectDir: String
-    @Option(name: .long) var hostID: String
-    @Option(name: .long) var sshHost: String
-    @Option(name: .long) var name: String?
-    @Option(name: .long) var sshUser: String?
-    @Option(name: .long) var sshPort: Int?
-    @Option(name: .long) var workspaceRoot: String = ComputeHostDraftBuilder.defaultWorkspaceRoot
-    @Option(name: .long) var daemonHost: String?
-    @Option(name: .long) var daemonPort: Int = ComputeHostDraftBuilder.defaultDaemonPort
-    @Option(name: .long) var authToken: String?
-    @Option(name: .long) var managedArtifactID: String?
-    @Option(name: .long) var managedArtifactURL: String?
-    @Option(name: .long) var managedArtifactSHA256: String?
-    @Option(name: .long) var timeoutSeconds: Double = 45
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedProjectDir = normalizePath(projectDir)
-        let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
-        guard let workspace = try orchestrator.store.workspace(dir: project.dir) else {
-            throw ValidationError("Default workspace not found for project: \(project.dir)")
-        }
-
-        let host = try initialHost(orchestrator: orchestrator)
-        let explicitToken = normalizedOptional(authToken)
-        let token = explicitToken ?? ComputeHostCredentialStore.generateAuthToken()
-        let outcome = try bootstrapper().startSpacesDaemon(host: host, authToken: token, timeout: timeoutSeconds, cleanExistingProfile: true)
-        let readyHost = host.updatedForBootstrap(outcome)
-        let status = try ping(host: readyHost, authToken: token)
-        try orchestrator.upsertComputeHost(readyHost)
-        try ComputeHostCredentialStore.saveAuthToken(token, hostID: readyHost.id)
-        guard let remoteBranch = workspace.branch ?? project.defaultBranch else {
-            throw ValidationError("Default workspace branch not found for project: \(project.dir)")
-        }
-        let remoteWorkspace = try orchestrator.createWorkspaceOnHost(
-            projectID: project.id, name: workspace.title, branch: remoteBranch, hostID: readyHost.id,
-            targetBranch: workspace.targetBranch ?? project.defaultBranch, notes: workspace.notes, runSetupScript: true,
-            allowRemoteBranchLookup: false, allowExistingBranchReuse: true)
-        let runtimePlan = try orchestrator.workspaceRuntimePlan(workspaceID: remoteWorkspace.id)
-        guard runtimePlan.selection.computeHostID == readyHost.id else {
-            throw ValidationError("Workspace runtime plan did not resolve to compute host \(readyHost.id).")
-        }
-        guard runtimePlan.selection.isRemote else { throw ValidationError("Workspace runtime plan resolved to local Mac.") }
-
-        let terminalSessionID = try orchestrator.openWorkspaceTerminal(workspaceID: remoteWorkspace.id)
-        let stopOutcome = try orchestrator.stopWorkspace(workspaceID: remoteWorkspace.id)
-        try emitJSON(
-            RemoteComputeHostSmokePayload(
-                host: computeHostPayload(readyHost), bootstrap: bootstrapOutcomePayload(outcome),
-                status: RemoteComputeHostSmokeStatusPayload(ok: status.ok, message: status.message, servicePID: status.servicePID),
-                projectID: project.id, workspace: workspaceSummaryPayload(remoteWorkspace),
-                runtimePlan: WorkspaceRuntimePlanPayload(
-                    projectID: runtimePlan.project.id, workspace: workspaceSummaryPayload(runtimePlan.workspace),
-                    selection: computeHostSelectionPayload(runtimePlan.selection), daemonTarget: daemonTargetPayload(runtimePlan.daemonTarget),
-                    manifest: runtimePlan.manifest, remoteSSHURI: runtimePlan.remoteSSHURI), terminalSessionID: terminalSessionID,
-                stopOutcome: WorkspaceStopOutcomePayload(
-                    skippedStopScriptBecauseWorkspaceDirectoryMissing: stopOutcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)))
-    }
-
-    private func initialHost(orchestrator: WorkspaceOrchestrator) throws -> ComputeHostRecord {
-        let id = try required(hostID, label: "host-id")
-        let now = nowISO8601()
-        let existing = try orchestrator.store.computeHost(id: id)
-        let requiredSSHHost = try required(sshHost, label: "ssh-host")
-        let endpointHost = normalizedOptional(daemonHost) ?? requiredSSHHost
-        return ComputeHostRecord(
-            id: id, name: normalizedOptional(name) ?? id, sshHost: requiredSSHHost, sshUser: normalizedOptional(sshUser),
-            sshPort: try validOptionalPort(sshPort, label: "ssh-port"), workspaceRoot: normalizeRemoteRoot(workspaceRoot),
-            daemonEndpoint: SpacesDaemonEndpoint(
-                host: endpointHost, port: try validPort(daemonPort, label: "daemon-port"),
-                certificateFingerprint: existing?.daemonEndpoint.certificateFingerprint ?? ""), createdAt: existing?.createdAt ?? now, updatedAt: now)
-    }
-
-    private func bootstrapper() throws -> ComputeHostBootstrapper {
-        let artifactID = normalizedOptional(managedArtifactID)
-        let artifactURL = normalizedOptional(managedArtifactURL)
-        let artifactSHA256 = normalizedOptional(managedArtifactSHA256)
-        let providedValues = [artifactID, artifactURL, artifactSHA256].compactMap { $0 }
-        guard providedValues.count == 0 || providedValues.count == 3 else {
-            throw ValidationError(
-                "Provide --managed-artifact-id, --managed-artifact-url, and --managed-artifact-sha256 together to override the remote artifact source."
-            )
-        }
-        guard let artifactID, let artifactURL, let artifactSHA256 else { return ComputeHostBootstrapper() }
-
-        let archiveName = {
-            guard let lastPathComponent = URL(string: artifactURL)?.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines),
-                !lastPathComponent.isEmpty
-            else { return "\(artifactID).tar.gz" }
-            return lastPathComponent
-        }()
-        let manifest = RemoteSpacesArtifactManifest(
-            appVersion: AppVersion.current, releaseTag: "v\(AppVersion.current)",
-            artifacts: [
-                RemoteSpacesArtifact(
-                    id: artifactID, version: AppVersion.current, platform: "", architecture: "", archiveName: archiveName, url: artifactURL,
-                    sha256: artifactSHA256)
-            ])
-        return ComputeHostBootstrapper(artifactManifestProvider: { manifest })
-    }
-
-    private func ping(host: ComputeHostRecord, authToken: String) throws -> TerminalServiceResponse {
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: "ping"), host: host.daemonEndpoint.host, port: host.daemonEndpoint.port, authToken: authToken,
-            certificateFingerprint: host.daemonEndpoint.certificateFingerprint, timeout: 10)
-        guard response.ok else { throw ValidationError("Remote spacesd ping failed: \(response.message)") }
-        return response
+                selection: spacesDeviceSelectionPayload(plan.selection), daemonTarget: daemonTargetPayload(plan.daemonTarget),
+                manifest: plan.manifest, remoteSSHURI: plan.remoteSSHURI))
     }
 }
 
@@ -1338,7 +1194,6 @@ private struct CreateWorkspaceCommand: ParsableCommand {
     @Option(name: .long) var projectDir: String
     @Option(name: .long) var title: String
     @Option(name: .long) var branch: String
-    @Option(name: .long) var host: String = ComputeHostRecord.localHostID
     @Option(name: .long) var targetBranch: String?
     @Option(name: .long) var directoryName: String?
     @Option(name: .long) var notes: String?
@@ -1354,9 +1209,10 @@ private struct CreateWorkspaceCommand: ParsableCommand {
         guard let project = try orchestrator.project(dir: normalizedProjectDir) else {
             throw ValidationError("Project not found: \(normalizedProjectDir)")
         }
-        let workspace = try orchestrator.createWorkspaceOnHost(
-            projectID: project.id, name: title, branch: branch, hostID: host, targetBranch: targetBranch, directoryName: directoryName, notes: notes,
-            runSetupScript: false, allowRemoteBranchLookup: false, allowExistingBranchReuse: existingBranch)
+        let workspace = try orchestrator.createWorkspaceOnDevice(
+            projectID: project.id, name: title, branch: branch, deviceID: SpacesDeviceRecord.localDeviceID, targetBranch: targetBranch,
+            directoryName: directoryName, notes: notes, runSetupScript: false, allowRemoteBranchLookup: false,
+            allowExistingBranchReuse: existingBranch)
         try emitJSON(
             WorkspaceSummaryPayload(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -1486,12 +1342,12 @@ private struct CycleWorkspaceWindowCommand: ParsableCommand {
         switch direction {
         case "next", "previous":
             let requestID = UUID().uuidString
-            DistributedNotificationCenter.default().postNotificationName(
-                IPCNotification.cycleWorkspaceWindow, object: try IPCNotification.currentObject(),
+            try IPCNotification.post(
+                IPCNotification.cycleWorkspaceWindow,
                 userInfo: [
                     IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.cycleDirectionUserInfoKey: direction,
                     IPCNotification.focusRequestIDUserInfoKey: requestID,
-                ], options: [.deliverImmediately])
+                ])
         default: throw ValidationError("Unsupported direction: \(direction)")
         }
         try emitJSON(["workspaceID": workspace.id, "direction": direction])
@@ -1533,9 +1389,7 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
         guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else {
             throw ValidationError("Running process has no built-in terminal session: \(processName)")
         }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.closeTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID], options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID])
         try emitJSON(["workspaceID": workspace.id, "processName": processName, "sessionID": sessionID])
     }
 }
@@ -1548,9 +1402,8 @@ private struct CloseTerminalSessionWindowCommand: ParsableCommand {
     func run() throws {
         let trimmedSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.closeTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID], options: [.deliverImmediately])
+        try IPCNotification.post(
+            IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID])
         try emitJSON(["sessionID": trimmedSessionID])
     }
 }
@@ -1566,11 +1419,9 @@ private struct FocusTerminalSessionWindowCommand: ParsableCommand {
         guard !trimmedSessionID.isEmpty else { throw ValidationError("Missing terminal session id.") }
         let trimmedRequestID = requestID?.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveRequestID = if let trimmedRequestID, !trimmedRequestID.isEmpty { trimmedRequestID } else { UUID().uuidString }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.focusTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [
-                IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.focusRequestIDUserInfoKey: effectiveRequestID,
-            ], options: [.deliverImmediately])
+        try IPCNotification.post(
+            IPCNotification.focusTerminalSessionWindow,
+            userInfo: [IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.focusRequestIDUserInfoKey: effectiveRequestID])
         try emitJSON(["sessionID": trimmedSessionID, "requestID": effectiveRequestID])
     }
 }
@@ -1593,9 +1444,7 @@ private struct DumpTerminalSessionWindowStateCommand: ParsableCommand {
             IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.outputPathUserInfoKey: trimmedOutputPath,
         ]
         if let attachmentMode { userInfo[IPCNotification.terminalAttachmentModeUserInfoKey] = attachmentMode.rawValue }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.dumpTerminalSessionWindowState, object: try IPCNotification.currentObject(), userInfo: userInfo,
-            options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.dumpTerminalSessionWindowState, userInfo: userInfo)
         try emitJSON(["sessionID": trimmedSessionID, "mode": attachmentMode?.rawValue ?? "any", "outputPath": trimmedOutputPath])
     }
 }
@@ -1616,9 +1465,7 @@ private struct TerminalSessionWindowShortcutCommand: ParsableCommand {
             IPCNotification.terminalSessionIDUserInfoKey: trimmedSessionID, IPCNotification.terminalShortcutActionUserInfoKey: trimmedAction,
         ]
         if let text { userInfo[IPCNotification.terminalShortcutTextUserInfoKey] = text }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.performTerminalSessionWindowShortcut, object: try IPCNotification.currentObject(), userInfo: userInfo,
-            options: [.deliverImmediately])
+        try IPCNotification.post(IPCNotification.performTerminalSessionWindowShortcut, userInfo: userInfo)
         try emitJSON(["sessionID": trimmedSessionID, "action": trimmedAction, "text": text ?? ""])
     }
 }
@@ -1907,7 +1754,7 @@ private struct TerminatedTerminalSessionPayload: Codable {
     let terminated: Bool
 }
 
-private struct MobilePairingWindowPayload: Codable {
+private struct DevicePairingWindowPayload: Codable {
     let host: String
     let port: Int
     let bonjourServiceName: String
@@ -1920,14 +1767,24 @@ private struct MobilePairingWindowPayload: Codable {
     let message: String
 }
 
-private struct ComputeHostListPayload: Codable { let hosts: [ComputeHostPayload] }
-
-private struct DeleteComputeHostPayload: Codable {
-    let hostID: String
-    let credentialTokenDeleted: Bool
+private struct RemoteDevicePairingPayload: Codable {
+    let deviceID: String
+    let name: String
+    let host: String
+    let port: Int
 }
 
-private struct ComputeHostPayload: Codable {
+private struct RemoteDevicePairingWindowPayload: Codable {
+    let name: String
+    let host: String
+    let port: Int
+    let pairingLink: String
+    let transportKey: String
+    let certificateFingerprint: String
+    let expiresAt: String?
+}
+
+private struct SpacesDevicePayload: Codable {
     let id: String
     let name: String
     let kind: String
@@ -1945,50 +1802,22 @@ private struct ComputeHostPayload: Codable {
 private struct WorkspaceRuntimePlanPayload: Codable {
     let projectID: String
     let workspace: WorkspaceSummaryPayload
-    let selection: ComputeHostSelectionPayload
+    let selection: SpacesDeviceSelectionPayload
     let daemonTarget: SpacesDaemonConnectionTargetPayload
     let manifest: WorkspaceRuntimeManifest
     let remoteSSHURI: String?
 }
 
-private struct RemoteComputeHostSmokePayload: Codable {
-    let host: ComputeHostPayload
-    let bootstrap: ComputeHostBootstrapOutcomePayload
-    let status: RemoteComputeHostSmokeStatusPayload
-    let projectID: String
-    let workspace: WorkspaceSummaryPayload
-    let runtimePlan: WorkspaceRuntimePlanPayload
-    let terminalSessionID: String
-    let stopOutcome: WorkspaceStopOutcomePayload
-}
-
-private struct ComputeHostBootstrapOutcomePayload: Codable {
-    let certificateFingerprint: String
-    let workspaceRoot: String
-    let daemonHost: String
-    let daemonPort: Int
-    let processID: Int?
-    let logPath: String
-}
-
-private struct RemoteComputeHostSmokeStatusPayload: Codable {
-    let ok: Bool
-    let message: String
-    let servicePID: Int32?
-}
-
-private struct WorkspaceStopOutcomePayload: Codable { let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool }
-
-private struct ComputeHostSelectionPayload: Codable {
+private struct SpacesDeviceSelectionPayload: Codable {
     let location: String
-    let computeHostID: String?
+    let deviceID: String?
     let displayName: String
-    let host: ComputeHostPayload?
+    let device: SpacesDevicePayload?
 }
 
 private struct SpacesDaemonConnectionTargetPayload: Codable {
     let transport: String
-    let computeHostID: String?
+    let deviceID: String?
     let displayName: String
     let socketPath: String?
     let endpoint: SpacesDaemonEndpointPayload?
@@ -2181,51 +2010,28 @@ private func workspaceSummaryPayload(_ workspace: WorkspaceRecord) -> WorkspaceS
         notes: workspace.notes)
 }
 
-private func computeHostPayload(_ host: ComputeHostRecord) -> ComputeHostPayload {
-    ComputeHostPayload(
-        id: host.id, name: host.name, kind: host.kind.rawValue, sshHost: host.sshHost, sshUser: host.sshUser, sshPort: host.sshPort,
-        workspaceRoot: host.workspaceRoot, daemonHost: host.daemonEndpoint.host, daemonPort: host.daemonEndpoint.port,
-        certificateFingerprint: host.daemonEndpoint.certificateFingerprint, createdAt: host.createdAt, updatedAt: host.updatedAt)
+private func spacesDevicePayload(_ device: SpacesDeviceRecord) -> SpacesDevicePayload {
+    SpacesDevicePayload(
+        id: device.id, name: device.name, kind: device.kind.rawValue, sshHost: device.sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
+        workspaceRoot: device.workspaceRoot, daemonHost: device.daemonEndpoint.host, daemonPort: device.daemonEndpoint.port,
+        certificateFingerprint: device.daemonEndpoint.certificateFingerprint, createdAt: device.createdAt, updatedAt: device.updatedAt)
 }
 
-private func deleteComputeHostPayload(_ result: ComputeHostDeletionResult) -> DeleteComputeHostPayload {
-    DeleteComputeHostPayload(hostID: result.hostID, credentialTokenDeleted: result.credentialTokenDeleted)
-}
-
-private func bootstrapOutcomePayload(_ outcome: ComputeHostBootstrapOutcome) -> ComputeHostBootstrapOutcomePayload {
-    ComputeHostBootstrapOutcomePayload(
-        certificateFingerprint: outcome.certificateFingerprint, workspaceRoot: outcome.workspaceRoot, daemonHost: outcome.daemonHost,
-        daemonPort: outcome.daemonPort, processID: outcome.processID, logPath: outcome.logPath)
-}
-
-private func computeHostSelectionPayload(_ selection: ComputeHostSelection) -> ComputeHostSelectionPayload {
+private func spacesDeviceSelectionPayload(_ selection: SpacesDeviceSelection) -> SpacesDeviceSelectionPayload {
     switch selection {
-    case .local(let host):
-        return ComputeHostSelectionPayload(location: "local", computeHostID: host.id, displayName: selection.displayName, host: nil)
-    case .remote(let host):
-        return ComputeHostSelectionPayload(
-            location: "remote", computeHostID: host.id, displayName: selection.displayName, host: computeHostPayload(host))
+    case .local(let device):
+        return SpacesDeviceSelectionPayload(location: "local", deviceID: device.id, displayName: selection.displayName, device: nil)
+    case .remote(let device):
+        return SpacesDeviceSelectionPayload(
+            location: "remote", deviceID: device.id, displayName: selection.displayName, device: spacesDevicePayload(device))
     }
 }
 
 private func daemonTargetPayload(_ target: SpacesDaemonConnectionTarget) -> SpacesDaemonConnectionTargetPayload {
     SpacesDaemonConnectionTargetPayload(
-        transport: target.transport.rawValue, computeHostID: target.computeHostID, displayName: target.displayName, socketPath: target.socketPath,
+        transport: target.transport.rawValue, deviceID: target.deviceID, displayName: target.displayName, socketPath: target.socketPath,
         endpoint: target.endpoint.map { SpacesDaemonEndpointPayload(host: $0.host, port: $0.port, certificateFingerprint: $0.certificateFingerprint) }
     )
-}
-
-extension ComputeHostRecord {
-    fileprivate func updatedForBootstrap(_ outcome: ComputeHostBootstrapOutcome) -> ComputeHostRecord {
-        ComputeHostRecord(
-            id: id, name: name, kind: kind, sshHost: sshHost, sshUser: sshUser, sshPort: sshPort,
-            workspaceRoot: outcome.workspaceRoot.isEmpty ? workspaceRoot : outcome.workspaceRoot,
-            daemonEndpoint: SpacesDaemonEndpoint(
-                host: outcome.daemonHost.isEmpty ? daemonEndpoint.host : outcome.daemonHost,
-                port: outcome.daemonPort == 0 ? daemonEndpoint.port : outcome.daemonPort,
-                certificateFingerprint: outcome.certificateFingerprint.isEmpty
-                    ? daemonEndpoint.certificateFingerprint : outcome.certificateFingerprint), createdAt: createdAt, updatedAt: nowISO8601())
-    }
 }
 
 /// Shared JSON encoder for the shell harness.
@@ -2249,7 +2055,7 @@ private func sendTerminalServiceRequestForSession(sessionID rawSessionID: String
         return try WorkspaceOrchestrator.sendTerminalServiceRequest(to: plan.daemonTarget, request: request)
     }
     let target = SpacesDaemonConnectionTarget(
-        transport: .localUnixSocket, computeHostID: nil, displayName: "local Mac", socketPath: try TerminalServicePaths.socketPath())
+        transport: .localUnixSocket, deviceID: nil, displayName: "local Mac", socketPath: try TerminalServicePaths.socketPath())
     return try WorkspaceOrchestrator.sendTerminalServiceRequest(to: target, request: request)
 }
 
@@ -2311,8 +2117,8 @@ private func terminalDefaultTitle(command: String?, cwd: String) -> String {
 }
 
 private final class MobileServePairingWindowEmitter: @unchecked Sendable {
-    weak var server: SpacesMobileBridgeServer?
-    var linkHost = SpacesMobileBridgeDefaults.loopbackHost
+    weak var server: SpacesDeviceAPIServer?
+    var linkHost = SpacesDeviceAPIDefaults.loopbackHost
 
     private let lock = NSLock()
     private let bindHost: String
@@ -2333,19 +2139,19 @@ private final class MobileServePairingWindowEmitter: @unchecked Sendable {
             return
         }
         emittedWindowCount += 1
-        let code = nextPairingCode ?? SpacesMobilePairingCoordinator.generatePairingCode()
+        let code = nextPairingCode ?? SpacesDevicePairingCoordinator.generatePairingCode()
         nextPairingCode = nil
         lock.unlock()
 
         let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
         print(
-            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
+            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesDeviceFirstPartyPolicy.allowedBundleID)"
         )
         fflush(stdout)
     }
 }
 
-private final class MobileBridgeRequestClient: @unchecked Sendable {
+private final class DeviceAPIRequestClient: @unchecked Sendable {
     private let host: String
     private let port: UInt16
     private let transportKey: String
@@ -2375,14 +2181,14 @@ private final class MobileBridgeRequestClient: @unchecked Sendable {
     private func makeConnection() throws -> NWConnection {
         let endpointPort = NWEndpoint.Port(rawValue: port)!
         return NWConnection(
-            host: NWEndpoint.Host(host), port: endpointPort,
-            using: try SpacesMobileBridgeTransport.parameters(transportKey: transportKey, role: .client))
+            host: NWEndpoint.Host(host), port: endpointPort, using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client)
+        )
     }
 
     private func waitUntilReady(_ connection: NWConnection) throws {
         let queue = DispatchQueue(label: "spaces.e2e.mobile.request")
         let semaphore = DispatchSemaphore(value: 0)
-        let box = MobileBridgeRequestResultBox()
+        let box = DeviceAPIRequestResultBox()
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready: semaphore.signal()
@@ -2393,9 +2199,7 @@ private final class MobileBridgeRequestClient: @unchecked Sendable {
             }
         }
         connection.start(queue: queue)
-        guard semaphore.wait(timeout: .now() + 10) == .success else {
-            throw MobileBridgeRequestError.timeout("Timed out connecting to the mobile bridge.")
-        }
+        guard semaphore.wait(timeout: .now() + 10) == .success else { throw DeviceAPIRequestError.timeout("Timed out connecting to the Device API.") }
         if let error = box.error() { throw error }
     }
 
@@ -2403,7 +2207,7 @@ private final class MobileBridgeRequestClient: @unchecked Sendable {
         var payload = requestData
         payload.append(0x0A)
         let semaphore = DispatchSemaphore(value: 0)
-        let box = MobileBridgeRequestResultBox()
+        let box = DeviceAPIRequestResultBox()
         connection.send(
             content: payload,
             completion: .contentProcessed { error in
@@ -2411,24 +2215,24 @@ private final class MobileBridgeRequestClient: @unchecked Sendable {
                 semaphore.signal()
             })
         guard semaphore.wait(timeout: .now() + 10) == .success else {
-            throw MobileBridgeRequestError.timeout("Timed out sending the mobile bridge request.")
+            throw DeviceAPIRequestError.timeout("Timed out sending the Device API request.")
         }
         if let error = box.error() { throw error }
     }
 
     private func receiveSingleResponse(from connection: NWConnection) throws -> Data {
         let semaphore = DispatchSemaphore(value: 0)
-        let box = MobileBridgeRequestResultBox()
+        let box = DeviceAPIRequestResultBox()
         receiveSingleResponse(from: connection, buffered: Data(), box: box, semaphore: semaphore)
         guard semaphore.wait(timeout: .now() + 10) == .success else {
-            throw MobileBridgeRequestError.timeout("Timed out waiting for the mobile bridge response.")
+            throw DeviceAPIRequestError.timeout("Timed out waiting for the Device API response.")
         }
         if let error = box.error() { throw error }
         return box.responseData()
     }
 
     private func receiveSingleResponse(
-        from connection: NWConnection, buffered data: Data, box: MobileBridgeRequestResultBox, semaphore: DispatchSemaphore
+        from connection: NWConnection, buffered data: Data, box: DeviceAPIRequestResultBox, semaphore: DispatchSemaphore
     ) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
             if let error {
@@ -2444,6 +2248,11 @@ private final class MobileBridgeRequestClient: @unchecked Sendable {
                 return
             }
             if isComplete {
+                guard !nextData.isEmpty else {
+                    box.setError(DeviceAPIRequestError.emptyResponse)
+                    semaphore.signal()
+                    return
+                }
                 box.setResponseData(nextData)
                 semaphore.signal()
                 return
@@ -2473,17 +2282,19 @@ private final class MobileBridgeRequestClient: @unchecked Sendable {
     }
 }
 
-private enum MobileBridgeRequestError: LocalizedError {
+private enum DeviceAPIRequestError: LocalizedError {
+    case emptyResponse
     case timeout(String)
 
     var errorDescription: String? {
         switch self {
+        case .emptyResponse: "The Device API connection closed before returning a response."
         case .timeout(let message): message
         }
     }
 }
 
-private final class MobileBridgeRequestResultBox: @unchecked Sendable {
+private final class DeviceAPIRequestResultBox: @unchecked Sendable {
     private let lock = NSLock()
     private var storedError: Error?
     private var storedResponseData = Data()
@@ -2515,7 +2326,7 @@ private final class MobileBridgeRequestResultBox: @unchecked Sendable {
     }
 }
 
-private func mobileServePairingLinkHost(host: String) -> String { SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: host) }
+private func mobileServePairingLinkHost(host: String) -> String { SpacesDeviceAPINetworkInterfaces.pairingLinkHost(boundHost: host) }
 
 private func profileShellQuoted(_ value: String) -> String {
     let escaped = value.replacingOccurrences(of: "'", with: #"'\"'\"'"#)

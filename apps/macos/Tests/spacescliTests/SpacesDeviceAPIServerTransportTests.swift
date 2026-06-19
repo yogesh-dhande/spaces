@@ -1,0 +1,754 @@
+import Darwin
+import Foundation
+import Network
+import XCTest
+import spacesdevicecore
+import spacesterminalcore
+import workspacecore
+
+@testable import spacesdeviceapi
+
+final class SpacesDeviceAPIServerTransportTests: XCTestCase {
+    func testTLSPskClientCanPairAndPlaintextClientCannotReadResponse() throws {
+        try withTemporaryProfile { _ in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let window = server.openPairingWindow(host: "127.0.0.1", name: "Test Mac", code: "12345678", nonce: "NONCE")
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-TLS", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok)
+            XCTAssertNotNil(response.issuedAuthToken)
+            XCTAssertFalse(try plaintextReceivesDeviceAPIResponse(port: server.listeningPort))
+        }
+    }
+
+    func testUnsupportedBundleDoesNotConsumePairingWindow() throws {
+        try withTemporaryProfile { _ in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let window = server.openPairingWindow(host: "127.0.0.1", name: "Test Mac", code: "12345678", nonce: "NONCE")
+            let unsupportedClientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-UNSUPPORTED", bundleID: "com.example.thirdparty", platform: "ios", deviceName: "Third Party",
+                appVersion: "1.0")
+
+            let rejectedResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: unsupportedClientApp),
+                port: server.listeningPort, transportKey: transportKey)
+            XCTAssertFalse(rejectedResponse.ok)
+            XCTAssertTrue(rejectedResponse.message.contains("Unsupported Spaces client bundle"))
+
+            let supportedClientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-SUPPORTED", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let acceptedResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: supportedClientApp),
+                port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(acceptedResponse.ok)
+            XCTAssertNotNil(acceptedResponse.issuedAuthToken)
+        }
+    }
+
+    func testMismatchedTransportKeyLeavesReachablePortForRecoveryProbe() throws {
+        try withTemporaryProfile { _ in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            let staleTransportKey = SpacesDeviceAPISettings.generateTransportKey()
+            switch try tlsConnectionOutcome(port: server.listeningPort, transportKey: staleTransportKey) {
+            case .ready: XCTFail("A stale transport key should not complete the TLS handshake.")
+            case .failed(let error):
+                XCTAssertEqual(
+                    SpacesDeviceAPIAuthentication.recoveryMessage(for: error),
+                    "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            case .timedOut:
+                XCTAssertFalse(try plaintextReceivesDeviceAPIResponse(port: server.listeningPort))
+                let probeError = NSError(
+                    domain: "SpacesDeviceAPIClient", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "The secure Device API transport could not authenticate."])
+                XCTAssertEqual(
+                    SpacesDeviceAPIAuthentication.recoveryMessage(for: probeError),
+                    "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            }
+        }
+    }
+
+    func testPartialTLSRequestEOFIsRejected() throws {
+        try withTemporaryProfile { _ in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+
+            XCTAssertTrue(try partialTLSRequestEOFClosesConnection(port: server.listeningPort, transportKey: transportKey, server: server))
+        }
+    }
+
+    func testTerminalLinkResolveRequiresAuthentication() throws {
+        try withTemporaryProfile { _ in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-AUTH", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "image.png")), clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertFalse(response.ok)
+            XCTAssertTrue(response.message.localizedStandardContains("device auth token"))
+            XCTAssertNil(response.terminalLinkMetadata)
+        }
+    }
+
+    func testCreateProjectImportsDaemonLocalDirectory() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let projectDir = root.appendingPathComponent("daemon-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-PROJECT-CREATE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: projectDir.path, gitURL: nil)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok, response.message)
+            let projectID = try XCTUnwrap(response.projectID)
+            XCTAssertEqual(response.overview?.projects.first(where: { $0.id == projectID })?.dir, projectDir.path)
+            XCTAssertEqual(response.overview?.workspaces.first(where: { $0.projectID == projectID })?.isDefault, true)
+            XCTAssertEqual(response.workspaceID, response.overview?.workspaces.first(where: { $0.projectID == projectID && $0.isDefault })?.id)
+        }
+    }
+
+    func testProjectConfigAndHiddenWorkspaceMutationsReturnParityOverview() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let projectDir = root.appendingPathComponent("configured-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-PARITY-OVERVIEW", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let config = SpacesDeviceProjectConfig(
+                setupScript: "echo setup", stopScript: "echo stop", ports: [SpacesDevicePortDefinition(id: "port-api", name: "API")],
+                processes: [SpacesDeviceProcessTemplate(id: "process-api", name: "api", command: "npm run api")],
+                browserSessions: [SpacesDeviceBrowserSession(name: "api-browser", url: "http://localhost:$API")],
+                agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")])
+
+            let createResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: projectDir.path, gitURL: nil, config: config)), authToken: pairingStore.authToken,
+                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(createResponse.ok, createResponse.message)
+            let projectID = try XCTUnwrap(createResponse.projectID)
+            let workspaceID = try XCTUnwrap(createResponse.workspaceID)
+            let project = try XCTUnwrap(createResponse.overview?.projects.first(where: { $0.id == projectID }))
+            XCTAssertEqual(project.config.setupScript, "echo setup")
+            XCTAssertEqual(project.config.stopScript, "echo stop")
+            XCTAssertEqual(project.config.ports.first?.name, "API")
+            XCTAssertEqual(project.config.processes.first?.command, "npm run api")
+            XCTAssertEqual(project.config.browserSessions.first?.url, "http://localhost:$API")
+            XCTAssertEqual(project.config.agentLaunchers.first?.name, "Codex")
+
+            let hideResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .updateWorkspaceMetadata(.init(workspaceID: workspaceID, isHidden: true, updatesHidden: true)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(hideResponse.ok, hideResponse.message)
+            XCTAssertEqual(hideResponse.overview?.workspaces.first(where: { $0.id == workspaceID })?.isHidden, true)
+        }
+    }
+
+    func testRestartWorkspaceLifecycleUsesDeviceAPIOrchestratorPath() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let launches = DeviceAPITerminalLaunchCapture()
+            let terminations = DeviceAPITerminalTerminationCapture()
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionTerminator: { terminations.append($0) },
+                builtInTerminalSessionLauncher: { configuration in
+                    let childPID = launches.append(configuration)
+                    return TerminalServiceSessionSummary(
+                        id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                        backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123,
+                        childPID: Int32(childPID), controlSocketPath: "/tmp/control-\(configuration.sessionID)",
+                        outputPath: "/tmp/output-\(configuration.sessionID)", launchConfiguration: configuration)
+                })
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("restart-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-restart", name: "Restart Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let workspace = WorkspaceRecord(
+                id: "workspace-restart", projectID: project.id, title: "Restart Workspace", dir: projectDir.path, dirname: nil, branch: nil,
+                isDefault: true, isArchived: false, isRunning: true, lastLaunchedAt: "2026-06-18T12:00:00Z")
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+            try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+            try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: "true")
+            try store.setWorkspaceProcesses(
+                workspaceID: workspace.id, processes: [ProcessTemplate(id: "process-api", name: "api", command: "echo api")])
+            try store.upsert(
+                runningProcess: RunningProcessRecord(
+                    id: "old-process", workspaceID: workspace.id, templateID: "process-api", templateName: "api", command: "echo old",
+                    terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "old-session", terminalNativeID: "old-session",
+                    pid: 777, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-18T12:00:01Z", exitedAt: nil))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "browser-window", workspaceID: workspace.id, app: "Google Chrome", name: "docs", detail: "http://localhost:9000/docs",
+                    targetURL: "http://localhost:9000/docs", windowID: nil, role: "browser", orderIndex: 0, lastSeenAt: "2026-06-18T12:00:02Z"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "shell-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: "zsh", windowID: 18,
+                    terminalTrackingID: "shell-session", terminalNativeID: "shell-session", role: "terminal", orderIndex: 300,
+                    lastSeenAt: "2026-06-18T12:00:03Z"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Mock Agent", detail: "codex",
+                    windowID: 19, terminalTrackingID: "agent-session", terminalNativeID: "agent-session", role: "terminal", orderIndex: 400,
+                    lastSeenAt: "2026-06-18T12:00:04Z"))
+            try store.upsertAgentWindow(
+                AgentWindowRecord(
+                    id: "old-agent", workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "agent-session",
+                    terminalNativeID: "agent-session", codexThreadID: nil, windowID: 19, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
+                    updatedAt: "2026-06-18T12:00:04Z"))
+
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-RESTART", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .restartWorkspace(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok, response.message)
+            XCTAssertEqual(response.workspaceID, workspace.id)
+            XCTAssertEqual(terminations.sessionIDs(), ["old-session", "agent-session", "shell-session"])
+            XCTAssertEqual(launches.titles(), ["api"])
+            let updatedWorkspace = try XCTUnwrap(try store.workspace(id: workspace.id))
+            XCTAssertTrue(updatedWorkspace.isRunning)
+            let processes = try store.runningProcesses(workspaceID: workspace.id)
+            XCTAssertEqual(processes.count, 1)
+            let relaunchedProcess = try XCTUnwrap(processes.first)
+            XCTAssertEqual(relaunchedProcess.templateID, "process-api")
+            XCTAssertEqual(relaunchedProcess.templateName, "api")
+            XCTAssertEqual(relaunchedProcess.status, .running)
+            XCTAssertNotEqual(relaunchedProcess.terminalNativeID, "old-session")
+            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+            XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.name), ["api"])
+            let overviewWorkspace = try XCTUnwrap(response.overview?.workspaces.first(where: { $0.id == workspace.id }))
+            XCTAssertTrue(overviewWorkspace.isRunning)
+            XCTAssertEqual(overviewWorkspace.processRows.count, 1)
+            XCTAssertTrue(overviewWorkspace.terminalRows.isEmpty)
+        }
+    }
+
+    func testCreateProjectRequiresOneSource() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let projectDir = root.appendingPathComponent("daemon-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-PROJECT-SOURCE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let missingResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: nil, gitURL: nil)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+            let bothResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: projectDir.path, gitURL: "https://example.com/repo.git")),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertFalse(missingResponse.ok)
+            XCTAssertEqual(missingResponse.message, "Provide exactly one project directory or Git URL.")
+            XCTAssertFalse(bothResponse.ok)
+            XCTAssertEqual(bothResponse.message, "Provide exactly one project directory or Git URL.")
+        }
+    }
+
+    func testTerminalLinkWorkspaceRootLookupErrorsPropagate() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-ROOTS", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let invalidDatabasePath = root.appendingPathComponent("not-a-database", isDirectory: true)
+            try FileManager.default.createDirectory(at: invalidDatabasePath, withIntermediateDirectories: true)
+            setenv("SPACES_DB_PATH", invalidDatabasePath.path, 1)
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "image.png")), authToken: pairingStore.authToken,
+                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertFalse(response.ok)
+            XCTAssertTrue(response.message.localizedStandardContains("Failed opening sqlite db"), response.message)
+            XCTAssertFalse(response.message.localizedStandardContains("blocked path"), response.message)
+            XCTAssertFalse(response.message.localizedStandardContains("invalid link"), response.message)
+        }
+    }
+
+    func testTerminalLinkExternalResolveSkipsWorkspaceRootLookupAndSessionState() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-EXTERNAL", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let invalidDatabasePath = root.appendingPathComponent("external-unavailable-spaces-db", isDirectory: true)
+            try FileManager.default.createDirectory(at: invalidDatabasePath, withIntermediateDirectories: true)
+            setenv("SPACES_DB_PATH", invalidDatabasePath.path, 1)
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .resolveTerminalLink(.init(sessionID: "missing-session", terminalLink: "https://example.com/screenshot.png")),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok, response.message)
+            let metadata = try XCTUnwrap(response.terminalLinkMetadata)
+            XCTAssertEqual(metadata.source, .externalURL)
+            XCTAssertEqual(metadata.externalURL, "https://example.com/screenshot.png")
+            XCTAssertEqual(metadata.mediaKind, .image)
+            XCTAssertFalse(response.message.localizedStandardContains("sqlite"), response.message)
+        }
+    }
+
+    func testTerminalLinkChunkReadUsesResolvedTransferAuthorizationWhenDatabaseBecomesUnavailable() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-CACHED", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let sessionID = "session-link-cached-\(UUID().uuidString)"
+            let workspaceDir = try makeWorkspaceRootProfile(root: root, sessionID: sessionID)
+            let image = workspaceDir.appendingPathComponent("preview.png")
+            let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x01, 0x02])
+            try imageData.write(to: image)
+
+            let resolveResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: "preview.png")), authToken: pairingStore.authToken,
+                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+            let metadata = try XCTUnwrap(resolveResponse.terminalLinkMetadata)
+            XCTAssertTrue(resolveResponse.ok)
+            XCTAssertEqual(metadata.source, .localFile)
+
+            let invalidDatabasePath = root.appendingPathComponent("unavailable-spaces-db", isDirectory: true)
+            try FileManager.default.createDirectory(at: invalidDatabasePath, withIntermediateDirectories: true)
+            setenv("SPACES_DB_PATH", invalidDatabasePath.path, 1)
+
+            let chunkResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .readTerminalLinkChunk(.init(sessionID: sessionID, terminalLinkID: metadata.id, offset: 0, limit: 16)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(chunkResponse.ok, chunkResponse.message)
+            let chunk = try XCTUnwrap(chunkResponse.terminalLinkChunk)
+            XCTAssertEqual(Data(base64Encoded: chunk.base64Data), imageData)
+            XCTAssertTrue(chunk.isFinal)
+        }
+    }
+
+    func testTerminalLinkChunkReadRefreshesResolvedTransferAuthorization() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-REFRESH", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let sessionID = "session-link-refresh-\(UUID().uuidString)"
+            let workspaceDir = try makeWorkspaceRootProfile(root: root, sessionID: sessionID)
+            let image = workspaceDir.appendingPathComponent("preview-refresh.png")
+            try Data([0x89, 0x50, 0x4E, 0x47, 0x01, 0x02]).write(to: image)
+
+            let resolveResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: "preview-refresh.png")),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+            let metadata = try XCTUnwrap(resolveResponse.terminalLinkMetadata)
+            let originalExpiration = try XCTUnwrap(server.terminalLinkTransferAuthorizationExpirationForTesting(linkID: metadata.id))
+
+            let chunkResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .readTerminalLinkChunk(.init(sessionID: sessionID, terminalLinkID: metadata.id, offset: 0, limit: 4)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(chunkResponse.ok, chunkResponse.message)
+            let refreshedExpiration = try XCTUnwrap(server.terminalLinkTransferAuthorizationExpirationForTesting(linkID: metadata.id))
+            XCTAssertGreaterThan(refreshedExpiration.timeIntervalSince1970, originalExpiration.timeIntervalSince1970)
+        }
+    }
+
+    func testTerminalLinkChunkReadRejectsNeverResolvedLocalLinkWithoutWorkspaceRootScan() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-FORGED", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let image = root.appendingPathComponent("forged.png")
+            try Data([0x89, 0x50, 0x4E, 0x47]).write(to: image)
+            let metadata = try SpacesDeviceTerminalLinkResolver.resolve(
+                sessionID: "session-forged", link: image.path, workingDirectory: nil, homeDirectory: root.path)
+
+            let invalidDatabasePath = root.appendingPathComponent("forged-unavailable-spaces-db", isDirectory: true)
+            try FileManager.default.createDirectory(at: invalidDatabasePath, withIntermediateDirectories: true)
+            setenv("SPACES_DB_PATH", invalidDatabasePath.path, 1)
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .readTerminalLinkChunk(.init(sessionID: "session-forged", terminalLinkID: metadata.id, offset: 0, limit: 4)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertFalse(response.ok)
+            XCTAssertTrue(response.message.localizedStandardContains("terminal link transfer id is invalid"), response.message)
+            XCTAssertFalse(response.message.localizedStandardContains("sqlite"), response.message)
+        }
+    }
+
+    private enum DeviceAPITransportConnectionOutcome {
+        case ready
+        case failed(Error)
+        case timedOut
+    }
+
+    private func tlsConnectionOutcome(port: Int, transportKey: String) throws -> DeviceAPITransportConnectionOutcome {
+        let finished = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "spaces.device.api.transport.outcome.test")
+        let resultBox = DeviceAPITransportTestResultBox()
+        let connection = NWConnection(
+            host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
+            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: finished.signal()
+            case .failed(let error):
+                resultBox.setError(error)
+                finished.signal()
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        guard finished.wait(timeout: .now() + 1) == .success else {
+            connection.cancel()
+            return .timedOut
+        }
+        connection.cancel()
+        if let error = resultBox.error() { return .failed(error) }
+        return .ready
+    }
+
+    private func sendTLSRequest(_ request: SpacesDeviceAPIRequest, port: Int, transportKey: String) throws -> SpacesDeviceAPIResponse {
+        let ready = DispatchSemaphore(value: 0)
+        let sent = DispatchSemaphore(value: 0)
+        let received = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "spaces.device.api.transport.test")
+        let resultBox = DeviceAPITransportTestResultBox()
+        let connection = NWConnection(
+            host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
+            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: ready.signal()
+            case .failed(let error):
+                resultBox.setError(error)
+                ready.signal()
+                sent.signal()
+                received.signal()
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
+        if let error = resultBox.error() { throw error }
+
+        var requestData = try SpacesDeviceAPICodec.encodeRequest(request)
+        requestData.append(0x0A)
+        connection.send(
+            content: requestData,
+            completion: .contentProcessed { error in
+                if let error { resultBox.setError(error) }
+                sent.signal()
+            })
+        XCTAssertEqual(sent.wait(timeout: .now() + 5), .success)
+        if let error = resultBox.error() { throw error }
+
+        @Sendable func receiveNext(_ data: Data) {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+                if let error {
+                    resultBox.setError(error)
+                    received.signal()
+                    return
+                }
+                var nextData = data
+                if let content { nextData.append(content) }
+                if let newlineIndex = nextData.firstIndex(of: 0x0A) {
+                    resultBox.setResponseData(Data(nextData.prefix(upTo: newlineIndex)))
+                    received.signal()
+                    return
+                }
+                if isComplete {
+                    resultBox.setResponseData(nextData)
+                    received.signal()
+                    return
+                }
+                receiveNext(nextData)
+            }
+        }
+        receiveNext(Data())
+        XCTAssertEqual(received.wait(timeout: .now() + 5), .success)
+        connection.cancel()
+        if let error = resultBox.error() { throw error }
+        return try SpacesDeviceAPICodec.decodeResponse(resultBox.responseData())
+    }
+
+    private func plaintextReceivesDeviceAPIResponse(port: Int) throws -> Bool {
+        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(socketFD) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(UInt16(port).bigEndian)
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        let connectResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                connect(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connectResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var requestData = try SpacesDeviceAPICodec.encodeRequest(SpacesDeviceAPIRequest(command: .ping))
+        requestData.append(0x0A)
+        _ = requestData.withUnsafeBytes { rawBuffer in write(socketFD, rawBuffer.baseAddress, rawBuffer.count) }
+
+        var buffer = [UInt8](repeating: 0, count: 512)
+        let count = read(socketFD, &buffer, buffer.count)
+        guard count > 0 else { return false }
+        return (try? SpacesDeviceAPICodec.decodeResponse(Data(buffer.prefix(count)))) != nil
+    }
+
+    private func partialTLSRequestEOFClosesConnection(port: Int, transportKey: String, server: SpacesDeviceAPIServer) throws -> Bool {
+        let ready = DispatchSemaphore(value: 0)
+        let sent = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "spaces.device.api.partial-eof.test")
+        let resultBox = DeviceAPITransportTestResultBox()
+        let connection = NWConnection(
+            host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
+            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: ready.signal()
+            case .failed(let error):
+                resultBox.setError(error)
+                ready.signal()
+                sent.signal()
+            default: break
+            }
+        }
+        connection.start(queue: queue)
+        XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
+        if let error = resultBox.error() { throw error }
+        XCTAssertTrue(waitForRequestConnectionCount(1, on: server, timeout: 5))
+
+        let requestData = try SpacesDeviceAPICodec.encodeRequest(SpacesDeviceAPIRequest(command: .ping))
+        connection.send(
+            content: requestData, contentContext: .defaultMessage, isComplete: true,
+            completion: .contentProcessed { error in
+                if let error { resultBox.setError(error) }
+                sent.signal()
+            })
+        XCTAssertEqual(sent.wait(timeout: .now() + 5), .success)
+        if let error = resultBox.error() { throw error }
+
+        connection.cancel()
+        return waitForRequestConnectionCount(0, on: server, timeout: 5)
+    }
+
+    private func waitForRequestConnectionCount(_ expectedCount: Int, on server: SpacesDeviceAPIServer, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if server.requestConnectionCountForTesting == expectedCount { return true }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return server.requestConnectionCountForTesting == expectedCount
+    }
+
+    private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalRuntimePath = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        unsetenv("SPACES_RUNTIME_DIR")
+        defer {
+            if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimePath { setenv("SPACES_RUNTIME_DIR", originalRuntimePath, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        try body(root)
+    }
+
+    private func makeWorkspaceRootProfile(root: URL, sessionID: String) throws -> URL {
+        let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        let workspaceDir = projectDir.appendingPathComponent("workspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+        let project = ProjectRecord(id: "project-\(sessionID)", name: "Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+        let workspace = WorkspaceRecord(
+            id: "workspace-\(sessionID)", projectID: project.id, title: "Workspace", dir: workspaceDir.path, dirname: nil, branch: nil,
+            isDefault: true, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "terminal", workingDirectory: workspaceDir.path, shell: "/bin/zsh", command: nil,
+                createdAt: "2026-06-09T12:00:00Z"), paths: paths)
+        return workspaceDir
+    }
+}
+
+private final class AlwaysAuthorizedDevicePairingStore: SpacesDevicePairingStoreProtocol {
+    let authToken = "valid-token"
+
+    func issueToken(for _: SpacesDeviceClientApp) throws -> String { authToken }
+    func listDevices() throws -> [SpacesDevicePairedClient] { [] }
+    func revoke(installationID _: String) throws {}
+    func removeAll() throws {}
+    func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
+        guard clientApp != nil, authToken == self.authToken else {
+            throw NSError(domain: "SpacesDeviceAPIServer", code: 401, userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])
+        }
+    }
+    func validate(clientApp _: SpacesDeviceClientApp) throws {}
+}
+
+private final class DeviceAPITerminalLaunchCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var configurations: [TerminalSessionLaunchConfiguration] = []
+
+    func append(_ configuration: TerminalSessionLaunchConfiguration) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        configurations.append(configuration)
+        return 9_000 + configurations.count
+    }
+
+    func titles() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return configurations.map(\.title)
+    }
+}
+
+private final class DeviceAPITerminalTerminationCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func append(_ sessionID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        values.append(sessionID)
+    }
+
+    func sessionIDs() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
+private final class DeviceAPITransportTestResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedError: Error?
+    private var storedResponseData = Data()
+
+    func setError(_ error: Error) {
+        lock.lock()
+        storedError = error
+        lock.unlock()
+    }
+
+    func error() -> Error? {
+        lock.lock()
+        let error = storedError
+        lock.unlock()
+        return error
+    }
+
+    func setResponseData(_ data: Data) {
+        lock.lock()
+        storedResponseData = data
+        lock.unlock()
+    }
+
+    func responseData() -> Data {
+        lock.lock()
+        let data = storedResponseData
+        lock.unlock()
+        return data
+    }
+}

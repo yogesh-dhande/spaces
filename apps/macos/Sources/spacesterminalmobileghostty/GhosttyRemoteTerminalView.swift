@@ -795,7 +795,7 @@ import Foundation
             eventAttributes["bounds"] = "\(Int(bounds.width))x\(Int(bounds.height))"
             let renderBounds = visibleRenderBounds()
             eventAttributes["render_bounds"] = "\(Int(renderBounds.width))x\(Int(renderBounds.height))"
-            SpacesMobileTerminalPerformanceLogger.emit(
+            SpacesDeviceTerminalPerformanceLogger.emit(
                 .init(sessionID: ownerEpoch.sessionID, source: "ios-host-view", name: name, attributes: eventAttributes))
         }
 
@@ -811,7 +811,7 @@ import Foundation
                 let attributes = GhosttyRenderFrameMetrics.attributes(
                     frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
                     targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
-                SpacesMobileTerminalPerformanceLogger.emit(
+                SpacesDeviceTerminalPerformanceLogger.emit(
                     .init(sessionID: sessionID, source: "ios-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS, attributes: attributes))
             }
             if applied {

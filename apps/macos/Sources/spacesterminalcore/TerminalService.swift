@@ -357,4 +357,90 @@ import Foundation
             }
         }
     }
+#else
+    public enum TerminalService {
+        public static func ping(timeout: TimeInterval = 2) throws {
+            let response = try pingResponse(timeout: timeout)
+            guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+        }
+
+        public static func createSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
+            try ensureRunning()
+            let response = try TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration),
+                socketPath: try TerminalServicePaths.socketPath(), timeout: createSessionRequestTimeout())
+            guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+            guard let session = response.session else { throw TerminalServiceError.requestFailed("spacesd did not return a session summary.") }
+            return session
+        }
+
+        public static func terminateSession(id sessionID: String) throws {
+            try ensureRunning()
+            let response = try TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: "terminate", sessionID: sessionID), socketPath: try TerminalServicePaths.socketPath(),
+                timeout: 10)
+            guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+        }
+
+        public static func listSessions() throws -> [TerminalServiceSessionSummary] {
+            let socketPath = try TerminalServicePaths.socketPath()
+            guard FileManager.default.fileExists(atPath: socketPath) else { return [] }
+            let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: "list"), socketPath: socketPath, timeout: 5)
+            guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+            return response.sessions ?? []
+        }
+
+        public static func sendProfileCommand(_ profileCommand: TerminalServiceProfileCommandRequest, timeout: TimeInterval = 15) throws
+            -> TerminalServiceProfileCommandResponse
+        {
+            try ensureRunning(timeout: min(timeout, 5))
+            let response = try TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: "profileCommand", profileCommand: profileCommand),
+                socketPath: try TerminalServicePaths.socketPath(), timeout: timeout)
+            guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+            guard let profile = response.profile else { throw TerminalServiceError.requestFailed("spacesd did not return a profile response.") }
+            return profile
+        }
+
+        @discardableResult public static func ensureRunning(timeout: TimeInterval = 5) throws -> Bool {
+            let socketPath = try TerminalServicePaths.socketPath()
+            let deadline = Date().addingTimeInterval(timeout)
+            repeat {
+                if FileManager.default.fileExists(atPath: socketPath), (try? ping(timeout: min(timeout, 1))) != nil { return false }
+                Thread.sleep(forTimeInterval: 0.05)
+            } while Date() < deadline
+            throw TerminalServiceError.serviceUnavailable(socketPath)
+        }
+
+        @discardableResult public static func relaunch(timeout: TimeInterval = 5) throws -> Bool {
+            let socketPath = try TerminalServicePaths.socketPath()
+            if FileManager.default.fileExists(atPath: socketPath) {
+                _ = try? TerminalServiceClient.send(
+                    request: TerminalServiceRequest(command: "shutdown"), socketPath: socketPath, timeout: min(timeout, 1))
+            }
+            return try ensureRunning(timeout: timeout)
+        }
+
+        static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
+            guard let rawValue = environment["SPACESD_CREATE_TIMEOUT"], let value = TimeInterval(rawValue), value > 0 else { return 30 }
+            return value
+        }
+
+        private static func pingResponse(timeout: TimeInterval = 2) throws -> TerminalServiceResponse {
+            try TerminalServiceClient.send(
+                request: TerminalServiceRequest(command: "ping"), socketPath: try TerminalServicePaths.socketPath(), timeout: timeout)
+        }
+    }
+
+    public enum TerminalServiceError: LocalizedError {
+        case requestFailed(String)
+        case serviceUnavailable(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .requestFailed(let message): message
+            case .serviceUnavailable(let socketPath): "spacesd is not running for this user. Expected daemon socket at \(socketPath)."
+            }
+        }
+    }
 #endif

@@ -710,7 +710,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let liveRenderUpdate = try renderUpdate(text: "live", sessionRevision: 2)
         let server = GhosttyRemoteSessionStateStreamServer(
-            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-final-live-test")
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-device.stale-final-live-test")
         ) {
             GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T00:00:02Z", sessionStateRevision: 2,
@@ -797,7 +797,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.stream-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.stream-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-live", reason: "initial", emittedAt: "2026-05-18T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -869,7 +869,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "tiny", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(
-            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-size-test")
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-device.stale-size-test")
         ) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -939,7 +939,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.renderable-viewer-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.renderable-viewer-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-renderable", reason: "initial", emittedAt: "2026-05-19T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -981,7 +981,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.owner-focus-render-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.owner-focus-render-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-owner-focus", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -1036,7 +1036,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.attachment-state-render-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.attachment-state-render-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-attachment-state", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -1095,7 +1095,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.snapshot-precedence-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.snapshot-precedence-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-snapshot-precedence", reason: "initial", emittedAt: "2026-05-21T00:00:00Z", sessionStateRevision: 1,
             sessionStateFlags: 1, screenStateRevision: nil,
@@ -1154,7 +1154,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             TerminalSessionRuntimeState(
                 sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-29T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2), paths: paths)
-        let queue = DispatchQueue(label: "spaces.remote-host.handoff-snapshot-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.handoff-snapshot-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-handoff-snapshot", reason: "initial", emittedAt: "2026-05-29T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: nil,
@@ -1218,7 +1218,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             attachments: [
                 TerminalAttachment(sessionID: "remote-recreate-surface", clientID: client.id, mode: .owner, attachedAt: "2026-05-30T00:00:00Z")
             ])
-        let queue = DispatchQueue(label: "spaces.remote-host.recreate-surface-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.recreate-surface-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-recreate-surface", reason: "initial", emittedAt: "2026-05-30T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,

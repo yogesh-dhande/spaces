@@ -197,7 +197,7 @@ def latency_values(summary: dict[str, Any]) -> list[float]:
 def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_summary: dict[str, Any]) -> dict[str, Any]:
     network_events = [
         record for record in events
-        if record.get("source") == "mobile-bridge" and record.get("name") == "stream_network_send_begin"
+        if record.get("source") == "device-api" and record.get("name") == "stream_network_send_begin"
     ]
     publish_events = [record for record in events if record.get("name") == "render_frame_payload_publish"]
     receive_events = [record for record in events if record.get("name") == "render_frame_payload_receive"]

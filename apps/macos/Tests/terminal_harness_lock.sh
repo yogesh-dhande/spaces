@@ -37,7 +37,7 @@ terminal_service_socket_path_for_runtime_dir() {
 import os
 import pathlib
 
-terminal_root = str(pathlib.Path(os.environ["SPACES_RUNTIME_DIR"]) / "terminal")
+terminal_root = str((pathlib.Path(os.environ["SPACES_RUNTIME_DIR"]).resolve() / "terminal"))
 hash_value = 5381
 for byte in terminal_root.encode("utf-8"):
     hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
@@ -77,7 +77,7 @@ PY
   done
 
   local pids
-  pids="$(lsof -nP -t -U "$service_socket" 2>/dev/null | sort -u || true)"
+  pids="$(lsof -nP -t "$service_socket" 2>/dev/null | sort -u || true)"
   if [[ -z "$pids" ]]; then
     rm -f "$service_socket" >/dev/null 2>&1 || true
     return 0

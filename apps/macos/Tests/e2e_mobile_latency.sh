@@ -16,14 +16,14 @@ WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-latency.XXXXX
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
 SERVICE_LOG="$WORK_ROOT/terminal-service.log"
-BRIDGE_LOG="$WORK_ROOT/mobile-bridge.log"
+DEVICE_API_LOG="$WORK_ROOT/device-api.log"
 PERF_JSONL="$WORK_ROOT/mobile-terminal-performance.jsonl"
 SUMMARY_JSON="$WORK_ROOT/terminal-latency-summary.json"
 SAMPLES="${SAMPLES:-12}"
 NETWORK_PROFILE="local"
-NETWORK_RTT_MS="${SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS:-}"
-NETWORK_BANDWIDTH_BPS="${SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS:-}"
-NETWORK_CHUNK_BYTES="${SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES:-}"
+NETWORK_RTT_MS="${SPACES_DEVICE_API_NETWORK_RTT_MS:-}"
+NETWORK_BANDWIDTH_BPS="${SPACES_DEVICE_API_NETWORK_BANDWIDTH_BPS:-}"
+NETWORK_CHUNK_BYTES="${SPACES_DEVICE_API_NETWORK_CHUNK_BYTES:-}"
 TERMINAL_TARGETS="${SPACES_MOBILE_LATENCY_TERMINAL_TARGETS:-auto}"
 REPORT_ONLY="${SPACES_MOBILE_LATENCY_REPORT_ONLY:-0}"
 KEEP_ROOT="${KEEP_ROOT:-0}"
@@ -46,7 +46,7 @@ REMOTE_RTT_MS=""
 SCENARIOS=(ios-input-latency ios-scrollback-latency)
 SELECTED_SCENARIOS=()
 SERVICE_PID=""
-BRIDGE_PID=""
+DEVICE_API_PID=""
 
 print_usage() {
   cat <<'EOF'
@@ -56,26 +56,25 @@ Options:
   --list                    List available scenarios.
   --scenario NAME           Run only one scenario. May be passed multiple times.
   --network-profile NAME    local or ios-constrained. Defaults to local.
-  --rtt-ms N                Override bridge RTT shaping in milliseconds.
-  --bandwidth-bps N         Override bridge bandwidth shaping.
-  --chunk-bytes N           Override bridge shaping chunk size.
-  --terminal-target NAME    auto, local, remote, or all. Defaults to auto.
+  --rtt-ms N                Override Device API RTT shaping in milliseconds.
+  --bandwidth-bps N         Override Device API bandwidth shaping.
+  --chunk-bytes N           Override Device API shaping chunk size.
+  --terminal-target NAME    auto or local. Defaults to auto.
   --report-only             Report budget failures without failing the script.
   --samples N               Probe count per scenario. Defaults to 12.
   --keep-root               Preserve the temporary profile root.
   --help                    Show this help text.
 
 Network profile defaults:
-  local             No bridge shaping.
+  local             No Device API shaping.
   ios-constrained   80ms RTT, 8Mbps, 16KB chunks.
 
 Env overrides:
-  SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS
-  SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS
-  SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES
+  SPACES_DEVICE_API_NETWORK_RTT_MS
+  SPACES_DEVICE_API_NETWORK_BANDWIDTH_BPS
+  SPACES_DEVICE_API_NETWORK_CHUNK_BYTES
   SPACES_MOBILE_LATENCY_TERMINAL_TARGETS
   SPACES_MOBILE_LATENCY_REPORT_ONLY
-  SPACES_E2E_REMOTE_SSH_HOST and related SPACES_E2E_REMOTE_* values for remote terminal latency.
 EOF
 }
 
@@ -86,9 +85,9 @@ fail() {
     printf '\nspacesd log tail:\n' >&2
     tail -n 160 "$SERVICE_LOG" >&2 || true
   fi
-  if [[ -f "$BRIDGE_LOG" ]]; then
-    printf '\nMobile bridge log tail:\n' >&2
-    tail -n 160 "$BRIDGE_LOG" >&2 || true
+  if [[ -f "$DEVICE_API_LOG" ]]; then
+    printf '\nDevice API log tail:\n' >&2
+    tail -n 160 "$DEVICE_API_LOG" >&2 || true
   fi
   exit 1
 }
@@ -278,27 +277,17 @@ PY
 resolve_terminal_targets() {
   case "$TERMINAL_TARGETS" in
     auto)
-      if [[ -n "$REMOTE_SSH_HOST" ]]; then
-        TERMINAL_TARGETS="local,remote"
-      else
-        TERMINAL_TARGETS="local"
-      fi
+      TERMINAL_TARGETS="local"
       ;;
-    all)
-      TERMINAL_TARGETS="local,remote"
+    local)
       ;;
-    local|remote|local,remote|remote,local)
+    remote|all|local,remote|remote,local)
+      fail "Remote terminal latency requires the direct paired-device E2E harness."
       ;;
     *)
-      fail "--terminal-target must be auto, local, remote, or all"
+      fail "--terminal-target must be auto or local"
       ;;
   esac
-  if [[ "$TERMINAL_TARGETS" == *remote* && -z "$REMOTE_SSH_HOST" ]]; then
-    fail "Remote terminal latency requires SPACES_E2E_REMOTE_SSH_HOST."
-  fi
-  if [[ "$TERMINAL_TARGETS" == *remote* ]]; then
-    ensure_remote_auth_token
-  fi
 }
 
 measure_remote_rtt_ms() {
@@ -321,40 +310,7 @@ PY
 }
 
 prepare_remote_workspace() {
-  [[ "$TERMINAL_TARGETS" == *remote* ]] || return 0
-  export_remote_auth_token
-  local artifact_id artifact_url artifact_sha256 artifact_arch
-  local artifact_assignments
-  artifact_assignments="$("$APP_ROOT/scripts/deploy_linux_spacesd_e2e.sh")" \
-    || fail "Remote managed artifact preparation failed."
-  eval "$artifact_assignments" || fail "Remote managed artifact assignment parsing failed."
-  spaces_e2e_create_scout_fixture_repo "$FIXTURE_TEMPLATE_DIR" "$REMOTE_PROJECT_DIR"
-  local slug
-  slug="$(basename "$WORK_ROOT" | tr -cd 'A-Za-z0-9_.-')"
-  [[ -n "$slug" ]] || slug="mobile-latency"
-  prepare_remote_git_origin "$REMOTE_PROJECT_DIR" "mobile-latency-$slug-scout" \
-    || fail "Remote git fixture setup failed."
-
-  local -a args=(
-    remote-compute-host-smoke
-    --project-dir "$REMOTE_PROJECT_DIR"
-    --host-id "$REMOTE_HOST_ID"
-    --name "$REMOTE_HOST_NAME"
-    --ssh-host "$REMOTE_SSH_HOST"
-    --workspace-root "$REMOTE_WORKSPACE_ROOT"
-    --daemon-port "$REMOTE_DAEMON_PORT"
-    --managed-artifact-id "$artifact_id"
-    --managed-artifact-url "$artifact_url"
-    --managed-artifact-sha256 "$artifact_sha256"
-  )
-  if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
-  if [[ -n "$REMOTE_DAEMON_HOST" ]]; then args+=(--daemon-host "$REMOTE_DAEMON_HOST"); fi
-  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=(--auth-token "$REMOTE_AUTH_TOKEN"); fi
-  "$SPACES_E2E" "${args[@]}" >"$WORK_ROOT/remote-compute-host-smoke.json" 2>"$WORK_ROOT/remote-compute-host-smoke.stderr.log" \
-    || fail "Remote compute host smoke failed. See $WORK_ROOT/remote-compute-host-smoke.stderr.log"
-  REMOTE_WORKSPACE_DIR="$(json_get "$WORK_ROOT/remote-compute-host-smoke.json" "workspace.dir")"
-  [[ -n "$REMOTE_WORKSPACE_DIR" ]] || fail "Remote compute host smoke did not return a workspace directory."
+  return 0
 }
 
 cleanup_remote_e2e_host() {
@@ -364,9 +320,9 @@ cleanup_remote_e2e_host() {
 
 cleanup() {
   local exit_code=$?
-  if [[ -n "$BRIDGE_PID" ]]; then
-    kill "$BRIDGE_PID" >/dev/null 2>&1 || true
-    wait "$BRIDGE_PID" >/dev/null 2>&1 || true
+  if [[ -n "$DEVICE_API_PID" ]]; then
+    kill "$DEVICE_API_PID" >/dev/null 2>&1 || true
+    wait "$DEVICE_API_PID" >/dev/null 2>&1 || true
   fi
   if [[ -n "$SERVICE_PID" ]]; then
     kill "$SERVICE_PID" >/dev/null 2>&1 || true
@@ -414,35 +370,35 @@ while [[ $SECONDS -lt $service_deadline ]]; do
 done
 [[ -S "$service_socket" ]] || fail "timed out waiting for spacesd socket"
 
-bridge_env=(SPACES_MOBILE_BRIDGE_NETWORK_PROFILE="$NETWORK_PROFILE")
+device_api_env=(SPACES_DEVICE_API_NETWORK_PROFILE="$NETWORK_PROFILE")
 if [[ "$NETWORK_PROFILE" == "ios-constrained" ]]; then
-  bridge_env+=(
-    SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS="${NETWORK_RTT_MS:-80}"
-    SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS="${NETWORK_BANDWIDTH_BPS:-8000000}"
-    SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES="${NETWORK_CHUNK_BYTES:-16384}"
+  device_api_env+=(
+    SPACES_DEVICE_API_NETWORK_RTT_MS="${NETWORK_RTT_MS:-80}"
+    SPACES_DEVICE_API_NETWORK_BANDWIDTH_BPS="${NETWORK_BANDWIDTH_BPS:-8000000}"
+    SPACES_DEVICE_API_NETWORK_CHUNK_BYTES="${NETWORK_CHUNK_BYTES:-16384}"
   )
 fi
 if [[ "$NETWORK_PROFILE" == "local" && -n "$NETWORK_RTT_MS" ]]; then
-  bridge_env=(SPACES_MOBILE_BRIDGE_NETWORK_PROFILE="ios-constrained")
-  bridge_env+=(
-    SPACES_MOBILE_BRIDGE_NETWORK_RTT_MS="$NETWORK_RTT_MS"
-    SPACES_MOBILE_BRIDGE_NETWORK_BANDWIDTH_BPS="${NETWORK_BANDWIDTH_BPS:-0}"
-    SPACES_MOBILE_BRIDGE_NETWORK_CHUNK_BYTES="${NETWORK_CHUNK_BYTES:-0}"
+  device_api_env=(SPACES_DEVICE_API_NETWORK_PROFILE="ios-constrained")
+  device_api_env+=(
+    SPACES_DEVICE_API_NETWORK_RTT_MS="$NETWORK_RTT_MS"
+    SPACES_DEVICE_API_NETWORK_BANDWIDTH_BPS="${NETWORK_BANDWIDTH_BPS:-0}"
+    SPACES_DEVICE_API_NETWORK_CHUNK_BYTES="${NETWORK_CHUNK_BYTES:-0}"
   )
 fi
 
-env "${bridge_env[@]}" "$SPACES_E2E" mobile-serve --host 127.0.0.1 --port 0 >"$BRIDGE_LOG" 2>&1 &
-BRIDGE_PID="$!"
+env "${device_api_env[@]}" "$SPACES_E2E" mobile-serve --host 127.0.0.1 --port 0 >"$DEVICE_API_LOG" 2>&1 &
+DEVICE_API_PID="$!"
 
 ready_deadline=$((SECONDS + 15))
 while [[ $SECONDS -lt $ready_deadline ]]; do
-  grep -q 'Spaces mobile bridge ready' "$BRIDGE_LOG" 2>/dev/null && break
+  grep -q 'Spaces Device API ready' "$DEVICE_API_LOG" 2>/dev/null && break
   sleep 0.1
 done
-grep -q 'Spaces mobile bridge ready' "$BRIDGE_LOG" || fail "timed out waiting for mobile bridge readiness"
+grep -q 'Spaces Device API ready' "$DEVICE_API_LOG" || fail "timed out waiting for device API readiness"
 
-parsed_bridge="$(
-python3 - "$BRIDGE_LOG" <<'PY'
+parsed_device_api="$(
+python3 - "$DEVICE_API_LOG" <<'PY'
 import pathlib
 import re
 import shlex
@@ -456,16 +412,16 @@ if not port_match or not link_match:
     raise SystemExit(1)
 link = link_match.group(1)
 values = parse_qs(urlparse(link).query)
-print(f"BRIDGE_PORT={shlex.quote(port_match.group(1))}")
+print(f"DEVICE_API_PORT={shlex.quote(port_match.group(1))}")
 print(f"PAIRING_LINK={shlex.quote(link)}")
 print(f"TRANSPORT_KEY={shlex.quote(values['psk'][0])}")
 print(f"PAIRING_CODE={shlex.quote(values['code'][0])}")
 print(f"PAIRING_NONCE={shlex.quote(values['nonce'][0])}")
 PY
 )"
-eval "$parsed_bridge"
+eval "$parsed_device_api"
 
-BRIDGE_PORT="$BRIDGE_PORT" \
+DEVICE_API_PORT="$DEVICE_API_PORT" \
 PAIRING_LINK="$PAIRING_LINK" \
 TRANSPORT_KEY="$TRANSPORT_KEY" \
 PAIRING_CODE="$PAIRING_CODE" \
@@ -504,7 +460,7 @@ from pathlib import Path
 
 scenarios = sys.argv[1:]
 host = "127.0.0.1"
-port = int(os.environ["BRIDGE_PORT"])
+port = int(os.environ["DEVICE_API_PORT"])
 transport_key = os.environ["TRANSPORT_KEY"]
 pairing_code = os.environ["PAIRING_CODE"]
 pairing_nonce = os.environ["PAIRING_NONCE"]
@@ -684,7 +640,38 @@ def start_terminal(title: str, command: str, terminal_target: str) -> str:
             ) from error
 
 
-def bridge_request(payload: dict) -> tuple[dict, float]:
+def typed_device_api_payload(payload: dict) -> dict:
+    command = payload.get("command")
+    if isinstance(command, dict):
+        return payload
+    command_payload = {key: value for key, value in payload.items() if key not in ("command", "authToken", "clientApp")}
+    if command in ("attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"):
+        command_payload["action"] = "clearScreen" if command == "clear" else command
+        command_payload.setdefault("appendNewline", False)
+        typed_command = {"terminalControl": command_payload}
+    else:
+        typed_command = {command: command_payload}
+    request = {key: value for key, value in payload.items() if key in ("authToken", "clientApp")}
+    request["command"] = typed_command
+    return request
+
+
+def device_api_result(response: dict, kind: str) -> dict:
+    result = response.get("result")
+    assert isinstance(result, dict) and set(result) == {kind}, {"kind": kind, "response": response}
+    payload = result[kind]
+    assert isinstance(payload, dict), {"kind": kind, "response": response}
+    return payload
+
+
+def device_api_session_state(response: dict) -> dict:
+    if "sessionState" in response:
+        return response["sessionState"]
+    return device_api_result(response, "terminalState")
+
+
+def device_api_request(payload: dict) -> tuple[dict, float]:
+    payload = typed_device_api_payload(payload)
     started = time.perf_counter()
     completed = run(
         [
@@ -703,7 +690,8 @@ def bridge_request(payload: dict) -> tuple[dict, float]:
     return json.loads(completed.stdout), (time.perf_counter() - started) * 1000
 
 
-def bridge_connect_stream(payload: dict) -> subprocess.Popen:
+def device_api_connect_stream(payload: dict) -> subprocess.Popen:
+    payload = typed_device_api_payload(payload)
     return subprocess.Popen(
         [
             spacese2e,
@@ -881,7 +869,7 @@ def direct_connect_stream(endpoint: dict, payload: dict) -> subprocess.Popen:
 
 
 def overview_payload() -> dict:
-    response, _ = bridge_request(
+    response, _ = device_api_request(
         {
             "command": "overview",
             "authToken": auth_token,
@@ -889,7 +877,7 @@ def overview_payload() -> dict:
         }
     )
     assert response["ok"], response
-    return response.get("overview") or {}
+    return device_api_result(response, "overview")
 
 
 def find_daemon_endpoint(value: object, session_id: str) -> dict | None:
@@ -929,13 +917,13 @@ def remote_daemon_endpoint(session_id: str, timeout: float = 60) -> dict:
 def request(payload: dict, terminal_target: str = "local") -> tuple[dict, float]:
     if terminal_target == "remote":
         return direct_request(remote_daemon_endpoint(payload["sessionID"]), payload)
-    return bridge_request(payload)
+    return device_api_request(payload)
 
 
 def connect_stream(payload: dict, terminal_target: str) -> subprocess.Popen:
     if terminal_target == "remote":
         return direct_connect_stream(remote_daemon_endpoint(payload["sessionID"]), payload)
-    return bridge_connect_stream(payload)
+    return device_api_connect_stream(payload)
 
 
 class StreamLineReader:
@@ -1365,7 +1353,7 @@ client_app = {
     "appVersion": "1.0",
 }
 
-pair_response, _ = bridge_request(
+pair_response, _ = device_api_request(
     {
         "command": "pair",
         "pairingCode": pairing_code,
@@ -1374,17 +1362,17 @@ pair_response, _ = bridge_request(
     }
 )
 assert pair_response["ok"], pair_response
-auth_token = pair_response["issuedAuthToken"]
+auth_token = device_api_result(pair_response, "issuedAuthToken")["authToken"]
 
 
-def wait_for_bridge_session_available(session_id: str, terminal_target: str, timeout: float = 60) -> None:
+def wait_for_device_api_session_available(session_id: str, terminal_target: str, timeout: float = 60) -> None:
     if terminal_target != "remote":
         return
     remote_daemon_endpoint(session_id, timeout=timeout)
 
 
 def attach_pair(session_id: str, terminal_target: str) -> tuple[str, str, subprocess.Popen | None]:
-    wait_for_bridge_session_available(session_id, terminal_target)
+    wait_for_device_api_session_available(session_id, terminal_target)
     desktop_client_id = str(uuid.uuid4()).upper()
     desktop_owner = {
         "id": desktop_client_id,
@@ -1478,8 +1466,7 @@ def fetch_state(session_id: str, terminal_target: str = "local") -> dict:
         terminal_target,
     )
     assert response["ok"], response
-    assert "sessionState" in response, response
-    return materialize_render_update(response["sessionState"])
+    return materialize_render_update(device_api_session_state(response))
 
 
 def poll_state_predicate(session_id: str, predicate, timeout: float = 10, terminal_target: str = "local") -> tuple[dict, int]:
@@ -1612,13 +1599,13 @@ def summarize_visible_render_samples(measurements: list[dict]) -> dict:
     }
 
 
-def bridge_latency_split(session_id: str, begin_ns: int, frame_publish_ns: int | None, visible_ns: int) -> dict:
+def device_api_latency_split(session_id: str, begin_ns: int, frame_publish_ns: int | None, visible_ns: int) -> dict:
     after_ns = frame_publish_ns if frame_publish_ns is not None else begin_ns
-    relay_read = last_performance_event(session_id, "mobile-bridge", "stream_relay_read", after_ns, before_ns=visible_ns)
+    relay_read = last_performance_event(session_id, "device-api", "stream_relay_read", after_ns, before_ns=visible_ns)
     relay_read_ns = relay_read[1] if relay_read else None
     network_send_begin = last_performance_event(
         session_id,
-        "mobile-bridge",
+        "device-api",
         "stream_network_send_begin",
         relay_read_ns if relay_read_ns is not None else after_ns,
         before_ns=visible_ns,
@@ -1725,7 +1712,7 @@ def run_ios_input_latency(terminal_target: str) -> dict:
             frame_publish_ns = frame_publish[1] if frame_publish else None
             event_to_frame_publish_ms = ms_between(begin_ns, frame_publish_ns) if frame_publish_ns is not None else None
             frame_publish_to_visible_ms = ms_between(frame_publish_ns, visible_ns) if frame_publish_ns is not None else None
-            bridge_split = bridge_latency_split(session_id, begin_ns, frame_publish_ns, visible_ns)
+            device_api_split = device_api_latency_split(session_id, begin_ns, frame_publish_ns, visible_ns)
             if frame_publish_ns is not None:
                 event(
                     "ios_input_frame_published",
@@ -1762,9 +1749,9 @@ def run_ios_input_latency(terminal_target: str) -> dict:
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
                 "event_to_frame_publish_ms": event_to_frame_publish_ms,
                 "event_to_host_publish_ms": event_to_frame_publish_ms,
-                "host_publish_to_relay_read_ms": bridge_split["host_publish_to_relay_read_ms"],
-                "relay_read_to_network_send_begin_ms": bridge_split["relay_read_to_network_send_begin_ms"],
-                "network_send_begin_to_stream_visible_ms": bridge_split["network_send_begin_to_stream_visible_ms"],
+                "host_publish_to_relay_read_ms": device_api_split["host_publish_to_relay_read_ms"],
+                "relay_read_to_network_send_begin_ms": device_api_split["relay_read_to_network_send_begin_ms"],
+                "network_send_begin_to_stream_visible_ms": device_api_split["network_send_begin_to_stream_visible_ms"],
                 "frame_publish_to_visible_ms": frame_publish_to_visible_ms,
                 "host_publish_to_client_visible_ms": frame_publish_to_visible_ms,
                 "event_to_visible_ms": ms_between(begin_ns, visible_ns),
@@ -1852,7 +1839,7 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
                 frame_publish_ns = frame_publish[1] if frame_publish else None
                 event_to_frame_publish_ms = ms_between(begin_ns, frame_publish_ns) if frame_publish_ns is not None else None
                 frame_publish_to_visible_ms = ms_between(frame_publish_ns, frame_ns) if frame_publish_ns is not None else None
-                bridge_split = bridge_latency_split(session_id, begin_ns, frame_publish_ns, frame_ns)
+                device_api_split = device_api_latency_split(session_id, begin_ns, frame_publish_ns, frame_ns)
                 if frame_publish_ns is not None:
                     event(
                         "ios_scroll_frame_published",
@@ -1881,7 +1868,7 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
                     visible_json_payload_bytes=visible_meta["visible_json_payload_bytes"],
                 )
             else:
-                bridge_split = {
+                device_api_split = {
                     "host_publish_to_relay_read_ms": None,
                     "relay_read_to_network_send_begin_ms": None,
                     "network_send_begin_to_stream_visible_ms": None,
@@ -1904,9 +1891,9 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
                 "rpc_end_to_render_visible_ms": rpc_end_to_render_visible_ms,
                 "event_to_frame_publish_ms": event_to_frame_publish_ms,
                 "event_to_host_publish_ms": event_to_frame_publish_ms,
-                "host_publish_to_relay_read_ms": bridge_split["host_publish_to_relay_read_ms"],
-                "relay_read_to_network_send_begin_ms": bridge_split["relay_read_to_network_send_begin_ms"],
-                "network_send_begin_to_stream_visible_ms": bridge_split["network_send_begin_to_stream_visible_ms"],
+                "host_publish_to_relay_read_ms": device_api_split["host_publish_to_relay_read_ms"],
+                "relay_read_to_network_send_begin_ms": device_api_split["relay_read_to_network_send_begin_ms"],
+                "network_send_begin_to_stream_visible_ms": device_api_split["network_send_begin_to_stream_visible_ms"],
                 "frame_publish_to_visible_ms": frame_publish_to_visible_ms,
                 "host_publish_to_client_visible_ms": frame_publish_to_visible_ms,
                 "rendered_change_latency_ms": rendered_change_latency_ms,
@@ -2041,7 +2028,7 @@ payload = {
     "network_profile": network_profile,
     "network": {
         "profile": network_profile,
-        "bridge_rtt_ms": network_rtt_ms,
+        "device_api_rtt_ms": network_rtt_ms,
         "remote_rtt_ms": remote_rtt_ms,
         "bandwidth_bps": network_bandwidth_bps,
         "chunk_bytes": network_chunk_bytes,
@@ -2065,7 +2052,7 @@ for result_key, result in scenario_results.items():
     target = budget["target_p95_ms"]
     target_text = f", target p95 {target}ms" if target is not None else ""
     enforcement_text = "gross" if result.get("budget_enforced", True) else "report-only"
-    rtt_label = f"remote_rtt={remote_rtt_ms:.3f}ms" if terminal_target == "remote" and remote_rtt_ms is not None else f"bridge_rtt={network_rtt_ms}ms"
+    rtt_label = f"remote_rtt={remote_rtt_ms:.3f}ms" if terminal_target == "remote" and remote_rtt_ms is not None else f"device_api_rtt={network_rtt_ms}ms"
     print(
         f"{name} [{network_profile}, terminal={terminal_target}, {rtt_label}]: "
         f"p50={summary['p50_ms']}ms p95={summary['p95_ms']}ms "

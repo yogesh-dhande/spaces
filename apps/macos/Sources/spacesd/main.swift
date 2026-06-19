@@ -1,6 +1,6 @@
 import Dispatch
 import Foundation
-import spacesmobilecore
+import spacesdevicecore
 import spacesruntimecore
 import spacesterminalcore
 import spacesterminalghostty
@@ -20,8 +20,8 @@ import workspacecore
     import Glibc
 #endif
 
-#if canImport(spacesmobilebridge)
-    import spacesmobilebridge
+#if canImport(spacesdeviceapi)
+    import spacesdeviceapi
 #endif
 
 @MainActor private final class SpacesDaemonController {
@@ -41,6 +41,7 @@ import workspacecore
     }
 
     private let socketPath: String
+    private let instanceLock: TerminalServiceInstanceLock
     private let serverQueue = DispatchQueue(label: "spaces.terminal.service")
     private lazy var server = TerminalServiceServer(socketPath: socketPath, queue: serverQueue) { [weak self] request in
         Self.runOnMainActorSynchronously {
@@ -90,10 +91,24 @@ import workspacecore
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
-    private let mobileBridgeSupervisor = SpacesDaemonMobileBridgeSupervisor()
+    private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
+        builtInTerminalSessionTerminator: { [weak self] sessionID in
+            Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
+        },
+        builtInTerminalSessionLauncher: { [weak self] launchConfiguration in
+            try Self.runOnMainActorSynchronously {
+                Result {
+                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                    return try self.launchBuiltInTerminalSession(launchConfiguration)
+                }
+            }.get()
+        })
     private let git = RemoteWorkspaceGitClient()
 
-    init() throws { socketPath = try TerminalServicePaths.socketPath() }
+    init() throws {
+        instanceLock = try TerminalServiceInstanceLock.acquire(path: try TerminalServicePaths.instanceLockPath())
+        socketPath = try TerminalServicePaths.socketPath()
+    }
 
     func start() throws {
         try recoverStaleSessions()
@@ -101,14 +116,14 @@ import workspacecore
         if let remoteServerLoadError { throw remoteServerLoadError }
         try server.start()
         try configuredRemoteServer?.start()
-        mobileBridgeSupervisor.start()
+        deviceAPISupervisor.start()
         startLifecycleTimer()
     }
 
     func shutdown() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
-        mobileBridgeSupervisor.stop()
+        deviceAPISupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
         remoteServer?.stop()
         server.stop()
@@ -119,6 +134,7 @@ import workspacecore
         case "ping": return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: daemonStatus())
         case "shutdownIfIdle": return shutdownIfIdle()
         case "shutdown":
+            writeStandardError("spacesd: terminal service shutdown requested\n")
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(100))
                 Self.terminateProcess()
@@ -284,7 +300,7 @@ import workspacecore
         }
         if exists {
             throw RemoteWorkspaceRefreshBlock(
-                hostName: refreshRequest?.hostName ?? "remote host", path: remotePath, branch: branch, reason: .checkoutFailed,
+                hostName: refreshRequest?.hostName ?? "remote device", path: remotePath, branch: branch, reason: .checkoutFailed,
                 detail: "Remote workspace path exists but is not an empty Git worktree.")
         }
         try FileManager.default.createDirectory(at: remotePathURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -294,7 +310,7 @@ import workspacecore
     private func cloneRemoteWorktree(manifest: TerminalServiceWorkspaceRuntimeManifest, branch: String, remotePath: String) throws {
         guard let remoteURL = manifest.gitRemoteURL?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteURL.isEmpty else {
             throw RemoteWorkspaceRefreshBlock(
-                hostName: manifest.computeHostID ?? "remote host", path: remotePath, branch: branch, reason: .fetchFailed,
+                hostName: manifest.deviceID ?? "remote device", path: remotePath, branch: branch, reason: .fetchFailed,
                 detail: "Remote workspace path is missing and no Git remote URL was provided.")
         }
         _ = try git.runGitAndCapture(["clone", "--branch", branch, "--single-branch", remoteURL, remotePath], timeout: 120)
@@ -434,13 +450,13 @@ import workspacecore
             let orchestrator = try makeProfileOrchestrator()
             let projectID = try requiredProfileArgument(command.projectID, name: "projectID")
             let branch = try requiredProfileArgument(command.branch, name: "branch")
-            let hostID = try requiredProfileArgument(command.hostID, name: "hostID")
             guard let project = try orchestrator.store.project(id: projectID) else {
                 throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(projectID).")
             }
-            let workspace = try orchestrator.createWorkspaceOnHost(
-                projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch, hostID: hostID,
-                targetBranch: command.targetBranch, allowExistingBranchReuse: command.existingBranch ?? false)
+            let workspace = try orchestrator.createWorkspaceOnDevice(
+                projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch,
+                deviceID: SpacesDeviceRecord.localDeviceID, targetBranch: command.targetBranch,
+                allowExistingBranchReuse: command.existingBranch ?? false)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
         case .workspaceStart:
             let orchestrator = try makeProfileOrchestrator()
@@ -502,27 +518,32 @@ import workspacecore
         let orchestrator = WorkspaceOrchestrator(
             store: store,
             builtInTerminalSessionTerminator: { [weak self] sessionID in
-                Self.runOnMainActorSynchronously {
-                    guard let self else { return }
-                    _ = self.terminateSession(id: sessionID)
-                }
+                Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
             },
             builtInTerminalSessionLauncher: { [weak self] launchConfiguration in
                 try Self.runOnMainActorSynchronously {
                     Result {
-                        guard let self else { throw TerminalServiceError.requestFailed("spacesd is shutting down.") }
-                        let response = self.createSession(
-                            launchConfiguration, request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration))
-                        guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
-                        guard let session = response.session else {
-                            throw TerminalServiceError.requestFailed("spacesd did not return a session summary.")
-                        }
-                        return session
+                        guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                        return try self.launchBuiltInTerminalSession(launchConfiguration)
                     }
                 }.get()
             })
         _ = try orchestrator.syncConfig()
         return orchestrator
+    }
+
+    private func terminateBuiltInTerminalSession(id sessionID: String) { _ = terminateSession(id: sessionID) }
+
+    private func launchBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
+        let response = createSession(
+            launchConfiguration, request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration))
+        guard response.ok else { throw Self.requestFailedError(response.message) }
+        guard let session = response.session else { throw Self.requestFailedError("spacesd did not return a session summary.") }
+        return session
+    }
+
+    private static func requestFailedError(_ message: String) -> NSError {
+        NSError(domain: "spacesd", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     private func profileProjectSummary(_ value: ProjectSummary) -> TerminalServiceProfileProjectSummary {
@@ -533,8 +554,8 @@ import workspacecore
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, hostID: value.hostID, title: value.title, dir: value.dir, runtimePath: value.runtimePath,
-            dirname: value.dirname, branch: value.branch, targetBranch: value.targetBranch, isDefault: value.isDefault, isArchived: value.isArchived,
+            id: value.id, projectID: value.projectID, title: value.title, dir: value.dir, runtimePath: value.runtimePath, dirname: value.dirname,
+            branch: value.branch, targetBranch: value.targetBranch, isDefault: value.isDefault, isArchived: value.isArchived,
             isHidden: value.isHidden, isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
 
@@ -637,9 +658,7 @@ import workspacecore
 
     private func postAgentEventNotification() {
         #if os(macOS)
-            guard let object = try? IPCNotification.currentObject() else { return }
-            DistributedNotificationCenter.default().postNotificationName(
-                IPCNotification.agentEventFired, object: object, userInfo: nil, options: [.deliverImmediately])
+            try? IPCNotification.post(IPCNotification.agentEventFired)
         #endif
     }
 
@@ -651,7 +670,7 @@ import workspacecore
         if Self.ownerGatedTerminalCommands.contains(controlRequest.command),
             controlRequest.clientID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
         {
-            return TerminalServiceResponse(ok: false, message: "Missing mobile client ID.")
+            return TerminalServiceResponse(ok: false, message: "Missing device client ID.")
         }
         if let liveCore = sessionCores[sessionID] {
             let response = liveCore.handleControlRequest(controlRequest)
@@ -683,17 +702,17 @@ import workspacecore
         }
         do {
             pruneTerminalLinkTransferAuthorizations(now: Date())
-            let metadata: SpacesMobileTerminalLinkMetadata
+            let metadata: SpacesDeviceTerminalLinkMetadata
             if canResolveTerminalLinkWithoutLocalState(request.terminalLink) {
-                metadata = try SpacesMobileTerminalLinkResolver.resolve(
+                metadata = try SpacesDeviceTerminalLinkResolver.resolve(
                     sessionID: sessionID, link: request.terminalLink, workingDirectory: nil, workspaceRoots: [])
             } else {
                 let workingDirectory = try terminalWorkingDirectory(sessionID: sessionID)
-                metadata = try SpacesMobileTerminalLinkResolver.resolve(
+                metadata = try SpacesDeviceTerminalLinkResolver.resolve(
                     sessionID: sessionID, link: request.terminalLink, workingDirectory: workingDirectory, workspaceRoots: [workingDirectory])
             }
             if metadata.source == .localFile {
-                let resolvedPath = try SpacesMobileTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
+                let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
                 authorizeTerminalLinkTransfer(linkID: metadata.id, sessionID: sessionID, resolvedPath: resolvedPath, now: Date())
             }
             return TerminalServiceResponse(ok: true, message: "Resolved terminal link.", terminalLinkMetadata: terminalServiceLinkMetadata(metadata))
@@ -706,12 +725,12 @@ import workspacecore
         }
         do {
             guard let linkID = request.terminalLinkID?.trimmingCharacters(in: .whitespacesAndNewlines), !linkID.isEmpty else {
-                throw SpacesMobileTerminalLinkResolverError.invalidLinkID
+                throw SpacesDeviceTerminalLinkResolverError.invalidLinkID
             }
             guard let authorization = try terminalLinkTransferAuthorization(linkID: linkID, sessionID: sessionID, now: Date()) else {
-                throw SpacesMobileTerminalLinkResolverError.invalidLinkID
+                throw SpacesDeviceTerminalLinkResolverError.invalidLinkID
             }
-            let chunk = try SpacesMobileTerminalLinkResolver.readChunk(
+            let chunk = try SpacesDeviceTerminalLinkResolver.readChunk(
                 sessionID: sessionID, linkID: linkID, offset: request.chunkOffset, limit: request.chunkLimit,
                 workspaceRoots: [authorization.resolvedPath])
             authorizeTerminalLinkTransfer(linkID: linkID, sessionID: sessionID, resolvedPath: authorization.resolvedPath, now: Date())
@@ -943,7 +962,7 @@ import workspacecore
     private func terminalLinkTransferAuthorization(linkID: String, sessionID: String, now: Date) throws -> TerminalLinkTransferAuthorization? {
         pruneTerminalLinkTransferAuthorizations(now: now)
         guard let authorization = terminalLinkTransferAuthorizations[linkID] else { return nil }
-        guard authorization.sessionID == sessionID else { throw SpacesMobileTerminalLinkResolverError.sessionMismatch }
+        guard authorization.sessionID == sessionID else { throw SpacesDeviceTerminalLinkResolverError.sessionMismatch }
         return authorization
     }
 
@@ -969,14 +988,14 @@ import workspacecore
         return trimmed
     }
 
-    private func terminalServiceLinkMetadata(_ metadata: SpacesMobileTerminalLinkMetadata) -> TerminalServiceTerminalLinkMetadata {
+    private func terminalServiceLinkMetadata(_ metadata: SpacesDeviceTerminalLinkMetadata) -> TerminalServiceTerminalLinkMetadata {
         TerminalServiceTerminalLinkMetadata(
             id: metadata.id, source: metadata.source.rawValue, originalLink: metadata.originalLink, displayName: metadata.displayName,
             contentType: metadata.contentType, mediaKind: metadata.mediaKind?.rawValue, byteCount: metadata.byteCount,
             externalURL: metadata.externalURL)
     }
 
-    private func terminalServiceLinkChunk(_ chunk: SpacesMobileTerminalLinkChunk) -> TerminalServiceTerminalLinkChunk {
+    private func terminalServiceLinkChunk(_ chunk: SpacesDeviceTerminalLinkChunk) -> TerminalServiceTerminalLinkChunk {
         TerminalServiceTerminalLinkChunk(
             linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
     }
@@ -1164,19 +1183,29 @@ private enum SpacesDaemonMobileCredentialStore {
     }
 }
 
-@MainActor private final class SpacesDaemonMobileBridgeSupervisor {
-    #if canImport(spacesmobilebridge)
-        private let supervisor = SpacesMobileBridgeSupervisor()
+@MainActor private final class SpacesDaemonDeviceAPISupervisor {
+    #if canImport(spacesdeviceapi)
+        private let supervisor: SpacesDeviceAPISupervisor
     #endif
 
+    init(
+        builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
+    ) {
+        #if canImport(spacesdeviceapi)
+            supervisor = SpacesDeviceAPISupervisor(
+                builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+        #endif
+    }
+
     func start() {
-        #if canImport(spacesmobilebridge)
+        #if canImport(spacesdeviceapi)
             supervisor.start()
         #endif
     }
 
     func stop() {
-        #if canImport(spacesmobilebridge)
+        #if canImport(spacesdeviceapi)
             supervisor.stop()
         #endif
     }
@@ -1223,8 +1252,9 @@ private enum SpacesDaemonMobileCredentialStore {
         #else
             do {
                 let controller = try MainActor.assumeIsolated { try SpacesDaemonController() }
+                let signalSources = installTerminationSignalHandlers(controller: controller)
                 try MainActor.assumeIsolated { try controller.start() }
-                RunLoop.main.run()
+                withExtendedLifetime(signalSources) { RunLoop.main.run() }
                 MainActor.assumeIsolated { controller.shutdown() }
             } catch {
                 writeStandardError("spacesd: \(error)\n")
@@ -1236,8 +1266,37 @@ private enum SpacesDaemonMobileCredentialStore {
     private static func configureProcessSignals() {
         #if canImport(Glibc)
             _ = signal(SIGPIPE, SIG_IGN)
+            _ = signal(SIGHUP, SIG_IGN)
         #endif
     }
+
+    #if canImport(Glibc)
+        private static func installTerminationSignalHandlers(controller: SpacesDaemonController) -> [DispatchSourceSignal] {
+            [SIGTERM, SIGINT].map { signalNumber in
+                _ = signal(signalNumber, SIG_IGN)
+                let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+                source.setEventHandler {
+                    writeStandardError("spacesd: received \(signalName(signalNumber)); shutting down\n")
+                    Task { @MainActor in
+                        controller.shutdown()
+                        exit(0)
+                    }
+                }
+                source.resume()
+                return source
+            }
+        }
+
+        private static func signalName(_ signalNumber: Int32) -> String {
+            switch signalNumber {
+            case SIGTERM: "SIGTERM"
+            case SIGINT: "SIGINT"
+            default: "signal \(signalNumber)"
+            }
+        }
+    #else
+        private static func installTerminationSignalHandlers(controller _: SpacesDaemonController) -> [DispatchSourceSignal] { [] }
+    #endif
 }
 
 private func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }

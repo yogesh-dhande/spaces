@@ -156,10 +156,7 @@ public final class WorkspaceOrchestrator {
         -> TerminalServiceResponse
     { try sendTerminalServiceRequest(to: target, request: request) }
 
-    private static func remoteDaemonAuthToken(target: SpacesDaemonConnectionTarget) throws -> String? {
-        if let computeHostID = target.computeHostID { return try ComputeHostCredentialStore.resolvedAuthToken(hostID: computeHostID) }
-        return nil
-    }
+    private static func remoteDaemonAuthToken(target: SpacesDaemonConnectionTarget) throws -> String? { nil }
 
     private enum ExtractedBrowserFocusOutcome {
         case focused
@@ -345,12 +342,11 @@ public final class WorkspaceOrchestrator {
         #if canImport(Darwin)
             self.builtInTerminalWindowOpener =
                 builtInTerminalWindowOpener ?? { sessionID, mode in
-                    guard let object = try? IPCNotification.currentObject() else { return }
-                    DistributedNotificationCenter.default().postNotificationName(
-                        IPCNotification.openTerminalSessionWindow, object: object,
+                    try? IPCNotification.post(
+                        IPCNotification.openTerminalSessionWindow,
                         userInfo: [
                             IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalAttachmentModeUserInfoKey: mode.rawValue,
-                        ], options: [.deliverImmediately])
+                        ])
                 }
             self.builtInTerminalWindowFocuser =
                 builtInTerminalWindowFocuser ?? { sessionID, requestID in
@@ -359,18 +355,15 @@ public final class WorkspaceOrchestrator {
                         IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
                     ]
                     if let requestID, !requestID.isEmpty { userInfo[IPCNotification.focusRequestIDUserInfoKey] = requestID }
-                    guard let object = try? IPCNotification.currentObject() else { return }
-                    DistributedNotificationCenter.default().postNotificationName(
-                        IPCNotification.openTerminalSessionWindow, object: object, userInfo: userInfo, options: [.deliverImmediately])
+                    try? IPCNotification.post(IPCNotification.openTerminalSessionWindow, userInfo: userInfo)
                 }
             self.builtInTerminalWindowCloser =
                 builtInTerminalWindowCloser ?? { sessionID in
-                    guard let object = try? IPCNotification.currentObject() else { return }
-                    DistributedNotificationCenter.default().postNotificationName(
-                        IPCNotification.closeTerminalSessionWindow, object: object,
+                    try? IPCNotification.post(
+                        IPCNotification.closeTerminalSessionWindow,
                         userInfo: [
                             IPCNotification.terminalSessionIDUserInfoKey: sessionID, IPCNotification.terminalSessionIsTerminatingUserInfoKey: "true",
-                        ], options: [.deliverImmediately])
+                        ])
                 }
             self.builtInTerminalSessionTerminator =
                 builtInTerminalSessionTerminator ?? Self.builtInTerminalSessionTerminatorOverrideStore.get() ?? { sessionID in
@@ -409,76 +402,39 @@ public final class WorkspaceOrchestrator {
         return config
     }
 
-    public func listComputeHosts() throws -> [ComputeHostRecord] { try store.computeHosts() }
+    public func listSpacesDevices() throws -> [SpacesDeviceRecord] { try store.spacesDevices() }
 
-    public func upsertComputeHost(_ host: ComputeHostRecord) throws { try store.upsert(computeHost: host) }
-
-    public func validateComputeHostDeletion(id: String) throws {
-        let hostID = normalizedComputeHostID(id) ?? id
-        if hostID == ComputeHostRecord.localHostID { throw WorkspaceError.invalidArgument(message: "The local host record cannot be removed.") }
-        let assignedWorkspaces = try workspacesResolving(toComputeHostID: hostID)
-        if !assignedWorkspaces.isEmpty {
-            throw computeHostChangeBlockedError(action: "remove compute host '\(hostID)'", workspaces: assignedWorkspaces)
+    public func upsertSpacesDevice(_ device: SpacesDeviceRecord) throws {
+        guard device.isLocal else {
+            throw WorkspaceError.invalidArgument(message: "Remote device records are not part of the device-owned daemon model.")
         }
+        try store.upsert(spacesDevice: device)
     }
 
-    @discardableResult public func deleteComputeHost(id: String) throws -> ComputeHostDeletionResult {
-        let hostID = normalizedComputeHostID(id) ?? id
-        try validateComputeHostDeletion(id: hostID)
-        let deletionResult = try computeHostDeletionResult(hostID: hostID)
-        try store.deleteComputeHost(id: hostID)
-        try ComputeHostCredentialStore.deleteAuthToken(hostID: hostID)
-        return deletionResult
+    public func validateSpacesDeviceDeletion(id: String) throws {
+        let deviceID = normalizedSpacesDeviceID(id) ?? id
+        if deviceID == SpacesDeviceRecord.localDeviceID {
+            throw WorkspaceError.invalidArgument(message: "The local device record cannot be removed.")
+        }
+        throw WorkspaceError.invalidArgument(message: "Remote device records are not stored on this device.")
     }
 
-    public func effectiveComputeHost(workspaceID: String) throws -> ComputeHostSelection {
+    @discardableResult public func deleteSpacesDevice(id: String) throws -> SpacesDeviceDeletionResult {
+        let deviceID = normalizedSpacesDeviceID(id) ?? id
+        try validateSpacesDeviceDeletion(id: deviceID)
+        try store.deleteSpacesDevice(id: deviceID)
+        return SpacesDeviceDeletionResult(deviceID: deviceID, credentialTokenDeleted: false)
+    }
+
+    public func effectiveSpacesDevice(workspaceID: String) throws -> SpacesDeviceSelection {
         guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
-        guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
-        let hostsByID = try computeHostsByID()
-        return ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID)
+        guard try store.project(id: workspace.projectID) != nil else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
+        return .local(SpacesDeviceRecord.local())
     }
 
-    private func computeHostsByID() throws -> [String: ComputeHostRecord] {
-        Dictionary(uniqueKeysWithValues: try store.computeHosts().map { ($0.id, $0) })
-    }
-
-    private func normalizedComputeHostID(_ value: String?) -> String? {
+    private func normalizedSpacesDeviceID(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
-    }
-
-    private func computeHostSelectionKey(_ selection: ComputeHostSelection) -> String {
-        switch selection {
-        case .local(let host): return "local:\(host.id)"
-        case .remote(let host): return "remote:\(host.id)"
-        }
-    }
-
-    private func workspacesResolving(toComputeHostID hostID: String) throws -> [WorkspaceRecord] {
-        let hostsByID = try computeHostsByID()
-        var affected: [WorkspaceRecord] = []
-        for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
-                if ComputeHostPlanner.selectHost(project: project, workspace: workspace, hostsByID: hostsByID).computeHostID == hostID {
-                    affected.append(workspace)
-                }
-            }
-        }
-        return affected
-    }
-
-    private func computeHostDeletionResult(hostID: String) throws -> ComputeHostDeletionResult {
-        let tokenWasStored = (try? ComputeHostCredentialStore.authToken(hostID: hostID)) != nil
-        return ComputeHostDeletionResult(hostID: hostID, credentialTokenDeleted: tokenWasStored)
-    }
-
-    private func computeHostChangeBlockedError(action: String, workspaces: [WorkspaceRecord]) -> WorkspaceError {
-        let workspaceNames = workspaces.map(\.title).sorted()
-        let visibleNames = workspaceNames.prefix(3).joined(separator: ", ")
-        let suffix = workspaceNames.count > 3 ? " and \(workspaceNames.count - 3) more" : ""
-        let noun = workspaceNames.count == 1 ? "workspace" : "workspaces"
-        let verb = workspaceNames.count == 1 ? "has" : "have"
-        return WorkspaceError.invalidArgument(message: "Cannot \(action) while \(noun) \(visibleNames)\(suffix) \(verb) assigned to that host.")
     }
 
     public func workspaceRuntimePlan(workspaceID: String) throws -> WorkspaceRuntimePlan {
@@ -668,7 +624,7 @@ public final class WorkspaceOrchestrator {
                 throw WorkspaceError.invalidArgument(message: "Protected branches main/master cannot be renamed.")
             }
             if trimmedBranch != workspace.branch {
-                if let existing = try workspaceForBranch(projectID: workspace.projectID, branch: trimmedBranch, hostID: workspace.hostID),
+                if let existing = try workspaceForBranch(projectID: workspace.projectID, branch: trimmedBranch, deviceID: workspace.deviceID),
                     existing.id != workspace.id
                 {
                     throw WorkspaceError.invalidArgument(message: "Branch '\(trimmedBranch)' is already used by workspace '\(existing.title)'.")
@@ -966,7 +922,7 @@ public final class WorkspaceOrchestrator {
             resolvedTargetBranch = nil
         }
         if project.isGitRepo, let branchName = resolvedBranch {
-            if let existing = try workspaceForBranch(projectID: projectID, branch: branchName, hostID: ComputeHostRecord.localHostID) {
+            if let existing = try workspaceForBranch(projectID: projectID, branch: branchName, deviceID: SpacesDeviceRecord.localDeviceID) {
                 if existing.isArchived {
                     guard allowExistingBranchReuse else {
                         throw WorkspaceError.invalidArgument(
@@ -987,7 +943,7 @@ public final class WorkspaceOrchestrator {
             }
         }
         if project.isGitRepo, let branchName = resolvedBranch,
-            let existing = try archivedWorkspace(projectID: projectID, branch: branchName, hostID: ComputeHostRecord.localHostID)
+            let existing = try archivedWorkspace(projectID: projectID, branch: branchName, deviceID: SpacesDeviceRecord.localDeviceID)
         {
             let revivedDir: String
             let revivedDirname: String?
@@ -1056,71 +1012,25 @@ public final class WorkspaceOrchestrator {
         return workspace
     }
 
-    public func createWorkspaceOnHost(
-        projectID: String, name: String, branch: String, hostID: String, targetBranch: String? = nil, directoryName: String? = nil,
+    public func createWorkspaceOnDevice(
+        projectID: String, name: String, branch: String, deviceID: String, targetBranch: String? = nil, directoryName: String? = nil,
         notes: String? = nil, runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
     ) throws -> WorkspaceRecord {
-        let normalizedHostID = hostID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedHostID.isEmpty else { throw WorkspaceError.invalidArgument(message: "Host is required.") }
-        guard let project = try store.project(id: projectID) else { throw WorkspaceError.missingProject(dir: projectID) }
+        let normalizedDeviceID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedDeviceID.isEmpty || normalizedDeviceID == SpacesDeviceRecord.localDeviceID else {
+            throw WorkspaceError.invalidArgument(message: "The spaces CLI can create workspaces only on this device's daemon.")
+        }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace name is required.") }
         let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedBranch.isEmpty else { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
-
-        if normalizedHostID == ComputeHostRecord.localHostID {
-            var workspace = try createWorkspace(
-                projectID: projectID, name: trimmedName, branch: trimmedBranch, targetBranch: targetBranch, directoryName: directoryName,
-                runSetupScript: runSetupScript, allowRemoteBranchLookup: allowRemoteBranchLookup, allowExistingBranchReuse: allowExistingBranchReuse)
-            if let notes {
-                try updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
-                workspace = try store.workspace(id: workspace.id) ?? workspace
-            }
-            return workspace
+        var workspace = try createWorkspace(
+            projectID: projectID, name: trimmedName, branch: trimmedBranch, targetBranch: targetBranch, directoryName: directoryName,
+            runSetupScript: runSetupScript, allowRemoteBranchLookup: allowRemoteBranchLookup, allowExistingBranchReuse: allowExistingBranchReuse)
+        if let notes {
+            try updateWorkspaceNotes(workspaceID: workspace.id, notes: notes)
+            workspace = try store.workspace(id: workspace.id) ?? workspace
         }
-
-        guard let host = try store.computeHost(id: normalizedHostID) else {
-            throw WorkspaceError.invalidArgument(message: "Compute host not found: \(normalizedHostID)")
-        }
-        guard !host.isLocal else {
-            return try createWorkspaceOnHost(
-                projectID: projectID, name: trimmedName, branch: trimmedBranch, hostID: ComputeHostRecord.localHostID, targetBranch: targetBranch,
-                directoryName: directoryName, notes: notes, runSetupScript: runSetupScript, allowRemoteBranchLookup: allowRemoteBranchLookup,
-                allowExistingBranchReuse: allowExistingBranchReuse)
-        }
-        guard project.isGitRepo else { throw WorkspaceError.invalidArgument(message: "Branch name is only supported for git projects.") }
-
-        let resolvedTargetBranch = try resolveWorkspaceTargetBranch(project: project, targetBranch: targetBranch)
-        let branchExists = try branchExistsForNewWorkspace(project: project, branch: trimmedBranch, allowRemoteBranchLookup: allowRemoteBranchLookup)
-        if allowExistingBranchReuse, !branchExists {
-            throw WorkspaceError.invalidArgument(
-                message: "Branch '\(trimmedBranch)' was not found. Choose an existing branch or switch to Create branch.")
-        }
-        if !allowExistingBranchReuse, branchExists {
-            throw WorkspaceError.invalidArgument(
-                message: "Branch '\(trimmedBranch)' already exists. Choose it from Existing branch or enter a different new branch name.")
-        }
-        if let existing = try workspaceForBranch(projectID: projectID, branch: trimmedBranch, hostID: host.id), !existing.isArchived {
-            throw WorkspaceError.invalidArgument(
-                message: "Branch '\(trimmedBranch)' is already used by workspace '\(existing.title)' on host '\(host.id)'.")
-        }
-
-        let trimmedDirectoryName = directoryName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedDirectoryName, !trimmedDirectoryName.isEmpty { try validateWorkspaceDirname(trimmedDirectoryName) }
-        let workspaceID = UUID().uuidString
-        let remoteDirname = trimmedDirectoryName?.isEmpty == false ? trimmedDirectoryName : nil
-        let template = WorkspaceRecord(
-            id: workspaceID, projectID: project.id, hostID: host.id, title: trimmedName, dir: project.dir, runtimePath: project.dir,
-            dirname: remoteDirname, branch: trimmedBranch, targetBranch: resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false,
-            lastLaunchedAt: nil, notes: notes)
-        let remotePath = ComputeHostPlanner.proposedRemoteWorkspacePath(host: host, project: project, workspace: template)
-        let workspace = WorkspaceRecord(
-            id: workspaceID, projectID: project.id, hostID: host.id, title: trimmedName, dir: remotePath, runtimePath: remotePath,
-            dirname: remoteDirname, branch: trimmedBranch, targetBranch: resolvedTargetBranch, isDefault: false, isArchived: false, isRunning: false,
-            lastLaunchedAt: nil, notes: notes)
-        try store.upsert(workspace: workspace)
-        try seedWorkspaceSettings(project: project, workspace: workspace)
-        try initializeWorkspaceRuntime(project: project, workspace: workspace, runSetupScript: runSetupScript)
         return workspace
     }
 
@@ -1163,7 +1073,7 @@ public final class WorkspaceOrchestrator {
         } else {
             inferredName = branch
         }
-        if let existing = try workspaceForBranch(projectID: project.id, branch: branch, hostID: ComputeHostRecord.localHostID) {
+        if let existing = try workspaceForBranch(projectID: project.id, branch: branch, deviceID: SpacesDeviceRecord.localDeviceID) {
             if existing.isArchived {
                 throw WorkspaceError.invalidArgument(
                     message: "Workspace already exists for archived branch '\(branch)': \(existing.title). Unarchive it or use a different worktree.")
@@ -1210,7 +1120,7 @@ public final class WorkspaceOrchestrator {
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
-                guard workspace.hostID == ComputeHostRecord.localHostID else { continue }
+                guard workspace.deviceID == SpacesDeviceRecord.localDeviceID else { continue }
                 guard !workspace.isArchived, !workspace.isDefault else { continue }
                 guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
                 try archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: workspace.id)
@@ -1236,12 +1146,12 @@ public final class WorkspaceOrchestrator {
         return createdWorkspaces
     }
 
-    private func workspaceForBranch(projectID: String, branch: String, hostID: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.hostID == hostID }
+    private func workspaceForBranch(projectID: String, branch: String, deviceID: String) throws -> WorkspaceRecord? {
+        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.deviceID == deviceID }
     }
 
-    private func archivedWorkspace(projectID: String, branch: String, hostID: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.hostID == hostID && $0.isArchived }
+    private func archivedWorkspace(projectID: String, branch: String, deviceID: String) throws -> WorkspaceRecord? {
+        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.deviceID == deviceID && $0.isArchived }
     }
 
     private func archivedWorkspace(projectID: String, dir: String) throws -> WorkspaceRecord? {
@@ -1426,7 +1336,6 @@ public final class WorkspaceOrchestrator {
                     closedBuiltInTerminalSessionIDs.insert(sessionID)
                 }
                 if let windowID = process.windowID { closedManagedTerminalWindowIDs.insert(windowID) }
-                if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
             } else if let pid = resolvedRuntimePID(for: process) {
                 terminateProcessGroup(pid: pid)
             }
@@ -1462,6 +1371,7 @@ public final class WorkspaceOrchestrator {
             }
             if let id = window.windowID { _ = try? yabai.closeWindow(id: id) }
         }
+        waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs)
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         try store.deleteAgentWindows(workspaceID: workspace.id)
@@ -1527,7 +1437,7 @@ public final class WorkspaceOrchestrator {
         guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be archived.") }
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
         try store.deleteAgentWindows(workspaceID: workspaceID)
-        if project.isGitRepo, workspace.hostID == ComputeHostRecord.localHostID {
+        if project.isGitRepo, workspace.deviceID == SpacesDeviceRecord.localDeviceID {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
         try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
@@ -2000,12 +1910,15 @@ public final class WorkspaceOrchestrator {
             terminateRemoteTerminalSession(for: process, plan: runtimePlan)
             let command = try spacesTerminalCommand(
                 template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                includeProfileEnvironment: false, commandPrelude: remoteComputeHostProfilePathPrelude(plan: runtimePlan))
+                includeProfileEnvironment: false, commandPrelude: remoteDeviceProfilePathPrelude(plan: runtimePlan))
             session = try launchRemoteTerminalSession(
                 title: process.templateName, command: command, plan: runtimePlan, kind: .process, showMode: .owner)
         } else {
-            _ = terminateProcessForRestart(process)
-            terminateBuiltInTerminalSession(for: process)
+            if isManagedTerminalApp(process.terminalApp) {
+                terminateBuiltInTerminalSession(for: process)
+            } else {
+                _ = terminateProcessForRestart(process)
+            }
             let command = try spacesTerminalCommand(template: template, env: env)
             session = try launchSpacesTerminalSession(
                 title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
@@ -3410,7 +3323,15 @@ public final class WorkspaceOrchestrator {
     private func terminalLoginShellPath() -> String {
         let shellPath = Shell.resolvedLoginShellExecutablePath(environment: Shell.currentProcessEnvironment())?.trimmingCharacters(
             in: .whitespacesAndNewlines)
-        return shellPath.flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
+        return shellPath.flatMap { $0.isEmpty ? nil : $0 } ?? defaultInteractiveShellPath()
+    }
+
+    private func defaultInteractiveShellPath() -> String {
+        #if os(Linux)
+            "/bin/bash"
+        #else
+            "/bin/zsh"
+        #endif
     }
 
     private enum BuiltInTerminalReadinessPolicy: String {
@@ -3433,7 +3354,7 @@ public final class WorkspaceOrchestrator {
 
     private func terminalServiceManifest(_ manifest: WorkspaceRuntimeManifest) -> TerminalServiceWorkspaceRuntimeManifest {
         TerminalServiceWorkspaceRuntimeManifest(
-            workspaceID: manifest.workspaceID, projectID: manifest.projectID, computeHostID: manifest.computeHostID,
+            workspaceID: manifest.workspaceID, projectID: manifest.projectID, deviceID: manifest.deviceID,
             location: manifest.location == .remote ? .remote : .local, localPath: manifest.localPath, remotePath: manifest.remotePath,
             branch: manifest.branch, targetBranch: manifest.targetBranch, gitRemoteURL: manifest.gitRemoteURL,
             namedPorts: manifest.namedPorts.map { TerminalServiceWorkspaceRuntimePortMapping(id: $0.id, name: $0.name, port: $0.port) },
@@ -3497,30 +3418,10 @@ public final class WorkspaceOrchestrator {
         FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
     }
 
-    private func remoteComputeHostProfilePathPrelude(plan: WorkspaceRuntimePlan) -> String? {
-        guard let computeHostID = plan.selection.computeHostID?.trimmingCharacters(in: .whitespacesAndNewlines), !computeHostID.isEmpty else {
-            return nil
-        }
-        let profileName = Self.safeComputeHostProfileName(computeHostID)
-        let helperPath = "~/.spaces/compute-hosts/\(profileName)/bin/spaces"
-        return "export PATH=~/.spaces/compute-hosts/\(profileName)/bin:$PATH; spaces() { \(helperPath) \"$@\"; }; export -f spaces"
-    }
-
-    private static func safeComputeHostProfileName(_ value: String) -> String {
-        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        var scalars: [UnicodeScalar] = []
-        var lastWasSeparator = false
-        for scalar in lowercased.unicodeScalars {
-            if CharacterSet.alphanumerics.contains(scalar) {
-                scalars.append(scalar)
-                lastWasSeparator = false
-            } else if !lastWasSeparator {
-                scalars.append("-")
-                lastWasSeparator = true
-            }
-        }
-        let result = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return result.isEmpty ? "host" : result
+    private func remoteDeviceProfilePathPrelude(plan: WorkspaceRuntimePlan) -> String? {
+        guard plan.selection.deviceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return nil }
+        let helperPath = "~/.spaces/bin/spaces"
+        return "export PATH=~/.spaces/bin:$PATH; spaces() { \(helperPath) \"$@\"; }; export -f spaces"
     }
 
     private func runRemoteWorkspaceCommand(_ command: String, plan: WorkspaceRuntimePlan, env: [String: String], logPath: String? = nil) throws
@@ -4729,8 +4630,8 @@ public final class WorkspaceOrchestrator {
         }
         let manifest =
             runtimeManifest
-            ?? ComputeHostPlanner.runtimeManifest(
-                project: project, workspace: workspace, selection: .local(ComputeHostRecord.local()),
+            ?? SpacesDevicePlanner.runtimeManifest(
+                project: project, workspace: workspace, selection: .local(SpacesDeviceRecord.local()),
                 namedPorts: namedPorts.map { WorkspaceRuntimePortMapping(id: $0.name, name: $0.name, port: $0.port) })
         env.merge(manifest.processEnvironment) { _, new in new }
         let runtimeWorkspacePath =
@@ -4744,18 +4645,18 @@ public final class WorkspaceOrchestrator {
     private func workspaceRuntimePlan(
         project: ProjectRecord, workspace: WorkspaceRecord, assignedPorts: [(definitionID: String, port: Int, name: String)]
     ) throws -> WorkspaceRuntimePlan {
-        let selection = try effectiveComputeHost(workspaceID: workspace.id)
+        let selection = try effectiveSpacesDevice(workspaceID: workspace.id)
         let namedPorts = assignedPorts.map {
             WorkspaceRuntimePortMapping(id: $0.definitionID.isEmpty ? $0.name : $0.definitionID, name: $0.name, port: $0.port)
         }
-        let manifest = ComputeHostPlanner.runtimeManifest(
+        let manifest = SpacesDevicePlanner.runtimeManifest(
             project: project, workspace: workspace, selection: selection, namedPorts: namedPorts,
             gitRemoteURL: gitRemoteURLForRuntime(project: project, selection: selection))
-        let daemonTarget = ComputeHostPlanner.daemonTarget(selection: selection, localSocketPath: try TerminalServicePaths.socketPath())
+        let daemonTarget = SpacesDevicePlanner.daemonTarget(selection: selection, localSocketPath: try TerminalServicePaths.socketPath())
         let remoteSSHURI: String?
-        if case .remote(let host) = selection {
+        if case .remote(let device) = selection {
             let remotePath = workspace.runtimePath
-            remoteSSHURI = ComputeHostPlanner.remoteSSHURI(host: host, path: remotePath)
+            remoteSSHURI = SpacesDevicePlanner.remoteSSHURI(device: device, path: remotePath)
         } else {
             remoteSSHURI = nil
         }
@@ -4763,21 +4664,9 @@ public final class WorkspaceOrchestrator {
             project: project, workspace: workspace, selection: selection, manifest: manifest, daemonTarget: daemonTarget, remoteSSHURI: remoteSSHURI)
     }
 
-    private func requireLocalWorkspaceRuntime(_ plan: WorkspaceRuntimePlan) throws {
-        guard case .remote(let host) = plan.selection else { return }
-        let remotePath = plan.manifest.remotePath ?? plan.workspace.runtimePath
-        throw WorkspaceError.invalidArgument(
-            message:
-                "Remote compute host launch is not available for '\(host.name)' at \(remotePath). Use spacese2e plan-workspace-runtime to inspect the workspace runtime path."
-        )
-    }
+    private func requireLocalWorkspaceRuntime(_ plan: WorkspaceRuntimePlan) throws { return }
 
-    private func gitRemoteURLForRuntime(project: ProjectRecord, selection: ComputeHostSelection) -> String? {
-        guard selection.isRemote, project.isGitRepo else { return nil }
-        let output = try? git.runGitAndCapture(["-C", project.dir, "remote", "get-url", "origin"])
-        let trimmed = output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? nil : trimmed
-    }
+    private func gitRemoteURLForRuntime(project: ProjectRecord, selection: SpacesDeviceSelection) -> String? { nil }
 
     private func processKey(for template: ProcessTemplate) -> String {
         let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -4922,8 +4811,11 @@ public final class WorkspaceOrchestrator {
         }
 
         for process in toStop {
-            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
-            if isManagedTerminalApp(process.terminalApp) { terminateBuiltInTerminalSession(for: process) }
+            if isManagedTerminalApp(process.terminalApp) {
+                terminateBuiltInTerminalSession(for: process)
+            } else if let pid = resolvedRuntimePID(for: process) {
+                terminateProcessGroup(pid: pid)
+            }
             try store.deleteRunningProcess(id: process.id)
             if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: { matchesTrackedTerminalWindow($0, process: process) })
             {
@@ -5242,7 +5134,7 @@ public final class WorkspaceOrchestrator {
             if let runtimePlan, runtimePlan.selection.isRemote {
                 let sessionCommand = try spacesTerminalCommand(
                     template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                    includeProfileEnvironment: false, commandPrelude: remoteComputeHostProfilePathPrelude(plan: runtimePlan))
+                    includeProfileEnvironment: false, commandPrelude: remoteDeviceProfilePathPrelude(plan: runtimePlan))
                 session = try launchRemoteTerminalSession(title: name, command: sessionCommand, plan: runtimePlan, kind: .process, showMode: .owner)
             } else {
                 let sessionCommand = try spacesTerminalCommand(template: template, env: env)
@@ -5414,7 +5306,19 @@ public final class WorkspaceOrchestrator {
 
     private func terminateProcessGroup(pid: Int) {
         guard pid > 0 else { return }
+        guard pid != Int(getpid()) else { return }
         let groupTarget = processGroupID(for: pid) ?? pid
+        if debugLoggingEnabled() {
+            Self.writeStandardError(
+                "spaces: terminate_process_group pid=\(pid) group=\(groupTarget) current_group=\(Int(getpgrp())) daemon_pid=\(Int(getpid()))\n")
+        }
+        if groupTarget == Int(getpgrp()) {
+            _ = try? Shell.run(["kill", "-INT", "\(pid)"])
+            waitForProcessExit(pid: pid, timeout: 2.0)
+            guard isProcessAlive(pid: pid) else { return }
+            _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
+            return
+        }
         let processGroupID = "-\(groupTarget)"
         // Send interrupt first so interactive commands like `docker compose up` shut down cleanly.
         _ = try? Shell.run(["kill", "-INT", "--", processGroupID])
@@ -6534,6 +6438,27 @@ public final class WorkspaceOrchestrator {
         for process in try store.runningProcesses(workspaceID: workspaceID) { terminateBuiltInTerminalSession(for: process) }
     }
 
+    private func waitForBuiltInTerminalSessionsToExit(_ sessionIDs: Set<String>, timeout: TimeInterval = 10.0) {
+        guard !sessionIDs.isEmpty else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        var pending = sessionIDs
+        while !pending.isEmpty, Date() < deadline {
+            pending = pending.filter { builtInTerminalSessionIsInteractive($0) }
+            if pending.isEmpty { return }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1", !pending.isEmpty {
+            Self.writeStandardError("spaces: timed out waiting for terminal sessions to exit: \(pending.sorted().joined(separator: ","))\n")
+        }
+    }
+
+    private func builtInTerminalSessionIsInteractive(_ sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState.state.isInteractive
+        else { return false }
+        return runtimeState.servicePID == getpid() || isProcessAlive(pid: Int(runtimeState.servicePID))
+    }
+
     private func builtInTerminalSessionID(for process: RunningProcessRecord) -> String? {
         guard terminalHost(for: process.terminalApp) == .spaces else { return nil }
         return normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
@@ -6745,7 +6670,7 @@ public final class WorkspaceOrchestrator {
         let agentSessionID = UUID().uuidString
         launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID
         let shellPath = runtimePlan.selection.isRemote ? remoteShellPath(for: runtimePlan) : terminalShellPathOverride()
-        let commandPrelude = runtimePlan.selection.isRemote ? remoteComputeHostProfilePathPrelude(plan: runtimePlan) : nil
+        let commandPrelude = runtimePlan.selection.isRemote ? remoteDeviceProfilePathPrelude(plan: runtimePlan) : nil
         let sessionCommand = commandPrefixedWithShellEnvironment(
             wrappedAgentLauncherCommand(
                 name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: commandPrelude),
@@ -6794,7 +6719,7 @@ public final class WorkspaceOrchestrator {
         if let trimmedShell = shellPath?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedShell.isEmpty {
             resolvedShell = trimmedShell
         } else {
-            resolvedShell = "/bin/zsh"
+            resolvedShell = defaultInteractiveShellPath()
         }
         return "exec \(shellQuoted(resolvedShell)) -ilc \(shellQuoted(wrappedCommand))"
     }
@@ -6881,7 +6806,6 @@ public final class WorkspaceOrchestrator {
         if isManagedTerminalApp(process.terminalApp) {
             terminateBuiltInTerminalSession(for: process)
             closedManagedTerminalWindowID = process.windowID
-            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
         } else {
             closedManagedTerminalWindowID = nil
             if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
@@ -6956,7 +6880,7 @@ public final class WorkspaceOrchestrator {
         if let runtimePlan, runtimePlan.selection.isRemote {
             let sessionCommand = try spacesTerminalCommand(
                 template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                includeProfileEnvironment: false, commandPrelude: remoteComputeHostProfilePathPrelude(plan: runtimePlan))
+                includeProfileEnvironment: false, commandPrelude: remoteDeviceProfilePathPrelude(plan: runtimePlan))
             session = try launchRemoteTerminalSession(title: name, command: sessionCommand, plan: runtimePlan, kind: .process, showMode: .owner)
         } else {
             let sessionCommand = try spacesTerminalCommand(template: template, env: env)

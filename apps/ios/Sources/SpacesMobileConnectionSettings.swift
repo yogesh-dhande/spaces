@@ -1,9 +1,9 @@
 import Foundation
-import spacesmobilecore
+import spacesdevicecore
 
 struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
     static let legacyDefaultPort = 47_071
-    static let defaultPort = SpacesMobileBridgeEndpointDefaults.port
+    static let defaultPort = SpacesDeviceAPIEndpointDefaults.port
 
     var host: String = defaultHost
     var port: Int = defaultPort
@@ -30,7 +30,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
     var isPaired: Bool { trimmedAuthToken != nil && trimmedTransportKey != nil && trimmedCertificateFingerprint != nil }
 
     static var defaultHost: String {
-        SpacesMobileBridgeEndpointDefaults.loopbackHost
+        SpacesDeviceAPIEndpointDefaults.loopbackHost
     }
 
     private enum CodingKeys: String, CodingKey {

@@ -6,7 +6,7 @@ struct CLITextOrJSONOutput {
 
     func emitLines<Payload>(text: @autoclosure () -> [String], json: @autoclosure () -> Payload) throws { for line in text() { print(line) } }
 
-    static func emitError(_ error: Error, wantsJSON: Bool) { fputs("Error: \(error.localizedDescription)\n", stderr) }
+    static func emitError(_ error: Error, wantsJSON: Bool) { FileHandle.standardError.write(Data("Error: \(error.localizedDescription)\n".utf8)) }
 }
 
 enum CLITextRenderer {
@@ -109,7 +109,6 @@ extension WorkspaceSummaryPayload {
 struct WorkspaceRecordPayload: Encodable {
     let id: String
     let projectID: String
-    let hostID: String
     let title: String
     let dir: String
     let runtimePath: String
@@ -128,7 +127,6 @@ extension WorkspaceRecordPayload {
     init(_ value: WorkspaceRecord) {
         id = value.id
         projectID = value.projectID
-        hostID = value.hostID
         title = value.title
         dir = value.dir
         runtimePath = value.runtimePath

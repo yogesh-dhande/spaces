@@ -33,13 +33,14 @@ cat > "$installer_script" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 2 ]; then
-  echo "Usage: $0 <system|user> <dmg-root>" >&2
+if [ $# -ne 3 ]; then
+  echo "Usage: $0 <dmg-root> <user-home> <user-uid>" >&2
   exit 1
 fi
 
-MODE="$1"
-DMG_ROOT="$2"
+DMG_ROOT="$1"
+INSTALL_HOME="$2"
+INSTALL_UID="$3"
 SOURCE_APP="$DMG_ROOT/Spaces.app"
 
 if [[ ! -d "$SOURCE_APP" ]]; then
@@ -51,7 +52,7 @@ emit_result() {
   printf 'APP_PATH=%s\n' "$1"
   printf 'CLI_PATH=%s\n' "$2"
   printf 'SERVICE_PATH=%s\n' "$3"
-  printf 'PATH_HINT=%s\n' "${4:-}"
+  printf 'LAUNCH_AGENT_PATH=%s\n' "$4"
 }
 
 copy_ghostty_vt_dylibs() {
@@ -76,53 +77,70 @@ copy_ghostty_vt_dylibs() {
   done
 }
 
-case "$MODE" in
-  system)
-    APP_PATH="/Applications/Spaces.app"
-    CLI_DIR="/usr/local/bin"
-    CLI_PATH="$CLI_DIR/spaces"
-    SERVICE_PATH="$CLI_DIR/spacesd"
-    /bin/mkdir -p /Applications /usr/local/bin
-    /bin/rm -rf "$APP_PATH"
-    /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
-    /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
-    /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
-    /bin/cp "$APP_PATH/Contents/Resources/spacesd" "$SERVICE_PATH"
-    /bin/chmod 755 "$CLI_PATH"
-    /bin/chmod 755 "$SERVICE_PATH"
-    copy_ghostty_vt_dylibs
-    /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
-    /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
-    emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH"
-    ;;
-  user)
-    APP_DIR="$HOME/Applications"
-    CLI_DIR="$HOME/.local/bin"
-    APP_PATH="$APP_DIR/Spaces.app"
-    CLI_PATH="$CLI_DIR/spaces"
-    SERVICE_PATH="$CLI_DIR/spacesd"
-    PATH_HINT=""
-    /bin/mkdir -p "$APP_DIR" "$CLI_DIR"
-    /bin/rm -rf "$APP_PATH"
-    /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
-    /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
-    /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
-    /bin/cp "$APP_PATH/Contents/Resources/spacesd" "$SERVICE_PATH"
-    /bin/chmod 755 "$CLI_PATH"
-    /bin/chmod 755 "$SERVICE_PATH"
-    copy_ghostty_vt_dylibs
-    /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
-    /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
-    if [[ ":$PATH:" != *":$CLI_DIR:"* ]]; then
-      PATH_HINT='export PATH="$PATH:$HOME/.local/bin"'
-    fi
-    emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH" "$PATH_HINT"
-    ;;
-  *)
-    echo "Unsupported install mode: $MODE" >&2
-    exit 1
-    ;;
-esac
+install_launch_agent() {
+  local daemon_path="$1"
+  local user_home="$2"
+  local user_uid="$3"
+  local plist_dir="$user_home/Library/LaunchAgents"
+  local plist_path="$plist_dir/dev.usespaces.spacesd.plist"
+  local runtime_dir="$user_home/.spaces/runtime"
+  local install_user
+  install_user="$(/usr/bin/stat -f %Su "$user_home" 2>/dev/null || true)"
+
+  /bin/mkdir -p "$plist_dir" "$runtime_dir"
+  /bin/cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.usespaces.spacesd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$daemon_path</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>$user_home</string>
+  <key>StandardOutPath</key>
+  <string>$runtime_dir/spacesd.launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$runtime_dir/spacesd.launchd.err.log</string>
+</dict>
+</plist>
+PLIST
+
+  /bin/chmod 644 "$plist_path"
+  if [[ -n "$install_user" ]]; then
+    /usr/sbin/chown "$install_user" "$plist_path" "$plist_dir" "$runtime_dir" 2>/dev/null || true
+  fi
+
+  /bin/launchctl bootout "gui/$user_uid" "$plist_path" >/dev/null 2>&1 || true
+  /bin/launchctl bootstrap "gui/$user_uid" "$plist_path"
+  /bin/launchctl kickstart -k "gui/$user_uid/dev.usespaces.spacesd"
+  printf '%s\n' "$plist_path"
+}
+
+APP_PATH="/Applications/Spaces.app"
+CLI_DIR="/usr/local/bin"
+CLI_PATH="$CLI_DIR/spaces"
+SERVICE_PATH="$CLI_DIR/spacesd"
+/bin/mkdir -p /Applications /usr/local/bin
+/bin/rm -rf "$APP_PATH"
+/usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
+/usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
+/bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
+/bin/cp "$APP_PATH/Contents/Resources/spacesd" "$SERVICE_PATH"
+/bin/chmod 755 "$CLI_PATH"
+/bin/chmod 755 "$SERVICE_PATH"
+copy_ghostty_vt_dylibs
+/usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
+/usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
+LAUNCH_AGENT_PATH="$(install_launch_agent "$SERVICE_PATH" "$INSTALL_HOME" "$INSTALL_UID")"
+emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH" "$LAUNCH_AGENT_PATH"
 EOF
 chmod +x "$installer_script"
 
@@ -133,7 +151,7 @@ on parseInstallResult(shellOutput)
     set appPath to ""
     set cliPath to ""
     set servicePath to ""
-    set pathHint to ""
+    set launchAgentPath to ""
     repeat with outputLine in paragraphs of shellOutput
         set currentLine to contents of outputLine
         if currentLine starts with "APP_PATH=" then
@@ -142,13 +160,13 @@ on parseInstallResult(shellOutput)
             set cliPath to text 10 thru -1 of currentLine
         else if currentLine starts with "SERVICE_PATH=" then
             set servicePath to text 14 thru -1 of currentLine
-        else if currentLine starts with "PATH_HINT=" then
-            if (length of currentLine) > 10 then
-                set pathHint to text 11 thru -1 of currentLine
+        else if currentLine starts with "LAUNCH_AGENT_PATH=" then
+            if (length of currentLine) > 18 then
+                set launchAgentPath to text 19 thru -1 of currentLine
             end if
         end if
     end repeat
-    return {appPath, cliPath, servicePath, pathHint}
+    return {appPath, cliPath, servicePath, launchAgentPath}
 end parseInstallResult
 
 on installerRootPOSIX()
@@ -159,6 +177,8 @@ end installerRootPOSIX
 on run
     set dmgRoot to installerRootPOSIX()
     set helperScript to quoted form of (dmgRoot & "/.install-spaces.sh")
+    set userHome to POSIX path of (path to home folder)
+    set userUID to do shell script "/usr/bin/id -u"
 
     try
         display dialog "Spaces installs the app, the required spaces CLI, and the spacesd daemon together. Continue to install them now?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel" with icon note
@@ -167,31 +187,16 @@ on run
     end try
 
     try
-        set installOutput to do shell script helperScript & " system " & quoted form of dmgRoot with administrator privileges
+        set installOutput to do shell script helperScript & " " & quoted form of dmgRoot & " " & quoted form of userHome & " " & quoted form of userUID with administrator privileges
     on error errMsg number errNum
-        if errNum is -128 then
-            try
-                display dialog "Administrator access was cancelled. Install Spaces for just this user instead? The app will go in ~/Applications and the CLI in ~/.local/bin." buttons {"Cancel", "Install for This User"} default button "Install for This User" cancel button "Cancel" with icon caution
-            on error number -128
-                return
-            end try
-            try
-                set installOutput to do shell script helperScript & " user " & quoted form of dmgRoot
-            on error fallbackMessage number fallbackNumber
-                display dialog "Spaces could not finish installation.\n\n" & fallbackMessage buttons {"OK"} default button "OK" with icon stop
-                return
-            end try
-        else
+        if errNum is not -128 then
             display dialog "Spaces could not finish installation.\n\n" & errMsg buttons {"OK"} default button "OK" with icon stop
-            return
         end if
+        return
     end try
 
-    set {appPath, cliPath, servicePath, pathHint} to parseInstallResult(installOutput)
-    set successText to "Spaces installed successfully.\n\nApp: " & appPath & "\nCLI: " & cliPath & "\nspacesd daemon: " & servicePath
-    if pathHint is not "" then
-        set successText to successText & "\n\nAdd this to your shell profile if the command is not found:\n" & pathHint
-    end if
+    set {appPath, cliPath, servicePath, launchAgentPath} to parseInstallResult(installOutput)
+    set successText to "Spaces installed successfully.\n\nApp: " & appPath & "\nCLI: " & cliPath & "\nspacesd daemon: " & servicePath & "\nLaunchAgent: " & launchAgentPath
 
     set actionButton to button returned of (display dialog successText buttons {"Close", "Open Spaces"} default button "Open Spaces" with icon note)
     if actionButton is "Open Spaces" then

@@ -17,6 +17,13 @@ BUILD_CMD="${BUILD_CMD:-$ROOT_DIR/scripts/swiftpm.sh build}"
 SPACES_APP="${SPACES_APP:-$MACOS_DIR/.build/debug/SpacesApp}"
 SPACES_CLI="${SPACES_CLI:-$MACOS_DIR/.build/debug/spaces}"
 SPACES_E2E_CLI="${SPACES_E2E_CLI:-$MACOS_DIR/.build/debug/spacese2e}"
+REMOTE_DEVICE_E2E_SCRIPT="${REMOTE_DEVICE_E2E_SCRIPT:-$MACOS_DIR/Tests/e2e_remote_device_api.sh}"
+GHOSTTYKIT_XCFRAMEWORK="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$MACOS_DIR/.local/ghosttykit/GhosttyKit.xcframework}"
+if [[ ! -d "$GHOSTTYKIT_XCFRAMEWORK" ]]; then
+  echo "FAIL: GhosttyKit.xcframework is required at $GHOSTTYKIT_XCFRAMEWORK. Run apps/macos/scripts/setup_ghostty.sh --build." >&2
+  exit 1
+fi
+export SPACES_GHOSTTYKIT_XCFRAMEWORK="$GHOSTTYKIT_XCFRAMEWORK"
 APP_LOG="${APP_LOG:-/tmp/spaces-e2e-app.log}"
 EVENT_LOG="${EVENT_LOG:-/tmp/spaces-e2e-events.log}"
 METRICS_LOG="${METRICS_LOG:-/tmp/spaces-e2e-metrics.log}"
@@ -50,24 +57,14 @@ SPACES_CPU_SAMPLE_COUNT="${SPACES_CPU_SAMPLE_COUNT:-6}"
 SPACES_CPU_SAMPLE_INTERVAL_SECONDS="${SPACES_CPU_SAMPLE_INTERVAL_SECONDS:-0.5}"
 HIGH_OUTPUT_PROCESS_NAME="${HIGH_OUTPUT_PROCESS_NAME:-noisy}"
 HIGH_OUTPUT_PROCESS_COMMAND="${HIGH_OUTPUT_PROCESS_COMMAND:-}"
-REMOTE_HOST_ID="${SPACES_E2E_REMOTE_HOST_ID:-macos-e2e-remote}"
-REMOTE_HOST_NAME="${SPACES_E2E_REMOTE_NAME:-macOS E2E Remote}"
-REMOTE_SSH_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
-REMOTE_SSH_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
-REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/workspaces}"
-REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_SSH_HOST}"
-REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
-REMOTE_AUTH_TOKEN="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
-REMOTE_GIT_ROOT="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
-REMOTE_DEFAULT_WORKSPACE_DIR=""
-
 TMP_PREFIX="${TMP_PREFIX:-/tmp/spaces-real-e2e}"
 USER_HOME="${HOME:?}"
 TMP_ROOT="$(cd "$(mktemp -d "$TMP_PREFIX".XXXXXX)" && pwd -P)"
 TMP_HOME="$TMP_ROOT/home"
 TMP_DB="$TMP_ROOT/spaces.db"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
+TMP_CLIENT_DB="$TMP_ROOT/client/spaces-client.db"
+TMP_CLIENT_SECRET_DIR="$TMP_ROOT/client/secrets"
 FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
 TEST_REPO="$TMP_ROOT/beacon-status"
 TEST_REPO_2="$TMP_ROOT/scout-errors"
@@ -121,8 +118,11 @@ KNOWN_SPACES_AGENT_SESSION_ID=""
 KNOWN_SPACES_ADHOC_SESSION_ID=""
 KNOWN_SPACES_ADHOC_NAME="shell-1"
 KNOWN_SPACES_NOISY_SESSION_ID=""
+REMOTE_DEVICE_RESULT_JSON=""
+REMOTE_DEVICE_PROJECT_ID=""
+REMOTE_DEVICE_WORKSPACE_ID=""
 
-mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR"
+mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
 : >"$EVENT_LOG"
 : >"$METRICS_LOG"
 : >"$DEBUG_LOG"
@@ -132,12 +132,13 @@ mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR"
 export HOME="$TMP_HOME"
 export SPACES_DB_PATH="$TMP_DB"
 export SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR"
+export SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB"
+export SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR"
 export SPACES_E2E_EVENTS_LOG="$EVENT_LOG"
 
 cleanup() {
   local exit_code="$?"
   if (( PRESERVE_FIXTURES_ON_EXIT == 1 && exit_code == 0 )); then
-    cleanup_remote_e2e_host
     print_run_summary "$exit_code"
     return 0
   fi
@@ -151,8 +152,8 @@ cleanup() {
     kill "${SPACES_PID}" >/dev/null 2>&1 || true
     wait "${SPACES_PID}" >/dev/null 2>&1 || true
   fi
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_terminal_service "$SPACES_CLI" "$ACTION_TIMEOUT_SECONDS" || true
   HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI" "$ACTION_TIMEOUT_SECONDS" || true
-  cleanup_remote_e2e_host
   print_run_summary "$exit_code"
   open_final_recording
 }
@@ -183,6 +184,17 @@ fail() {
     record_case_result "FAIL" "$CURRENT_CASE" "$*"
   fi
   exit 1
+}
+
+device_api_connect_host() {
+  case "$1" in
+    "" | "0.0.0.0" | "::")
+      printf '127.0.0.1'
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
 }
 
 log_step() {
@@ -236,7 +248,7 @@ skip_case() {
 }
 
 is_spaces_terminal_target() {
-  [[ "$1" == "spaces" || "$1" == "remote" || "$1" == "mixed" ]]
+  [[ "$1" == local* ]]
 }
 
 require_cmd() {
@@ -308,10 +320,6 @@ parse_args() {
         ;;
     esac
   done
-}
-
-require_remote_configuration() {
-  [[ -n "$REMOTE_SSH_HOST" ]] || fail "SPACES_E2E_REMOTE_SSH_HOST is required for mixed local/remote macOS E2E runs."
 }
 
 transition_pause() {
@@ -648,7 +656,7 @@ launch_spaces() {
   log_step "launching Spaces with isolated HOME=$TMP_HOME"
   : >"$APP_LOG"
   APP_LOG_SEARCH_FROM_LINE=1
-  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB" SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
   SPACES_PID=$!
   ensure_profile_spaces_owner "$SPACES_PID"
   start_desktop_awake_assertion
@@ -943,128 +951,287 @@ print(shlex.quote(sys.argv[1]))
 PY
 }
 
-remote_ssh_destination() {
-  if [[ -n "$REMOTE_SSH_USER" ]]; then
-    printf '%s@%s' "$REMOTE_SSH_USER" "$REMOTE_SSH_HOST"
-  else
-    printf '%s' "$REMOTE_SSH_HOST"
+mac_client_installation_id() {
+  local profile_root
+  profile_root="$(
+    HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" profile-show |
+      awk -F '\t' '$1 == "profile-root" { print $2; exit }'
+  )"
+  [[ -n "$profile_root" ]] || fail "Unable to resolve macOS E2E profile root for remote pairing."
+  if [[ "$profile_root" == /private/tmp/* ]]; then
+    profile_root="/tmp/${profile_root#/private/tmp/}"
   fi
+  python3 - "$profile_root" <<'PY'
+import sys
+profile_root = sys.argv[1]
+value = 14695981039346656037
+for byte in profile_root.encode():
+    value ^= byte
+    value = (value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+print(f"macos-{value:x}")
+PY
 }
 
-remote_ssh() {
-  [[ -n "$REMOTE_SSH_HOST" ]] || fail "Remote target requires SPACES_E2E_REMOTE_SSH_HOST."
-  local destination
-  destination="$(remote_ssh_destination)"
-  local -a args=(-o BatchMode=yes)
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then
-    args+=(-p "$REMOTE_SSH_PORT")
-  fi
-  ssh "${args[@]}" "$destination" "$@"
+seed_remote_active_device_for_macos() {
+  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || return 0
+  python3 - "$REMOTE_DEVICE_RESULT_JSON" "$TMP_CLIENT_DB" "$TMP_CLIENT_SECRET_DIR" <<'PY'
+import json
+import os
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+result_path = Path(sys.argv[1])
+client_db = Path(sys.argv[2])
+secret_dir = Path(sys.argv[3])
+payload = json.loads(result_path.read_text())
+device_id = payload["deviceID"]
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+client_db.parent.mkdir(parents=True, exist_ok=True)
+with sqlite3.connect(client_db) as db:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS paired_devices (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          host TEXT NOT NULL,
+          port INTEGER NOT NULL,
+          certificate_fingerprint TEXT NOT NULL,
+          ssh_host TEXT,
+          ssh_user TEXT,
+          ssh_port INTEGER,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          last_selected_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS client_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS migration_state (
+          current_version INTEGER NOT NULL
+        );
+        """
+    )
+    db.execute("DELETE FROM migration_state")
+    db.execute("INSERT INTO migration_state(current_version) VALUES (1)")
+    db.execute(
+        """
+        INSERT INTO paired_devices(
+          id, name, platform, host, port, certificate_fingerprint, ssh_host, ssh_user, ssh_port, created_at, updated_at, last_selected_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          platform = excluded.platform,
+          host = excluded.host,
+          port = excluded.port,
+          certificate_fingerprint = excluded.certificate_fingerprint,
+          ssh_host = excluded.ssh_host,
+          ssh_user = excluded.ssh_user,
+          ssh_port = excluded.ssh_port,
+          updated_at = excluded.updated_at,
+          last_selected_at = excluded.last_selected_at
+        """,
+        (
+            device_id,
+            payload.get("name") or "Remote Device",
+            "linux",
+            payload["remoteDaemonHost"],
+            int(payload["remoteDaemonPort"]),
+            payload["certificateFingerprint"],
+            os.environ.get("SPACES_E2E_REMOTE_SSH_HOST", ""),
+            os.environ.get("SPACES_E2E_REMOTE_SSH_USER", ""),
+            os.environ.get("SPACES_E2E_REMOTE_SSH_PORT", "") or None,
+            now,
+            now,
+            now,
+        ),
+    )
+    db.execute(
+        """
+        INSERT INTO client_settings(key, value)
+        VALUES ('active_device_id', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (device_id,),
+    )
+
+def sanitize(value: str) -> str:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    sanitized = "".join(ch if ch in allowed else "_" for ch in value).strip("._-")
+    return sanitized or "device"
+
+secret_dir.mkdir(parents=True, exist_ok=True)
+os.chmod(secret_dir, 0o700)
+safe_id = sanitize(device_id)
+for prefix, value in (
+    ("device-auth-token", payload["macAuthToken"]),
+    ("device-transport-key", payload["transportKey"]),
+):
+    path = secret_dir / f"{prefix}-{safe_id}.secret"
+    path.write_text(str(value).strip())
+    os.chmod(path, 0o600)
+PY
+  REMOTE_DEVICE_PROJECT_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "projectID")"
+  REMOTE_DEVICE_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "workspaceID")"
+  [[ -n "$REMOTE_DEVICE_PROJECT_ID" ]] || fail "remote Device API result missing projectID"
+  [[ -n "$REMOTE_DEVICE_WORKSPACE_ID" ]] || fail "remote Device API result missing workspaceID"
 }
 
-remote_expand_path() {
-  local raw_path="$1"
-  local quoted
-  quoted="$(shell_quote "$raw_path")"
-  remote_ssh "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted"
-}
-
-remote_push_url_for_path() {
-  local remote_path="$1"
-  local user_prefix=""
-  local port_part=""
-  if [[ -n "$REMOTE_SSH_USER" ]]; then
-    user_prefix="$REMOTE_SSH_USER@"
-  fi
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then
-    port_part=":$REMOTE_SSH_PORT"
-  fi
-  printf 'ssh://%s%s%s%s\n' "$user_prefix" "$REMOTE_SSH_HOST" "$port_part" "$remote_path"
-}
-
-remote_auth_token_env_key() {
-  printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$REMOTE_HOST_ID" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
-}
-
-export_remote_auth_token() {
-  [[ -n "$REMOTE_AUTH_TOKEN" ]] || return 0
-  local key
-  key="$(remote_auth_token_env_key)"
-  export "$key=$REMOTE_AUTH_TOKEN"
-}
-
-prepare_remote_managed_artifact() {
-  require_remote_configuration
-  "$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh"
-}
-
-cleanup_remote_e2e_host() {
-  [[ -n "$REMOTE_SSH_HOST" ]] || return 0
-  "$ROOT_DIR/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null 2>&1 || true
-}
-
-prepare_remote_git_origin() {
-  local project_dir="$1"
-  local slug="$2"
-  local git_root
-  git_root="$(remote_expand_path "$REMOTE_GIT_ROOT")" || return
-  local remote_origin="$git_root/$slug.git"
-  local quoted_root quoted_origin
-  quoted_root="$(shell_quote "$git_root")"
-  quoted_origin="$(shell_quote "$remote_origin")"
-  remote_ssh "mkdir -p $quoted_root && rm -rf $quoted_origin && git init --bare -q $quoted_origin" || return
-  local push_url
-  push_url="$(remote_push_url_for_path "$remote_origin")"
-  local ssh_command="ssh"
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then
-    ssh_command+=" -p $REMOTE_SSH_PORT"
-  fi
-  git -C "$project_dir" remote remove origin >/dev/null 2>&1 || true
-  git -C "$project_dir" remote add origin "$remote_origin" || return
-  git -C "$project_dir" -c core.sshCommand="$ssh_command" push -q "$push_url" --all || return
-  printf '%s\n' "$remote_origin"
-}
-
-prepare_remote_scout_git_origin() {
-  local slug
-  slug="$(basename "$TMP_ROOT" | tr -cd 'A-Za-z0-9_.-')"
-  [[ -n "$slug" ]] || slug="macos-e2e"
-  prepare_remote_git_origin "$TEST_REPO_2" "macos-$slug-scout" >>"$TMP_ROOT/remote-git-origin.log" 2>&1
-}
-
-configure_mixed_e2e_targets() {
+configure_local_e2e_targets() {
   if [[ -z "$SPACES_CYCLE_LATENCY_BUDGET_MS_WAS_SET" ]]; then
     SPACES_CYCLE_LATENCY_BUDGET_MS=3000
   fi
-  log_step "configuring mixed local/remote compute targets"
-  require_remote_configuration
-  export_remote_auth_token
-  local artifact_id artifact_url artifact_sha256 artifact_arch
-  local artifact_assignments
-  artifact_assignments="$(prepare_remote_managed_artifact)" || fail "Remote managed artifact preparation failed."
-  eval "$artifact_assignments" || fail "Remote managed artifact assignment parsing failed."
-  prepare_remote_scout_git_origin \
-    || fail "Remote git fixture setup failed. See $TMP_ROOT/remote-git-origin.log"
-  local -a args=(
-    remote-compute-host-smoke
-    --project-dir "$TEST_REPO_2"
-    --host-id "$REMOTE_HOST_ID"
-    --name "$REMOTE_HOST_NAME"
-    --ssh-host "$REMOTE_SSH_HOST"
-    --workspace-root "$REMOTE_WORKSPACE_ROOT"
-    --daemon-port "$REMOTE_DAEMON_PORT"
-    --managed-artifact-id "$artifact_id"
-    --managed-artifact-url "$artifact_url"
-    --managed-artifact-sha256 "$artifact_sha256"
-  )
-  if [[ -n "$REMOTE_SSH_USER" ]]; then args+=(--ssh-user "$REMOTE_SSH_USER"); fi
-  if [[ -n "$REMOTE_SSH_PORT" ]]; then args+=(--ssh-port "$REMOTE_SSH_PORT"); fi
-  if [[ -n "$REMOTE_DAEMON_HOST" ]]; then args+=(--daemon-host "$REMOTE_DAEMON_HOST"); fi
-  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then args+=("--auth-token=$REMOTE_AUTH_TOKEN"); fi
-  env HOME="$USER_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" "${args[@]}" >"$TMP_ROOT/remote-compute-host-smoke.json" 2>"$TMP_ROOT/remote-compute-host-smoke.stderr.log" \
-    || fail "Remote compute host smoke failed. See $TMP_ROOT/remote-compute-host-smoke.stderr.log"
-  REMOTE_DEFAULT_WORKSPACE_DIR="$(json_get "$TMP_ROOT/remote-compute-host-smoke.json" "workspace.dir")"
-  [[ -n "$REMOTE_DEFAULT_WORKSPACE_DIR" ]] || fail "Remote compute host smoke did not return a workspace directory."
+  log_step "configuring local device E2E targets"
+}
+
+run_remote_device_e2e() {
+  log_step "remote paired-device API parity"
+  local remote_result="$TMP_ROOT/remote-device-e2e.json"
+  local remote_stdout="$TMP_ROOT/remote-device-e2e.stdout"
+  local remote_log="$TMP_ROOT/remote-device-e2e.log"
+  local mac_installation_id
+  mac_installation_id="$(mac_client_installation_id)"
+  SPACES_E2E="$SPACES_E2E_CLI" \
+    SPACES_E2E_REMOTE_DEVICE_RESULT_JSON="$remote_result" \
+    SPACES_E2E_REMOTE_MAC_CLIENT_INSTALLATION_ID="$mac_installation_id" \
+    "$REMOTE_DEVICE_E2E_SCRIPT" >"$remote_stdout" 2>"$remote_log" \
+    || fail "Remote paired-device E2E failed. See $remote_log"
+  [[ -s "$remote_result" ]] || fail "Remote paired-device E2E did not write result JSON: $remote_result. See $remote_log"
+  REMOTE_DEVICE_RESULT_JSON="$remote_result"
+  cat "$remote_result" >>"$DEBUG_LOG" || true
+}
+
+create_device_api_parity_fixture() {
+  local project_dir="$1"
+  rm -rf "$project_dir"
+  mkdir -p "$project_dir"
+  printf 'local device api sentinel\n' >"$project_dir/README.txt"
+  cat >"$project_dir/spaces.yaml" <<'YAML'
+version: 1
+processes:
+  - name: parity-process
+    command: >-
+      python3 -c "import time; print('device-api-process-ready', flush=True); time.sleep(120)"
+    on_exit: none
+agent_launchers:
+  - name: parity-agent
+    command: >-
+      python3 -c "import time; print('device-api-agent-ready', flush=True); time.sleep(120)"
+YAML
+  git -C "$project_dir" init >/dev/null
+  git -C "$project_dir" config user.email "spaces-e2e@example.invalid"
+  git -C "$project_dir" config user.name "Spaces E2E"
+  git -C "$project_dir" add README.txt spaces.yaml
+  git -C "$project_dir" commit -m "Initial device API parity fixture" >/dev/null
+}
+
+run_local_device_api_parity() {
+  begin_case "local paired-device API parity"
+  local parity_project_dir="$TMP_ROOT/local-device-api-parity"
+  local pairing_window_json="$TMP_ROOT/local-device-pairing-window.json"
+  local pair_request_json="$TMP_ROOT/local-device-pair-request.json"
+  local pair_response_json="$TMP_ROOT/local-device-pair-response.json"
+  local parity_result="$TMP_ROOT/local-device-api-parity.json"
+  local parity_stdout="$TMP_ROOT/local-device-api-parity.stdout"
+  local parity_log="$TMP_ROOT/local-device-api-parity.log"
+  local parsed host port transport_key pairing_code pairing_nonce auth_token
+  create_device_api_parity_fixture "$parity_project_dir"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    "$SPACES_E2E_CLI" open-device-pairing-window >"$pairing_window_json"
+  parsed="$(
+    python3 - "$pairing_window_json" <<'PY'
+import json
+import shlex
+import sys
+payload = json.load(open(sys.argv[1]))
+for key, name in (("host", "host"), ("port", "port"), ("transportKey", "transport_key"), ("pairingCode", "pairing_code"), ("pairingNonce", "pairing_nonce")):
+    value = payload.get(key)
+    if value is None or str(value).strip() == "":
+        raise SystemExit(f"pairing window missing {key}")
+    print(f"{name}={shlex.quote(str(value))}")
+PY
+  )"
+  eval "$parsed"
+  host="$(device_api_connect_host "$host")"
+  python3 - "$pair_request_json" "$pairing_code" "$pairing_nonce" <<'PY'
+import json
+import sys
+path, pairing_code, pairing_nonce = sys.argv[1:4]
+payload = {
+    "command": {"pair": {"pairingCode": pairing_code, "pairingNonce": pairing_nonce}},
+    "clientApp": {
+        "installationID": "MACOS-LOCAL-DEVICE-E2E",
+        "bundleID": "dev.usespaces.spacesmobile",
+        "platform": "ios",
+        "deviceName": "macOS Local Device API E2E",
+        "appVersion": "1.0",
+    },
+}
+open(path, "w").write(json.dumps(payload, separators=(",", ":")))
+PY
+  "$SPACES_E2E_CLI" mobile-request \
+    --host "$host" \
+    --port "$port" \
+    --transport-key "$transport_key" \
+    --request-json "$(cat "$pair_request_json")" >"$pair_response_json"
+  auth_token="$(
+    python3 - "$pair_response_json" <<'PY'
+import json
+import sys
+payload = json.load(open(sys.argv[1]))
+token = (((payload.get("result") or {}).get("issuedAuthToken") or {}).get("authToken"))
+if not payload.get("ok") or not token:
+    raise SystemExit(f"pair failed: {payload}")
+print(token)
+PY
+  )"
+  "$ROOT_DIR/apps/macos/Tests/device_api_parity.py" \
+    --spacese2e "$SPACES_E2E_CLI" \
+    --host "$host" \
+    --port "$port" \
+    --transport-key "$transport_key" \
+    --auth-token "$auth_token" \
+    --project-dir "$parity_project_dir" \
+    --label "local-macos" \
+    --client-installation-id "MACOS-LOCAL-DEVICE-E2E" \
+    --client-device-name "macOS Local Device API E2E" \
+    --result-json "$parity_result" >"$parity_stdout" 2>"$parity_log" \
+    || fail "Local Device API parity flow failed. See $parity_log"
+  cat "$parity_result" >>"$DEBUG_LOG" || true
+  pass_case
+}
+
+run_remote_active_device_ui_parity() {
+  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "Remote active-device UI parity requires a remote Device API result JSON."
+  begin_case "remote active-device UI parity"
+  wait_for_spaces_frontmost_ready
+  wait_for_spaces_splitter_ready
+  wait_for_ui_identifier "sidebar-active-device-selector" "active device selector"
+  wait_for_ui_identifier "sidebar-project-title-$REMOTE_DEVICE_PROJECT_ID" "remote project row"
+  wait_for_ui_identifier "sidebar-project-settings-$REMOTE_DEVICE_PROJECT_ID" "remote project settings action"
+  wait_for_ui_identifier "sidebar-project-add-workspace-$REMOTE_DEVICE_PROJECT_ID" "remote add workspace action"
+  wait_for_ui_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID" "remote workspace row"
+  ui_select_outline_row_containing_identifier "sidebar-workspace-title-$REMOTE_DEVICE_WORKSPACE_ID"
+  wait_for_ui_identifier "workspace-detail-title-label" "remote workspace detail title"
+  wait_for_ui_identifier "workspace-detail-launch-restart" "remote workspace lifecycle action"
+  wait_for_ui_identifier "workspace-detail-stop" "remote workspace stop action"
+  wait_for_ui_identifier "workspace-detail-overflow" "remote workspace overflow action"
+  pass_case
+}
+
+relaunch_spaces_with_local_active_device() {
+  log_step "relaunching Spaces with local active device"
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI" "$ACTION_TIMEOUT_SECONDS" \
+    || fail "timed out waiting for Spaces to exit before local active-device E2E"
+  SPACES_PID=""
+  sqlite3 "$TMP_CLIENT_DB" "DELETE FROM client_settings WHERE key = 'active_device_id';" \
+    || fail "failed to reset active device in client database"
+  launch_spaces
 }
 
 add_workspace_process() {
@@ -1150,16 +1317,6 @@ http_body_contains() {
   return 1
 }
 
-remote_http_body_contains() {
-  local url="$1"
-  local expected="$2"
-  local quoted_url quoted_expected
-  quoted_url="$(shell_quote "$url")"
-  quoted_expected="$(shell_quote "$expected")"
-  remote_ssh "python3 -c 'import sys, urllib.request; body = urllib.request.urlopen(sys.argv[1], timeout=2).read().decode(\"utf-8\"); raise SystemExit(0 if sys.argv[2] in body else 1)' $quoted_url $quoted_expected" \
-    >/dev/null 2>&1
-}
-
 wait_for_http_body_contains() {
   local url="$1"
   local expected="$2"
@@ -1181,11 +1338,7 @@ wait_for_workspace_http_content_optional() {
   local timeout_seconds="${5:-$WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS}"
   local deadline=$((SECONDS + timeout_seconds))
   while (( SECONDS < deadline )); do
-    if [[ "$host" == "remote" ]]; then
-      if http_body_contains "$docs_url" "$docs_expected" && remote_http_body_contains "$backend_url" "$backend_expected"; then
-        return 0
-      fi
-    elif http_body_contains "$docs_url" "$docs_expected" && http_body_contains "$backend_url" "$backend_expected"; then
+    if http_body_contains "$docs_url" "$docs_expected" && http_body_contains "$backend_url" "$backend_expected"; then
       return 0
     fi
     sleep 0.2
@@ -1239,51 +1392,12 @@ PY
 mock_agent_launcher_command() {
   local host="$1"
   local workspace_dir="$2"
-  if [[ "$host" == "remote" ]]; then
-    python3 <<'PY'
-import shlex
-
-script = r"""set -euo pipefail
-workspace_dir="${SPACES_WORKSPACE_DIR:-$PWD}"
-workspace_id="${SPACES_WORKSPACE_ID:?}"
-session_id="${SPACES_TERMINAL_TRACKING_ID:?}"
-spaces agent signal --workspace "$workspace_id" --session "$session_id" init >/dev/null
-spaces agent signal --workspace "$workspace_id" --session "$session_id" start >/dev/null
-sleep 2
-spaces agent signal --workspace "$workspace_id" --session "$session_id" waiting >/dev/null
-sleep 6
-spaces agent signal --workspace "$workspace_id" --session "$session_id" done >/dev/null
-trap 'spaces agent signal --workspace "$workspace_id" --session "$session_id" exit >/dev/null 2>&1 || true; exit 0' TERM INT
-while true; do sleep 5; done
-"""
-print("bash -lc " + shlex.quote(script))
-PY
-  else
-    create_mock_agent_script "$workspace_dir"
-  fi
+  create_mock_agent_script "$workspace_dir"
 }
 
 create_high_output_process_script() {
   local host="$1"
   local project_dir="$2"
-  if [[ "$host" == "remote" ]]; then
-    python3 <<'PY'
-import shlex
-
-script = r"""set -euo pipefail
-trap 'exit 0' TERM INT
-while true; do
-  for _ in {1..128}; do
-    printf 'spaces-e2e-noisy\n'
-  done
-  sleep 0.05
-done
-"""
-print("bash -lc " + shlex.quote(script))
-PY
-    return
-  fi
-
   local script_path="$project_dir/.spaces-e2e-high-output"
   python3 - "$script_path" <<'PY'
 import os
@@ -1433,6 +1547,23 @@ for process in data.get("runningProcesses", []):
 PY
 }
 
+workspace_process_session_id() {
+  local workspace_dir="$1"
+  local process_name="$2"
+  local out="$TMP_ROOT/workspace-process-session.json"
+  dump_workspace "$workspace_dir" "$out"
+  python3 - "$out" "$process_name" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+target = sys.argv[2]
+for process in data.get("runningProcesses", []):
+    if process.get("name") == target:
+        print(process.get("terminalNativeID") or process.get("terminalTrackingID") or "")
+        break
+PY
+}
+
 wait_for_workspace_process_status() {
   local workspace_dir="$1"
   local process_name="$2"
@@ -1445,6 +1576,22 @@ wait_for_workspace_process_status() {
     sleep 0.2
   done
   fail "workspace process did not reach status=$expected_status: $process_name"
+}
+
+wait_for_workspace_process_session_change() {
+  local workspace_dir="$1"
+  local process_name="$2"
+  local previous_session="$3"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local current_session
+    current_session="$(workspace_process_session_id "$workspace_dir" "$process_name")"
+    if [[ -n "$current_session" && "$current_session" != "$previous_session" && "$(workspace_process_status "$workspace_dir" "$process_name")" == "running" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "workspace process did not relaunch with a new session: $process_name"
 }
 
 url_port() {
@@ -1470,119 +1617,47 @@ wait_for_tcp_listener_port() {
   fail "timed out waiting for TCP listener on port $port"
 }
 
-wait_for_remote_tcp_listener_port() {
-  local port="$1"
-  [[ -n "$port" ]] || fail "missing remote port for listener wait"
-  local quoted_port
-  quoted_port="$(shell_quote "$port")"
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    if remote_ssh "python3 -c 'import socket, sys; s = socket.create_connection((\"127.0.0.1\", int(sys.argv[1])), timeout=1); s.close()' $quoted_port" \
-      >/dev/null 2>&1
-    then
-      return 0
-    fi
-    sleep 0.2
-  done
-  fail "timed out waiting for remote TCP listener on port $port"
-}
-
-remote_tcp_listener_exists() {
-  local port="$1"
-  [[ "$port" =~ ^[0-9]+$ ]] || fail "invalid remote listener port: $port"
-  remote_ssh "lsof -tiTCP:$port -sTCP:LISTEN >/dev/null 2>&1"
-}
-
-remote_listener_process_rows() {
-  local port="$1"
-  [[ "$port" =~ ^[0-9]+$ ]] || fail "invalid remote listener port: $port"
-  remote_ssh bash -s -- "$port" <<'REMOTE_SCRIPT'
-port="$1"
-pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
-for pid in $pids; do
-  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ -n "$command" ]] || continue
-  printf '%s\t%s\n' "$pid" "$command"
-done
-REMOTE_SCRIPT
-}
-
-stop_remote_listener_processes() {
-  local port="$1"
-  [[ "$port" =~ ^[0-9]+$ ]] || fail "invalid remote listener port: $port"
-  local rows
-  rows="$(remote_listener_process_rows "$port")"
-  [[ -n "$rows" ]] || return 0
-
-  local -a e2e_pids=()
-  local non_e2e_rows=""
-  local pid
-  local command
-  while IFS=$'\t' read -r pid command; do
-    [[ -n "$pid" ]] || continue
-    if [[ "$command" == *"spaces_e2e_demo"* ]]; then
-      e2e_pids+=("$pid")
-    else
-      non_e2e_rows+="$pid $command"$'\n'
-    fi
-  done <<<"$rows"
-
-  if [[ -n "$non_e2e_rows" ]]; then
-    fail "remote TCP listener on port $port is not an E2E demo process: ${non_e2e_rows%$'\n'}"
-  fi
-
-  [[ ${#e2e_pids[@]} -gt 0 ]] || return 0
-  remote_ssh bash -s -- "${e2e_pids[@]}" <<'REMOTE_SCRIPT'
-for pid in "$@"; do
-  kill "$pid" >/dev/null 2>&1 || true
-done
-sleep 0.5
-for pid in "$@"; do
-  kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true
-done
-REMOTE_SCRIPT
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    rows="$(remote_listener_process_rows "$port")"
-    if [[ -z "$rows" ]]; then
-      return 0
-    fi
-    if [[ "$rows" != *"spaces_e2e_demo"* ]]; then
-      fail "remote TCP listener on port $port is not an E2E demo process after cleanup: $rows"
-    fi
-    sleep 0.2
-  done
-  fail "remote TCP listener on port $port did not stop"
-}
-
-stop_remote_workspace_port_listeners() {
-  local workspace_dir="$1"
-  local port_name
-  local port
-  for port_name in "$APP_PORT_NAME" "$API_PORT_NAME"; do
-    port="$(workspace_named_port "$workspace_dir" "$port_name")"
-    [[ -n "$port" ]] || continue
-    stop_remote_listener_processes "$port"
-  done
-}
-
 ui_click_identifier() {
   # The GUI identifiers added for this suite keep the AppleScript automation
   # resilient when labels or ordering change.
   local identifier="$1"
   osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on clickMatchingIdentifier(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events" to click targetElement
+    return true
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my clickMatchingIdentifier(childElement, targetID) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my clickMatchingIdentifier(childElement, targetID) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end clickMatchingIdentifier
+
 on run argv
   set targetPID to (item 1 of argv) as integer
   set targetID to item 2 of argv
   tell application "System Events"
     repeat with proc in every process whose unix id is targetPID
-      repeat with targetElement in entire contents of window 1 of proc
-        try
-          if (value of attribute "AXIdentifier" of targetElement) is targetID then
-            click targetElement
-            return
-          end if
-        end try
+      repeat with targetWindow in windows of proc
+        if my clickMatchingIdentifier(targetWindow, targetID) then return
       end repeat
     end repeat
   end tell
@@ -1591,19 +1666,136 @@ end run
 APPLESCRIPT
 }
 
+ui_identifier_exists() {
+  local identifier="$1"
+  osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT' >/dev/null 2>/dev/null
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on identifierExistsInElement(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then return true
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my identifierExistsInElement(childElement, targetID) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my identifierExistsInElement(childElement, targetID) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end identifierExistsInElement
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        if my identifierExistsInElement(targetWindow, targetID) then return "1"
+      end repeat
+    end repeat
+  end tell
+  error "identifier not found: " & targetID
+end run
+APPLESCRIPT
+}
+
+wait_for_ui_identifier() {
+  local identifier="$1"
+  local description="${2:-$identifier}"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ui_identifier_exists "$identifier"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for UI identifier: $description ($identifier)"
+}
+
+ui_select_outline_row_containing_identifier() {
+  local identifier="$1"
+  osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on identifierExistsInElement(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then return true
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my identifierExistsInElement(childElement, targetID) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my identifierExistsInElement(childElement, targetID) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end identifierExistsInElement
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetID to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        try
+          set sidebarOutline to outline 1 of scroll area 1 of splitter group 1 of targetWindow
+          set rowIndex to 1
+          repeat with targetRow in rows of sidebarOutline
+            if my identifierExistsInElement(targetRow, targetID) then
+              select row rowIndex of sidebarOutline
+              return
+            end if
+            set rowIndex to rowIndex + 1
+          end repeat
+        end try
+      end repeat
+    end repeat
+  end tell
+  error "outline row containing identifier not found: " & targetID
+end run
+APPLESCRIPT
+}
+
 ui_click_workspace_detail_header_button() {
   local description="$1"
-  python3 - "$SPACES_PID" "$description" "$AX_ACTION_TIMEOUT_SECONDS" <<'PY'
+  local identifier
+  case "$description" in
+    Launch|Restart) identifier="workspace-detail-launch-restart" ;;
+    Stop) identifier="workspace-detail-stop" ;;
+    *) fail "unsupported workspace detail header button: $description" ;;
+  esac
+  python3 - "$SPACES_PID" "$identifier" "$AX_ACTION_TIMEOUT_SECONDS" <<'PY'
 import subprocess
 import sys
 
 target_pid = sys.argv[1]
-target_description = sys.argv[2]
+target_identifier = sys.argv[2]
 timeout_seconds = float(sys.argv[3])
 script = r'''
 on run argv
   set targetPID to (item 1 of argv) as integer
-  set targetDescription to item 2 of argv
+  set targetIdentifier to item 2 of argv
   tell application "System Events"
     repeat with proc in every process whose unix id is targetPID
       repeat with targetWindow in windows of proc
@@ -1619,7 +1811,7 @@ on run argv
           tell scroll area 2 of splitter group 1 of targetWindow
             repeat with targetButton in buttons
               try
-                if (description of targetButton) is targetDescription then
+                if (value of attribute "AXIdentifier" of targetButton) is targetIdentifier then
                   click targetButton
                   return
                 end if
@@ -1630,12 +1822,12 @@ on run argv
       end repeat
     end repeat
   end tell
-  error "workspace-detail header button not found: " & targetDescription
+  error "workspace-detail header button not found: " & targetIdentifier
 end run
 '''
 try:
     result = subprocess.run(
-        ["osascript", "-e", script, target_pid, target_description],
+        ["osascript", "-e", script, target_pid, target_identifier],
         timeout=timeout_seconds,
     )
 except subprocess.TimeoutExpired:
@@ -1648,19 +1840,43 @@ ui_set_identifier_value() {
   local identifier="$1"
   local value="$2"
   osascript - "$SPACES_PID" "$identifier" "$value" <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on setMatchingIdentifierValue(targetElement, targetID, targetValue)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events" to set value of targetElement to targetValue
+    return true
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my setMatchingIdentifierValue(childElement, targetID, targetValue) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my setMatchingIdentifierValue(childElement, targetID, targetValue) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end setMatchingIdentifierValue
+
 on run argv
   set targetPID to (item 1 of argv) as integer
   set targetID to item 2 of argv
   set targetValue to item 3 of argv
   tell application "System Events"
     repeat with proc in every process whose unix id is targetPID
-      repeat with targetElement in entire contents of window 1 of proc
-        try
-          if (value of attribute "AXIdentifier" of targetElement) is targetID then
-            set value of targetElement to targetValue
-            return
-          end if
-        end try
+      repeat with targetWindow in windows of proc
+        if my setMatchingIdentifierValue(targetWindow, targetID, targetValue) then return
       end repeat
     end repeat
   end tell
@@ -1673,20 +1889,46 @@ ui_select_popup_identifier() {
   local identifier="$1"
   local value="$2"
   osascript - "$SPACES_PID" "$identifier" "$value" <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on selectMatchingPopupValue(targetElement, targetID, targetValue)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events"
+      click targetElement
+      click menu item targetValue of menu 1 of targetElement
+    end tell
+    return true
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my selectMatchingPopupValue(childElement, targetID, targetValue) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my selectMatchingPopupValue(childElement, targetID, targetValue) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end selectMatchingPopupValue
+
 on run argv
   set targetPID to (item 1 of argv) as integer
   set targetID to item 2 of argv
   set targetValue to item 3 of argv
   tell application "System Events"
     repeat with proc in every process whose unix id is targetPID
-      repeat with targetElement in entire contents of window 1 of proc
-        try
-          if (value of attribute "AXIdentifier" of targetElement) is targetID then
-            click targetElement
-            click menu item targetValue of menu 1 of targetElement
-            return
-          end if
-        end try
+      repeat with targetWindow in windows of proc
+        if my selectMatchingPopupValue(targetWindow, targetID, targetValue) then return
       end repeat
     end repeat
   end tell
@@ -1698,20 +1940,46 @@ APPLESCRIPT
 ui_double_click_identifier() {
   local identifier="$1"
   osascript - "$SPACES_PID" "$identifier" <<'APPLESCRIPT'
+on elementMatchesIdentifier(targetElement, targetID)
+  tell application "System Events"
+    try
+      if ((value of attribute "AXIdentifier" of targetElement) as text) is targetID then return true
+    end try
+  end tell
+  return false
+end elementMatchesIdentifier
+
+on doubleClickMatchingIdentifier(targetElement, targetID)
+  if my elementMatchesIdentifier(targetElement, targetID) then
+    tell application "System Events"
+      perform action "AXPress" of targetElement
+      delay 0.1
+      perform action "AXPress" of targetElement
+    end tell
+    return true
+  end if
+  tell application "System Events"
+    try
+      repeat with childElement in UI elements of targetElement
+        if my doubleClickMatchingIdentifier(childElement, targetID) then return true
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        if my doubleClickMatchingIdentifier(childElement, targetID) then return true
+      end repeat
+    end try
+  end tell
+  return false
+end doubleClickMatchingIdentifier
+
 on run argv
   set targetPID to (item 1 of argv) as integer
   set targetID to item 2 of argv
   tell application "System Events"
     repeat with proc in every process whose unix id is targetPID
-      repeat with targetElement in entire contents of window 1 of proc
-        try
-          if (value of attribute "AXIdentifier" of targetElement) is targetID then
-            perform action "AXPress" of targetElement
-            delay 0.1
-            perform action "AXPress" of targetElement
-            return
-          end if
-        end try
+      repeat with targetWindow in windows of proc
+        if my doubleClickMatchingIdentifier(targetWindow, targetID) then return
       end repeat
     end repeat
   end tell
@@ -1815,7 +2083,6 @@ create_scout_branch_workspace() {
   "$SPACES_E2E_CLI" create-workspace \
     --project-dir "$TEST_REPO_2" \
     --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
-    --host "$REMOTE_HOST_ID" \
     --existing-branch \
     --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
     --target-branch main \
@@ -1881,20 +2148,14 @@ stop_workspace_via_gui() {
     sleep 0.2
   done
   if [[ "$(spaces_main_window_visible)" != "1" ]]; then
-    log_debug "stop_workspace_via_gui fallback=main-window-not-visible"
-    "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
-    return 0
+    fail "Spaces main window was not visible before stop"
   fi
   if ! spaces_splitter_ready; then
-    log_debug "stop_workspace_via_gui fallback=stop-workspace-helper"
-    "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
-    return 0
+    fail "Spaces split view was not ready before stop"
   fi
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Stop"; then
-    log_debug "stop_workspace_via_gui fallback=identifier-stop-workspace-helper"
-    "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
-    return 0
+    fail "workspace detail Stop button was not clickable"
   fi
   local out="$TMP_ROOT/stop-workspace-state.json"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
@@ -1905,14 +2166,15 @@ stop_workspace_via_gui() {
     fi
     sleep 0.5
   done
-  log_debug "stop_workspace_via_gui fallback=post-click-stop-workspace-helper"
-  "$SPACES_E2E_CLI" stop-workspace --workspace-dir "$workspace_dir" >/tmp/spaces-e2e-stop-workspace-fallback.json
+  fail "workspace did not stop after GUI click"
 }
 
 restart_workspace_via_gui() {
   local workspace_dir="$1"
   log_step "restarting workspace via GUI"
   ui_show_workspace_detail "$workspace_dir" ""
+  local previous_frontend_session
+  previous_frontend_session="$(workspace_process_session_id "$workspace_dir" "frontend")"
   local main_window_deadline=$((SECONDS + 4))
   while (( SECONDS < main_window_deadline )); do
     if [[ "$(spaces_main_window_visible)" == "1" ]]; then
@@ -1921,19 +2183,13 @@ restart_workspace_via_gui() {
     sleep 0.2
   done
   if [[ "$(spaces_main_window_visible)" != "1" ]]; then
-    log_debug "restart_workspace_via_gui fallback=main-window-not-visible"
-    run_spaces_logged /tmp/spaces-e2e-restart-workspace-fallback.log restart "$workspace_dir"
-    transition_pause "workspace restart fallback"
-    return 0
+    fail "Spaces main window was not visible before restart"
   fi
   sleep 0.5
   if ! ui_click_workspace_detail_header_button "Restart"; then
-    log_debug "restart_workspace_via_gui fallback=spaces-workspace-up-restart"
-    run_spaces_logged /tmp/spaces-e2e-restart-workspace-fallback.log restart "$workspace_dir"
-    transition_pause "workspace restart fallback"
-    return 0
+    fail "workspace detail Restart button was not clickable"
   fi
-  sleep 1
+  wait_for_workspace_process_session_change "$workspace_dir" "frontend" "$previous_frontend_session"
   transition_pause "workspace restart"
 }
 
@@ -3306,6 +3562,30 @@ wait_for_file() {
   fail "timed out waiting for $label: $path"
 }
 
+post_window_issue_modal_with_ack() {
+  local title="$1"
+  local detail="$2"
+  local ack_path="$3"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  local attempt=1
+  while (( SECONDS < deadline )); do
+    rm -f "$ack_path"
+    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+      "$SPACES_E2E_CLI" show-window-issue-modal \
+      --title "$title" \
+      --detail "$detail" \
+      --output-path "$ack_path" >/tmp/spaces-e2e-show-window-issue-modal.json
+    local ack_deadline=$((SECONDS + 2))
+    while (( SECONDS < ack_deadline )); do
+      [[ -f "$ack_path" ]] && return 0
+      sleep 0.1
+    done
+    log_debug "window issue modal IPC ack missing on attempt=$attempt; retrying"
+    attempt=$((attempt + 1))
+  done
+  fail "timed out waiting for window issue modal IPC acknowledgement: $ack_path"
+}
+
 extract_metric_field() {
   local line="$1"
   local key="$2"
@@ -4024,12 +4304,8 @@ ensure_workspace_http_ready() {
 
   wait_for_workspace_process_status "$workspace_dir" "frontend" "running"
   wait_for_workspace_process_status "$workspace_dir" "backend" "running"
-  if [[ "$host" == "remote" ]]; then
-    wait_for_remote_tcp_listener_port "$backend_port"
-  else
-    wait_for_tcp_listener_port "$docs_port"
-    wait_for_tcp_listener_port "$backend_port"
-  fi
+  wait_for_tcp_listener_port "$docs_port"
+  wait_for_tcp_listener_port "$backend_port"
 
   if wait_for_workspace_http_content_optional \
     "$host" \
@@ -4430,9 +4706,6 @@ run_launch_and_focus_assertions() {
   set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
   begin_case "$host: launch workspace and persist terminal host"
-  if [[ "$host" == "remote" ]]; then
-    stop_remote_workspace_port_listeners "$workspace_dir"
-  fi
   run_spaces_logged /tmp/spaces-e2e-launch.log start "$workspace_dir"
   if is_spaces_terminal_target "$host"; then
     activate_spaces_pid "$SPACES_PID"
@@ -4508,9 +4781,7 @@ run_launch_and_focus_assertions() {
     transition_pause "$host seed chrome focus for window issue modal"
     wait_for_condition "frontmost_app" "Google Chrome"
     local modal_ack_path="$TMP_ROOT/window-issue-modal-ack.json"
-    rm -f "$modal_ack_path"
-    env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" show-window-issue-modal --title "Process window not found" --detail "frontend is no longer open." --output-path "$modal_ack_path" >/tmp/spaces-e2e-show-window-issue-modal.json
-    wait_for_file "$modal_ack_path" "window issue modal IPC acknowledgement"
+    post_window_issue_modal_with_ack "Process window not found" "frontend is no longer open." "$modal_ack_path"
     if ! wait_for_spaces_modal_dialog_frontmost_optional; then
       activate_spaces_pid "$SPACES_PID"
       wait_for_spaces_modal_dialog_visible
@@ -5279,7 +5550,6 @@ run_multi_workspace_focus_and_cycle_assertions() {
   dump_workspace "$primary_workspace_dir" "$primary_dump"
   primary_docs_url="$(window_url_for_name "$primary_dump" "docs")"
   [[ -n "$primary_docs_url" ]] || primary_docs_url="$PRIMARY_DOCS_URL"
-  stop_remote_workspace_port_listeners "$secondary_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch.log start "$secondary_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host launch secondary workspace"
@@ -5439,20 +5709,13 @@ run_agent_status_assertions() {
   # through both persisted agent-window state and the visible GUI rows.
   ensure_single_spaces_instance "$SPACES_PID"
   reset_fixture_runtime "$workspace_dir"
-  if [[ "$host" == "remote" ]]; then
-    stop_remote_workspace_port_listeners "$workspace_dir"
-  fi
   run_spaces_logged "/tmp/spaces-e2e-$host-agent-launch.log" start "$workspace_dir"
   transition_pause "$host launch workspace with agent"
 
-  if [[ "$host" != "remote" ]]; then
-    wait_for_event_log_contains "agent-waiting:$workspace_dir"
-  fi
+  wait_for_event_log_contains "agent-waiting:$workspace_dir"
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "waiting"
 
-  if [[ "$host" != "remote" ]]; then
-    wait_for_event_log_contains "agent-done:$workspace_dir"
-  fi
+  wait_for_event_log_contains "agent-done:$workspace_dir"
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "done"
 
   reset_fixture_runtime "$workspace_dir"
@@ -5464,26 +5727,34 @@ main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
   parse_args "$@"
-  require_remote_configuration
   require_cmd git
   require_cmd osascript
   require_cmd python3
+  require_cmd sqlite3
   require_cmd uv
   require_cmd yabai
 
   build_binaries
   cleanup_existing_fixture_projects
+  mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
+  if (( SETUP_FIXTURES_ONLY == 0 )); then
+    run_remote_device_e2e
+    seed_remote_active_device_for_macos
+  fi
   close_existing_spaces_instances
   setup_git_fixture
   seed_fixture
   seed_second_fixture
   seed_third_fixture
-  configure_mixed_e2e_targets
+  configure_local_e2e_targets
   if [[ -n "$RECORD_VIDEO_PATH" ]]; then
     hide_all_visible_windows
     start_screen_recording
   fi
   launch_spaces
+  run_remote_active_device_ui_parity
+  relaunch_spaces_with_local_active_device
+  run_local_device_api_parity
   create_workspace_via_gui
   create_scout_branch_workspace
 
@@ -5494,9 +5765,6 @@ main() {
   workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
   local second_workspace_dir
   second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
-  if [[ -n "$REMOTE_DEFAULT_WORKSPACE_DIR" ]]; then
-    second_workspace_dir="$REMOTE_DEFAULT_WORKSPACE_DIR"
-  fi
   local third_workspace_dir
   third_workspace_dir="$(json_get "$THIRD_SEED_FILE" "defaultWorkspace.dir")"
   local scout_branch_workspace_dir
@@ -5549,41 +5817,40 @@ EOF
     return 0
   fi
 
-  run_launch_and_focus_assertions "spaces" "$workspace_dir" "Beacon docs sentinel" '"workspace": "beacon-status"'
-  run_launch_and_focus_assertions "remote" "$second_workspace_dir" "Scout docs sentinel" '"workspace": "scout-errors"'
+  run_launch_and_focus_assertions "local-primary" "$workspace_dir" "Beacon docs sentinel" '"workspace": "beacon-status"'
+  run_launch_and_focus_assertions "local-secondary" "$second_workspace_dir" "Scout docs sentinel" '"workspace": "scout-errors"'
   if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
     return 0
   fi
-  run_multi_workspace_focus_and_cycle_assertions "mixed" "$workspace_dir" "$second_workspace_dir"
-  run_agent_status_assertions "spaces" "$workspace_dir"
-  run_agent_status_assertions "remote" "$second_workspace_dir"
+  run_multi_workspace_focus_and_cycle_assertions "local-multi" "$workspace_dir" "$second_workspace_dir"
+  run_agent_status_assertions "local-primary" "$workspace_dir"
+  run_agent_status_assertions "local-secondary" "$second_workspace_dir"
   assert_file_contains "$EVENT_LOG" "$stop_marker"
 
   begin_case "branch and tertiary workspaces serve correct content"
   run_spaces_logged /tmp/spaces-e2e-beacon-branch-start.log start "$created_workspace_dir"
   wait_for_workspace_running_state "$created_workspace_dir" "true"
   wait_for_http_body_contains "$BEACON_BRANCH_DOCS_URL" "Beacon redesign-hero docs sentinel"
-  stop_remote_workspace_port_listeners "$scout_branch_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-scout-branch-start.log start "$scout_branch_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-scout-branch-open-docs.log open docs "$scout_branch_workspace_dir"
   wait_for_workspace_running_state "$scout_branch_workspace_dir" "true"
   SCOUT_BRANCH_DOCS_URL="$(wait_for_workspace_window_url_by_name "$scout_branch_workspace_dir" "docs")"
-  ensure_workspace_http_ready "remote" "$scout_branch_workspace_dir" "$SCOUT_BRANCH_DOCS_URL" "Scout redesign-hero docs sentinel" "$SCOUT_BRANCH_BACKEND_STATUS_URL" '"workspace": "scout-errors"'
+  ensure_workspace_http_ready "local-scout-branch" "$scout_branch_workspace_dir" "$SCOUT_BRANCH_DOCS_URL" "Scout redesign-hero docs sentinel" "$SCOUT_BRANCH_BACKEND_STATUS_URL" '"workspace": "scout-errors"'
   local scout_branch_dump_file="$TMP_ROOT/scout-branch-render-dump.json"
   local scout_branch_frontend_session_id
   local scout_branch_backend_session_id
   run_spaces_logged /tmp/spaces-e2e-scout-branch-open-frontend.log open frontend "$scout_branch_workspace_dir"
-  transition_pause "remote scout branch frontend terminal focus"
+  transition_pause "local scout branch frontend terminal focus"
   scout_branch_frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "frontend" "$scout_branch_dump_file")"
   wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${scout_branch_frontend_session_id}"
   wait_for_spaces_front_window_title "frontend"
-  wait_for_terminal_session_live_render "$scout_branch_frontend_session_id" "remote scout branch frontend"
+  wait_for_terminal_session_live_render "$scout_branch_frontend_session_id" "local scout branch frontend"
   run_spaces_logged /tmp/spaces-e2e-scout-branch-open-backend.log open backend "$scout_branch_workspace_dir"
-  transition_pause "remote scout branch backend terminal focus"
+  transition_pause "local scout branch backend terminal focus"
   scout_branch_backend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "backend" "$scout_branch_dump_file")"
   wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${scout_branch_backend_session_id}"
   wait_for_spaces_front_window_title "backend"
-  wait_for_terminal_session_live_render "$scout_branch_backend_session_id" "remote scout branch backend"
+  wait_for_terminal_session_live_render "$scout_branch_backend_session_id" "local scout branch backend"
   run_spaces_logged /tmp/spaces-e2e-prism-start.log start "$third_workspace_dir"
   wait_for_workspace_running_state "$third_workspace_dir" "true"
   wait_for_http_body_contains "$TERTIARY_DOCS_URL" "Prism docs sentinel"

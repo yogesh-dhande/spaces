@@ -59,32 +59,6 @@ import Testing
         #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: nil) == nil)
     }
 
-    @Test func preparedGitProjectRestoreAfterFailedSaveRequiresActiveMatchingSource() {
-        #expect(
-            AppKitController.preparedGitProjectCanBeRestoredAfterFailedSave(
-                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                preparedRepoURL: "https://example.com/repo.git", sourceExists: true))
-    }
-
-    @Test func preparedGitProjectRestoreAfterFailedSaveRejectsInactiveStaleOrMissingSource() {
-        #expect(
-            !AppKitController.preparedGitProjectCanBeRestoredAfterFailedSave(
-                isActiveForm: false, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                preparedRepoURL: "https://example.com/repo.git", sourceExists: true))
-        #expect(
-            !AppKitController.preparedGitProjectCanBeRestoredAfterFailedSave(
-                isActiveForm: true, selectedSegment: 0, currentRepoURL: "https://example.com/repo.git",
-                preparedRepoURL: "https://example.com/repo.git", sourceExists: true))
-        #expect(
-            !AppKitController.preparedGitProjectCanBeRestoredAfterFailedSave(
-                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/other.git",
-                preparedRepoURL: "https://example.com/repo.git", sourceExists: true))
-        #expect(
-            !AppKitController.preparedGitProjectCanBeRestoredAfterFailedSave(
-                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                preparedRepoURL: "https://example.com/repo.git", sourceExists: false))
-    }
-
     @MainActor @Test func setupScriptReplaceCancelsOpenEditorAndAppliesHydratedValue() {
         let section = SetupScriptSection(value: "old")
         section.editButtonForLifecycleTests?.performClick(nil)

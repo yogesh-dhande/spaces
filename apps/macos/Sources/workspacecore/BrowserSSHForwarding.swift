@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 struct BrowserSSHForwardRequest: Sendable, Hashable {
-    let computeHostID: String
+    let deviceID: String
     let displayName: String
     let sshHost: String
     let sshUser: String?
@@ -46,13 +46,13 @@ enum BrowserSSHForwardResolver {
     }
 
     private static func forwardRequest(rawURL: String, runtimePlan: WorkspaceRuntimePlan?) -> (URLComponents, BrowserSSHForwardRequest)? {
-        guard let runtimePlan, case .remote(let host) = runtimePlan.selection else { return nil }
+        guard let runtimePlan, case .remote(let device) = runtimePlan.selection else { return nil }
         guard let components = URLComponents(string: rawURL), isLocalServiceURL(components), let remotePort = components.port else { return nil }
         guard runtimePlan.manifest.namedPorts.contains(where: { $0.port == remotePort }) else { return nil }
         return (
             components,
             BrowserSSHForwardRequest(
-                computeHostID: host.id, displayName: host.name, sshHost: host.sshHost, sshUser: normalized(host.sshUser), sshPort: host.sshPort,
+                deviceID: device.id, displayName: device.name, sshHost: device.sshHost, sshUser: normalized(device.sshUser), sshPort: device.sshPort,
                 remotePort: remotePort)
         )
     }
@@ -73,7 +73,7 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
     static let shared = BrowserSSHForwardManager()
 
     private struct ForwardKey: Hashable {
-        let computeHostID: String
+        let deviceID: String
         let sshHost: String
         let sshUser: String?
         let sshPort: Int?
@@ -90,8 +90,7 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
 
     func localPort(for request: BrowserSSHForwardRequest) throws -> Int {
         let key = ForwardKey(
-            computeHostID: request.computeHostID, sshHost: request.sshHost, sshUser: request.sshUser, sshPort: request.sshPort,
-            remotePort: request.remotePort)
+            deviceID: request.deviceID, sshHost: request.sshHost, sshUser: request.sshUser, sshPort: request.sshPort, remotePort: request.remotePort)
         lock.lock()
         if let existing = forwards[key], existing.process.isRunning {
             let localPort = existing.localPort
@@ -110,8 +109,7 @@ final class BrowserSSHForwardManager: @unchecked Sendable {
 
     func hasLiveForward(localPort: Int, for request: BrowserSSHForwardRequest) -> Bool {
         let key = ForwardKey(
-            computeHostID: request.computeHostID, sshHost: request.sshHost, sshUser: request.sshUser, sshPort: request.sshPort,
-            remotePort: request.remotePort)
+            deviceID: request.deviceID, sshHost: request.sshHost, sshUser: request.sshUser, sshPort: request.sshPort, remotePort: request.remotePort)
         lock.lock()
         if let existing = forwards[key], existing.localPort == localPort, existing.process.isRunning {
             lock.unlock()

@@ -1,7 +1,7 @@
 import QuickLook
 import SwiftUI
 import spacesterminalmobileghostty
-import spacesmobilecore
+import spacesdevicecore
 
 struct TerminalDetailView: View {
     private static let chromeControlHeight: CGFloat = 36
@@ -10,11 +10,11 @@ struct TerminalDetailView: View {
     /// (`Theme.bg` dark = 15,21,23) rather than a dynamic token.
     private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
 
-    let session: SpacesMobileTerminalSessionSummary
+    let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
     let appModel: SpacesMobileAppModel
     let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
-    let onSessionChanged: (SpacesMobileTerminalSessionSummary) -> Void
+    let onSessionChanged: (SpacesDeviceTerminalSessionSummary) -> Void
     let onBack: () -> Void
 
     @State private var hasMountedTerminalSurface = false
@@ -29,11 +29,11 @@ struct TerminalDetailView: View {
     }
 
     init(
-        session: SpacesMobileTerminalSessionSummary,
+        session: SpacesDeviceTerminalSessionSummary,
         settings: SpacesMobileConnectionSettings,
         appModel: SpacesMobileAppModel,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
-        onSessionChanged: @escaping (SpacesMobileTerminalSessionSummary) -> Void,
+        onSessionChanged: @escaping (SpacesDeviceTerminalSessionSummary) -> Void,
         onBack: @escaping () -> Void
     ) {
         self.session = session

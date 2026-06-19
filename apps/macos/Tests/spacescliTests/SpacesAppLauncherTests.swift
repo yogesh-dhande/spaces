@@ -1,9 +1,9 @@
 import Foundation
 import Network
 import XCTest
-import spacesmobilecore
+import spacesdevicecore
 
-@testable import spacesmobilebridge
+@testable import spacesdeviceapi
 @testable import spacesterminalcore
 @testable import workspacecore
 
@@ -138,11 +138,11 @@ final class SpacesAppLauncherTests: XCTestCase {
         XCTAssertEqual(startCount, 1)
     }
 
-    func testBridgeLaunchCommandRejectsUnauthenticatedRequests() throws {
-        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
-        let store = StubMobilePairingStore()
+    func testDeviceAPILaunchCommandRejectsUnauthenticatedRequests() throws {
+        let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+        let store = StubDevicePairingStore()
         var launchCount = 0
-        let server = SpacesMobileBridgeServer(
+        let server = SpacesDeviceAPIServer(
             host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: store,
             launchSpacesAppHandler: {
                 launchCount += 1
@@ -152,28 +152,28 @@ final class SpacesAppLauncherTests: XCTestCase {
         defer { server.stop() }
 
         let response = try sendTLSRequest(
-            SpacesMobileBridgeRequest(command: "launchSpacesApp", clientApp: Self.clientApp), port: server.listeningPort, transportKey: transportKey)
+            SpacesDeviceAPIRequest(command: .launchSpacesApp, clientApp: Self.clientApp), port: server.listeningPort, transportKey: transportKey)
 
         XCTAssertFalse(response.ok)
-        XCTAssertTrue(response.message.contains("Invalid mobile auth token."))
+        XCTAssertTrue(response.message.contains("Invalid device auth token."))
         XCTAssertEqual(launchCount, 0)
     }
 
-    func testBridgeLaunchCommandRejectsWhenLauncherIsNotInstalled() throws {
-        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
-        let server = SpacesMobileBridgeServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: StubMobilePairingStore())
+    func testDeviceAPILaunchCommandRejectsWhenLauncherIsNotInstalled() throws {
+        let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: StubDevicePairingStore())
         try server.start()
         defer { server.stop() }
 
         let response = try sendTLSRequest(
-            SpacesMobileBridgeRequest(command: "launchSpacesApp", authToken: StubMobilePairingStore.validToken, clientApp: Self.clientApp),
+            SpacesDeviceAPIRequest(command: .launchSpacesApp, authToken: StubDevicePairingStore.validToken, clientApp: Self.clientApp),
             port: server.listeningPort, transportKey: transportKey)
 
         XCTAssertFalse(response.ok)
-        XCTAssertEqual(response.message, "launchSpacesApp is only available from the daemon-hosted mobile bridge.")
+        XCTAssertEqual(response.message, "launchSpacesApp is only available from the daemon-hosted Device API.")
     }
 
-    func testBridgeLaunchCommandReturnsAlreadyRunningAndLaunchedOutcomes() throws {
+    func testDeviceAPILaunchCommandReturnsAlreadyRunningAndLaunchedOutcomes() throws {
         let alreadyRunning = try sendLaunchCommandResponse(
             outcome: SpacesAppLaunchOutcome(message: "Spaces is already running on Mac.", launchedProcessID: nil))
         let launched = try sendLaunchCommandResponse(outcome: SpacesAppLaunchOutcome(message: "Launched Spaces on Mac.", launchedProcessID: 42))
@@ -184,21 +184,21 @@ final class SpacesAppLauncherTests: XCTestCase {
         XCTAssertEqual(launched.message, "Launched Spaces on Mac.")
     }
 
-    private func sendLaunchCommandResponse(outcome: SpacesAppLaunchOutcome) throws -> SpacesMobileBridgeResponse {
-        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
-        let server = SpacesMobileBridgeServer(
-            host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: StubMobilePairingStore(),
+    private func sendLaunchCommandResponse(outcome: SpacesAppLaunchOutcome) throws -> SpacesDeviceAPIResponse {
+        let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+        let server = SpacesDeviceAPIServer(
+            host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: StubDevicePairingStore(),
             launchSpacesAppHandler: { outcome })
         try server.start()
         defer { server.stop() }
 
         return try sendTLSRequest(
-            SpacesMobileBridgeRequest(command: "launchSpacesApp", authToken: StubMobilePairingStore.validToken, clientApp: Self.clientApp),
+            SpacesDeviceAPIRequest(command: .launchSpacesApp, authToken: StubDevicePairingStore.validToken, clientApp: Self.clientApp),
             port: server.listeningPort, transportKey: transportKey)
     }
 
-    private static let clientApp = SpacesMobileClientApp(
-        installationID: "INSTALLATION-1", bundleID: SpacesMobileFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
+    private static let clientApp = SpacesDeviceClientApp(
+        installationID: "INSTALLATION-1", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
         appVersion: "1.0")
 
     private func makeProfile() -> SpacesProfile {
@@ -214,7 +214,7 @@ final class SpacesAppLauncherTests: XCTestCase {
             acquiredAt: "2026-06-01T00:00:00Z")
     }
 
-    private func sendTLSRequest(_ request: SpacesMobileBridgeRequest, port: Int, transportKey: String) throws -> SpacesMobileBridgeResponse {
+    private func sendTLSRequest(_ request: SpacesDeviceAPIRequest, port: Int, transportKey: String) throws -> SpacesDeviceAPIResponse {
         let ready = DispatchSemaphore(value: 0)
         let sent = DispatchSemaphore(value: 0)
         let received = DispatchSemaphore(value: 0)
@@ -222,7 +222,7 @@ final class SpacesAppLauncherTests: XCTestCase {
         let resultBox = BridgeRequestResultBox()
         let connection = NWConnection(
             host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
-            using: try SpacesMobileBridgeTransport.parameters(transportKey: transportKey, role: .client))
+            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
 
         connection.stateUpdateHandler = { state in
             switch state {
@@ -239,7 +239,7 @@ final class SpacesAppLauncherTests: XCTestCase {
         XCTAssertEqual(ready.wait(timeout: .now() + 5), .success)
         if let error = resultBox.error() { throw error }
 
-        var requestData = try SpacesMobileBridgeCodec.encodeRequest(request)
+        var requestData = try SpacesDeviceAPICodec.encodeRequest(request)
         requestData.append(0x0A)
         connection.send(
             content: requestData,
@@ -276,25 +276,25 @@ final class SpacesAppLauncherTests: XCTestCase {
         XCTAssertEqual(received.wait(timeout: .now() + 5), .success)
         connection.cancel()
         if let error = resultBox.error() { throw error }
-        return try SpacesMobileBridgeCodec.decodeResponse(resultBox.responseData())
+        return try SpacesDeviceAPICodec.decodeResponse(resultBox.responseData())
     }
 }
 
-private final class StubMobilePairingStore: SpacesMobilePairingStoreProtocol {
+private final class StubDevicePairingStore: SpacesDevicePairingStoreProtocol {
     static let validToken = "valid-token"
 
-    func issueToken(for _: SpacesMobileClientApp) throws -> String { Self.validToken }
-    func listDevices() throws -> [SpacesMobilePairedDevice] { [] }
+    func issueToken(for _: SpacesDeviceClientApp) throws -> String { Self.validToken }
+    func listDevices() throws -> [SpacesDevicePairedClient] { [] }
     func revoke(installationID _: String) throws {}
     func removeAll() throws {}
 
-    func authorize(clientApp: SpacesMobileClientApp?, authToken: String?) throws {
+    func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
         guard clientApp != nil, authToken == Self.validToken else {
-            throw NSError(domain: "SpacesMobileBridgeServer", code: 401, userInfo: [NSLocalizedDescriptionKey: "Invalid mobile auth token."])
+            throw NSError(domain: "SpacesDeviceAPIServer", code: 401, userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])
         }
     }
 
-    func validate(clientApp _: SpacesMobileClientApp) throws {}
+    func validate(clientApp _: SpacesDeviceClientApp) throws {}
 }
 
 private final class BridgeRequestResultBox: @unchecked Sendable {

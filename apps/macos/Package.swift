@@ -18,6 +18,7 @@ let spacesDatabaseExtraDependencies: [Target.Dependency] = [.target(name: "CSQLi
 let spacesTerminalCoreExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL")]
 let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = [.linkedLibrary("ssl"), .linkedLibrary("crypto")]
 let workspaceCoreExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
+let spacesDeviceAPIExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL")]
 #else
 let systemLibraryTargets: [Target] = []
 let ghosttyKitSupportTargets: [Target] = [
@@ -43,6 +44,7 @@ let spacesDatabaseExtraDependencies: [Target.Dependency] = []
 let spacesTerminalCoreExtraDependencies: [Target.Dependency] = []
 let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = []
 let workspaceCoreExtraDependencies: [Target.Dependency] = []
+let spacesDeviceAPIExtraDependencies: [Target.Dependency] = []
 #endif
 
 let supportTargets: [Target] = ghosttyKitSupportTargets + [
@@ -70,10 +72,19 @@ let terminalTargets: [Target] = [
         ] + spacesTerminalCoreExtraDependencies,
         linkerSettings: spacesTerminalCoreExtraLinkerSettings
     ),
-    .target(name: "spacesmobilecore", dependencies: ["spacesterminalcore"]),
+    .target(name: "spacesdevicecore", dependencies: ["spacesterminalcore"]),
     .target(
-        name: "spacesmobilebridge",
-        dependencies: ["spacesmobilecore", "workspacecore", "spacesterminalcore"]
+        name: "spacesdeviceapi",
+        dependencies: ["spacesdevicecore", "workspacecore", "spacesterminalcore"] + spacesDeviceAPIExtraDependencies
+    ),
+    .target(
+        name: "spacesclientcore",
+        dependencies: [
+            "spacesdatabase",
+            "spacesterminalcore",
+            "spacesdevicecore",
+            "spacesdeviceapi",
+        ]
     ),
     .target(
         name: "spacesterminalghostty",
@@ -96,6 +107,7 @@ let appTargets: [Target] = [
             "spacesdatabase",
             "systembridge",
             "spacesterminalcore",
+            "spacesdevicecore",
         ] + workspaceCoreExtraDependencies + [
             .product(name: "Yams", package: "Yams"),
         ],
@@ -106,7 +118,8 @@ let appTargets: [Target] = [
         dependencies: [
             "workspacecore",
             "systembridge",
-            "spacesmobilebridge",
+            "spacesdeviceapi",
+            "spacesclientcore",
             "spacesterminalui",
             .product(name: "Sparkle", package: "Sparkle"),
         ]
@@ -118,8 +131,9 @@ let appTargets: [Target] = [
             "spacesterminalcore",
             "spacesterminalghostty",
             "systembridge",
-            "spacesmobilebridge",
-            "spacesmobilecore",
+            "spacesclientcore",
+            "spacesdeviceapi",
+            "spacesdevicecore",
             .product(name: "ArgumentParser", package: "swift-argument-parser")
         ]
     ),
@@ -131,8 +145,9 @@ let executableTargets: [Target] = [
         dependencies: [
             "workspacecore",
             "systembridge",
-            "spacesmobilebridge",
-            "spacesmobilecore",
+            "spacesclientcore",
+            "spacesdeviceapi",
+            "spacesdevicecore",
             .product(name: "ArgumentParser", package: "swift-argument-parser")
         ],
         path: "Sources/spacese2e"
@@ -143,9 +158,9 @@ let executableTargets: [Target] = [
             "workspacecore",
             "spacesterminalcore",
             "spacesterminalghostty",
-            "spacesmobilecore",
+            "spacesdevicecore",
             "spacesruntimecore",
-            .target(name: "spacesmobilebridge", condition: .when(platforms: [.macOS])),
+            "spacesdeviceapi",
         ],
         path: "Sources/spacesd"
     ),
@@ -175,12 +190,13 @@ let testTargets: [Target] = [
     .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
     .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
     .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
+    .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
     .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
     .testTarget(
         name: "spacescliTests",
         dependencies: [
             "spacescli",
-            "spacesmobilebridge",
+            "spacesdeviceapi",
             .product(name: "ArgumentParser", package: "swift-argument-parser")
         ]
     )
@@ -200,8 +216,9 @@ let package = Package(
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
         .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
-        .library(name: "spacesmobilecore", targets: ["spacesmobilecore"]),
-        .library(name: "spacesmobilebridge", targets: ["spacesmobilebridge"]),
+        .library(name: "spacesdevicecore", targets: ["spacesdevicecore"]),
+        .library(name: "spacesdeviceapi", targets: ["spacesdeviceapi"]),
+        .library(name: "spacesclientcore", targets: ["spacesclientcore"]),
         .library(name: "spacesruntimecore", targets: ["spacesruntimecore"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
         .library(name: "spacesui", targets: ["spacesui"]),

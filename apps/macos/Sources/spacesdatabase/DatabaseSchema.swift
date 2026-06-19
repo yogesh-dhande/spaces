@@ -1,34 +1,19 @@
 import Foundation
 
+#if os(Linux)
+    import CSQLite3
+#else
+    import SQLite3
+#endif
+
 public enum DatabaseSchema {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
-    public static let migrationSteps: [DatabaseMigrationStep] = []
-
-    static let localComputeHostSQL = """
-            INSERT OR IGNORE INTO compute_hosts(
-              id, name, kind, ssh_host, ssh_user, ssh_port, workspace_root, daemon_host, daemon_port, daemon_certificate_fingerprint, created_at, updated_at
-            )
-            VALUES ('local', 'Local Mac', 'local', '', '', NULL, '', '', 0, '', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
-        """
-
-    static let computeHostSchemaSQL = """
-            CREATE TABLE IF NOT EXISTS compute_hosts (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL UNIQUE,
-              kind TEXT NOT NULL,
-              ssh_host TEXT NOT NULL,
-              ssh_user TEXT,
-              ssh_port INTEGER,
-              workspace_root TEXT NOT NULL,
-              daemon_host TEXT NOT NULL,
-              daemon_port INTEGER NOT NULL,
-              daemon_certificate_fingerprint TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-        """
+    public static let migrationSteps: [DatabaseMigrationStep] = [
+        DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
+            try executeBatch(database: database, sql: destructiveResetSQL)
+        }
+    ]
 
     static let terminalRemoteSessionStateSQL = """
             CREATE TABLE IF NOT EXISTS terminal_remote_session_states (
@@ -211,7 +196,6 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
-              host_id TEXT NOT NULL,
               title TEXT NOT NULL,
               dir TEXT NOT NULL,
               runtime_path TEXT NOT NULL,
@@ -224,12 +208,11 @@ public enum DatabaseSchema {
               is_running INTEGER NOT NULL,
               last_launched_at TEXT,
               notes TEXT,
-              FOREIGN KEY (host_id) REFERENCES compute_hosts(id) ON DELETE RESTRICT,
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS workspaces_project_branch_host_active_unique
-            ON workspaces(project_id, branch, host_id)
+            CREATE UNIQUE INDEX IF NOT EXISTS workspaces_project_branch_active_unique
+            ON workspaces(project_id, branch)
             WHERE length(branch) > 0 AND is_archived = 0;
 
             CREATE TABLE IF NOT EXISTS workspace_ports (
@@ -324,10 +307,6 @@ public enum DatabaseSchema {
               FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
-            \(computeHostSchemaSQL)
-
-            \(localComputeHostSQL)
-
             CREATE TABLE IF NOT EXISTS runtime_targets (
               id TEXT PRIMARY KEY,
               workspace_id TEXT NOT NULL,
@@ -396,4 +375,51 @@ public enum DatabaseSchema {
               current_version INTEGER NOT NULL
             );
         """
+
+    static let destructiveResetSQL = """
+            PRAGMA foreign_keys = OFF;
+
+            DROP TABLE IF EXISTS terminal_agent_signal_events;
+            DROP TABLE IF EXISTS terminal_remote_session_states;
+            DROP TABLE IF EXISTS terminal_window_frames;
+            DROP TABLE IF EXISTS terminal_attachments;
+            DROP TABLE IF EXISTS terminal_clients;
+            DROP TABLE IF EXISTS terminal_runtime_states;
+            DROP TABLE IF EXISTS terminal_sessions;
+            DROP TABLE IF EXISTS agent_session_events;
+            DROP TABLE IF EXISTS runtime_target_events;
+            DROP TABLE IF EXISTS agent_sessions;
+            DROP TABLE IF EXISTS browser_targets;
+            DROP TABLE IF EXISTS runtime_targets;
+            DROP TABLE IF EXISTS ignored_worktrees;
+            DROP TABLE IF EXISTS settings;
+            DROP TABLE IF EXISTS running_processes;
+            DROP TABLE IF EXISTS workspace_agent_launchers;
+            DROP TABLE IF EXISTS workspace_browser_sessions;
+            DROP TABLE IF EXISTS workspace_processes;
+            DROP TABLE IF EXISTS workspace_settings;
+            DROP TABLE IF EXISTS workspace_port_definitions;
+            DROP TABLE IF EXISTS workspace_ports;
+            DROP TABLE IF EXISTS workspaces;
+            DROP TABLE IF EXISTS project_agent_launchers;
+            DROP TABLE IF EXISTS project_browser_sessions;
+            DROP TABLE IF EXISTS project_processes;
+            DROP TABLE IF EXISTS project_port_definitions;
+            DROP TABLE IF EXISTS projects;
+            DROP TABLE IF EXISTS compute_hosts;
+            DROP TABLE IF EXISTS migration_state;
+
+            PRAGMA foreign_keys = ON;
+
+            \(latestSchemaSQL)
+        """
+
+    private static func executeBatch(database: OpaquePointer, sql: String) throws {
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        if sqlite3_exec(database, sql, nil, nil, &errorMessage) != SQLITE_OK {
+            let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(database))
+            if let errorMessage { sqlite3_free(errorMessage) }
+            throw SpacesDatabaseError.migrationFailed(message: message)
+        }
+    }
 }

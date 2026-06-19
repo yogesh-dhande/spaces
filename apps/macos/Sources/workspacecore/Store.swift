@@ -165,10 +165,9 @@ public final class SQLiteStore {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO workspaces(id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO workspaces(id, project_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
-                      host_id = excluded.host_id,
                       title = excluded.title,
                       dir = excluded.dir,
                       runtime_path = excluded.runtime_path,
@@ -183,10 +182,9 @@ public final class SQLiteStore {
                       notes = excluded.notes
                     """,
                 bindings: [
-                    workspace.id, workspace.projectID, workspace.hostID, workspace.title, workspace.dir, workspace.runtimePath,
-                    workspace.dirname ?? "", workspace.branch ?? "", workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0",
-                    workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "",
-                    workspace.notes ?? "",
+                    workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.runtimePath, workspace.dirname ?? "",
+                    workspace.branch ?? "", workspace.targetBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0",
+                    workspace.isHidden ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.notes ?? "",
                 ])
             try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
         }
@@ -196,7 +194,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT id, project_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -207,7 +205,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT id, project_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE project_id = ? AND title = ?
                     """, bindings: [projectID, title])
         else { return nil }
@@ -218,7 +216,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT id, project_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces
                     WHERE dir = ?
                     ORDER BY is_archived ASC
@@ -231,7 +229,7 @@ public final class SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, host_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                SELECT id, project_id, title, dir, runtime_path, dirname, branch, target_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, title
@@ -297,57 +295,20 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET notes = ? WHERE id = ?", bindings: [notes ?? "", id])
     }
 
-    public func upsert(computeHost: ComputeHostRecord) throws {
-        try execute(
-            sql: """
-                INSERT INTO compute_hosts(
-                  id, name, kind, ssh_host, ssh_user, ssh_port, workspace_root, daemon_host, daemon_port, daemon_certificate_fingerprint, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  name = excluded.name,
-                  kind = excluded.kind,
-                  ssh_host = excluded.ssh_host,
-                  ssh_user = excluded.ssh_user,
-                  ssh_port = excluded.ssh_port,
-                  workspace_root = excluded.workspace_root,
-                  daemon_host = excluded.daemon_host,
-                  daemon_port = excluded.daemon_port,
-                  daemon_certificate_fingerprint = excluded.daemon_certificate_fingerprint,
-                  updated_at = excluded.updated_at
-                """,
-            bindings: [
-                computeHost.id, computeHost.name, computeHost.kind.rawValue, computeHost.sshHost, computeHost.sshUser ?? "",
-                computeHost.sshPort.map(String.init) ?? "", computeHost.workspaceRoot, computeHost.daemonEndpoint.host,
-                String(computeHost.daemonEndpoint.port), computeHost.daemonEndpoint.certificateFingerprint, computeHost.createdAt,
-                computeHost.updatedAt,
-            ])
+    public func upsert(spacesDevice: SpacesDeviceRecord) throws {
+        guard spacesDevice.isLocal else {
+            throw WorkspaceError.invalidArgument(message: "Remote device records are not stored in this daemon database.")
+        }
     }
 
-    public func computeHost(id: String) throws -> ComputeHostRecord? {
-        guard
-            let row = try queryRow(
-                sql: """
-                    SELECT id, name, kind, ssh_host, ssh_user, ssh_port, workspace_root, daemon_host, daemon_port, daemon_certificate_fingerprint, created_at, updated_at
-                    FROM compute_hosts
-                    WHERE id = ?
-                    """, bindings: [id])
-        else { return nil }
-        return decodeComputeHost(row: row)
-    }
+    public func spacesDevice(id: String) throws -> SpacesDeviceRecord? { id == SpacesDeviceRecord.localDeviceID ? SpacesDeviceRecord.local() : nil }
 
-    public func computeHosts() throws -> [ComputeHostRecord] {
-        try queryRows(
-            sql: """
-                SELECT id, name, kind, ssh_host, ssh_user, ssh_port, workspace_root, daemon_host, daemon_port, daemon_certificate_fingerprint, created_at, updated_at
-                FROM compute_hosts
-                ORDER BY name
-                """
-        ).compactMap { decodeComputeHost(row: $0) }
-    }
+    public func spacesDevices() throws -> [SpacesDeviceRecord] { [SpacesDeviceRecord.local()] }
 
-    public func deleteComputeHost(id: String) throws {
-        try withImmediateTransaction { try execute(sql: "DELETE FROM compute_hosts WHERE id = ?", bindings: [id]) }
+    public func deleteSpacesDevice(id: String) throws {
+        guard id != SpacesDeviceRecord.localDeviceID else {
+            throw WorkspaceError.invalidArgument(message: "The local device record cannot be removed.")
+        }
     }
 
     public func updateWorkspaceTitle(id: String, title: String) throws {
@@ -1153,20 +1114,12 @@ public final class SQLiteStore {
     }
 
     private func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
-        guard row.count >= 15 else { return nil }
+        guard row.count >= 14 else { return nil }
         return WorkspaceRecord(
-            id: row[0], projectID: row[1], hostID: normalizedOptional(row[2]) ?? ComputeHostRecord.localHostID, title: row[3], dir: row[4],
-            runtimePath: row[5].isEmpty ? row[4] : row[5], dirname: row[6].isEmpty ? nil : row[6], branch: row[7].isEmpty ? nil : row[7],
-            targetBranch: row[8].isEmpty ? nil : row[8], isDefault: row[9] == "1", isArchived: row[10] == "1", isHidden: row[11] != "0",
-            isRunning: row[12] == "1", lastLaunchedAt: row[13].isEmpty ? nil : row[13], notes: row[14].isEmpty ? nil : row[14])
-    }
-
-    private func decodeComputeHost(row: [String]) -> ComputeHostRecord? {
-        guard row.count >= 12, let kind = ComputeHostKind(rawValue: row[2]), let daemonPort = Int(row[8]) else { return nil }
-        return ComputeHostRecord(
-            id: row[0], name: row[1], kind: kind, sshHost: row[3], sshUser: normalizedOptional(row[4]), sshPort: Int(row[5]), workspaceRoot: row[6],
-            daemonEndpoint: SpacesDaemonEndpoint(host: row[7], port: daemonPort, certificateFingerprint: row[9]), createdAt: row[10],
-            updatedAt: row[11])
+            id: row[0], projectID: row[1], title: row[2], dir: row[3], runtimePath: row[4].isEmpty ? row[3] : row[4],
+            dirname: row[5].isEmpty ? nil : row[5], branch: row[6].isEmpty ? nil : row[6], targetBranch: row[7].isEmpty ? nil : row[7],
+            isDefault: row[8] == "1", isArchived: row[9] == "1", isHidden: row[10] != "0", isRunning: row[11] == "1",
+            lastLaunchedAt: row[12].isEmpty ? nil : row[12], notes: row[13].isEmpty ? nil : row[13])
     }
 
     private func normalizedOptional(_ value: String?) -> String? {

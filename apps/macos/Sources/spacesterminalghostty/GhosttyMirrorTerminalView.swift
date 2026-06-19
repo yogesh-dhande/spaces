@@ -653,7 +653,7 @@
             let attributes = GhosttyRenderFrameMetrics.attributes(
                 frame: frame, dropped: !applied, dropReason: applied ? nil : "mirror_apply_failed", renderMode: "ghostty-mirror",
                 targetRevision: frame.sessionRevision, appliedRevision: applied ? frame.sessionRevision : nil, applyMS: applyMS)
-            SpacesMobileTerminalPerformanceLogger.emit(
+            SpacesDeviceTerminalPerformanceLogger.emit(
                 .init(
                     sessionID: launchConfiguration.sessionID, source: "mac-mirror", name: "render_frame_mirror_apply", elapsedMS: applyMS,
                     attributes: attributes))

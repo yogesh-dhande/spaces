@@ -77,6 +77,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         return try XCTUnwrap(foregroundPID, file: file, line: line)
     }
 
+    private func processIsAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
     func testHostManagedPTYLaunchesInteractiveShellAsLoginShell() {
         let command = HostManagedPTYTerminalSessionDriver.execCommand(
             for: TerminalSessionLaunchConfiguration(
@@ -167,12 +173,67 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertFalse(markerText.contains("survived"))
     }
 
+    @MainActor func testHostManagedPTYTerminateEscalatesWhenHUPIsIgnored() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("termination-marker")
+        let scriptPath = root.appendingPathComponent("ignore-hup-target.sh")
+        try """
+        #!/bin/sh
+        trap 'printf "hup\\n" >> "\(markerPath.path)"' HUP
+        trap 'printf "term\\n" >> "\(markerPath.path)"; exit 0' TERM
+        printf 'ready\\n' > "\(markerPath.path)"
+        while :; do sleep 1; done
+        """.write(to: scriptPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "terminate-escalates-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-escalates",
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec \(scriptPath.path)", createdAt: "2026-06-19T00:00:00Z"))
+
+        try driver.startIfNeeded()
+        try waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        driver.terminate()
+
+        try waitUntil(timeout: 5) {
+            guard let markerText = try? String(contentsOf: markerPath, encoding: .utf8) else { return false }
+            return markerText.contains("term")
+        }
+        try waitUntil(timeout: 5) { !self.processIsAlive(childPID) }
+
+        let markerText = try String(contentsOf: markerPath, encoding: .utf8)
+        XCTAssertTrue(markerText.contains("hup"))
+        XCTAssertTrue(markerText.contains("term"))
+    }
+
     func testHostManagedPTYForegroundPIDFallsBackToLiveChildPID() {
         let currentPID = getpid()
 
         XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: nil, childPID: currentPID), currentPID)
         XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: Int32.max, childPID: currentPID), currentPID)
         XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: currentPID, childPID: nil), currentPID)
+    }
+
+    func testHostManagedPTYDoesNotGroupSignalCurrentProcessGroup() {
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldSignalProcessGroup(childPID: 42, processGroupID: 42, currentProcessGroupID: 42))
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldSignalProcessGroup(childPID: 42, processGroupID: 41, currentProcessGroupID: 1))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldSignalProcessGroup(childPID: 42, processGroupID: 42, currentProcessGroupID: 1))
+    }
+
+    func testHostManagedPTYRemovesDaemonEnvironmentBeforeExec() {
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("INVOCATION_ID"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("JOURNAL_STREAM"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("NOTIFY_SOCKET"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACESD_AUTH_TOKEN"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACESD_AUTH_TOKEN_REMOTE"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DEVICE_API_PORT"))
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DB_PATH"))
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("PATH"))
     }
 
     func testHostManagedPTYStripsGhosttyCommandPrefixesBeforeShellExecution() {

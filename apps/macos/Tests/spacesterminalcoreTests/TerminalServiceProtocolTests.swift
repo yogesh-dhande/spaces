@@ -14,7 +14,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             sessionID: "session-1", backend: .ghosttyEmbedded, lifetimePolicy: .whileAttached, title: "shell", workingDirectory: "/tmp/work",
             shell: "/bin/zsh", command: "cat", createdAt: "2026-05-17T00:00:00Z")
         let manifest = TerminalServiceWorkspaceRuntimeManifest(
-            workspaceID: "workspace-1", projectID: "project-1", computeHostID: "host-1", location: .remote, localPath: "/local/work",
+            workspaceID: "workspace-1", projectID: "project-1", deviceID: "host-1", location: .remote, localPath: "/local/work",
             remotePath: "/srv/work", branch: "feature", targetBranch: "main", gitRemoteURL: "git@example.com:repo.git",
             namedPorts: [TerminalServiceWorkspaceRuntimePortMapping(id: "api", name: "API_PORT", port: 3000)],
             processEnvironment: ["SPACES_WORKSPACE_ID": "workspace-1"], allowedFileRoots: ["/srv/work"])
@@ -29,9 +29,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
                 createdAt: "2026-06-11T00:00:00Z"), agentSignalEventIDs: ["event-1"],
             profileCommand: TerminalServiceProfileCommandRequest(
-                operation: .workspaceCreate, projectID: "project-1", branch: "feature", hostID: "host-1", title: "Feature", targetBranch: "main",
-                existingBranch: true, terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true,
-                lineCount: 40))
+                operation: .workspaceCreate, projectID: "project-1", branch: "feature", title: "Feature", targetBranch: "main", existingBranch: true,
+                terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true, lineCount: 40))
         let response = TerminalServiceResponse(
             ok: true, message: "Started.",
             session: TerminalServiceSessionSummary(
@@ -53,9 +52,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
             profile: TerminalServiceProfileCommandResponse(
                 message: "Created workspace.",
                 workspace: TerminalServiceProfileWorkspaceRecord(
-                    id: "workspace-1", projectID: "project-1", hostID: "host-1", title: "Feature", dir: "/srv/work", runtimePath: "/srv/work",
-                    dirname: "feature", branch: "feature", targetBranch: "main", isDefault: false, isArchived: false, isHidden: false,
-                    isRunning: false, lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
+                    id: "workspace-1", projectID: "project-1", title: "Feature", dir: "/srv/work", runtimePath: "/srv/work", dirname: "feature",
+                    branch: "feature", targetBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false,
+                    lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
             mobileCredentials: [
                 TerminalServiceMobileCredential(
                     id: "credential-1", installationID: "installation-1", deviceName: "iPhone", platform: "ios", scopes: ["terminal"],
@@ -95,6 +94,38 @@ final class TerminalServiceProtocolTests: XCTestCase {
 
         wait(for: [received], timeout: 2)
         XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
+    }
+
+    func testTerminalServiceInstanceLockRejectsSecondOwnerAndReleases() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let lockPath = root.appendingPathComponent("daemon.lock").path
+        let lock = try TerminalServiceInstanceLock.acquire(path: lockPath)
+        XCTAssertThrowsError(try TerminalServiceInstanceLock.acquire(path: lockPath)) { error in
+            guard case TerminalServiceInstanceLockError.alreadyRunning(let pid, let path) = error else {
+                return XCTFail("Expected an already-running lock error, got \(error).")
+            }
+            XCTAssertEqual(pid, getpid())
+            XCTAssertEqual(path, lockPath)
+        }
+
+        lock.release()
+        let reacquired = try TerminalServiceInstanceLock.acquire(path: lockPath)
+        reacquired.release()
+    }
+
+    func testTerminalServiceInstanceLockReclaimsStaleOwner() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let lockPath = root.appendingPathComponent("daemon.lock").path
+        try #"{"pid":-1,"token":"stale"}"#.write(toFile: lockPath, atomically: true, encoding: .utf8)
+
+        let lock = try TerminalServiceInstanceLock.acquire(path: lockPath)
+        lock.release()
     }
 
     func testClientCanSendRequestToRemoteServiceSocket() throws {

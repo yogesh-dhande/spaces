@@ -1407,7 +1407,7 @@
         }
 
         private func logMobileTakeoverPerformance(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
-            SpacesMobileTerminalPerformanceLogger.emit(
+            SpacesDeviceTerminalPerformanceLogger.emit(
                 .init(
                     sessionID: launchConfiguration.sessionID, source: "mac-host", name: name, elapsedMS: elapsedMS, count: count,
                     attributes: attributes))

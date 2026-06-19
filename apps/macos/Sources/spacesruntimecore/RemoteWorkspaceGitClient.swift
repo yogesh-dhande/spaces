@@ -62,12 +62,12 @@ public struct RemoteWorkspaceRefreshBlock: LocalizedError, Sendable, Equatable {
 
     public var guidance: String {
         switch reason {
-        case .dirtyWorktree: "Commit, discard, or move local changes on the compute host before launching."
+        case .dirtyWorktree: "Commit, discard, or move local changes on the device before launching."
         case .untrackedOverwriteRisk: "Move or remove untracked files that would be overwritten before launching."
         case .divergentHistory: "Reconcile the remote worktree branch history so it can fast-forward to the workspace branch tip."
-        case .missingBranch: "Push the workspace branch or choose a workspace with a branch reachable from the compute host."
-        case .fetchFailed: "Fix remote repository access from the compute host, then retry."
-        case .checkoutFailed: "Fix the remote worktree checkout error on the compute host, then retry."
+        case .missingBranch: "Push the workspace branch or choose a workspace with a branch reachable from the device."
+        case .fetchFailed: "Fix remote repository access from the device, then retry."
+        case .checkoutFailed: "Fix the remote worktree checkout error on the device, then retry."
         }
     }
 }
