@@ -123,13 +123,13 @@ public enum SpacesDevicePairingClient {
             let sshUser = normalized(request.sshUser)
             try validateSSHPort(request.sshPort)
             let destination = sshDestination(host: sshHost, user: sshUser)
+            let deviceAPIHost = try sshPairingDeviceAPIHost(destination: destination, port: request.sshPort, sshHost: sshHost)
 
             try validateRemoteDeviceSSH(destination: destination, port: request.sshPort)
             let probe = try validateRemoteDeviceInstall(destination: destination, port: request.sshPort)
             let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
                 destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion,
                 remoteArtifactPublicKey: request.remoteArtifactPublicKey)
-            let deviceAPIHost = sshHost
 
             let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
             let client = try SpacesDeviceAPIRequestClient(host: deviceAPIHost, port: metadata.port, transportKey: metadata.transportKey)
@@ -172,16 +172,17 @@ public enum SpacesDevicePairingClient {
             let sshUser = normalized(device.sshUser)
             try validateSSHPort(device.sshPort)
             let destination = sshDestination(host: sshHost, user: sshUser)
+            let deviceAPIHost = try remotePairingWindowDeviceAPIHost(destination: destination, port: device.sshPort, sshHost: sshHost)
             try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
             let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
             let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
                 destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey
             )
             let link = SpacesDevicePairingLink(
-                host: sshHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode, transportKey: metadata.transportKey,
-                certificateFingerprint: metadata.certificateFingerprint, name: metadata.name)
+                host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
+                transportKey: metadata.transportKey, certificateFingerprint: metadata.certificateFingerprint, name: metadata.name)
             return SpacesRemoteDevicePairingWindowResult(
-                name: metadata.name, host: sshHost, port: metadata.port, linkString: link.absoluteString, expiresAt: metadata.expiresAt)
+                name: metadata.name, host: deviceAPIHost, port: metadata.port, linkString: link.absoluteString, expiresAt: metadata.expiresAt)
         #else
             throw SpacesRemoteDevicePairingError.sshUnavailable("Remote device pairing requires Network.framework.")
         #endif
@@ -285,6 +286,44 @@ public enum SpacesDevicePairingClient {
         guard let port else { return }
         guard (1...65_535).contains(port) else { throw SpacesRemoteDevicePairingError.invalidSSHPort(port) }
     }
+
+    private static func sshPairingDeviceAPIHost(destination: String, port: Int?, sshHost: String) throws -> String {
+        try sshPairingDeviceAPIHost(sshHost: sshHost, configuration: loadSSHResolvedConfiguration(destination: destination, port: port))
+    }
+
+    static func sshPairingDeviceAPIHost(sshHost: String, configuration: SSHResolvedConfiguration) throws -> String {
+        let fallback = try normalizedSSHHost(sshHost)
+        return configuration.resolvedHostname(fallback: fallback)
+    }
+
+    private static func remotePairingWindowDeviceAPIHost(destination: String, port: Int?, sshHost: String) throws -> String {
+        try remotePairingWindowDeviceAPIHost(sshHost: sshHost, configuration: loadSSHResolvedConfiguration(destination: destination, port: port))
+    }
+
+    static func remotePairingWindowDeviceAPIHost(sshHost: String, configuration: SSHResolvedConfiguration) throws -> String {
+        try sshPairingDeviceAPIHost(sshHost: sshHost, configuration: configuration)
+    }
+
+    private static func loadSSHResolvedConfiguration(destination: String, port: Int?, timeoutSeconds: TimeInterval = 5) throws
+        -> SSHResolvedConfiguration
+    {
+        let result = try runSSHConfiguration(destination: destination, port: port, timeoutSeconds: timeoutSeconds)
+        let normalizedDestination = try normalizedSSHHost(destination)
+        if result.timedOut {
+            throw SpacesRemoteDevicePairingError.sshValidationFailed(
+                "SSH configuration lookup timed out for \(normalizedDestination). Check the SSH host or ssh config, then retry.")
+        }
+        guard result.exitStatus == 0 else {
+            let detail = [result.standardError, result.standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter {
+                !$0.isEmpty
+            }.joined(separator: "\n")
+            let suffix = detail.isEmpty ? "Exit status \(result.exitStatus)." : detail
+            throw SpacesRemoteDevicePairingError.sshValidationFailed("SSH configuration lookup failed for \(normalizedDestination). \(suffix)")
+        }
+        return parseOpenSSHConfiguration(result.standardOutput)
+    }
+
+    static func parseOpenSSHConfiguration(_ output: String) -> SSHResolvedConfiguration { SSHResolvedConfiguration.parseOpenSSHConfiguration(output) }
 
     private static func validateRemoteDeviceSSH(destination: String, port: Int?) throws {
         let result = try runSSH(destination: destination, port: port, remoteCommand: "true", timeoutSeconds: 12)
@@ -612,6 +651,46 @@ public enum SpacesDevicePairingClient {
             standardError: stderr.trimmingCharacters(in: .whitespacesAndNewlines), timedOut: timedOut)
     }
 
+    static func sshConfigurationArguments(destination: String, port: Int?) -> [String] {
+        var arguments = [
+            "-G", "-T", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
+        ]
+        if let port { arguments += ["-p", String(port)] }
+        arguments.append(destination)
+        return arguments
+    }
+
+    private static func runSSHConfiguration(destination: String, port: Int?, timeoutSeconds: TimeInterval) throws -> SSHCommandResult {
+        guard FileManager.default.isExecutableFile(atPath: sshPath) else {
+            throw SpacesRemoteDevicePairingError.sshUnavailable("SSH is required to connect a remote device, but \(sshPath) is not executable.")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: sshPath)
+        process.arguments = sshConfigurationArguments(destination: destination, port: port)
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        do { try process.run() } catch {
+            throw SpacesRemoteDevicePairingError.sshUnavailable("Failed to launch \(sshPath): \(error.localizedDescription)")
+        }
+
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        let timedOut = process.isRunning
+        if timedOut {
+            process.terminate()
+            while process.isRunning { Thread.sleep(forTimeInterval: 0.02) }
+        }
+
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return SSHCommandResult(
+            exitStatus: process.terminationStatus, standardOutput: stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            standardError: stderr.trimmingCharacters(in: .whitespacesAndNewlines), timedOut: timedOut)
+    }
+
     private static func runLocalProcess(executablePath: String, arguments: [String], timeoutSeconds: TimeInterval) throws -> SSHCommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
@@ -773,4 +852,31 @@ private struct SSHCommandResult: Sendable, Equatable {
     let standardOutput: String
     let standardError: String
     let timedOut: Bool
+}
+
+struct SSHResolvedConfiguration: Sendable, Equatable {
+    let hostname: String?
+
+    init(hostname: String? = nil) { self.hostname = Self.normalized(hostname) }
+
+    func resolvedHostname(fallback: String) -> String { Self.normalized(hostname) ?? fallback.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    static func parseOpenSSHConfiguration(_ output: String) -> SSHResolvedConfiguration {
+        var hostname: String?
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            let parts = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            guard parts.count == 2 else { continue }
+            if parts[0].lowercased() == "hostname" { hostname = normalized(String(parts[1])) }
+        }
+        return SSHResolvedConfiguration(hostname: hostname)
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty, trimmed.lowercased() != "none" else {
+            return nil
+        }
+        return trimmed
+    }
 }

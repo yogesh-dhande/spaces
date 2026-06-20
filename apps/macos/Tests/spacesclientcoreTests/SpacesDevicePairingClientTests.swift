@@ -75,6 +75,51 @@ final class SpacesDevicePairingClientTests: XCTestCase {
                 systemCLIExecutable: false, systemDaemonExecutable: false, canonicalCLIExecutable: false, launchAgentInstalled: false))
     }
 
+    func testSSHPairingDeviceAPIHostUsesResolvedHostNameForAliases() throws {
+        let configuration = SpacesDevicePairingClient.parseOpenSSHConfiguration(
+            """
+            user dev
+            hostname 100.64.12.34
+            port 2222
+            """)
+
+        let deviceAPIHost = try SpacesDevicePairingClient.sshPairingDeviceAPIHost(sshHost: "studio-mac", configuration: configuration)
+
+        XCTAssertEqual(deviceAPIHost, "100.64.12.34")
+    }
+
+    func testSSHConfigurationLookupUsesRemoteDestinationAndPort() {
+        XCTAssertEqual(
+            SpacesDevicePairingClient.sshConfigurationArguments(destination: "dev@studio-mac", port: 2222),
+            [
+                "-G", "-T", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
+                "-p", "2222", "dev@studio-mac",
+            ])
+    }
+
+    func testSSHPairingDeviceAPIHostFallsBackToNormalizedSSHHostWithoutHostName() throws {
+        let configuration = SpacesDevicePairingClient.parseOpenSSHConfiguration(
+            """
+            user dev
+            hostname none
+            """)
+
+        let deviceAPIHost = try SpacesDevicePairingClient.sshPairingDeviceAPIHost(sshHost: " studio.local ", configuration: configuration)
+
+        XCTAssertEqual(deviceAPIHost, "studio.local")
+    }
+
+    func testRemotePairingWindowDeviceAPIHostUsesCurrentSSHAlias() throws {
+        let configuration = SpacesDevicePairingClient.parseOpenSSHConfiguration(
+            """
+            hostname 100.64.12.34
+            """)
+
+        let deviceAPIHost = try SpacesDevicePairingClient.remotePairingWindowDeviceAPIHost(sshHost: "studio-mac", configuration: configuration)
+
+        XCTAssertEqual(deviceAPIHost, "100.64.12.34")
+    }
+
     func testSelectRemoteLinuxArtifactMatchesSupportedPlatform() throws {
         let manifest = RemoteArtifactManifest(
             schemaVersion: 1, appVersion: "1.2.3", releaseTag: "v1.2.3",
