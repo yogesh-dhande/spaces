@@ -1,6 +1,7 @@
 import Testing
 import spacesclientcore
 import spacesdevicecore
+import spacesterminalcore
 import workspacecore
 
 @testable import spacesui
@@ -173,5 +174,47 @@ import workspacecore
         #expect(entries.count == 1)
         #expect(entries.first?.kind == .process)
         #expect(entries.first?.processID == "running-web")
+    }
+
+    @Test func activeDeviceShortcutResolvesRunningProcessToRemoteTerminalOpen() {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", targetBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, notes: nil,
+                    sessionCount: 1, assignedPorts: [], setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
+                    config: SpacesDeviceWorkspaceConfig(processes: [
+                        SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
+                    ]),
+                    processRows: [
+                        SpacesDeviceWorkspaceProcessRow(
+                            id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
+                            processID: "running-web", sessionID: "session-web", runState: .running, canRun: false, canStop: true, canRestart: true)
+                    ])
+            ], sessions: [])
+
+        let resolution = AppKitController.activeDeviceWindowShortcutResolution(index: 1, selectedWorkspaceID: "workspace-1", overview: overview)
+
+        #expect(
+            resolution
+                == .openTerminal(
+                    AppKitController.ActiveDeviceTerminalOpenRequest(
+                        workspaceID: "workspace-1", sessionID: "session-web", title: "web", workingDirectory: "/device/project-feature",
+                        kind: .process)))
+    }
+
+    @Test func activeDeviceTerminalControlRequestTranslatesRendererControlPayload() throws {
+        let control = TerminalControlRequest(command: "resize", clientID: "mac-client", columns: 120, rows: 40, ownerEpoch: 7, resizeSerial: 3)
+
+        let request = try AppKitController.activeDeviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .resize)
+        #expect(request.sessionID == "session-web")
+        #expect(request.clientID == "mac-client")
+        #expect(request.columns == 120)
+        #expect(request.rows == 40)
+        #expect(request.ownerEpoch == 7)
+        #expect(request.resizeSerial == 3)
     }
 }

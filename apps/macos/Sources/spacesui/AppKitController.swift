@@ -251,9 +251,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
     private var commandPaletteMainWindowVisibility: Bool?
     private var mobileConnectionPanel: NSPanel?
-    private var mobileConnectionTimer: Timer?
     private weak var activeDeviceSelectorContainer: NSView?
     private weak var activeDevicePopUpButton: NSPopUpButton?
+    private var projectsSectionHeaderTopToDeviceSelector: NSLayoutConstraint?
+    private var projectsSectionHeaderTopToAlertsRow: NSLayoutConstraint?
     private weak var remoteDeviceSSHHostField: NSTextField?
     private weak var remoteDeviceSSHUserField: NSTextField?
     private weak var remoteDeviceSSHPortField: NSTextField?
@@ -587,8 +588,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         periodicSidebarMetadataRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebarReloadTask?.cancel()
-        mobileConnectionTimer?.invalidate()
-        mobileConnectionTimer = nil
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
@@ -1009,7 +1008,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private struct RemoteTerminalSessionRoute: Sendable {
         let requestSender: RemoteGhosttyTerminalServiceRequestSender
-        let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber
+        let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
         let launchConfiguration: TerminalSessionLaunchConfiguration
     }
 
@@ -1030,7 +1029,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    @discardableResult private func openTerminalSessionWindow(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) -> Int? {
+    @discardableResult private func openTerminalSessionWindow(
+        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, remoteRouteOverride: RemoteTerminalSessionRoute? = nil
+    ) -> Int? {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1043,7 +1044,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 reusedExistingWindow = true
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                let remoteRoute = try remoteTerminalSessionRoute(sessionID: sessionID)
+                let remoteRoute: RemoteTerminalSessionRoute?
+                if let remoteRouteOverride {
+                    remoteRoute = remoteRouteOverride
+                } else {
+                    remoteRoute = try remoteTerminalSessionRoute(sessionID: sessionID)
+                }
                 if let remoteRoute { try ensureRemoteTerminalLaunchConfiguration(remoteRoute.launchConfiguration, paths: paths) }
                 let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
                 if remoteRoute == nil {
@@ -1182,6 +1188,73 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 try client.start()
                 return client
             }, launchConfiguration: launchConfiguration)
+    }
+
+    private func activeDeviceRemoteTerminalSessionRoute(_ request: ActiveDeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord)
+        -> RemoteTerminalSessionRoute
+    {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
+            shell: "/bin/bash", command: nil, createdAt: ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID,
+            kind: request.kind)
+        return RemoteTerminalSessionRoute(
+            requestSender: Self.activeDeviceTerminalServiceRequestSender(device: device), stateStreamSubscriber: nil,
+            launchConfiguration: launchConfiguration)
+    }
+
+    private func openActiveDeviceTerminalSession(
+        _ request: ActiveDeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
+    ) -> Bool {
+        let route = activeDeviceRemoteTerminalSessionRoute(request, device: device)
+        return openTerminalSessionWindow(sessionID: request.sessionID, mode: .owner, requestID: requestID, remoteRouteOverride: route) != nil
+    }
+
+    nonisolated static func activeDeviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws
+        -> SpacesDeviceTerminalControlRequest
+    {
+        guard request.bytes == nil else {
+            throw WorkspaceError.invalidArgument(message: "Raw byte terminal control is not supported for active remote devices.")
+        }
+        guard let action = SpacesDeviceTerminalControlAction(rawValue: request.command) else {
+            throw WorkspaceError.invalidArgument(message: "Unsupported remote terminal command '\(request.command)'.")
+        }
+        return SpacesDeviceTerminalControlRequest(
+            action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
+            text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
+            resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
+            scrollMods: request.scrollMods, appendNewline: request.appendNewline)
+    }
+
+    nonisolated private static func activeDeviceTerminalServiceRequestSender(device: SpacesPairedDeviceRecord)
+        -> RemoteGhosttyTerminalServiceRequestSender
+    {
+        { request in
+            let clientApp = SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+            switch request.command {
+            case "state":
+                guard let sessionID = request.sessionID else {
+                    throw WorkspaceError.invalidArgument(message: "Remote terminal state requires a session ID.")
+                }
+                let response = try SpacesActiveDeviceClient.request(
+                    SpacesDeviceAPIRequest(command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID))), device: device,
+                    clientApp: clientApp)
+                return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
+            case "control":
+                guard let sessionID = request.sessionID else {
+                    throw WorkspaceError.invalidArgument(message: "Remote terminal control requires a session ID.")
+                }
+                guard let controlRequest = request.controlRequest else {
+                    throw WorkspaceError.invalidArgument(message: "Remote terminal control requires a control request.")
+                }
+                let deviceRequest = try activeDeviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
+                let response = try SpacesActiveDeviceClient.request(
+                    SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest)), device: device, clientApp: clientApp)
+                return TerminalServiceResponse(
+                    ok: response.ok, message: response.message, sessionState: response.sessionState,
+                    controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
+            default: throw WorkspaceError.invalidArgument(message: "Remote device terminal command '\(request.command)' is not supported.")
+            }
+        }
     }
 
     private func ensureRemoteTerminalLaunchConfiguration(_ launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
@@ -2822,6 +2895,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let agentWindow: AgentWindowRecord?
     }
 
+    struct ActiveDeviceTerminalOpenRequest: Sendable, Equatable {
+        let workspaceID: String
+        let sessionID: String
+        let title: String
+        let workingDirectory: String
+        let kind: TerminalSessionKind
+    }
+
+    enum ActiveDeviceWindowShortcutResolution: Sendable, Equatable {
+        case openURL(String)
+        case openTerminal(ActiveDeviceTerminalOpenRequest)
+        case runProcess(workspaceID: String, processKey: String, processTemplateID: String?)
+        case runCodingAgent(workspaceID: String, agentName: String, agentLauncherID: String?)
+        case noWorkspace
+        case noMatch
+    }
+
     struct WorkspaceDetailShortcutIndices: Sendable {
         let browserSessionsByURL: [String: Int]
         let processesByName: [String: Int]
@@ -3194,6 +3284,65 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return targets
     }
 
+    nonisolated static func activeDeviceWindowShortcutResolution(index: Int, selectedWorkspaceID: String?, overview: SpacesDeviceOverviewPayload)
+        -> ActiveDeviceWindowShortcutResolution
+    {
+        guard let selectedWorkspaceID else { return .noWorkspace }
+        guard index > 0 else { return .noMatch }
+        guard let deviceWorkspace = overview.workspaces.first(where: { $0.id == selectedWorkspaceID }) else { return .noWorkspace }
+
+        let detail = SpacesActiveDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
+        let windows = activeDeviceTerminalWindows(from: detail.terminalRows)
+        let processes = runningProcesses(from: detail.processRows)
+        let agentWindows = agentWindows(from: detail.codingAgentRows)
+        let settings = localWorkspaceSettings(from: detail.config)
+        let browserSessions = detail.config.resolvedBrowserSessions.map(localBrowserSession(from:))
+        let processEntries = orderedWorkspaceRunProcessEntries(
+            configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
+        let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
+        let shortcutTargets = orderedWorkspaceRunShortcutTargets(
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+            configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows)
+        guard shortcutTargets.indices.contains(index - 1) else { return .noMatch }
+
+        let target = shortcutTargets[index - 1]
+        switch target.kind {
+        case .browser:
+            guard let targetURL = target.targetURL, !targetURL.isEmpty else { return .noMatch }
+            return .openURL(targetURL)
+        case .process:
+            guard let processID = target.processID, let row = detail.processRows.first(where: { ($0.processID ?? $0.id) == processID }),
+                let sessionID = row.sessionID
+            else { return .noMatch }
+            return .openTerminal(
+                ActiveDeviceTerminalOpenRequest(
+                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .process))
+        case .window:
+            guard let windowListIndex = target.windowListIndex, detail.terminalRows.indices.contains(windowListIndex),
+                let sessionID = detail.terminalRows[windowListIndex].sessionID
+            else { return .noMatch }
+            let row = detail.terminalRows[windowListIndex]
+            return .openTerminal(
+                ActiveDeviceTerminalOpenRequest(
+                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell))
+        case .missingConfiguredProcess:
+            guard let processKey = target.processKey else { return .noMatch }
+            let processTemplateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
+            return .runProcess(workspaceID: selectedWorkspaceID, processKey: processKey, processTemplateID: processTemplateID)
+        case .agentLauncher:
+            guard let launcherName = target.launcherName else { return .noMatch }
+            let launcherID = detail.config.agentLaunchers.first { normalizedRunRowName($0.name) == normalizedRunRowName(launcherName) }?.id
+            return .runCodingAgent(workspaceID: selectedWorkspaceID, agentName: launcherName, agentLauncherID: launcherID)
+        case .agent:
+            guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id }),
+                let sessionID = row.sessionID
+            else { return .noMatch }
+            return .openTerminal(
+                ActiveDeviceTerminalOpenRequest(
+                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .agent))
+        }
+    }
+
     nonisolated static func workspaceDetailShortcutIndices(
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
         configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
@@ -3466,6 +3615,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
 
+        let sectionHeaderTopToDeviceSelector = sectionHeader.topAnchor.constraint(equalTo: deviceSelector.bottomAnchor, constant: 10)
+        let sectionHeaderTopToAlertsRow = sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10)
+        projectsSectionHeaderTopToDeviceSelector = sectionHeaderTopToDeviceSelector
+        projectsSectionHeaderTopToAlertsRow = sectionHeaderTopToAlertsRow
+
         NSLayoutConstraint.activate([
             topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
@@ -3480,8 +3634,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             deviceSelector.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
 
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: deviceSelector.bottomAnchor, constant: 10),
+            sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16), sectionHeaderTopToDeviceSelector,
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
@@ -3538,7 +3691,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             popup.selectItem(at: 0)
         }
-        activeDeviceSelectorContainer?.isHidden = devices.count <= 1
+        let hideSelector = devices.count <= 1
+        activeDeviceSelectorContainer?.isHidden = hideSelector
+        projectsSectionHeaderTopToDeviceSelector?.isActive = !hideSelector
+        projectsSectionHeaderTopToAlertsRow?.isActive = hideSelector
     }
 
     @objc private func activeDeviceSelectionChanged(_ sender: NSPopUpButton) {
@@ -3615,7 +3771,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
-        let mobileButton = sidebarRowIconButton(symbol: "qrcode", tooltip: "Devices", action: #selector(showMobileConnection))
+        let mobileButton = sidebarRowIconButton(symbol: "desktopcomputer.and.macbook", tooltip: "Devices", action: #selector(showMobileConnection))
         mobileButton.setAccessibilityIdentifier("sidebar-device-pairing")
         let settingsButton = sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(showSettings))
         let reloadButton = sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(reloadTapped))
@@ -7748,7 +7904,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        startMobileConnectionTimer()
     }
 
     private func refreshVisibleMobileConnectionPanel(_ response: SpacesDeviceAPIControlResponse) {
@@ -7859,10 +8014,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var rows: [NSView] = []
         rows.append(devicePairingInstructionLabel("Scan this QR code with Spaces on iPhone or iPad to pair it with \(window.deviceName)."))
         rows.append(mobileQRCodeView(link: window.linkString))
-        let countdownLabel = NSTextField(labelWithString: mobileCountdownText(expiresAt: window.expiresAt))
-        countdownLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        countdownLabel.textColor = .secondaryLabelColor
-        rows.append(centeredPanelRow(countdownLabel))
         return mobilePanelSection(icon: "qrcode", title: "Pair iPhone or iPad", rows: rows)
     }
 
@@ -7903,13 +8054,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         textStack.spacing = 2
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let activeImageName = device.id == activeDeviceID ? "checkmark.circle.fill" : "circle"
-        let activeButton = iconButton(
-            symbol: activeImageName, tooltip: device.id == activeDeviceID ? "Active device" : "Use this device",
-            action: #selector(useConnectedDevice(_:)))
-        activeButton.identifier = NSUserInterfaceItemIdentifier(device.id)
-        activeButton.isEnabled = device.id != activeDeviceID && device.isAvailable
-
         let pairButton = iconButton(
             symbol: "qrcode", tooltip: "Pair iPhone or iPad with \(device.name)", action: #selector(pairIOSWithConnectedDevice(_:)))
         pairButton.identifier = NSUserInterfaceItemIdentifier(device.id)
@@ -7922,7 +8066,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.translatesAutoresizingMaskIntoConstraints = false
         row.addArrangedSubview(textStack)
         row.addArrangedSubview(NSView())
-        row.addArrangedSubview(activeButton)
         row.addArrangedSubview(pairButton)
         if !device.isLocal {
             let removeButton = iconButton(symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(removeMacPairedDevice(_:)))
@@ -8102,32 +8245,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func mobileCountdownText(expiresAt: Date) -> String {
-        let remaining = max(Int(expiresAt.timeIntervalSince(Date()).rounded(.down)), 0)
-        let minutes = remaining / 60
-        let seconds = remaining % 60
-        return String(format: "%02d:%02d", minutes, seconds)
-    }
-
-    private func startMobileConnectionTimer() {
-        mobileConnectionTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            MainActor.assumeIsolated { self.refreshMobileConnectionPanelIfVisible() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        mobileConnectionTimer = timer
-    }
-
-    private func refreshMobileConnectionPanelIfVisible() {
-        guard mobileConnectionPanel?.isVisible == true else {
-            mobileConnectionTimer?.invalidate()
-            mobileConnectionTimer = nil
-            return
-        }
-        do { refreshVisibleMobileConnectionPanel(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
-    }
-
     @objc private func openDevicePairingWindow() {
         do {
             let response = try SpacesDeviceAPIControlClient.openPairingWindow()
@@ -8145,26 +8262,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 showError(error)
             }
         }
-    }
-
-    @objc private func useConnectedDevice(_ sender: NSButton) {
-        guard let deviceID = sender.identifier?.rawValue else { return }
-        guard connectedClientDevices().first(where: { $0.id == deviceID })?.isAvailable == true else {
-            devicePanelStatusMessage = (message: "Remove and reconnect this device before using it.", isError: true)
-            refreshMobileConnectionPanelAfterClientDeviceChange()
-            return
-        }
-        do {
-            let database = try SpacesClientDatabase()
-            try database.setActiveDeviceID(deviceID)
-            devicePanelStatusMessage = nil
-            refreshActiveDeviceSelector()
-            refreshMobileConnectionPanelAfterClientDeviceChange()
-            selectedProjectID = nil
-            selectedWorkspaceID = nil
-            showLoadingPlaceholder(message: "Loading device...", detail: "Spaces is loading projects and workspaces.")
-            requestSidebarReload(failurePlaceholderMessage: "Spaces couldn't load this device.")
-        } catch { showError(error) }
     }
 
     @objc private func pairIOSWithConnectedDevice(_ sender: NSButton) {
@@ -10188,6 +10285,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
         logWindowShortcutProfile("stage=received index=\(index) alerts=\(showingAlerts ? 1 : 0)")
+        if activeDeviceIsRemote {
+            await runActiveDeviceWindowShortcut(index: index, startedAt: startedAt)
+            return
+        }
         let alertsFocusRequest = showingAlerts ? alertsFocusRequestMap[index] : nil
         let routeStartedAt = Date()
         let result = await Self.focusWindowShortcutSnapshot(
@@ -10218,6 +10319,105 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .failure(let error):
             await handleWindowFocusFailure(error)
             logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            activeWindowShortcutProfile = nil
+        }
+    }
+
+    private func runActiveDeviceWindowShortcut(index: Int, startedAt: Date) async {
+        let routeStartedAt = Date()
+        guard let overview = activeDeviceOverview else {
+            logWindowShortcutProfile(
+                "stage=aborted index=\(index) reason=no_active_device_overview elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            activeWindowShortcutProfile = nil
+            showNoActiveDeviceSelectedError()
+            return
+        }
+        let resolution = Self.activeDeviceWindowShortcutResolution(index: index, selectedWorkspaceID: selectedWorkspaceID, overview: overview)
+        switch resolution {
+        case .openURL(let targetURL):
+            guard let url = URL(string: targetURL) else {
+                logWindowShortcutProfile("stage=aborted index=\(index) reason=invalid_url elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+                activeWindowShortcutProfile = nil
+                showError(WorkspaceError.invalidArgument(message: "Browser session URL is invalid."))
+                return
+            }
+            NSWorkspace.shared.open(url)
+            logWindowShortcutProfile("stage=route_done index=\(index) kind=browser elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+            hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
+        case .openTerminal(let request):
+            guard let device = activeDeviceForDaemonStateMutation() else {
+                logWindowShortcutProfile(
+                    "stage=aborted index=\(index) reason=no_active_device elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+                activeWindowShortcutProfile = nil
+                showNoActiveDeviceSelectedError()
+                return
+            }
+            let opened = openActiveDeviceTerminalSession(request, device: device)
+            logWindowShortcutProfile("stage=route_done index=\(index) kind=terminal elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: opened)
+            activeWindowShortcutProfile = nil
+        case .runProcess(let workspaceID, let processKey, let processTemplateID):
+            guard let device = activeDeviceForDaemonStateMutation() else {
+                logWindowShortcutProfile(
+                    "stage=aborted index=\(index) reason=no_active_device elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+                activeWindowShortcutProfile = nil
+                showNoActiveDeviceSelectedError()
+                return
+            }
+            let result = await Self.activeDeviceMutation(device: device) { device in
+                try SpacesActiveDeviceClient.runWorkspaceProcess(
+                    workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
+                    clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            }
+            switch result {
+            case .success(let response):
+                logWindowShortcutProfile("stage=route_done index=\(index) kind=process elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+                applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+            case .failure(let error):
+                logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+                showError(error)
+            }
+            activeWindowShortcutProfile = nil
+        case .runCodingAgent(let workspaceID, let agentName, let agentLauncherID):
+            guard let device = activeDeviceForDaemonStateMutation() else {
+                logWindowShortcutProfile(
+                    "stage=aborted index=\(index) reason=no_active_device elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+                activeWindowShortcutProfile = nil
+                showNoActiveDeviceSelectedError()
+                return
+            }
+            let result = await Self.activeDeviceMutation(device: device) { device in
+                try SpacesActiveDeviceClient.runCodingAgent(
+                    workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
+                    clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            }
+            switch result {
+            case .success(let response):
+                logWindowShortcutProfile(
+                    "stage=route_done index=\(index) kind=agent_launcher elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+                applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+            case .failure(let error):
+                logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+                showError(error)
+            }
+            activeWindowShortcutProfile = nil
+        case .noWorkspace:
+            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            activeWindowShortcutProfile = nil
+        case .noMatch:
+            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
             activeWindowShortcutProfile = nil
         }

@@ -245,7 +245,17 @@ struct ContentView: View {
     }
 
     private var homeControls: some View {
+        VStack(spacing: 8) {
+            deviceSelectorRow
+            searchFilterRow
+        }
+    }
+
+    private var deviceSelectorRow: some View {
         HStack(spacing: 8) {
+            Image(systemName: "desktopcomputer.and.macbook")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.accent)
             if model.pairedDevices.count > 1 {
                 Menu {
                     ForEach(model.pairedDevices) { device in
@@ -257,16 +267,32 @@ struct ContentView: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "desktopcomputer")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(model.activeDeviceName ?? "Device")
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(model.activeDeviceName ?? "Device")
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Theme.accent)
-                Divider()
+            } else {
+                Text(model.activeDeviceName ?? "Device")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .lineLimit(1)
             }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
+    }
+
+    private var searchFilterRow: some View {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Theme.mutedSecondary)
@@ -378,7 +404,7 @@ struct ContentView: View {
             Button {
                 model.isShowingConnectionSettings = true
             } label: {
-                Label("Devices", systemImage: "desktopcomputer")
+                Label("Devices", systemImage: "desktopcomputer.and.macbook")
             }
         }
     }

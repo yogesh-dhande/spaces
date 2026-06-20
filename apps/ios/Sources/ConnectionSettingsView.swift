@@ -55,8 +55,6 @@ struct ConnectionSettingsView: View {
                     } else {
                         ForEach(pairedDevices) { device in
                             HStack(spacing: 10) {
-                                Image(systemName: device.id == activeDeviceID ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(device.id == activeDeviceID ? Theme.accent : .secondary)
                                 Button {
                                     settings.host = device.host
                                     settings.port = device.port
@@ -96,7 +94,7 @@ struct ConnectionSettingsView: View {
                             }
                         } else {
                             Label(
-                                settings.isPaired ? "Scan QR Code to Re-Pair" : "Scan QR Code",
+                                "Scan QR Code to Pair",
                                 systemImage: "qrcode.viewfinder"
                             )
                         }
