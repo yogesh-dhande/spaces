@@ -190,7 +190,7 @@ public final class SpacesDeviceAPISettingsStore {
     private func applyingEnvironmentOverrides(to settings: SpacesDeviceAPISettings) -> SpacesDeviceAPISettings {
         var resolved = settings
         if let host = trimmed(environment[SpacesDeviceAPIDefaults.hostEnvironmentVariable]) { resolved.host = host }
-        if let port = trimmed(environment[SpacesDeviceAPIDefaults.portEnvironmentVariable]).flatMap(Int.init), (1...65_535).contains(port) {
+        if let port = trimmed(environment[SpacesDeviceAPIDefaults.portEnvironmentVariable]).flatMap(Int.init), (0...65_535).contains(port) {
             resolved.port = port
         }
         if let transportKey = trimmed(environment[SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable]) { resolved.transportKey = transportKey }

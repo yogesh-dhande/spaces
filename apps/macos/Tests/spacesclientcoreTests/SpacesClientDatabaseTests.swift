@@ -19,6 +19,99 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try SpacesClientDatabase.defaultPath(), overridePath)
     }
 
+    func testDefaultPathUsesCurrentProfileRoot() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let profileRoot = root.appendingPathComponent("profile-a", isDirectory: true)
+        try FileManager.default.createDirectory(at: profileRoot, withIntermediateDirectories: true)
+        let originalDatabasePath = currentEnvironmentValue("SPACES_DB_PATH")
+        let originalRuntimePath = currentEnvironmentValue("SPACES_RUNTIME_DIR")
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        setenv("SPACES_DB_PATH", profileRoot.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", profileRoot.appendingPathComponent("runtime").path, 1)
+        unsetenv(SpacesClientDatabase.databasePathEnvironmentVariable)
+        SpacesProfile.resetCacheForTesting()
+        defer {
+            restoreEnvironmentValue(originalDatabasePath, name: "SPACES_DB_PATH")
+            restoreEnvironmentValue(originalRuntimePath, name: "SPACES_RUNTIME_DIR")
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            SpacesProfile.resetCacheForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        XCTAssertEqual(try SpacesClientDatabase.defaultPath(), profileRoot.appendingPathComponent("Client/spaces-client.db", isDirectory: false).path)
+    }
+
+    func testDefaultPathUsesHomeScopedProfileRoot() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let originalHome = currentEnvironmentValue("HOME")
+        let originalDatabasePath = currentEnvironmentValue("SPACES_DB_PATH")
+        let originalRuntimePath = currentEnvironmentValue("SPACES_RUNTIME_DIR")
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        setenv("HOME", home.path, 1)
+        unsetenv("SPACES_DB_PATH")
+        unsetenv("SPACES_RUNTIME_DIR")
+        unsetenv(SpacesClientDatabase.databasePathEnvironmentVariable)
+        SpacesProfile.resetCacheForTesting()
+        defer {
+            restoreEnvironmentValue(originalHome, name: "HOME")
+            restoreEnvironmentValue(originalDatabasePath, name: "SPACES_DB_PATH")
+            restoreEnvironmentValue(originalRuntimePath, name: "SPACES_RUNTIME_DIR")
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            SpacesProfile.resetCacheForTesting()
+            try? FileManager.default.removeItem(at: home)
+        }
+
+        let currentDirectoryPath = FileManager.default.currentDirectoryPath
+        let profile = try SpacesProfile.resolve(
+            environment: ["HOME": home.path], homeDirectoryURL: home, currentDirectoryPath: currentDirectoryPath,
+            executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath))
+        XCTAssertEqual(
+            try SpacesClientDatabase.defaultPath(),
+            URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).appendingPathComponent("Client", isDirectory: true).appendingPathComponent(
+                "spaces-client.db", isDirectory: false
+            ).path)
+    }
+
+    func testActiveDeviceSelectionIsScopedToCurrentProfile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let profileA = root.appendingPathComponent("profile-a", isDirectory: true)
+        let profileB = root.appendingPathComponent("profile-b", isDirectory: true)
+        try FileManager.default.createDirectory(at: profileA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: profileB, withIntermediateDirectories: true)
+        let originalDatabasePath = currentEnvironmentValue("SPACES_DB_PATH")
+        let originalRuntimePath = currentEnvironmentValue("SPACES_RUNTIME_DIR")
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        unsetenv(SpacesClientDatabase.databasePathEnvironmentVariable)
+        defer {
+            restoreEnvironmentValue(originalDatabasePath, name: "SPACES_DB_PATH")
+            restoreEnvironmentValue(originalRuntimePath, name: "SPACES_RUNTIME_DIR")
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            SpacesProfile.resetCacheForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        setenv("SPACES_DB_PATH", profileA.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", profileA.appendingPathComponent("runtime").path, 1)
+        SpacesProfile.resetCacheForTesting()
+        let profileADatabasePath = try SpacesClientDatabase.defaultPath()
+        let databaseA = try SpacesClientDatabase()
+        let record = device(id: "profile-a-device")
+        try databaseA.upsert(device: record)
+        try databaseA.setActiveDeviceID(record.id)
+        XCTAssertEqual(try databaseA.activeDeviceID(), record.id)
+
+        setenv("SPACES_DB_PATH", profileB.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", profileB.appendingPathComponent("runtime").path, 1)
+        SpacesProfile.resetCacheForTesting()
+        let profileBDatabasePath = try SpacesClientDatabase.defaultPath()
+        let databaseB = try SpacesClientDatabase()
+
+        XCTAssertNotEqual(profileADatabasePath, profileBDatabasePath)
+        XCTAssertNil(try databaseB.activeDeviceID())
+        XCTAssertTrue(try databaseB.pairedDevices().isEmpty)
+    }
+
     func testPairedDeviceMetadataAndActiveSelectionPersistWithoutToken() throws {
         try withTemporaryProfile { root in
             let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)

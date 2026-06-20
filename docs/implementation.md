@@ -56,7 +56,7 @@ flowchart TD
 
   subgraph macClient["macOS client"]
     app["Spaces.app / spacesui"]
-    clientDB[("Application Support/Spaces/Client/spaces-client.db")]
+    clientDB[("<profile-root>/Client/spaces-client.db")]
     keychain["Keychain\npaired-device tokens"]
     yabai["yabai"]
     chrome["Google Chrome"]
@@ -172,8 +172,8 @@ flowchart TD
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
 - Daemon SQLite stores projects, workspaces, runtime state, terminal metadata, paired-client metadata, daemon settings, and global settings.
-- macOS client SQLite stores metadata at `~/Library/Application Support/Spaces/Client/spaces-client.db`, with timestamped backups under `~/Library/Application Support/Spaces/Client/Backups/`.
-- E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the default client database path and Keychain-backed secrets.
+- macOS client SQLite stores paired-device metadata and active-device selection under `<profile-root>/Client/spaces-client.db`, with timestamped backups under `<profile-root>/Client/Backups/`.
+- E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` records the canonical schema version. The active daemon schema is version `2`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.

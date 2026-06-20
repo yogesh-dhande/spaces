@@ -1,5 +1,12 @@
 import Foundation
 import spacesdatabase
+import spacesterminalcore
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 #if os(Linux)
     import CSQLite3
@@ -101,10 +108,29 @@ public final class SpacesClientDatabase {
             if expanded.hasPrefix("/") { return expanded }
             return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(expanded).path
         }
-        return homeDirectoryURL.appendingPathComponent("Library", isDirectory: true).appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("Spaces", isDirectory: true).appendingPathComponent("Client", isDirectory: true).appendingPathComponent(
-                "spaces-client.db", isDirectory: false
-            ).path
+        let environment = currentProfileEnvironment()
+        let currentDirectoryPath = FileManager.default.currentDirectoryPath
+        let profile = try SpacesProfile.resolve(
+            environment: environment, homeDirectoryURL: profileHomeDirectoryURL(environment: environment, fallback: homeDirectoryURL),
+            currentDirectoryPath: currentDirectoryPath,
+            executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath))
+        return URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).appendingPathComponent("Client", isDirectory: true)
+            .appendingPathComponent("spaces-client.db", isDirectory: false).path
+    }
+
+    private static func currentProfileEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        for key in [SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable, "HOME"] {
+            if let value = getenv(key) { environment[key] = String(cString: value) } else { environment.removeValue(forKey: key) }
+        }
+        return environment
+    }
+
+    private static func profileHomeDirectoryURL(environment: [String: String], fallback: URL) -> URL {
+        if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines), !home.isEmpty {
+            return URL(fileURLWithPath: home, isDirectory: true)
+        }
+        return fallback
     }
 
     public func upsert(device: SpacesPairedDeviceRecord) throws {

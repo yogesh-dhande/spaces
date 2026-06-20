@@ -44,6 +44,17 @@ final class SpacesDeviceAPISettingsStoreTests: XCTestCase {
         }
     }
 
+    func testEnvironmentPortOverrideAllowsEphemeralPortWithoutChangingStoredDefaults() throws {
+        try withTemporaryProfile { _ in
+            let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "0"]
+            let overridden = try SpacesDeviceAPISettingsStore(environment: environment).loadOrCreate()
+            let stored = try SpacesDeviceAPISettingsStore().loadOrCreate()
+
+            XCTAssertEqual(overridden.port, 0)
+            XCTAssertEqual(stored.port, SpacesDeviceAPIDefaults.port)
+        }
+    }
+
     func testRotateTransportKeyPersistsNewKey() throws {
         try withTemporaryProfile { _ in
             let store = SpacesDeviceAPISettingsStore()

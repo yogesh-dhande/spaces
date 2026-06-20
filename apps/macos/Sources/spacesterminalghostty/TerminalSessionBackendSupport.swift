@@ -8,13 +8,17 @@ public enum TerminalSessionBackendSupport {
     ) -> Bool {
         switch backend {
         case .ghosttyEmbedded:
-            if case .available = GhosttyEmbeddedLocator.resolve(
-                environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath)
-            {
+            #if os(Linux)
                 true
-            } else {
-                false
-            }
+            #else
+                if case .available = GhosttyEmbeddedLocator.resolve(
+                    environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath)
+                {
+                    true
+                } else {
+                    false
+                }
+            #endif
         }
     }
 }
