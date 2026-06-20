@@ -123,7 +123,7 @@ Spaces focuses those windows; it does not decide their geometry.
 - Device API traffic uses TLS with pinned daemon identity plus a per-client full-control token. Clients reject endpoint identity mismatches before sending authenticated requests.
 - `spaces pair` opens a short-lived pairing window on the same-machine daemon and prints `spaces://pair?...` details for terminal-driven iOS pairing. The Mac Devices panel shows QR codes for pairing iPhone and iPad clients with any device already connected to the Mac client.
 - Pairing stores the pinned daemon identity and client token in Keychain. Client SQLite backup files contain paired-device metadata only and do not contain pairing tokens.
-- Pairing a remote device for macOS asks for SSH host, user, and port, validates SSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, runs `~/.spaces/bin/spaces pair --json` on the remote device, then pairs with the Device API at the validated SSH host and returned API port. Missing or failing SSH is a setup failure for pairing, remote terminal attach, browser forwarding, and editor opening.
+- Pairing a remote device for macOS asks for SSH host, user, and port, validates SSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, requires a remote Mac to have the DMG install markers, prepares supported Linux hosts automatically over SSH when Spaces is missing or not responding, runs `~/.spaces/bin/spaces pair --json` on the remote device, then pairs with the Device API at the validated SSH host and returned API port. Missing or failing SSH is a setup failure for pairing, remote terminal attach, browser forwarding, and editor opening.
 - Paired clients have full control of the selected daemon. The client Devices UI lists connected daemons and lets the user select the active daemon; paired-client administration is handled by daemon control paths rather than shown as a normal client screen.
 - Creating projects, workspaces, terminals, processes, and coding-agent runs from macOS or iOS always targets the active paired daemon. Project creation accepts a daemon-side Git URL or an existing daemon-local path.
 - The `spaces` CLI targets only the same-machine daemon. It does not create or mutate projects, workspaces, or terminals on paired remote devices.
@@ -332,11 +332,12 @@ Spaces focuses those windows; it does not decide their geometry.
 - Long-running actions should show visible progress.
 - Failure states should be explicit and actionable.
 - The GUI should prefer inline guidance over silent failure or hidden background behavior.
+- Remote-device setup should use user-facing status and error messages: Macs need the Spaces app installed, while supported Linux devices are set up automatically over SSH.
 - Background sidebar/runtime refresh should update in place without replacing the current detail pane or resetting the selected workspace tab.
 
 ## Update Experience
 - The app should check for updates periodically and allow manual update checks.
 - Update discovery and installation should use one stable Sparkle appcast feed.
 - Manual downloads may still be published separately, but the in-app updater should not depend on GitHub release APIs.
-- The manual-download DMG should present a single guided installer entry point that installs `Spaces.app`, the required `spaces` CLI, and the spacesd daemon used by built-in terminal commands together.
+- The manual-download DMG should present a single guided installer entry point that installs `Spaces.app`, the required `spaces` CLI, the spacesd daemon, `~/.spaces/bin` helper links, and the per-user LaunchAgent used by built-in terminal commands and remote Mac pairing.
 - `spaces --version` should report the current version.

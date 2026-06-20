@@ -391,7 +391,7 @@ private struct PairRemoteDeviceCommand: ParsableCommand {
                 sshHost: sshHost, sshUser: normalizedOptional(sshUser), sshPort: sshPort,
                 clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
                 clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: Host.current().localizedName ?? "Mac",
-                clientAppVersion: AppVersion.short))
+                clientAppVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey))
         try emitJSON(RemoteDevicePairingPayload(deviceID: result.deviceID, name: result.name, host: result.host, port: result.port))
     }
 }
@@ -411,7 +411,8 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
             id: "remote-pairing-window", name: "Remote Device", platform: "remote", host: sshHost, port: SpacesDeviceAPIEndpointDefaults.port,
             certificateFingerprint: "", sshHost: sshHost, sshUser: normalizedOptional(sshUser), sshPort: sshPort, createdAt: nowISO8601(),
             updatedAt: nowISO8601())
-        let result = try SpacesDevicePairingClient.openRemotePairingWindow(for: device)
+        let result = try SpacesDevicePairingClient.openRemotePairingWindow(
+            for: device, appVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey)
         let link = try SpacesDevicePairingLink.parse(result.linkString)
         try emitJSON(
             RemoteDevicePairingWindowPayload(

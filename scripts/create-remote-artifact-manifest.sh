@@ -37,7 +37,6 @@ manifest_path = pathlib.Path(manifest_path)
 signature_path = pathlib.Path(signature_path)
 
 specs = [
-    ("spacesd-macos-universal", "macos", "universal", "spacesd-macos-universal.tar.gz"),
     ("spacesd-ubuntu-24.04-x86_64", "ubuntu-24.04", "x86_64", "spacesd-ubuntu-24.04-x86_64.tar.gz"),
     ("spacesd-ubuntu-24.04-arm64", "ubuntu-24.04", "arm64", "spacesd-ubuntu-24.04-arm64.tar.gz"),
 ]

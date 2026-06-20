@@ -67,7 +67,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 - [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
 - Built-in process and ad hoc terminals run through the paired device's `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
 - Every Mac or Linux `spacesd` owns its own database, projects, workspaces, runtime rows, terminal sessions, and workspace filesystem. macOS and iOS apps are thin clients connected to one active paired device.
-- iOS pairing uses the short-lived QR/deep link from `spaces pair` or the Mac Devices panel. Mac remote-device pairing validates SSH, opens the remote daemon's pairing window over `~/.spaces/bin/spaces pair --json`, pins the daemon TLS identity, and stores the client token in Keychain.
+- iOS pairing uses the short-lived QR/deep link from `spaces pair` or the Mac Devices panel. Remote-device pairing validates SSH, prepares supported Linux hosts from the signed release artifact when needed, opens the remote daemon's pairing window over `~/.spaces/bin/spaces pair --json`, pins the daemon TLS identity, and stores the client token in Keychain. Remote Macs require the DMG install.
 - The `spaces` CLI targets the same-machine daemon. Remote macOS terminal attach, browser forwarding, and editor opening use SSH to the paired device when those features are invoked from the Mac app.
 - The first-party iOS client pairs through QR/deep link, selects among paired devices, browses live Spaces terminal sessions, auto-takes ownership when opening one for live rendering, and can ask a paired macOS daemon to launch the Mac app after an app quit or crash.
 - Browser sessions automate Google Chrome so you can quickly switch to view output without typing the URL or clicking through tabs.
@@ -81,7 +81,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 
 ## Install
 
-Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/spaces/releases/latest). The installer drops `Spaces.app`, `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and a per-user LaunchAgent that keeps `spacesd` available after login. In-app updates are delivered via Sparkle.
+Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/spaces/releases/latest). The installer drops `Spaces.app`, `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, `~/.spaces/bin` helper links, and a per-user LaunchAgent that keeps `spacesd` available after login. In-app updates are delivered via Sparkle.
 
 ## Development
 

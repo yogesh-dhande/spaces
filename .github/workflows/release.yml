@@ -207,13 +207,6 @@ jobs:
             apps/macos/.build/apple/Products/Release/spaces \
             apps/macos/.build/apple/Products/Release/spacesd
 
-      - name: Package macOS remote spacesd artifact
-        run: |
-          scripts/package-macos-remote-artifact.sh \
-            apps/macos/.build/apple/Products/Release/spacesd \
-            ${{ steps.version.outputs.version }} \
-            dist/remote
-
       - name: Package DMG
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
@@ -272,10 +265,8 @@ jobs:
       - name: Verify remote spacesd artifacts
         run: |
           cd dist/remote
-          shasum -a 256 -c spacesd-macos-universal.tar.gz.sha256
           shasum -a 256 -c spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
           shasum -a 256 -c spacesd-ubuntu-24.04-arm64.tar.gz.sha256
-          tar -tzf spacesd-macos-universal.tar.gz >/dev/null
           tar -tzf spacesd-ubuntu-24.04-x86_64.tar.gz >/dev/null
           tar -tzf spacesd-ubuntu-24.04-arm64.tar.gz >/dev/null
 
@@ -294,8 +285,6 @@ jobs:
           release_title="Spaces ${{ steps.version.outputs.version }}"
           release_assets=(
             "$DMG_PATH"
-            "dist/remote/spacesd-macos-universal.tar.gz"
-            "dist/remote/spacesd-macos-universal.tar.gz.sha256"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
             "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"

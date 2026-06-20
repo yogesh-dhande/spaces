@@ -7967,8 +7967,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         var rows: [NSView] = []
         rows.append(
             devicePairingInstructionLabel(
-                "Enter the SSH target for a Mac or Linux device running spacesd. Spaces validates SSH, opens a remote pairing window, and adds that daemon to Connected Devices."
-            ))
+                "Enter the SSH details for a Mac or Linux device. Macs need the Spaces app installed first. Linux is set up automatically over SSH."))
 
         let sshHostField = NSTextField()
         sshHostField.placeholderString = "SSH host"
@@ -7996,7 +7995,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         rows.append(sshRow)
 
         let connectButton = actionButton(
-            title: "Connect Remote Device", symbol: "link", tooltip: "Pair this Mac with a remote spacesd over SSH",
+            title: "Connect Remote Device", symbol: "link", tooltip: "Connect this Mac with another device over SSH",
             action: #selector(connectRemoteDeviceFromPairingPanel), primary: true)
         rows.append(mobilePanelButtonRow([connectButton]))
 
@@ -8179,8 +8178,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refreshMobileConnectionPanelAfterClientDeviceChange()
         Task { [weak self] in
             do {
-                let result = try await Task.detached(priority: .userInitiated) { try SpacesDevicePairingClient.openRemotePairingWindow(for: device) }
-                    .value
+                let appVersion = AppVersion.short
+                let remoteArtifactPublicKey = AppVersion.remoteArtifactPublicKey
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try SpacesDevicePairingClient.openRemotePairingWindow(
+                        for: device, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey)
+                }.value
                 let expiresAt = result.expiresAt.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date().addingTimeInterval(300)
                 self?.currentDevicePairingWindow = ClientDevicePairingWindow(
                     deviceID: device.id, deviceName: result.name, linkString: result.linkString, expiresAt: expiresAt)
@@ -8200,7 +8203,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
         let deviceName = Host.current().localizedName ?? "Mac"
         let appVersion = AppVersion.short
-        setRemoteDevicePairingStatus("Validating SSH and pairing...", isError: false)
+        let remoteArtifactPublicKey = AppVersion.remoteArtifactPublicKey
+        setRemoteDevicePairingStatus("Validating SSH and preparing the remote device...", isError: false)
         Task { [weak self] in
             do {
                 let sshPort = try Self.parsedSSHPort(sshPortText)
@@ -8210,7 +8214,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         SpacesRemoteDevicePairingRequest(
                             sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
                             clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion))
+                            clientAppVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey))
                 }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshActiveDeviceSelector()

@@ -77,6 +77,25 @@ copy_ghostty_vt_dylibs() {
   done
 }
 
+install_user_state_paths() {
+  local user_home="$1"
+  local state_root="$user_home/.spaces"
+  local bin_dir="$state_root/bin"
+  local runtime_dir="$state_root/runtime"
+  local workspaces_dir="$state_root/workspaces"
+  local install_user
+  install_user="$(/usr/bin/stat -f %Su "$user_home" 2>/dev/null || true)"
+
+  /bin/mkdir -p "$bin_dir" "$runtime_dir" "$workspaces_dir"
+  /bin/ln -sfn "$CLI_PATH" "$bin_dir/spaces"
+  /bin/ln -sfn "$SERVICE_PATH" "$bin_dir/spacesd"
+
+  if [[ -n "$install_user" ]]; then
+    /usr/sbin/chown "$install_user" "$state_root" "$bin_dir" "$runtime_dir" "$workspaces_dir" 2>/dev/null || true
+    /usr/sbin/chown -h "$install_user" "$bin_dir/spaces" "$bin_dir/spacesd" 2>/dev/null || true
+  fi
+}
+
 install_launch_agent() {
   local daemon_path="$1"
   local user_home="$2"
@@ -139,6 +158,7 @@ SERVICE_PATH="$CLI_DIR/spacesd"
 copy_ghostty_vt_dylibs
 /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
 /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
+install_user_state_paths "$INSTALL_HOME"
 LAUNCH_AGENT_PATH="$(install_launch_agent "$SERVICE_PATH" "$INSTALL_HOME" "$INSTALL_UID")"
 emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH" "$LAUNCH_AGENT_PATH"
 EOF

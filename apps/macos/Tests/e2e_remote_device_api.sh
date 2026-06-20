@@ -26,7 +26,6 @@ AUTH_TOKEN=""
 MAC_AUTH_TOKEN=""
 REMOTE_HTTP_PID=""
 LOCAL_FORWARD_PID=""
-REMOTE_KEEPALIVE_PID=""
 REMOTE_MAC_CLIENT_INSTALLATION_ID="${SPACES_E2E_REMOTE_MAC_CLIENT_INSTALLATION_ID:-MACOS-REMOTE-DEVICE-E2E}"
 REMOTE_MAC_CLIENT_DEVICE_NAME="${SPACES_E2E_REMOTE_MAC_CLIENT_DEVICE_NAME:-Remote Device macOS E2E}"
 
@@ -79,10 +78,6 @@ cleanup() {
   if [[ -n "$REMOTE_HTTP_PID" ]]; then
     remote_ssh "kill $(shell_quote "$REMOTE_HTTP_PID") >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
   fi
-  if [[ -n "$REMOTE_KEEPALIVE_PID" ]]; then
-    kill "$REMOTE_KEEPALIVE_PID" >/dev/null 2>&1 || true
-    wait "$REMOTE_KEEPALIVE_PID" >/dev/null 2>&1 || true
-  fi
   if [[ $exit_code -eq 0 ]]; then
     rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true
   else
@@ -100,20 +95,6 @@ require_remote_config() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required for remote paired-device E2E."
 }
 
-start_remote_systemd_keepalive() {
-  local -a args=()
-  while IFS= read -r arg; do args+=("$arg"); done < <(ssh_args)
-  args+=(-n -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
-  ssh "${args[@]}" "$(remote_destination)" "sh -lc 'trap exit INT TERM HUP; while :; do sleep 60; done'" &
-  REMOTE_KEEPALIVE_PID=$!
-  sleep 0.5
-  if ! kill -0 "$REMOTE_KEEPALIVE_PID" >/dev/null 2>&1; then
-    wait "$REMOTE_KEEPALIVE_PID" >/dev/null 2>&1 || true
-    REMOTE_KEEPALIVE_PID=""
-    fail "Remote SSH keepalive session exited before the daemon E2E started."
-  fi
-}
-
 prepare_remote_daemon() {
   "$ROOT_DIR/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
   local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
@@ -126,6 +107,33 @@ prepare_remote_daemon() {
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
   remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT $quoted_install/install.sh" >/dev/null
+}
+
+wait_for_remote_daemon_from_mac() {
+  python3 - "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" <<'PY'
+import socket
+import sys
+import time
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+
+def wait_until_reachable(label):
+    deadline = time.time() + 60
+    last_error = None
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.5)
+    raise SystemExit(f"remote daemon {host}:{port} did not stay reachable after SSH setup exited during {label}: {last_error}")
+
+wait_until_reachable("initial check")
+time.sleep(5)
+wait_until_reachable("follow-up check")
+PY
 }
 
 wait_for_remote_daemon() {
@@ -454,9 +462,10 @@ main() {
   mkdir -p "$TMP_ROOT"
   printf '[remote-device] validating SSH target %s\n' "$(remote_destination)"
   remote_ssh "printf 'ssh-ok\n'" >/dev/null
-  start_remote_systemd_keepalive
   printf '[remote-device] deploying Linux spacesd artifact\n'
   prepare_remote_daemon
+  printf '[remote-device] verifying remote daemon survives SSH setup disconnect on %s:%s\n' "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT"
+  wait_for_remote_daemon_from_mac
   printf '[remote-device] waiting for remote daemon on %s:%s\n' "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT"
   wait_for_remote_daemon
   printf '[remote-device] pairing mobile and macOS clients through structured remote CLI metadata\n'

@@ -2,6 +2,10 @@ import Foundation
 import spacesdevicecore
 import spacesterminalcore
 
+#if canImport(CryptoKit)
+    import CryptoKit
+#endif
+
 public struct SpacesRemoteDevicePairingRequest: Sendable {
     public let sshHost: String
     public let sshUser: String?
@@ -10,11 +14,12 @@ public struct SpacesRemoteDevicePairingRequest: Sendable {
     public let clientBundleID: String
     public let clientDeviceName: String
     public let clientAppVersion: String?
+    public let remoteArtifactPublicKey: String?
     public let profile: SpacesProfile?
 
     public init(
         sshHost: String, sshUser: String? = nil, sshPort: Int? = nil, clientInstallationID: String, clientBundleID: String, clientDeviceName: String,
-        clientAppVersion: String?, profile: SpacesProfile? = nil
+        clientAppVersion: String?, remoteArtifactPublicKey: String? = nil, profile: SpacesProfile? = nil
     ) {
         self.sshHost = sshHost
         self.sshUser = sshUser
@@ -23,6 +28,7 @@ public struct SpacesRemoteDevicePairingRequest: Sendable {
         self.clientBundleID = clientBundleID
         self.clientDeviceName = clientDeviceName
         self.clientAppVersion = clientAppVersion
+        self.remoteArtifactPublicKey = remoteArtifactPublicKey
         self.profile = profile
     }
 }
@@ -63,6 +69,11 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
     case sshUnavailable(String)
     case sshValidationTimedOut(String)
     case sshValidationFailed(String)
+    case remoteInstallPreflightTimedOut(String)
+    case remoteInstallPreflightFailed(String)
+    case remoteMacDMGInstallRequired(String)
+    case remoteLinuxSetupTimedOut(String)
+    case remoteLinuxSetupFailed(String)
     case remotePairCommandTimedOut(String)
     case remotePairCommandFailed(String)
     case invalidRemotePairingOutput(String)
@@ -78,8 +89,15 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
         case .sshValidationTimedOut(let destination):
             "SSH validation timed out for \(destination). Spaces uses BatchMode=yes and strict known-host checks; confirm the host, port, network route, and SSH service."
         case .sshValidationFailed(let message): message
+        case .remoteInstallPreflightTimedOut(let destination):
+            "SSH connected to \(destination), but the remote Spaces install check timed out. Confirm the remote user can run shell commands over SSH."
+        case .remoteInstallPreflightFailed(let message): message
+        case .remoteMacDMGInstallRequired(let message): message
+        case .remoteLinuxSetupTimedOut(let destination):
+            "SSH connected to \(destination), but Linux setup timed out. Check the network connection and retry."
+        case .remoteLinuxSetupFailed(let message): message
         case .remotePairCommandTimedOut(let destination):
-            "SSH connected to \(destination), but `~/.spaces/bin/spaces pair --json` timed out. Confirm spacesd is installed and responsive for that remote user."
+            "SSH connected to \(destination), but Spaces did not finish preparing the connection. Confirm Spaces is installed and available for that user, then retry."
         case .remotePairCommandFailed(let message): message
         case .invalidRemotePairingOutput(let message): message
         case .deviceAPIUnreachable(let host, let port, let message):
@@ -92,7 +110,12 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
 
 public enum SpacesDevicePairingClient {
     private static let sshPath = "/usr/bin/ssh"
+    private static let scpPath = "/usr/bin/scp"
+    private static let curlPath = "/usr/bin/curl"
+    private static let remoteArtifactManifestBaseURL = "https://github.com/yogesh-dhande/spaces/releases/download"
     private static let remotePairCommand = "~/.spaces/bin/spaces pair --json"
+    private static let remoteInstallProbeCommand =
+        #"os="$(uname -s 2>/dev/null || true)"; arch="$(uname -m 2>/dev/null || true)"; printf 'os=%s\narch=%s\n' "$os" "$arch"; if [ "$os" = "Linux" ]; then linux_id="$(awk -F= '$1=="ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"; linux_version_id="$(awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"; printf 'linux_id=%s\nlinux_version_id=%s\n' "$linux_id" "$linux_version_id"; fi; if [ "$os" = "Darwin" ]; then plist="$HOME/Library/LaunchAgents/dev.usespaces.spacesd.plist"; if [ -d /Applications/Spaces.app ]; then app=1; else app=0; fi; if [ -x /usr/local/bin/spaces ]; then cli=1; else cli=0; fi; if [ -x /usr/local/bin/spacesd ]; then daemon=1; else daemon=0; fi; if [ -x "$HOME/.spaces/bin/spaces" ]; then helper=1; else helper=0; fi; if [ -f "$plist" ] && grep -q '/usr/local/bin/spacesd' "$plist"; then launch_agent=1; else launch_agent=0; fi; printf 'spaces_app=%s\nusr_local_spaces=%s\nusr_local_spacesd=%s\nhome_spaces_cli=%s\nlaunch_agent=%s\n' "$app" "$cli" "$daemon" "$helper" "$launch_agent"; fi"#
 
     public static func pairRemoteDevice(_ request: SpacesRemoteDevicePairingRequest) throws -> SpacesRemoteDevicePairingResult {
         #if canImport(Network)
@@ -102,7 +125,10 @@ public enum SpacesDevicePairingClient {
             let destination = sshDestination(host: sshHost, user: sshUser)
 
             try validateRemoteDeviceSSH(destination: destination, port: request.sshPort)
-            let metadata = try loadRemotePairingMetadata(destination: destination, port: request.sshPort)
+            let probe = try validateRemoteDeviceInstall(destination: destination, port: request.sshPort)
+            let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
+                destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion,
+                remoteArtifactPublicKey: request.remoteArtifactPublicKey)
             let deviceAPIHost = sshHost
 
             let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
@@ -138,14 +164,19 @@ public enum SpacesDevicePairingClient {
         #endif
     }
 
-    public static func openRemotePairingWindow(for device: SpacesPairedDeviceRecord) throws -> SpacesRemoteDevicePairingWindowResult {
+    public static func openRemotePairingWindow(
+        for device: SpacesPairedDeviceRecord, appVersion: String? = nil, remoteArtifactPublicKey: String? = nil
+    ) throws -> SpacesRemoteDevicePairingWindowResult {
         #if canImport(Network)
             let sshHost = try normalizedSSHHost(device.sshHost ?? device.host)
             let sshUser = normalized(device.sshUser)
             try validateSSHPort(device.sshPort)
             let destination = sshDestination(host: sshHost, user: sshUser)
             try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
-            let metadata = try loadRemotePairingMetadata(destination: destination, port: device.sshPort)
+            let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
+            let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
+                destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey
+            )
             let link = SpacesDevicePairingLink(
                 host: sshHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode, transportKey: metadata.transportKey,
                 certificateFingerprint: metadata.certificateFingerprint, name: metadata.name)
@@ -209,6 +240,42 @@ public enum SpacesDevicePairingClient {
         return "SSH validation failed for \(destination). \(suffix)"
     }
 
+    static func validateRemoteInstallProbe(_ probe: RemoteInstallProbe, destination: String) throws {
+        guard probe.operatingSystem == "Darwin" else { return }
+        var missing: [String] = []
+        if !probe.spacesAppInstalled { missing.append("/Applications/Spaces.app") }
+        if !probe.systemCLIExecutable { missing.append("/usr/local/bin/spaces") }
+        if !probe.systemDaemonExecutable { missing.append("/usr/local/bin/spacesd") }
+        if !probe.canonicalCLIExecutable { missing.append("~/.spaces/bin/spaces") }
+        if !probe.launchAgentInstalled { missing.append("~/Library/LaunchAgents/dev.usespaces.spacesd.plist") }
+        guard missing.isEmpty else {
+            throw SpacesRemoteDevicePairingError.remoteMacDMGInstallRequired(
+                remoteMacDMGInstallRequiredMessage(destination: destination, missing: missing))
+        }
+    }
+
+    static func remoteMacDMGInstallRequiredMessage(destination: String, missing _: [String]) -> String {
+        "SSH connected to \(destination), but Spaces is not fully installed on that Mac. Install the Spaces app on the remote Mac, open it once if needed, then retry."
+    }
+
+    static func parseRemoteInstallProbeOutput(_ output: String, destination: String) throws -> RemoteInstallProbe {
+        var pairs: [String: String] = [:]
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            pairs[String(parts[0])] = String(parts[1])
+        }
+        guard let operatingSystem = normalized(pairs["os"]) else {
+            throw SpacesRemoteDevicePairingError.remoteInstallPreflightFailed(
+                "SSH connected to \(destination), but the remote Spaces install check returned invalid output.")
+        }
+        return RemoteInstallProbe(
+            operatingSystem: operatingSystem, architecture: normalized(pairs["arch"]), linuxID: normalized(pairs["linux_id"]),
+            linuxVersionID: normalized(pairs["linux_version_id"]), spacesAppInstalled: pairs["spaces_app"] == "1",
+            systemCLIExecutable: pairs["usr_local_spaces"] == "1", systemDaemonExecutable: pairs["usr_local_spacesd"] == "1",
+            canonicalCLIExecutable: pairs["home_spaces_cli"] == "1", launchAgentInstalled: pairs["launch_agent"] == "1")
+    }
+
     private static func normalizedSSHHost(_ value: String) throws -> String {
         guard let host = normalized(value) else { throw SpacesRemoteDevicePairingError.missingSSHHost }
         return host
@@ -228,8 +295,39 @@ public enum SpacesDevicePairingClient {
         }
     }
 
+    private static func validateRemoteDeviceInstall(destination: String, port: Int?) throws -> RemoteInstallProbe {
+        let result = try runSSH(destination: destination, port: port, remoteCommand: remoteInstallProbeCommand, timeoutSeconds: 12)
+        if result.timedOut { throw SpacesRemoteDevicePairingError.remoteInstallPreflightTimedOut(destination) }
+        guard result.exitStatus == 0 else {
+            let detail = [result.standardError, result.standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter {
+                !$0.isEmpty
+            }.joined(separator: "\n")
+            let suffix = detail.isEmpty ? "Exit status \(result.exitStatus)." : detail
+            throw SpacesRemoteDevicePairingError.remoteInstallPreflightFailed(
+                "SSH connected to \(destination), but the remote Spaces install check failed. \(suffix)")
+        }
+        let probe = try parseRemoteInstallProbeOutput(result.standardOutput, destination: destination)
+        try validateRemoteInstallProbe(probe, destination: destination)
+        return probe
+    }
+
     private static func loadRemotePairingMetadata(destination: String, port: Int?) throws -> RemotePairingMetadata {
         let result = try runSSH(destination: destination, port: port, remoteCommand: remotePairCommand, timeoutSeconds: 15)
+        return try parseRemotePairingMetadataResult(result, destination: destination)
+    }
+
+    private static func loadRemotePairingMetadataPreparingLinuxIfNeeded(
+        destination: String, port: Int?, probe: RemoteInstallProbe, appVersion: String?, remoteArtifactPublicKey: String?
+    ) throws -> RemotePairingMetadata {
+        let firstResult = try runSSH(destination: destination, port: port, remoteCommand: remotePairCommand, timeoutSeconds: 15)
+        if firstResult.exitStatus == 0 && !firstResult.timedOut { return try parseRemotePairingMetadataResult(firstResult, destination: destination) }
+        guard probe.operatingSystem == "Linux" else { return try parseRemotePairingMetadataResult(firstResult, destination: destination) }
+        try installRemoteLinuxSpaces(
+            destination: destination, port: port, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey)
+        return try loadRemotePairingMetadata(destination: destination, port: port)
+    }
+
+    private static func parseRemotePairingMetadataResult(_ result: SSHCommandResult, destination: String) throws -> RemotePairingMetadata {
         if result.timedOut { throw SpacesRemoteDevicePairingError.remotePairCommandTimedOut(destination) }
         guard result.exitStatus == 0 else {
             throw SpacesRemoteDevicePairingError.remotePairCommandFailed(
@@ -248,6 +346,236 @@ public enum SpacesDevicePairingClient {
         }
     }
 
+    private static func installRemoteLinuxSpaces(
+        destination: String, port: Int?, probe: RemoteInstallProbe, appVersion: String?, remoteArtifactPublicKey: String?
+    ) throws {
+        let artifact = try loadRemoteLinuxArtifact(
+            probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey, destination: destination)
+        let fileManager = FileManager.default
+        let tempDirectory = fileManager.temporaryDirectory.appendingPathComponent("spaces-linux-setup-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDirectory) }
+
+        let archiveURL = tempDirectory.appendingPathComponent(artifact.archiveName)
+        try downloadRemoteLinuxArtifact(artifact, to: archiveURL)
+        try verifyRemoteLinuxArtifactArchive(archiveURL, expectedSHA256: artifact.sha256)
+
+        let remoteTempDirectory = try createRemoteLinuxSetupDirectory(destination: destination, port: port)
+        defer { try? cleanupRemoteLinuxSetupDirectory(remoteTempDirectory, destination: destination, port: port) }
+
+        let remoteArchivePath = "\(remoteTempDirectory)/\(artifact.archiveName)"
+        try copyRemoteLinuxArtifact(archiveURL, remoteArchivePath: remoteArchivePath, destination: destination, port: port)
+        try runRemoteLinuxInstallScript(
+            remoteTempDirectory: remoteTempDirectory, remoteArchivePath: remoteArchivePath, destination: destination, port: port)
+    }
+
+    static func remoteLinuxArtifactPlatform(probe: RemoteInstallProbe, destination: String) throws -> (platform: String, architecture: String) {
+        guard probe.operatingSystem == "Linux" else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed("Automatic setup is only available for Linux devices.")
+        }
+        guard probe.linuxID == "ubuntu", probe.linuxVersionID == "24.04" else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "SSH connected to \(destination), but automatic Linux setup supports Ubuntu 24.04 on x86_64 and arm64. Use an Ubuntu 24.04 device, then retry."
+            )
+        }
+        guard let architecture = normalizedRemoteLinuxArchitecture(probe.architecture) else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "SSH connected to \(destination), but automatic Linux setup supports x86_64 and arm64 Linux devices.")
+        }
+        return ("ubuntu-24.04", architecture)
+    }
+
+    static func selectRemoteLinuxArtifact(from manifest: RemoteArtifactManifest, probe: RemoteInstallProbe, appVersion: String?, destination: String)
+        throws -> RemoteLinuxArtifact
+    {
+        guard manifest.schemaVersion == 1 else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces could not read the Linux installer manifest for this version. Update Spaces, then retry.")
+        }
+        guard let appVersion = normalized(appVersion), manifest.appVersion == appVersion else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces could not find a Linux installer for this app version. Update Spaces, then retry.")
+        }
+        let platform = try remoteLinuxArtifactPlatform(probe: probe, destination: destination)
+        guard
+            let artifact = manifest.artifacts.first(where: {
+                $0.version == appVersion && $0.platform == platform.platform && $0.architecture == platform.architecture
+            })
+        else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces could not find a Linux installer for this device. Use Ubuntu 24.04 on x86_64 or arm64, then retry.")
+        }
+        guard let url = URL(string: artifact.url), url.scheme == "https" else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces could not verify the Linux installer download for this version. Update Spaces, then retry.")
+        }
+        return artifact
+    }
+
+    static func verifyRemoteArtifactManifestSignature(manifestData: Data, signature: Data, publicKey: String?) throws {
+        guard let publicKey = normalized(publicKey), let publicKeyData = Data(base64Encoded: publicKey) else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces cannot verify the Linux installer for this version. Update Spaces, then retry.")
+        }
+        #if canImport(CryptoKit)
+            let key = try Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData)
+            guard key.isValidSignature(signature, for: manifestData) else {
+                throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                    "Spaces could not verify the Linux installer for this version. Update Spaces, then retry.")
+            }
+        #else
+            _ = publicKeyData
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces cannot verify Linux installers on this platform. Connect from the Mac app, then retry.")
+        #endif
+    }
+
+    private static func loadRemoteLinuxArtifact(probe: RemoteInstallProbe, appVersion: String?, remoteArtifactPublicKey: String?, destination: String)
+        throws -> RemoteLinuxArtifact
+    {
+        guard let appVersion = normalized(appVersion) else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces could not find a Linux installer for this app version. Update Spaces, then retry.")
+        }
+        let manifestURL = remoteArtifactManifestURL(appVersion: appVersion)
+        let signatureURL = remoteArtifactManifestSignatureURL(appVersion: appVersion)
+        let manifestData = try downloadRemoteLinuxSetupData(from: manifestURL, description: "Linux installer manifest", timeoutSeconds: 30)
+        let signature = try downloadRemoteLinuxSetupData(from: signatureURL, description: "Linux installer signature", timeoutSeconds: 30)
+        try verifyRemoteArtifactManifestSignature(manifestData: manifestData, signature: signature, publicKey: remoteArtifactPublicKey)
+        let manifest = try JSONDecoder().decode(RemoteArtifactManifest.self, from: manifestData)
+        return try selectRemoteLinuxArtifact(from: manifest, probe: probe, appVersion: appVersion, destination: destination)
+    }
+
+    private static func remoteArtifactManifestURL(appVersion: String) -> URL {
+        let releaseTag = appVersion.hasPrefix("v") ? appVersion : "v\(appVersion)"
+        return URL(string: "\(remoteArtifactManifestBaseURL)/\(releaseTag)/spaces-remote-artifacts.json")!
+    }
+
+    private static func remoteArtifactManifestSignatureURL(appVersion: String) -> URL {
+        let releaseTag = appVersion.hasPrefix("v") ? appVersion : "v\(appVersion)"
+        return URL(string: "\(remoteArtifactManifestBaseURL)/\(releaseTag)/spaces-remote-artifacts.json.sig")!
+    }
+
+    private static func downloadRemoteLinuxSetupData(from url: URL, description: String, timeoutSeconds: TimeInterval) throws -> Data {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-linux-setup-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try downloadURL(url, to: tempURL, description: description, timeoutSeconds: timeoutSeconds)
+        return try Data(contentsOf: tempURL)
+    }
+
+    private static func downloadRemoteLinuxArtifact(_ artifact: RemoteLinuxArtifact, to destination: URL) throws {
+        guard let url = URL(string: artifact.url) else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces could not read the Linux installer download for this version. Update Spaces, then retry.")
+        }
+        try downloadURL(url, to: destination, description: "Linux installer", timeoutSeconds: 300)
+    }
+
+    private static func downloadURL(_ url: URL, to destination: URL, description: String, timeoutSeconds: TimeInterval) throws {
+        guard FileManager.default.isExecutableFile(atPath: curlPath) else {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces cannot download the \(description) because this Mac is missing its system download tool.")
+        }
+        let result = try runLocalProcess(
+            executablePath: curlPath, arguments: curlDownloadArguments(url: url, destination: destination, timeoutSeconds: timeoutSeconds),
+            timeoutSeconds: timeoutSeconds + 5)
+        if result.timedOut {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces could not download the \(description) before the connection timed out. Check this Mac's internet connection, then retry.")
+        }
+        guard result.exitStatus == 0 else {
+            let detail = [result.standardError, result.standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter {
+                !$0.isEmpty
+            }.joined(separator: "\n")
+            let suffix = detail.isEmpty ? "Exit status \(result.exitStatus)." : detail
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed("Spaces could not download the \(description). \(suffix)")
+        }
+    }
+
+    static func curlDownloadArguments(url: URL, destination: URL, timeoutSeconds: TimeInterval) -> [String] {
+        ["-f", "-sS", "-L", "--connect-timeout", "15", "--max-time", String(Int(timeoutSeconds)), "-o", destination.path, url.absoluteString]
+    }
+
+    private static func verifyRemoteLinuxArtifactArchive(_ archiveURL: URL, expectedSHA256: String) throws {
+        #if canImport(CryptoKit)
+            let data = try Data(contentsOf: archiveURL)
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            guard digest == expectedSHA256.lowercased() else {
+                throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                    "Spaces could not verify the Linux installer download. Update Spaces, then retry.")
+            }
+        #else
+            _ = archiveURL
+            _ = expectedSHA256
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "Spaces cannot verify Linux installers on this platform. Connect from the Mac app, then retry.")
+        #endif
+    }
+
+    private static func createRemoteLinuxSetupDirectory(destination: String, port: Int?) throws -> String {
+        let result = try runSSH(
+            destination: destination, port: port, remoteCommand: #"mktemp -d "${TMPDIR:-/tmp}/spaces-install.XXXXXX""#, timeoutSeconds: 12)
+        if result.timedOut { throw SpacesRemoteDevicePairingError.remoteLinuxSetupTimedOut(destination) }
+        guard result.exitStatus == 0, let directory = normalized(result.standardOutput) else {
+            let detail = [result.standardError, result.standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter {
+                !$0.isEmpty
+            }.joined(separator: "\n")
+            let suffix = detail.isEmpty ? "Exit status \(result.exitStatus)." : detail
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "SSH connected to \(destination), but Linux setup could not create a temporary install directory. \(suffix)")
+        }
+        return directory
+    }
+
+    private static func cleanupRemoteLinuxSetupDirectory(_ directory: String, destination: String, port: Int?) throws {
+        _ = try runSSH(destination: destination, port: port, remoteCommand: "rm -rf \(shellQuoted(directory))", timeoutSeconds: 10)
+    }
+
+    private static func copyRemoteLinuxArtifact(_ archiveURL: URL, remoteArchivePath: String, destination: String, port: Int?) throws {
+        guard FileManager.default.isExecutableFile(atPath: scpPath) else {
+            throw SpacesRemoteDevicePairingError.sshUnavailable(
+                "SSH file copy is required to set up Linux devices, but \(scpPath) is not executable.")
+        }
+        var arguments = [
+            "-q", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
+        ]
+        if let port { arguments += ["-P", String(port)] }
+        arguments += [archiveURL.path, scpRemoteDestination(destination: destination, remotePath: remoteArchivePath)]
+        let result = try runLocalProcess(executablePath: scpPath, arguments: arguments, timeoutSeconds: 300)
+        if result.timedOut { throw SpacesRemoteDevicePairingError.remoteLinuxSetupTimedOut(destination) }
+        guard result.exitStatus == 0 else {
+            let detail = [result.standardError, result.standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter {
+                !$0.isEmpty
+            }.joined(separator: "\n")
+            let suffix = detail.isEmpty ? "Exit status \(result.exitStatus)." : detail
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed(
+                "SSH connected to \(destination), but Spaces could not copy the Linux installer. \(suffix)")
+        }
+    }
+
+    private static func runRemoteLinuxInstallScript(remoteTempDirectory: String, remoteArchivePath: String, destination: String, port: Int?) throws {
+        let command = """
+            set -e
+            temp_dir=\(shellQuoted(remoteTempDirectory))
+            archive_path=\(shellQuoted(remoteArchivePath))
+            install_dir="$temp_dir/install"
+            rm -rf "$install_dir"
+            mkdir -p "$install_dir"
+            tar -xzf "$archive_path" -C "$install_dir" --strip-components=1
+            "$install_dir/install.sh"
+            rm -rf "$temp_dir"
+            """
+        let result = try runSSH(destination: destination, port: port, remoteCommand: command, timeoutSeconds: 120)
+        if result.timedOut { throw SpacesRemoteDevicePairingError.remoteLinuxSetupTimedOut(destination) }
+        guard result.exitStatus == 0 else {
+            let detail = [result.standardError, result.standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter {
+                !$0.isEmpty
+            }.joined(separator: "\n")
+            let suffix = detail.isEmpty ? "Exit status \(result.exitStatus)." : detail
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed("SSH connected to \(destination), but Linux setup did not finish. \(suffix)")
+        }
+    }
+
     private static func runSSH(destination: String, port: Int?, remoteCommand: String, timeoutSeconds: TimeInterval) throws -> SSHCommandResult {
         guard FileManager.default.isExecutableFile(atPath: sshPath) else {
             throw SpacesRemoteDevicePairingError.sshUnavailable("SSH is required to connect a remote device, but \(sshPath) is not executable.")
@@ -258,7 +586,7 @@ public enum SpacesDevicePairingClient {
             "-T", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
         ]
         if let port { arguments += ["-p", String(port)] }
-        arguments += [destination, remoteCommand]
+        arguments += [destination, remoteShellCommand(remoteCommand)]
         process.arguments = arguments
 
         let stdoutPipe = Pipe()
@@ -284,19 +612,44 @@ public enum SpacesDevicePairingClient {
             standardError: stderr.trimmingCharacters(in: .whitespacesAndNewlines), timedOut: timedOut)
     }
 
-    private static func remotePairCommandFailureMessage(destination: String, standardError: String, standardOutput: String, exitStatus: Int32)
-        -> String
-    {
+    private static func runLocalProcess(executablePath: String, arguments: [String], timeoutSeconds: TimeInterval) throws -> SSHCommandResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        do { try process.run() } catch {
+            throw SpacesRemoteDevicePairingError.remoteLinuxSetupFailed("Failed to launch \(executablePath): \(error.localizedDescription)")
+        }
+
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        let timedOut = process.isRunning
+        if timedOut {
+            process.terminate()
+            while process.isRunning { Thread.sleep(forTimeInterval: 0.02) }
+        }
+
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return SSHCommandResult(
+            exitStatus: process.terminationStatus, standardOutput: stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            standardError: stderr.trimmingCharacters(in: .whitespacesAndNewlines), timedOut: timedOut)
+    }
+
+    static func remotePairCommandFailureMessage(destination: String, standardError: String, standardOutput: String, exitStatus: Int32) -> String {
         let detail = [standardError, standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(
             separator: "\n")
         let lowercased = detail.lowercased()
         if exitStatus == 127 || lowercased.contains("no such file") || lowercased.contains("not found") {
             return
-                "SSH connected to \(destination), but Spaces CLI was not found at ~/.spaces/bin/spaces. Install spacesd for that remote user, then retry."
+                "SSH connected to \(destination), but Spaces is not available for that user. On a Mac, install the Spaces app. On Linux, retry automatic setup."
         }
         if lowercased.contains("permission denied") {
-            return
-                "SSH connected to \(destination), but ~/.spaces/bin/spaces is not executable for that remote user. Fix the install permissions, then retry."
+            return "SSH connected to \(destination), but Spaces cannot be run by that remote user. Fix the install permissions, then retry."
         }
         let suffix = detail.isEmpty ? "Exit status \(exitStatus)." : detail
         return "SSH connected to \(destination), but `\(remotePairCommand)` failed. \(suffix)"
@@ -304,9 +657,82 @@ public enum SpacesDevicePairingClient {
 
     private static func sshDestination(host: String, user: String?) -> String { user.map { "\($0)@\(host)" } ?? host }
 
+    static func remoteShellCommand(_ command: String) -> String { "sh -c \(shellQuoted(command))" }
+
+    static func scpRemoteDestination(destination: String, remotePath: String) -> String {
+        let userPrefix: String
+        let host: String
+        if let atIndex = destination.firstIndex(of: "@") {
+            userPrefix = "\(destination[..<destination.index(after: atIndex)])"
+            host = String(destination[destination.index(after: atIndex)...])
+        } else {
+            userPrefix = ""
+            host = destination
+        }
+        let formattedHost: String
+        if host.contains(":"), !host.hasPrefix("[") { formattedHost = "[\(host)]" } else { formattedHost = host }
+        return "\(userPrefix)\(formattedHost):\(remotePath)"
+    }
+
+    private static func normalizedRemoteLinuxArchitecture(_ value: String?) -> String? {
+        switch normalized(value) {
+        case "x86_64", "amd64": "x86_64"
+        case "arm64", "aarch64": "arm64"
+        default: nil
+        }
+    }
+
+    private static func shellQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
+
     private static func normalized(_ value: String?) -> String? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
         return value
+    }
+}
+
+struct RemoteInstallProbe: Equatable, Sendable {
+    let operatingSystem: String
+    let architecture: String?
+    let linuxID: String?
+    let linuxVersionID: String?
+    let spacesAppInstalled: Bool
+    let systemCLIExecutable: Bool
+    let systemDaemonExecutable: Bool
+    let canonicalCLIExecutable: Bool
+    let launchAgentInstalled: Bool
+}
+
+struct RemoteArtifactManifest: Decodable, Equatable, Sendable {
+    let schemaVersion: Int
+    let appVersion: String
+    let releaseTag: String
+    let artifacts: [RemoteLinuxArtifact]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case appVersion = "app_version"
+        case releaseTag = "release_tag"
+        case artifacts
+    }
+}
+
+struct RemoteLinuxArtifact: Decodable, Equatable, Sendable {
+    let id: String
+    let version: String
+    let platform: String
+    let architecture: String
+    let archiveName: String
+    let url: String
+    let sha256: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case version
+        case platform
+        case architecture
+        case archiveName = "archive_name"
+        case url
+        case sha256
     }
 }
 

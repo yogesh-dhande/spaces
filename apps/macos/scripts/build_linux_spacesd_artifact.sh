@@ -368,6 +368,33 @@ cleanup_install_staging() {
 }
 trap cleanup_install_staging EXIT
 
+ensure_user_linger() {
+    local login_user linger_state error_log
+    login_user="$(id -un)"
+    error_log="${TMPDIR:-/tmp}/spaces-enable-linger.$$"
+    if ! command -v loginctl >/dev/null 2>&1; then
+        echo "Spaces needs this Linux account to keep background services running after SSH disconnects, but this system is missing the required service manager." >&2
+        exit 1
+    fi
+    linger_state="$(loginctl show-user "$login_user" -p Linger --value 2>/dev/null || true)"
+    if [[ "$linger_state" != "yes" ]]; then
+        if ! loginctl enable-linger "$login_user" >"$error_log" 2>&1; then
+            echo "Spaces needs this Linux account to keep background services running after SSH disconnects." >&2
+            echo "On the Linux device, run: sudo loginctl enable-linger $login_user" >&2
+            cat "$error_log" >&2
+            rm -f "$error_log"
+            exit 1
+        fi
+    fi
+    rm -f "$error_log"
+    linger_state="$(loginctl show-user "$login_user" -p Linger --value 2>/dev/null || true)"
+    if [[ "$linger_state" != "yes" ]]; then
+        echo "Spaces could not confirm that Linux background services stay available after SSH disconnects." >&2
+        echo "On the Linux device, run: sudo loginctl enable-linger $login_user, then retry." >&2
+        exit 1
+    fi
+}
+
 mkdir -p "$release_parent" "$bin_root" "$HOME/.spaces/runtime" "$HOME/.spaces/workspaces" "$service_dir"
 rm -rf "$release_staging_dir" "$previous_release_dir"
 mkdir -p "$release_staging_dir"
@@ -402,6 +429,7 @@ Environment=SPACES_DEVICE_API_PORT=$device_api_port
 WantedBy=default.target
 SERVICE
 
+ensure_user_linger
 systemctl --user daemon-reload
 systemctl --user enable spacesd.service
 systemctl --user reset-failed spacesd.service >/dev/null 2>&1 || true
@@ -447,7 +475,7 @@ manifest = {
     "swift_version": swift_version,
     "ghostty_build_optimize": ghostty_optimize,
     "archive_name": archive_name,
-    "install_hint": "Extract the archive, run ./install.sh as the target user, and keep ~/.spaces/bin on PATH.",
+    "install_hint": "Extract the archive and run ./install.sh as the target user. The Linux account must be allowed to keep background services running after SSH disconnects.",
     "install_root": "~/.spaces/daemon/releases/<app_version>/",
     "current_symlink": "~/.spaces/daemon/current",
     "bin_symlinks": ["~/.spaces/bin/spacesd", "~/.spaces/bin/spaces"],

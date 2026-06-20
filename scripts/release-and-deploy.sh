@@ -120,7 +120,7 @@ verify_remote_artifact() {
 }
 
 # Step 1: Build macOS app in release mode
-echo "🧾 Step 1/11: Syncing release metadata..."
+echo "🧾 Step 1/10: Syncing release metadata..."
 "$SCRIPTS_DIR/sync-app-version.sh" \
   --short "$VERSION" \
   --build "$BUILD_NUMBER" \
@@ -130,13 +130,13 @@ echo "🧾 Step 1/11: Syncing release metadata..."
 echo "✓ Release metadata synced"
 echo ""
 
-echo "📦 Step 2/11: Building macOS app..."
+echo "📦 Step 2/10: Building macOS app..."
 "$SCRIPTS_DIR/swiftpm.sh" build -c release --arch arm64 --arch x86_64
 echo "✓ Build complete"
 echo ""
 
 # Step 3: Code sign binaries
-echo "🔐 Step 3/11: Code signing binaries..."
+echo "🔐 Step 3/10: Code signing binaries..."
 BUILD_DIR="$MACOS_DIR/.build/apple/Products/Release"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
@@ -151,30 +151,23 @@ fi
 echo "✓ Code signing complete"
 echo ""
 
-# Step 4: Package remote daemon artifacts
-echo "🧰 Step 4/11: Packaging macOS remote spacesd artifact..."
+echo "🐧 Step 4/10: Building and smoke-testing Ubuntu remote spacesd artifacts..."
 rm -rf "$REMOTE_ARTIFACT_DIR"
 mkdir -p "$REMOTE_ARTIFACT_DIR"
-"$SCRIPTS_DIR/package-macos-remote-artifact.sh" "$SPACESD" "$VERSION" "$REMOTE_ARTIFACT_DIR"
-echo "✓ macOS remote artifact packaged"
-echo ""
-
-echo "🐧 Step 5/11: Building and smoke-testing Ubuntu remote spacesd artifacts..."
 build_linux_remote_artifact x86_64 linux/amd64
 build_linux_remote_artifact arm64 linux/arm64
 echo "✓ Ubuntu remote artifacts built"
 echo ""
 
-echo "🔎 Step 6/11: Verifying and signing remote artifact manifest..."
-verify_remote_artifact "spacesd-macos-universal.tar.gz"
+echo "🔎 Step 5/10: Verifying and signing remote artifact manifest..."
 verify_remote_artifact "spacesd-ubuntu-24.04-x86_64.tar.gz"
 verify_remote_artifact "spacesd-ubuntu-24.04-arm64.tar.gz"
 "$SCRIPTS_DIR/create-remote-artifact-manifest.sh" "$VERSION" "$TAG" "$REMOTE_ARTIFACT_DIR"
 echo "✓ Remote artifact manifest signed"
 echo ""
 
-# Step 7: Create DMG installer
-echo "💿 Step 7/11: Creating DMG installer..."
+# Step 6: Create DMG installer
+echo "💿 Step 6/10: Creating DMG installer..."
 "$SCRIPTS_DIR/create-dmg.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$VERSION"
 DMG_NAME="Spaces-${VERSION}.dmg"
 DMG_PATH="$REPO_ROOT/dist/releases/$VERSION/$DMG_NAME"
@@ -186,17 +179,17 @@ fi
 echo "✓ DMG created: $DMG_NAME"
 echo ""
 
-# Step 8: Create Sparkle archive
-echo "📦 Step 8/11: Creating Sparkle archive..."
+# Step 7: Create Sparkle archive
+echo "📦 Step 7/10: Creating Sparkle archive..."
 "$SCRIPTS_DIR/create-sparkle-archive.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$VERSION"
 ZIP_NAME="Spaces-${VERSION}.zip"
 ZIP_PATH="$REPO_ROOT/dist/releases/$VERSION/$ZIP_NAME"
 echo "✓ Sparkle archive created: $ZIP_NAME"
 echo ""
 
-# Step 9: Notarize (optional)
+# Step 8: Notarize (optional)
 if [[ "${NOTARIZE:-}" == "1" ]]; then
-  echo "🍎 Step 9/11: Notarizing DMG..."
+  echo "🍎 Step 8/10: Notarizing DMG..."
   if [[ -z "${APPLE_ID:-}" ]] || [[ -z "${TEAM_ID:-}" ]] || [[ -z "${APP_PASSWORD:-}" ]]; then
     echo "Error: APPLE_ID, TEAM_ID, and APP_PASSWORD are required for notarization" >&2
     exit 1
@@ -210,7 +203,7 @@ if [[ "${NOTARIZE:-}" == "1" ]]; then
   echo "✓ Notarization complete"
   echo ""
 else
-  echo "⏭️  Step 9/11: Skipping notarization (set NOTARIZE=1 to enable)"
+  echo "⏭️  Step 8/10: Skipping notarization (set NOTARIZE=1 to enable)"
   echo ""
 fi
 
@@ -222,14 +215,14 @@ fi
 "$SCRIPTS_DIR/verify-release-artifacts.sh" "${verify_args[@]}" "$DMG_PATH"
 echo ""
 
-# Step 10: Generate and publish Sparkle appcast
-echo "🛰️  Step 10/11: Publishing Sparkle appcast..."
+# Step 9: Generate and publish Sparkle appcast
+echo "🛰️  Step 9/10: Publishing Sparkle appcast..."
 "$SCRIPTS_DIR/publish-sparkle-appcast.sh" "$VERSION"
 echo "✓ Sparkle appcast updated"
 echo ""
 
-# Step 11: Build website static output with staged Sparkle artifacts
-echo "🌐 Step 11/11: Building website..."
+# Step 10: Build website static output with staged Sparkle artifacts
+echo "🌐 Step 10/10: Building website..."
 (
   cd "$REPO_ROOT/apps/web"
   npm run build
@@ -244,8 +237,6 @@ echo "🚀 Final step: Creating GitHub release..."
 cd "$REPO_ROOT"
 release_assets=(
   "$DMG_PATH"
-  "$REMOTE_ARTIFACT_DIR/spacesd-macos-universal.tar.gz"
-  "$REMOTE_ARTIFACT_DIR/spacesd-macos-universal.tar.gz.sha256"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-arm64.tar.gz"

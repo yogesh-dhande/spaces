@@ -166,7 +166,7 @@ apps/macos/Tests/e2e_local_device_api.sh
 apps/macos/Tests/e2e_remote_device_api.sh
 ```
 
-Both scripts create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. The remote script keeps one SSH session open while the Linux user service is under test so hosts without user lingering do not stop `spacesd.service` between short SSH setup commands.
+Both scripts create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. The remote script relies on the Linux installer enabling user lingering and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime.
 
 The lower-level Linux artifact build command is:
 
@@ -178,20 +178,22 @@ docker run --rm --platform linux/amd64 \
   bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch x86_64'
 ```
 
-Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, creates `~/.spaces/runtime` and `~/.spaces/workspaces`, installs `~/.config/systemd/user/spacesd.service`, enables the user service, and restarts it.
+Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, creates `~/.spaces/runtime` and `~/.spaces/workspaces`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, enables the user service, and restarts it. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry. The Mac app uses the signed release manifest and this install script to set up supported Linux devices automatically over SSH when pairing needs it.
 
-Install an artifact on a reachable Linux device with:
+For development or debugging, install an artifact on a reachable Linux device with:
 
 ```bash
 scp .build/artifacts/spacesd-ubuntu-24.04-x86_64.tar.gz <host>:/tmp/
 ssh <host> 'mkdir -p /tmp/spacesd-install && tar -xzf /tmp/spacesd-ubuntu-24.04-x86_64.tar.gz -C /tmp/spacesd-install && /tmp/spacesd-install/install.sh'
 ```
 
-After install, verify the remote pairing command over strict SSH. The Mac app uses the same path when connecting a remote device:
+After install, verify the remote pairing command over strict SSH. The Mac app uses the same command after automatic Linux setup and when connecting an already prepared remote device:
 
 ```bash
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <host> '~/.spaces/bin/spaces pair --json'
 ```
+
+Remote Macs are installed from the signed DMG instead of a headless artifact. The DMG install creates `/Applications/Spaces.app`, `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, `~/.spaces/bin/spaces`, `~/.spaces/bin/spacesd`, the per-user LaunchAgent, and the default `~/.spaces` state directories. Remote Mac pairing rejects partial installs before running the pairing command.
 
 For focused terminal latency probes:
 
@@ -545,24 +547,23 @@ Publish macOS releases to GitHub Releases with:
 scripts/release-and-deploy.sh <version> [build-number]
 ```
 
-Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script.
+Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. The Mac app installs these Linux artifacts automatically over SSH during remote pairing when needed. Remote Macs use the signed DMG rather than a separate daemon artifact.
 
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
-- builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts
 - code-signs the app, CLI, and spacesd daemon
-- packages the signed macOS universal remote daemon artifact
+- builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts
+- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key used by the Mac app to verify automatic Linux setup downloads
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
-- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
 - stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
 - builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
 - optionally notarizes the DMG when `NOTARIZE=1`
 - verifies the final DMG signature plus the bundled installer, app, CLI, and spacesd daemon before publish
 - publishes the DMG to GitHub Releases
-- publishes `spacesd-macos-universal.tar.gz`, `spacesd-ubuntu-24.04-x86_64.tar.gz`, `spacesd-ubuntu-24.04-arm64.tar.gz`, their `.sha256` checksum files, `spaces-remote-artifacts.json`, and `spaces-remote-artifacts.json.sig` to the same GitHub Release
+- publishes `spacesd-ubuntu-24.04-x86_64.tar.gz`, `spacesd-ubuntu-24.04-arm64.tar.gz`, their `.sha256` checksum files, `spaces-remote-artifacts.json`, and `spaces-remote-artifacts.json.sig` to the same GitHub Release
 
 Important environment variables:
 - `CODESIGN_IDENTITY`
@@ -582,7 +583,7 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, and one stable `appcast.xml`, all backed by those universal binaries. The app bundle carries `spaces` and `spacesd` in `Contents/Resources`; the DMG installer also copies both executables to the selected CLI install directory so installed CLI commands can start the spacesd daemon without extra environment variables.
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts for automatic setup. The app bundle carries `spaces` and `spacesd` in `Contents/Resources`; the DMG installer also copies both executables to the selected CLI install directory and creates `~/.spaces/bin` helper links so installed CLI commands and remote Mac pairing use the same path.
 
 ## Website Deploy
 
