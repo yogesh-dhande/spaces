@@ -24,15 +24,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             lock.lock()
             recordedRequests.append(request)
             let currentPayload: GhosttyRemoteSessionStatePayload?
-            if request.command == "state", payloads.count > 1 { currentPayload = payloads.removeFirst() } else { currentPayload = payloads.first }
+            if case .state = request.command, payloads.count > 1 { currentPayload = payloads.removeFirst() } else { currentPayload = payloads.first }
             lock.unlock()
 
             switch request.command {
-            case "state": return TerminalServiceResponse(ok: true, message: "state", sessionState: currentPayload)
-            case "control":
+            case .state: return TerminalServiceResponse(ok: true, message: "state", sessionState: currentPayload)
+            case .control:
                 return TerminalServiceResponse(
                     ok: true, message: "controlled", controlResponse: TerminalControlResponse(ok: true, message: "controlled"))
-            default: return TerminalServiceResponse(ok: false, message: "Unexpected command '\(request.command)'.")
+            default: return TerminalServiceResponse(ok: false, message: "Unexpected command '\(request.commandName)'.")
             }
         }
 
@@ -1375,11 +1375,18 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertTrue(host.clearScreenAndScrollback())
         waitForCondition("direct daemon control") {
             recorder.requests().contains {
-                $0.command == "control" && $0.sessionID == sessionID && $0.controlRequest?.command == "clearScreen"
-                    && $0.controlRequest?.clientID == client.id
+                if case .control(let payload) = $0.command {
+                    return payload.sessionID == sessionID && payload.controlRequest.command == "clearScreen"
+                        && payload.controlRequest.clientID == client.id
+                }
+                return false
             }
         }
-        XCTAssertTrue(recorder.requests().contains { $0.command == "state" && $0.sessionID == sessionID })
+        XCTAssertTrue(
+            recorder.requests().contains { request in
+                if case .state(let payload) = request.command { return payload.sessionID == sessionID }
+                return false
+            })
     }
 
     @MainActor func testRemoteHostRequestsDirectStateResyncAfterMissingDeltaBaseline() throws {
@@ -1418,7 +1425,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
 
         waitForCondition("direct state resync request") {
-            recorder.requests().filter { $0.command == "state" }.count >= 2 && host.snapshotText() == "bravo"
+            recorder.requests().filter { request in
+                if case .state = request.command { return true }
+                return false
+            }.count >= 2 && host.snapshotText() == "bravo"
         }
     }
 

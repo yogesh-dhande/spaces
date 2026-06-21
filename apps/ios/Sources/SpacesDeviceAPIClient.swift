@@ -593,7 +593,7 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
         onDisconnect: @escaping @MainActor (Error?) -> Void
     ) throws -> SpacesDeviceAPIStreamHandle {
         let connection = try Self.makePinnedTLSConnection(endpoint: endpoint)
-        let request = TerminalServiceRequest(command: "subscribe", sessionID: sessionID).withAuthToken(endpoint.authToken)
+        let request = TerminalServiceRequest(command: .subscribe(.init(sessionID: sessionID))).withAuthToken(endpoint.authToken)
         let queue = DispatchQueue(label: "spaces.mobile.direct.stream.\(sessionID).\(clientID)")
         DirectTerminalServiceStreamSubscription(
             connection: connection, request: request, onEvent: onEvent, onDisconnect: onDisconnect
@@ -603,7 +603,7 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
     }
 
     func fetchState(sessionID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload {
-        let response = try await send(.init(command: "state", sessionID: sessionID), timeout: timeout)
+        let response = try await send(.init(command: .state(.init(sessionID: sessionID))), timeout: timeout)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
         guard let sessionState = response.sessionState else {
             throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd did not return terminal state.")
@@ -697,7 +697,8 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
     func resolveTerminalLink(sessionID: String, link: String, timeout: Duration = .seconds(6)) async throws
         -> SpacesDeviceTerminalLinkMetadata
     {
-        let response = try await send(.init(command: "resolveTerminalLink", sessionID: sessionID, terminalLink: link), timeout: timeout)
+        let response = try await send(
+            .init(command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: link))), timeout: timeout)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
         guard let metadata = response.terminalLinkMetadata else {
             throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd did not return terminal link metadata.")
@@ -710,8 +711,8 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
     {
         let response = try await send(
             .init(
-                command: "readTerminalLinkChunk", sessionID: sessionID, terminalLinkID: linkID, chunkOffset: offset,
-                chunkLimit: limit),
+                command: .readTerminalLinkChunk(
+                    .init(sessionID: sessionID, terminalLinkID: linkID, offset: offset, limit: limit))),
             timeout: timeout)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
         guard let chunk = response.terminalLinkChunk else {
@@ -726,7 +727,7 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
     }
 
     private func controlResponse(sessionID: String, request: TerminalControlRequest, timeout: Duration) async throws -> TerminalServiceResponse {
-        let response = try await send(.init(command: "control", sessionID: sessionID, controlRequest: request), timeout: timeout)
+        let response = try await send(.init(command: .control(.init(sessionID: sessionID, controlRequest: request))), timeout: timeout)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
         guard let controlResponse = response.controlResponse else {
             throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd did not return terminal control response.")
@@ -804,8 +805,8 @@ private actor DirectTerminalServiceCommandChannel {
         if request.authToken == nil {
             request = request.withAuthToken(endpoint.authToken)
         }
-        let command = request.command
-        let controlCommand = request.controlRequest?.command
+        let command = request.commandName
+        let controlCommand = request.command.controlCommandName
         let sessionID = request.sessionID ?? "-"
         let connectionWasOpen = connection != nil
         let startedAt = Date()

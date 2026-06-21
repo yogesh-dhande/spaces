@@ -131,49 +131,37 @@ import workspacecore
 
     private func handle(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
         switch request.command {
-        case "ping": return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: daemonStatus())
-        case "shutdownIfIdle": return shutdownIfIdle()
-        case "shutdown":
+        case .ping: return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: daemonStatus())
+        case .shutdownIfIdle: return shutdownIfIdle()
+        case .shutdown:
             writeStandardError("spacesd: terminal service shutdown requested\n")
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(100))
                 Self.terminateProcess()
             }
             return TerminalServiceResponse(ok: true, message: "spacesd is shutting down.", servicePID: getpid())
-        case "create":
-            guard let launchConfiguration = request.launchConfiguration else {
-                return TerminalServiceResponse(ok: false, message: "Missing terminal launch configuration.")
-            }
-            return createSession(launchConfiguration, request: request)
-        case "prepareWorkspace":
+        case .create(let payload): return createSession(payload)
+        case .prepareWorkspace(let payload):
             do {
-                try prepareWorkspace(request: request, workingDirectory: request.runtimeManifest?.remotePath ?? request.runtimeManifest?.localPath)
+                try prepareWorkspace(
+                    runtimeManifest: payload.runtimeManifest, worktreeRefresh: payload.worktreeRefresh,
+                    workingDirectory: payload.runtimeManifest.remotePath ?? payload.runtimeManifest.localPath)
                 return TerminalServiceResponse(ok: true, message: "Workspace runtime is prepared.", servicePID: getpid())
             } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
-        case "runWorkspaceCommand":
-            guard let workspaceCommand = request.workspaceCommand else {
-                return TerminalServiceResponse(ok: false, message: "Missing workspace command request.")
-            }
-            guard request.runtimeManifest != nil else {
-                return TerminalServiceResponse(ok: false, message: "Workspace runtime manifest is required.")
-            }
-            return runWorkspaceCommand(workspaceCommand, request: request)
-        case "terminate":
-            guard let sessionID = request.sessionID, !sessionID.isEmpty else {
-                return TerminalServiceResponse(ok: false, message: "Missing session ID.")
-            }
-            return terminateSession(id: sessionID)
-        case "list": return listSessions()
-        case "state": return loadTerminalState(request)
-        case "subscribe": return subscribeTerminalState(request)
-        case "control": return handleTerminalControl(request)
-        case "agentSignal": return recordAgentSignal(request)
-        case "ackAgentSignals": return acknowledgeAgentSignals(request)
-        case "profileCommand": return handleProfileCommand(request)
-        case "mobileCredential": return handleMobileCredential(request)
-        case "resolveTerminalLink": return resolveTerminalLink(request)
-        case "readTerminalLinkChunk": return readTerminalLinkChunk(request)
-        default: return TerminalServiceResponse(ok: false, message: "Unsupported spacesd command '\(request.command)'.")
+        case .runWorkspaceCommand(let payload): return runWorkspaceCommand(payload)
+        case .terminate(let payload):
+            guard !payload.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
+            return terminateSession(id: payload.sessionID)
+        case .list: return listSessions()
+        case .state(let payload): return loadTerminalState(sessionID: payload.sessionID)
+        case .subscribe(let payload): return subscribeTerminalState(sessionID: payload.sessionID)
+        case .control(let payload): return handleTerminalControl(payload)
+        case .agentSignal(let payload): return recordAgentSignal(payload)
+        case .ackAgentSignals(let payload): return acknowledgeAgentSignals(payload)
+        case .profileCommand(let command): return handleProfileCommand(command)
+        case .mobileCredential(let credentialRequest): return handleMobileCredential(credentialRequest)
+        case .resolveTerminalLink(let payload): return resolveTerminalLink(payload)
+        case .readTerminalLinkChunk(let payload): return readTerminalLinkChunk(payload)
         }
     }
 
@@ -201,10 +189,10 @@ import workspacecore
         guard let token = request.authToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
             return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.")
         }
-        guard Self.mobileTerminalServiceCommands.contains(request.command) else {
-            return TerminalServiceResponse(ok: false, message: "Mobile terminal credential cannot call '\(request.command)'.")
+        guard Self.mobileTerminalServiceCommands.contains(request.commandName) else {
+            return TerminalServiceResponse(ok: false, message: "Mobile terminal credential cannot call '\(request.commandName)'.")
         }
-        if request.command == "control", !Self.mobileTerminalControlCommands.contains(request.controlRequest?.command ?? "") {
+        if request.commandName == "control", !Self.mobileTerminalControlCommands.contains(request.command.controlCommandName ?? "") {
             return TerminalServiceResponse(ok: false, message: "Mobile terminal credential cannot call this terminal control command.")
         }
         do {
@@ -215,10 +203,7 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func handleMobileCredential(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let credentialRequest = request.mobileCredentialRequest else {
-            return TerminalServiceResponse(ok: false, message: "Missing mobile credential request.")
-        }
+    private func handleMobileCredential(_ credentialRequest: TerminalServiceMobileCredentialRequest) -> TerminalServiceResponse {
         do {
             switch credentialRequest.operation {
             case .issue:
@@ -243,10 +228,12 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func createSession(_ launchConfiguration: TerminalSessionLaunchConfiguration, request: TerminalServiceRequest) -> TerminalServiceResponse
-    {
+    private func createSession(_ request: TerminalServiceCreateRequest) -> TerminalServiceResponse {
+        let launchConfiguration = request.launchConfiguration
         do {
-            try prepareWorkspace(request: request, workingDirectory: launchConfiguration.workingDirectory)
+            try prepareWorkspace(
+                runtimeManifest: request.runtimeManifest, worktreeRefresh: request.worktreeRefresh,
+                workingDirectory: launchConfiguration.workingDirectory)
             let sessionCore = try sessionCore(for: launchConfiguration)
             try sessionCore.startIfNeeded()
             return TerminalServiceResponse(
@@ -255,11 +242,12 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error)) }
     }
 
-    private func runWorkspaceCommand(_ workspaceCommand: TerminalServiceWorkspaceCommandRequest, request: TerminalServiceRequest)
-        -> TerminalServiceResponse
-    {
+    private func runWorkspaceCommand(_ request: TerminalServiceRunWorkspaceCommandRequest) -> TerminalServiceResponse {
+        let workspaceCommand = request.workspaceCommand
         do {
-            try prepareWorkspace(request: request, workingDirectory: workspaceCommand.workingDirectory)
+            try prepareWorkspace(
+                runtimeManifest: request.runtimeManifest, worktreeRefresh: request.worktreeRefresh,
+                workingDirectory: workspaceCommand.workingDirectory)
             let logPath = try workspaceCommandLogPath(workspaceCommand.logPath)
             let result = try runShellCommand(workspaceCommand, logPath: logPath, manifest: request.runtimeManifest)
             let message = result.exitCode == 0 ? "Workspace command completed." : "Workspace command exited with code \(result.exitCode)."
@@ -267,15 +255,17 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func prepareWorkspace(request: TerminalServiceRequest, workingDirectory: String?) throws {
-        if request.worktreeRefresh != nil, request.runtimeManifest == nil {
+    private func prepareWorkspace(
+        runtimeManifest: TerminalServiceWorkspaceRuntimeManifest?, worktreeRefresh: TerminalServiceWorktreeRefreshRequest?, workingDirectory: String?
+    ) throws {
+        if worktreeRefresh != nil, runtimeManifest == nil {
             throw SpacesRuntimeError.invalidArgument(message: "Workspace runtime manifest is required for worktree refresh.")
         }
-        if let manifest = request.runtimeManifest {
+        if let manifest = runtimeManifest {
             if let workingDirectory { try validateWorkspacePath(workingDirectory, manifest: manifest) }
-            if manifest.location == .remote { try prepareRemoteWorktree(manifest: manifest, refreshRequest: request.worktreeRefresh) }
+            if manifest.location == .remote { try prepareRemoteWorktree(manifest: manifest, refreshRequest: worktreeRefresh) }
         }
-        if let refreshRequest = request.worktreeRefresh {
+        if let refreshRequest = worktreeRefresh {
             _ = try git.refreshWorktreeFastForwardOnly(path: refreshRequest.path, branch: refreshRequest.branch, hostName: refreshRequest.hostName)
         }
     }
@@ -381,8 +371,8 @@ import workspacecore
         }
     }
 
-    private func loadTerminalState(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let sessionID = request.sessionID, !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
+    private func loadTerminalState(sessionID: String) -> TerminalServiceResponse {
+        guard !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             return TerminalServiceResponse(
@@ -391,12 +381,9 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func recordAgentSignal(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let event = request.agentSignal else { return TerminalServiceResponse(ok: false, message: "Missing agent signal event.") }
+    private func recordAgentSignal(_ request: TerminalServiceAgentSignalRequest) -> TerminalServiceResponse {
+        let event = request.event
         guard !event.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
-        if let requestSessionID = request.sessionID, !requestSessionID.isEmpty, requestSessionID != event.sessionID {
-            return TerminalServiceResponse(ok: false, message: "Agent signal session does not match request session.")
-        }
         do {
             let paths = try TerminalSessionPaths.forSession(id: event.sessionID)
             try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths)
@@ -404,18 +391,17 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func acknowledgeAgentSignals(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let sessionID = request.sessionID, !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
+    private func acknowledgeAgentSignals(_ request: TerminalServiceAgentSignalAcknowledgementRequest) -> TerminalServiceResponse {
+        guard !request.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
         do {
             try TerminalSessionPersistence.acknowledgeAgentSignals(
-                ids: request.agentSignalEventIDs ?? [], sessionID: sessionID, paths: try TerminalSessionPaths.forSession(id: sessionID),
+                ids: request.eventIDs, sessionID: request.sessionID, paths: try TerminalSessionPaths.forSession(id: request.sessionID),
                 acknowledgedAt: nowISO8601())
             return TerminalServiceResponse(ok: true, message: "Acknowledged agent signals.")
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func handleProfileCommand(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let command = request.profileCommand else { return TerminalServiceResponse(ok: false, message: "Missing profile command request.") }
+    private func handleProfileCommand(_ command: TerminalServiceProfileCommandRequest) -> TerminalServiceResponse {
         do {
             let profile = try runProfileCommand(command)
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
@@ -535,8 +521,7 @@ import workspacecore
     private func terminateBuiltInTerminalSession(id sessionID: String) { _ = terminateSession(id: sessionID) }
 
     private func launchBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
-        let response = createSession(
-            launchConfiguration, request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration))
+        let response = createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration))
         guard response.ok else { throw Self.requestFailedError(response.message) }
         guard let session = response.session else { throw Self.requestFailedError("spacesd did not return a session summary.") }
         return session
@@ -662,11 +647,10 @@ import workspacecore
         #endif
     }
 
-    private func handleTerminalControl(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let sessionID = request.sessionID, !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
-        guard let controlRequest = request.controlRequest else {
-            return TerminalServiceResponse(ok: false, message: "Missing terminal control request.")
-        }
+    private func handleTerminalControl(_ request: TerminalServiceControlCommandRequest) -> TerminalServiceResponse {
+        let sessionID = request.sessionID
+        let controlRequest = request.controlRequest
+        guard !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
         if Self.ownerGatedTerminalCommands.contains(controlRequest.command),
             controlRequest.clientID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
         {
@@ -696,20 +680,21 @@ import workspacecore
         return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: sessionState, controlResponse: response)
     }
 
-    private func resolveTerminalLink(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let sessionID = request.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else {
+    private func resolveTerminalLink(_ request: TerminalServiceTerminalLinkResolveRequest) -> TerminalServiceResponse {
+        let link = request.terminalLink
+        guard !request.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return TerminalServiceResponse(ok: false, message: "Missing session ID.")
         }
+        let sessionID = request.sessionID
         do {
             pruneTerminalLinkTransferAuthorizations(now: Date())
             let metadata: SpacesDeviceTerminalLinkMetadata
-            if canResolveTerminalLinkWithoutLocalState(request.terminalLink) {
-                metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                    sessionID: sessionID, link: request.terminalLink, workingDirectory: nil, workspaceRoots: [])
+            if canResolveTerminalLinkWithoutLocalState(link) {
+                metadata = try SpacesDeviceTerminalLinkResolver.resolve(sessionID: sessionID, link: link, workingDirectory: nil, workspaceRoots: [])
             } else {
                 let workingDirectory = try terminalWorkingDirectory(sessionID: sessionID)
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                    sessionID: sessionID, link: request.terminalLink, workingDirectory: workingDirectory, workspaceRoots: [workingDirectory])
+                    sessionID: sessionID, link: link, workingDirectory: workingDirectory, workspaceRoots: [workingDirectory])
             }
             if metadata.source == .localFile {
                 let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
@@ -719,10 +704,11 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func readTerminalLinkChunk(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let sessionID = request.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !sessionID.isEmpty else {
+    private func readTerminalLinkChunk(_ request: TerminalServiceTerminalLinkChunkRequest) -> TerminalServiceResponse {
+        guard !request.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return TerminalServiceResponse(ok: false, message: "Missing session ID.")
         }
+        let sessionID = request.sessionID
         do {
             guard let linkID = request.terminalLinkID?.trimmingCharacters(in: .whitespacesAndNewlines), !linkID.isEmpty else {
                 throw SpacesDeviceTerminalLinkResolverError.invalidLinkID
@@ -731,8 +717,7 @@ import workspacecore
                 throw SpacesDeviceTerminalLinkResolverError.invalidLinkID
             }
             let chunk = try SpacesDeviceTerminalLinkResolver.readChunk(
-                sessionID: sessionID, linkID: linkID, offset: request.chunkOffset, limit: request.chunkLimit,
-                workspaceRoots: [authorization.resolvedPath])
+                sessionID: sessionID, linkID: linkID, offset: request.offset, limit: request.limit, workspaceRoots: [authorization.resolvedPath])
             authorizeTerminalLinkTransfer(linkID: linkID, sessionID: sessionID, resolvedPath: authorization.resolvedPath, now: Date())
             return TerminalServiceResponse(ok: true, message: "Read terminal link chunk.", terminalLinkChunk: terminalServiceLinkChunk(chunk))
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
@@ -876,8 +861,8 @@ import workspacecore
         return try GhosttyRemoteSessionStateCodec.decodeLine(data)
     }
 
-    private func subscribeTerminalState(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
-        guard let sessionID = request.sessionID, !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    private func subscribeTerminalState(sessionID: String) -> TerminalServiceResponse {
+        guard !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return TerminalServiceResponse(ok: false, message: "Missing session ID.")
         }
         do {

@@ -18,19 +18,33 @@ final class TerminalServiceProtocolTests: XCTestCase {
             remotePath: "/srv/work", branch: "feature", targetBranch: "main", gitRemoteURL: "git@example.com:repo.git",
             namedPorts: [TerminalServiceWorkspaceRuntimePortMapping(id: "api", name: "API_PORT", port: 3000)],
             processEnvironment: ["SPACES_WORKSPACE_ID": "workspace-1"], allowedFileRoots: ["/srv/work"])
-        let request = TerminalServiceRequest(
-            command: "create", authToken: "SECRET", launchConfiguration: launchConfiguration, sessionID: "session-1", runtimeManifest: manifest,
-            worktreeRefresh: TerminalServiceWorktreeRefreshRequest(path: "/srv/work", branch: "feature", hostName: "Builder"),
-            workspaceCommand: TerminalServiceWorkspaceCommandRequest(command: "true", workingDirectory: "/srv/work"),
-            controlRequest: TerminalControlRequest(command: "send", text: "hello", clientID: "ios-client", ownerEpoch: 7), terminalLink: "image.png",
-            terminalLinkID: "link-1", chunkOffset: 128, chunkLimit: 4096,
-            agentSignal: TerminalServiceAgentSignalEvent(
-                id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting", label: "Mock Agent",
-                terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
-                createdAt: "2026-06-11T00:00:00Z"), agentSignalEventIDs: ["event-1"],
-            profileCommand: TerminalServiceProfileCommandRequest(
-                operation: .workspaceCreate, projectID: "project-1", branch: "feature", title: "Feature", targetBranch: "main", existingBranch: true,
-                terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true, lineCount: 40))
+        let refresh = TerminalServiceWorktreeRefreshRequest(path: "/srv/work", branch: "feature", hostName: "Builder")
+        let workspaceCommand = TerminalServiceWorkspaceCommandRequest(command: "true", workingDirectory: "/srv/work")
+        let controlRequest = TerminalControlRequest(command: "send", text: "hello", clientID: "ios-client", ownerEpoch: 7)
+        let agentSignal = TerminalServiceAgentSignalEvent(
+            id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting", label: "Mock Agent",
+            terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
+            createdAt: "2026-06-11T00:00:00Z")
+        let profileCommand = TerminalServiceProfileCommandRequest(
+            operation: .workspaceCreate, projectID: "project-1", branch: "feature", title: "Feature", targetBranch: "main", existingBranch: true,
+            terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true, lineCount: 40)
+        let requests = [
+            TerminalServiceRequest(command: .ping),
+            TerminalServiceRequest(
+                command: .create(.init(launchConfiguration: launchConfiguration, runtimeManifest: manifest, worktreeRefresh: refresh)),
+                authToken: "SECRET"),
+            TerminalServiceRequest(
+                command: .runWorkspaceCommand(.init(runtimeManifest: manifest, worktreeRefresh: refresh, workspaceCommand: workspaceCommand))),
+            TerminalServiceRequest(command: .control(.init(sessionID: "session-1", controlRequest: controlRequest))),
+            TerminalServiceRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "image.png"))),
+            TerminalServiceRequest(
+                command: .readTerminalLinkChunk(.init(sessionID: "session-1", terminalLinkID: "link-1", offset: 128, limit: 4096))),
+            TerminalServiceRequest(command: .agentSignal(.init(event: agentSignal))),
+            TerminalServiceRequest(command: .ackAgentSignals(.init(sessionID: "session-1", eventIDs: ["event-1"]))),
+            TerminalServiceRequest(command: .profileCommand(profileCommand)),
+            TerminalServiceRequest(
+                command: .mobileCredential(.init(operation: .issue, installationID: "installation-1", deviceName: "iPhone", platform: "ios"))),
+        ]
         let response = TerminalServiceResponse(
             ok: true, message: "Started.",
             session: TerminalServiceSessionSummary(
@@ -63,14 +77,16 @@ final class TerminalServiceProtocolTests: XCTestCase {
             daemonStatus: TerminalServiceDaemonStatus(
                 version: "1.2.3", artifactVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 
-        let credentialRequest = TerminalServiceRequest(
-            command: "mobileCredential",
-            mobileCredentialRequest: TerminalServiceMobileCredentialRequest(
-                operation: .issue, installationID: "installation-1", deviceName: "iPhone", platform: "ios"))
-
-        XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request)
-        XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(credentialRequest)), credentialRequest)
+        for request in requests { XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request) }
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)
+    }
+
+    func testRequestDecodeRejectsAmbiguousCommandPayloads() {
+        let emptyCommand = #"{"command":{}}"#.data(using: .utf8)!
+        let multipleCommands = #"{"command":{"ping":{},"list":{}}}"#.data(using: .utf8)!
+
+        XCTAssertThrowsError(try TerminalServiceCodec.decodeRequest(emptyCommand))
+        XCTAssertThrowsError(try TerminalServiceCodec.decodeRequest(multipleCommands))
     }
 
     func testClientCanSendRequestToServiceSocket() throws {
@@ -83,14 +99,14 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let received = expectation(description: "received request")
 
         let server = TerminalServiceServer(socketPath: socketPath, queue: queue) { request in
-            XCTAssertEqual(request, TerminalServiceRequest(command: "ping"))
+            XCTAssertEqual(request, TerminalServiceRequest(command: .ping))
             received.fulfill()
             return TerminalServiceResponse(ok: true, message: "pong")
         }
         try server.start()
         defer { server.stop() }
 
-        let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: "ping"), socketPath: socketPath)
+        let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath)
 
         wait(for: [received], timeout: 2)
         XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
@@ -132,7 +148,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let queue = DispatchQueue(label: "terminal-service-tcp-protocol-test")
         let received = expectation(description: "received request")
         let server = TerminalServiceTCPServer(host: "127.0.0.1", port: 0, authToken: "SECRET", queue: queue) { request in
-            XCTAssertEqual(request, TerminalServiceRequest(command: "ping", authToken: "SECRET"))
+            XCTAssertEqual(request, TerminalServiceRequest(command: .ping, authToken: "SECRET"))
             received.fulfill()
             return TerminalServiceResponse(ok: true, message: "pong")
         }
@@ -140,7 +156,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         defer { server.stop() }
 
         let response = try TerminalServiceClient.send(
-            request: TerminalServiceRequest(command: "ping"), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET")
+            request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET")
 
         wait(for: [received], timeout: 2)
         XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
@@ -156,7 +172,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         defer { server.stop() }
 
         let response = try TerminalServiceClient.send(
-            request: TerminalServiceRequest(command: "ping"), host: "127.0.0.1", port: server.listeningPort, authToken: "WRONG")
+            request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "WRONG")
 
         XCTAssertEqual(response, TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client."))
     }
@@ -170,7 +186,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let queue = DispatchQueue(label: "terminal-service-tls-protocol-test")
         let received = expectation(description: "received pinned TLS request")
         let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
-            XCTAssertEqual(request, TerminalServiceRequest(command: "ping", authToken: "SECRET"))
+            XCTAssertEqual(request, TerminalServiceRequest(command: .ping, authToken: "SECRET"))
             received.fulfill()
             return TerminalServiceResponse(ok: true, message: "pong")
         }
@@ -178,7 +194,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         defer { server.stop() }
 
         let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: "ping"), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
+            request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
             certificateFingerprint: identity.certificateFingerprint)
 
         wait(for: [received], timeout: 5)
@@ -196,7 +212,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let requestCount = LockedCounter()
             let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
                 let count = requestCount.increment()
-                return TerminalServiceResponse(ok: true, message: "\(request.command)-\(count)")
+                return TerminalServiceResponse(ok: true, message: "\(request.commandName)-\(count)")
             }
             try server.start()
             defer { server.stop() }
@@ -205,12 +221,11 @@ final class TerminalServiceProtocolTests: XCTestCase {
             try Self.waitUntilReady(connection, queue: DispatchQueue(label: "terminal-service-tls-persistent-client"))
             defer { connection.cancel() }
 
-            let first = try Self.sendRequestLineAndReadResponse(TerminalServiceRequest(command: "first", authToken: "SECRET"), connection: connection)
-            let second = try Self.sendRequestLineAndReadResponse(
-                TerminalServiceRequest(command: "second", authToken: "SECRET"), connection: connection)
+            let first = try Self.sendRequestLineAndReadResponse(TerminalServiceRequest(command: .ping, authToken: "SECRET"), connection: connection)
+            let second = try Self.sendRequestLineAndReadResponse(TerminalServiceRequest(command: .list, authToken: "SECRET"), connection: connection)
 
-            XCTAssertEqual(first, TerminalServiceResponse(ok: true, message: "first-1"))
-            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-2"))
+            XCTAssertEqual(first, TerminalServiceResponse(ok: true, message: "ping-1"))
+            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "list-2"))
             XCTAssertEqual(requestCount.value, 2)
         }
 
@@ -224,7 +239,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let requestCount = LockedCounter()
             let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
                 let count = requestCount.increment()
-                return TerminalServiceResponse(ok: true, message: "\(request.command)-\(request.authToken ?? "")-\(count)")
+                return TerminalServiceResponse(ok: true, message: "\(request.commandName)-\(request.authToken ?? "")-\(count)")
             }
             try server.start()
             defer { server.stop() }
@@ -233,11 +248,11 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET", certificateFingerprint: identity.certificateFingerprint)
             defer { client.cancel() }
 
-            let first = try client.send(request: TerminalServiceRequest(command: "first"))
-            let second = try client.send(request: TerminalServiceRequest(command: "second"))
+            let first = try client.send(request: TerminalServiceRequest(command: .ping))
+            let second = try client.send(request: TerminalServiceRequest(command: .list))
 
-            XCTAssertEqual(first, TerminalServiceResponse(ok: true, message: "first-SECRET-1"))
-            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-SECRET-2"))
+            XCTAssertEqual(first, TerminalServiceResponse(ok: true, message: "ping-SECRET-1"))
+            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "list-SECRET-2"))
             XCTAssertEqual(requestCount.value, 2)
         }
 
@@ -252,7 +267,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
                 let count = requestCount.increment()
                 if count == 1 { return TerminalServiceResponse(ok: false, message: "Unauthorized test connection close.") }
-                return TerminalServiceResponse(ok: true, message: "\(request.command)-\(request.authToken ?? "")-\(count)")
+                return TerminalServiceResponse(ok: true, message: "\(request.commandName)-\(request.authToken ?? "")-\(count)")
             }
             try server.start()
             defer { server.stop() }
@@ -261,11 +276,11 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET", certificateFingerprint: identity.certificateFingerprint)
             defer { client.cancel() }
 
-            let first = try client.send(request: TerminalServiceRequest(command: "first"))
-            let second = try client.send(request: TerminalServiceRequest(command: "second"))
+            let first = try client.send(request: TerminalServiceRequest(command: .ping))
+            let second = try client.send(request: TerminalServiceRequest(command: .list))
 
             XCTAssertEqual(first, TerminalServiceResponse(ok: false, message: "Unauthorized test connection close."))
-            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "second-SECRET-2"))
+            XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "list-SECRET-2"))
             XCTAssertEqual(requestCount.value, 2)
         }
     #endif
@@ -297,7 +312,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
 
         XCTAssertThrowsError(
             try TerminalServiceClient.sendPinnedTLS(
-                request: TerminalServiceRequest(command: "ping"), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
+                request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
                 certificateFingerprint: "SHA256:0000000000000000000000000000000000000000000000000000000000000000")
         ) { error in
             guard case TerminalServiceTLSError.certificatePinMismatch = error else {

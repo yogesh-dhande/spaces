@@ -1183,7 +1183,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             requestSender: { request in try requestClient.send(request: request, timeout: requestTimeout) },
             stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
                 let client = TerminalServicePinnedTLSStateStreamClient(
-                    request: TerminalServiceRequest(command: "subscribe", sessionID: sessionID), host: endpoint.host, port: endpoint.port,
+                    request: TerminalServiceRequest(command: .subscribe(.init(sessionID: sessionID))), host: endpoint.host, port: endpoint.port,
                     authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, onEvent: onEvent, onDisconnect: onDisconnect)
                 try client.start()
                 return client
@@ -1231,28 +1231,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         { request in
             let clientApp = SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
             switch request.command {
-            case "state":
-                guard let sessionID = request.sessionID else {
-                    throw WorkspaceError.invalidArgument(message: "Remote terminal state requires a session ID.")
-                }
+            case .state(let payload):
                 let response = try SpacesActiveDeviceClient.request(
-                    SpacesDeviceAPIRequest(command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID))), device: device,
+                    SpacesDeviceAPIRequest(command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID))), device: device,
                     clientApp: clientApp)
                 return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
-            case "control":
-                guard let sessionID = request.sessionID else {
-                    throw WorkspaceError.invalidArgument(message: "Remote terminal control requires a session ID.")
-                }
-                guard let controlRequest = request.controlRequest else {
-                    throw WorkspaceError.invalidArgument(message: "Remote terminal control requires a control request.")
-                }
-                let deviceRequest = try activeDeviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
+            case .control(let payload):
+                let deviceRequest = try activeDeviceTerminalControlRequest(sessionID: payload.sessionID, controlRequest: payload.controlRequest)
                 let response = try SpacesActiveDeviceClient.request(
                     SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest)), device: device, clientApp: clientApp)
                 return TerminalServiceResponse(
                     ok: response.ok, message: response.message, sessionState: response.sessionState,
                     controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
-            default: throw WorkspaceError.invalidArgument(message: "Remote device terminal command '\(request.command)' is not supported.")
+            default: throw WorkspaceError.invalidArgument(message: "Remote device terminal command '\(request.commandName)' is not supported.")
             }
         }
     }
@@ -1281,7 +1272,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func refreshRemoteTerminalSessionMirror(
         sessionID: String, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender
     ) throws {
-        let response = try requestSender(TerminalServiceRequest(command: "state", sessionID: sessionID))
+        let response = try requestSender(TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         guard let payload = response.sessionState else {
             throw WorkspaceError.invalidArgument(message: "Remote spacesd did not return terminal state.")
@@ -1308,7 +1299,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sessionID: String, request: TerminalControlRequest, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender,
         refreshMirror: Bool
     ) throws -> TerminalControlResponse {
-        let response = try requestSender(TerminalServiceRequest(command: "control", sessionID: sessionID, controlRequest: request))
+        let response = try requestSender(TerminalServiceRequest(command: .control(.init(sessionID: sessionID, controlRequest: request))))
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         if let payload = response.sessionState {
             try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
@@ -1321,7 +1312,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated private static func refreshRemoteTerminalSessionMirror(
         sessionID: String, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender
     ) throws {
-        let response = try requestSender(TerminalServiceRequest(command: "state", sessionID: sessionID))
+        let response = try requestSender(TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         guard let payload = response.sessionState else {
             throw WorkspaceError.invalidArgument(message: "Remote spacesd did not return terminal state.")

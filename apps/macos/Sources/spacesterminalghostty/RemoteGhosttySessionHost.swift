@@ -294,7 +294,7 @@
             DirectStateFetchResult, Error
         > {
             do {
-                let response = try requestSender(TerminalServiceRequest(command: "state", sessionID: sessionID))
+                let response = try requestSender(TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
                 guard response.ok else { throw remoteTerminalRequestError(response.message) }
                 guard let payload = response.sessionState else { throw remoteTerminalRequestError("Remote spacesd did not return terminal state.") }
                 return .success(DirectStateFetchResult(payload: payload, agentSignals: response.agentSignals ?? []))
@@ -314,7 +314,7 @@
             let sessionID = launchConfiguration.sessionID
             Task.detached(priority: .utility) {
                 _ = try? terminalServiceRequestSender(
-                    TerminalServiceRequest(command: "ackAgentSignals", sessionID: sessionID, agentSignalEventIDs: acknowledgedIDs))
+                    TerminalServiceRequest(command: .ackAgentSignals(.init(sessionID: sessionID, eventIDs: acknowledgedIDs))))
             }
         }
 
@@ -595,7 +595,7 @@
             _ request: TerminalControlRequest, sessionID: String, socketPath: String, requestSender: RemoteGhosttyTerminalServiceRequestSender?
         ) throws -> TerminalControlResponse {
             guard let requestSender else { return try TerminalControlClient.send(request: request, socketPath: socketPath) }
-            let response = try requestSender(TerminalServiceRequest(command: "control", sessionID: sessionID, controlRequest: request))
+            let response = try requestSender(TerminalServiceRequest(command: .control(.init(sessionID: sessionID, controlRequest: request))))
             guard response.ok else { throw remoteTerminalRequestError(response.message) }
             let controlResponse = response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message)
             guard controlResponse.ok else { throw remoteTerminalRequestError(controlResponse.message) }

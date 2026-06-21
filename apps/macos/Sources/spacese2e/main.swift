@@ -33,9 +33,10 @@ struct SpacesE2ECommand: ParsableCommand {
             TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self,
             PlanWorkspaceRuntimeCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
-            ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self,
-            MobileRequestCommand.self, TerminalServiceTLSRequestCommand.self, TerminalServiceTLSSessionCommand.self,
-            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self,
+            MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self, TerminalServiceTLSRequestCommand.self,
+            TerminalServiceTLSSessionCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self,
         ])
 }
 
@@ -288,7 +289,8 @@ private struct TerminalServiceStateCommand: ParsableCommand {
     @Option(name: .long) var sessionID: String
 
     func run() throws {
-        let response = try sendTerminalServiceRequestForSession(sessionID: sessionID, request: TerminalServiceRequest(command: "state"))
+        let response = try sendTerminalServiceRequestForSession(
+            sessionID: sessionID, request: TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
         try emitJSON(response)
     }
 }
@@ -329,7 +331,8 @@ private struct TerminalServiceControlCommand: ParsableCommand {
             return
         }
         let response = try sendTerminalServiceRequestForSession(
-            sessionID: trimmedSessionID, request: TerminalServiceRequest(command: "control", controlRequest: controlRequest))
+            sessionID: trimmedSessionID,
+            request: TerminalServiceRequest(command: .control(.init(sessionID: trimmedSessionID, controlRequest: controlRequest))))
         try emitJSON(response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message))
     }
 
@@ -447,6 +450,18 @@ private struct ProfileShowCommand: ParsableCommand {
         print("ipc-object\t\(profile.ipcNotificationObject)")
         if let worktreeRoot = payload.worktreeRoot { print("worktree-root\t\(worktreeRoot)") }
         if let branch = payload.branchName { print("branch\t\(branch)") }
+    }
+}
+
+private struct ProfileSocketPathsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "profile-socket-paths", abstract: "Show resolved Spaces terminal socket paths for harnesses.")
+
+    @Option(name: .long, help: "Include paths for a terminal session ID.") var sessionID: String?
+
+    func run() throws {
+        let profile = try SpacesProfile.current()
+        try emitJSON(ProfileSocketPathsPayload(profile: profile, sessionID: sessionID))
     }
 }
 
@@ -1964,6 +1979,42 @@ private struct ProfilePayload: Codable {
     }
 }
 
+private struct ProfileSocketPathsPayload: Codable {
+    let profileRoot: String
+    let runtimeDirectory: String
+    let terminalRootDirectory: String
+    let serviceSocketPath: String
+    let serviceLockPath: String
+    let serviceLogPath: String
+    let sessionID: String?
+    let sessionRootDirectory: String?
+    let sessionControlSocketPath: String?
+    let sessionSubscriptionSocketPath: String?
+
+    init(profile: SpacesProfile, sessionID: String?) throws {
+        self.profileRoot = profile.rootDirectory
+        runtimeDirectory = profile.runtimeDirectory
+        terminalRootDirectory = try TerminalServicePaths.terminalRootDirectory().path
+        serviceSocketPath = try TerminalServicePaths.socketPath()
+        serviceLockPath = try TerminalServicePaths.instanceLockPath()
+        serviceLogPath = try TerminalServicePaths.logPath()
+
+        let trimmedSessionID = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedSessionID, !trimmedSessionID.isEmpty {
+            let sessionPaths = try TerminalSessionPaths.forSession(id: trimmedSessionID)
+            self.sessionID = trimmedSessionID
+            sessionRootDirectory = sessionPaths.rootDirectory
+            sessionControlSocketPath = sessionPaths.controlSocketPath
+            sessionSubscriptionSocketPath = sessionPaths.subscriptionSocketPath
+        } else {
+            self.sessionID = nil
+            sessionRootDirectory = nil
+            sessionControlSocketPath = nil
+            sessionSubscriptionSocketPath = nil
+        }
+    }
+}
+
 private struct LeaseStatePayload: Codable {
     let available: Bool
     let profileRoot: String?
@@ -2062,11 +2113,20 @@ private func sendTerminalServiceRequestForSession(sessionID rawSessionID: String
 
 extension TerminalServiceRequest {
     fileprivate func withSessionID(_ sessionID: String) -> TerminalServiceRequest {
-        TerminalServiceRequest(
-            command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
-            worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
-            terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
-            agentSignalEventIDs: agentSignalEventIDs)
+        let updatedCommand: TerminalServiceCommand
+        switch command {
+        case .terminate: updatedCommand = .terminate(.init(sessionID: sessionID))
+        case .state: updatedCommand = .state(.init(sessionID: sessionID))
+        case .subscribe: updatedCommand = .subscribe(.init(sessionID: sessionID))
+        case .control(let payload): updatedCommand = .control(.init(sessionID: sessionID, controlRequest: payload.controlRequest))
+        case .ackAgentSignals(let payload): updatedCommand = .ackAgentSignals(.init(sessionID: sessionID, eventIDs: payload.eventIDs))
+        case .resolveTerminalLink(let payload): updatedCommand = .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: payload.terminalLink))
+        case .readTerminalLinkChunk(let payload):
+            updatedCommand = .readTerminalLinkChunk(
+                .init(sessionID: sessionID, terminalLinkID: payload.terminalLinkID, offset: payload.offset, limit: payload.limit))
+        default: updatedCommand = command
+        }
+        return TerminalServiceRequest(command: updatedCommand, authToken: authToken)
     }
 }
 

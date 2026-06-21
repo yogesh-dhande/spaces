@@ -576,7 +576,7 @@ runtime = os.path.join(root, "profile", "runtime")
 work = os.path.join(root, "work")
 
 def service_socket_path():
-    terminal_root = os.path.abspath(os.path.join(runtime, "terminal"))
+    terminal_root = os.path.realpath(os.path.join(runtime, "terminal"))
     value = 5381
     for byte in terminal_root.encode("utf-8"):
         value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
@@ -607,18 +607,21 @@ def request(payload, timeout=10):
     return json.loads(data.decode("utf-8"))
 
 response = request({
-    "command": "create",
-    "launchConfiguration": {
-        "sessionID": "linux-artifact-smoke",
-        "backend": "ghostty-embedded",
-        "lifetimePolicy": "persistent",
-        "title": "artifact smoke",
-        "workingDirectory": work,
-        "shell": "/bin/bash",
-        "command": "echo artifact-smoke; sleep 20",
-        "createdAt": "2026-06-11T00:00:00.000Z",
-        "workspaceID": "artifact-workspace",
-        "kind": "process",
+    "command": {
+        "create": {
+            "launchConfiguration": {
+                "sessionID": "linux-artifact-smoke",
+                "backend": "ghostty-embedded",
+                "lifetimePolicy": "persistent",
+                "title": "artifact smoke",
+                "workingDirectory": work,
+                "shell": "/bin/bash",
+                "command": "echo artifact-smoke; sleep 20",
+                "createdAt": "2026-06-11T00:00:00.000Z",
+                "workspaceID": "artifact-workspace",
+                "kind": "process",
+            },
+        },
     },
 })
 if not response.get("ok"):
@@ -626,19 +629,21 @@ if not response.get("ok"):
 
 created_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 response = request({
-    "command": "agentSignal",
-    "sessionID": "linux-artifact-smoke",
-    "agentSignal": {
-        "id": str(uuid.uuid4()),
-        "sessionID": "linux-artifact-smoke",
-        "workspaceID": "artifact-workspace",
-        "workspacePath": work,
-        "type": "waiting",
-        "provider": "spaces",
-        "terminalTrackingID": "linux-artifact-smoke",
-        "terminalNativeID": "linux-artifact-smoke",
-        "environmentKeys": [],
-        "createdAt": created_at,
+    "command": {
+        "agentSignal": {
+            "event": {
+                "id": str(uuid.uuid4()),
+                "sessionID": "linux-artifact-smoke",
+                "workspaceID": "artifact-workspace",
+                "workspacePath": work,
+                "type": "waiting",
+                "provider": "spaces",
+                "terminalTrackingID": "linux-artifact-smoke",
+                "terminalNativeID": "linux-artifact-smoke",
+                "environmentKeys": [],
+                "createdAt": created_at,
+            },
+        },
     },
 })
 if not response.get("ok"):
@@ -654,7 +659,7 @@ import sys
 root = sys.argv[1]
 runtime = os.path.join(root, "profile", "runtime")
 
-terminal_root = os.path.abspath(os.path.join(runtime, "terminal"))
+terminal_root = os.path.realpath(os.path.join(runtime, "terminal"))
 value = 5381
 for byte in terminal_root.encode("utf-8"):
     value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
@@ -664,7 +669,7 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(10)
 with sock:
     sock.connect(path)
-    sock.sendall(json.dumps({"command": "state", "sessionID": "linux-artifact-smoke"}).encode("utf-8"))
+    sock.sendall(json.dumps({"command": {"state": {"sessionID": "linux-artifact-smoke"}}}).encode("utf-8"))
     sock.shutdown(socket.SHUT_WR)
     data = bytearray()
     while True:

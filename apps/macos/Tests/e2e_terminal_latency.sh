@@ -16,6 +16,8 @@ SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-latency.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
+CLIENT_DB_PATH="${SPACES_CLIENT_DB_PATH:-$WORK_ROOT/client/spaces-client.db}"
+CLIENT_SECRET_DIR="${SPACES_CLIENT_SECRET_DIR:-$WORK_ROOT/client/secrets}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 PERF_JSONL="$WORK_ROOT/terminal-performance.jsonl"
 SUMMARY_JSON="$WORK_ROOT/terminal-latency-summary.json"
@@ -123,10 +125,13 @@ parse_args "$@"
 [[ -x "$SPACES_CLI" ]] || fail "spaces CLI not found at $SPACES_CLI"
 [[ -x "$SPACES_E2E" ]] || fail "spacese2e not found at $SPACES_E2E"
 
-mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR"
+mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR" "$(dirname "$CLIENT_DB_PATH")" "$CLIENT_SECRET_DIR"
 touch "$APP_LOG" "$PERF_JSONL"
 export SPACES_DB_PATH="$DB_PATH"
 export SPACES_RUNTIME_DIR="$RUNTIME_DIR"
+export SPACES_CLIENT_DB_PATH="$CLIENT_DB_PATH"
+export SPACES_CLIENT_SECRET_DIR="$CLIENT_SECRET_DIR"
+export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 
 cd "$REPO_ROOT"
 acquire_terminal_harness_lock
@@ -141,7 +146,24 @@ env \
   "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 spaces_profile_wait_for_owner_pid "$SPACES_CLI" "$APP_PID" 20
-sleep 1
+
+ipc_probe_output="$WORK_ROOT/ipc-ready-$(uuidgen).json"
+ipc_probe_deadline=$((SECONDS + 20))
+ipc_probe_ready=0
+while (( SECONDS < ipc_probe_deadline )); do
+  rm -f "$ipc_probe_output"
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+    dump-terminal-session-window-state --session-id "__ipc_ready_probe__" --output-path "$ipc_probe_output" --any-mode >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    if [[ -s "$ipc_probe_output" ]]; then
+      ipc_probe_ready=1
+      rm -f "$ipc_probe_output"
+      break 2
+    fi
+    sleep 0.1
+  done
+done
+[[ "$ipc_probe_ready" == "1" ]] || fail "Timed out waiting for SpacesApp terminal IPC observers."
 
 python3 - "$SPACES_CLI" "$SPACES_E2E" "$RUNTIME_DIR" "$WORK_ROOT" "$PERF_JSONL" "$SUMMARY_JSON" "$SAMPLES" "${SELECTED_SCENARIOS[@]}" <<'PY'
 import json
@@ -162,11 +184,11 @@ runtime_dir = Path(runtime_dir)
 work_root = Path(work_root)
 performance_log_path = Path(performance_log_path)
 summary_json = Path(summary_json)
-profile_root = Path(os.environ["SPACES_DB_PATH"]).expanduser().resolve().parent
 base_env = os.environ.copy()
 
 events: list[dict] = []
 scenario_results: dict[str, dict] = {}
+socket_path_cache: dict[str, Path] = {}
 
 budgets = {
     "mac-input-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
@@ -339,11 +361,21 @@ def extract_session_id(output: str) -> str:
     return match[-1].upper()
 
 
-def control_socket_path(profile_root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{profile_root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
+def control_socket_path(session_id: str) -> Path:
+    cached = socket_path_cache.get(session_id)
+    if cached is not None:
+        return cached
+    result = subprocess.run(
+        [spacese2e, "profile-socket-paths", "--session-id", session_id],
+        env=base_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    path = Path(json.loads(result.stdout)["sessionControlSocketPath"])
+    socket_path_cache[session_id] = path
+    return path
 
 
 def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
@@ -355,7 +387,7 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
                 (title,),
             ).fetchall()
         for session_id, root_directory in rows:
-            if control_socket_path(profile_root, session_id).exists():
+            if control_socket_path(session_id).exists():
                 return session_id.upper()
         time.sleep(0.1)
     raise TimeoutError(f"timed out recovering session id for title {title}")

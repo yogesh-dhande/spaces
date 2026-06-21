@@ -8,69 +8,254 @@ import Foundation
 #endif
 
 public struct TerminalServiceRequest: Codable, Sendable, Equatable {
-    public let command: String
     public let authToken: String?
-    public let launchConfiguration: TerminalSessionLaunchConfiguration?
-    public let sessionID: String?
+    public let command: TerminalServiceCommand
+
+    public init(command: TerminalServiceCommand, authToken: String? = nil) {
+        self.authToken = authToken
+        self.command = command
+    }
+
+    public func withAuthToken(_ authToken: String?) -> TerminalServiceRequest { TerminalServiceRequest(command: command, authToken: authToken) }
+
+    public var commandName: String { command.name }
+    public var sessionID: String? { command.sessionID }
+}
+
+public struct TerminalServiceEmptyPayload: Codable, Sendable, Equatable { public init() {} }
+
+public struct TerminalServiceSessionRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+
+    public init(sessionID: String) { self.sessionID = sessionID }
+}
+
+public struct TerminalServiceCreateRequest: Codable, Sendable, Equatable {
+    public let launchConfiguration: TerminalSessionLaunchConfiguration
     public let runtimeManifest: TerminalServiceWorkspaceRuntimeManifest?
     public let worktreeRefresh: TerminalServiceWorktreeRefreshRequest?
-    public let workspaceCommand: TerminalServiceWorkspaceCommandRequest?
-    public let controlRequest: TerminalControlRequest?
-    public let terminalLink: String?
-    public let terminalLinkID: String?
-    public let chunkOffset: Int64?
-    public let chunkLimit: Int?
-    public let agentSignal: TerminalServiceAgentSignalEvent?
-    public let agentSignalEventIDs: [String]?
-    public let profileCommand: TerminalServiceProfileCommandRequest?
-    public let mobileCredentialRequest: TerminalServiceMobileCredentialRequest?
 
     public init(
-        command: String, authToken: String? = nil, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil,
-        runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
-        workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil, controlRequest: TerminalControlRequest? = nil, terminalLink: String? = nil,
-        terminalLinkID: String? = nil, chunkOffset: Int64? = nil, chunkLimit: Int? = nil, agentSignal: TerminalServiceAgentSignalEvent? = nil,
-        agentSignalEventIDs: [String]? = nil, profileCommand: TerminalServiceProfileCommandRequest? = nil,
-        mobileCredentialRequest: TerminalServiceMobileCredentialRequest? = nil
+        launchConfiguration: TerminalSessionLaunchConfiguration, runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil,
+        worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil
     ) {
-        self.command = command
-        self.authToken = authToken
         self.launchConfiguration = launchConfiguration
-        self.sessionID = sessionID
+        self.runtimeManifest = runtimeManifest
+        self.worktreeRefresh = worktreeRefresh
+    }
+}
+
+public struct TerminalServicePrepareWorkspaceRequest: Codable, Sendable, Equatable {
+    public let runtimeManifest: TerminalServiceWorkspaceRuntimeManifest
+    public let worktreeRefresh: TerminalServiceWorktreeRefreshRequest?
+
+    public init(runtimeManifest: TerminalServiceWorkspaceRuntimeManifest, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil) {
+        self.runtimeManifest = runtimeManifest
+        self.worktreeRefresh = worktreeRefresh
+    }
+}
+
+public struct TerminalServiceRunWorkspaceCommandRequest: Codable, Sendable, Equatable {
+    public let runtimeManifest: TerminalServiceWorkspaceRuntimeManifest
+    public let worktreeRefresh: TerminalServiceWorktreeRefreshRequest?
+    public let workspaceCommand: TerminalServiceWorkspaceCommandRequest
+
+    public init(
+        runtimeManifest: TerminalServiceWorkspaceRuntimeManifest, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
+        workspaceCommand: TerminalServiceWorkspaceCommandRequest
+    ) {
         self.runtimeManifest = runtimeManifest
         self.worktreeRefresh = worktreeRefresh
         self.workspaceCommand = workspaceCommand
+    }
+}
+
+public struct TerminalServiceControlCommandRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let controlRequest: TerminalControlRequest
+
+    public init(sessionID: String, controlRequest: TerminalControlRequest) {
+        self.sessionID = sessionID
         self.controlRequest = controlRequest
+    }
+}
+
+public struct TerminalServiceAgentSignalRequest: Codable, Sendable, Equatable {
+    public let event: TerminalServiceAgentSignalEvent
+
+    public init(event: TerminalServiceAgentSignalEvent) { self.event = event }
+}
+
+public struct TerminalServiceAgentSignalAcknowledgementRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let eventIDs: [String]
+
+    public init(sessionID: String, eventIDs: [String]) {
+        self.sessionID = sessionID
+        self.eventIDs = eventIDs
+    }
+}
+
+public struct TerminalServiceTerminalLinkResolveRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let terminalLink: String?
+
+    public init(sessionID: String, terminalLink: String?) {
+        self.sessionID = sessionID
         self.terminalLink = terminalLink
+    }
+}
+
+public struct TerminalServiceTerminalLinkChunkRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let terminalLinkID: String?
+    public let offset: Int64?
+    public let limit: Int?
+
+    public init(sessionID: String, terminalLinkID: String?, offset: Int64? = nil, limit: Int? = nil) {
+        self.sessionID = sessionID
         self.terminalLinkID = terminalLinkID
-        self.chunkOffset = chunkOffset
-        self.chunkLimit = chunkLimit
-        self.agentSignal = agentSignal
-        self.agentSignalEventIDs = agentSignalEventIDs
-        self.profileCommand = profileCommand
-        self.mobileCredentialRequest = mobileCredentialRequest
+        self.offset = offset
+        self.limit = limit
+    }
+}
+
+public enum TerminalServiceCommand: Sendable, Equatable {
+    case ping
+    case shutdownIfIdle
+    case shutdown
+    case create(TerminalServiceCreateRequest)
+    case prepareWorkspace(TerminalServicePrepareWorkspaceRequest)
+    case runWorkspaceCommand(TerminalServiceRunWorkspaceCommandRequest)
+    case terminate(TerminalServiceSessionRequest)
+    case list
+    case state(TerminalServiceSessionRequest)
+    case subscribe(TerminalServiceSessionRequest)
+    case control(TerminalServiceControlCommandRequest)
+    case agentSignal(TerminalServiceAgentSignalRequest)
+    case ackAgentSignals(TerminalServiceAgentSignalAcknowledgementRequest)
+    case profileCommand(TerminalServiceProfileCommandRequest)
+    case mobileCredential(TerminalServiceMobileCredentialRequest)
+    case resolveTerminalLink(TerminalServiceTerminalLinkResolveRequest)
+    case readTerminalLinkChunk(TerminalServiceTerminalLinkChunkRequest)
+
+    public var name: String {
+        switch self {
+        case .ping: "ping"
+        case .shutdownIfIdle: "shutdownIfIdle"
+        case .shutdown: "shutdown"
+        case .create: "create"
+        case .prepareWorkspace: "prepareWorkspace"
+        case .runWorkspaceCommand: "runWorkspaceCommand"
+        case .terminate: "terminate"
+        case .list: "list"
+        case .state: "state"
+        case .subscribe: "subscribe"
+        case .control: "control"
+        case .agentSignal: "agentSignal"
+        case .ackAgentSignals: "ackAgentSignals"
+        case .profileCommand: "profileCommand"
+        case .mobileCredential: "mobileCredential"
+        case .resolveTerminalLink: "resolveTerminalLink"
+        case .readTerminalLinkChunk: "readTerminalLinkChunk"
+        }
     }
 
-    public init(
-        command: String, authToken: String? = nil, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil,
-        runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
-        workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil, controlRequest: TerminalControlRequest? = nil, terminalLink: String? = nil,
-        terminalLinkID: String? = nil, chunkOffset: Int64? = nil, chunkLimit: Int? = nil, agentSignal: TerminalServiceAgentSignalEvent? = nil,
-        agentSignalEventIDs: [String]? = nil
-    ) {
-        self.init(
-            command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
-            worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
-            terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
-            agentSignalEventIDs: agentSignalEventIDs, profileCommand: nil, mobileCredentialRequest: nil)
+    public var sessionID: String? {
+        switch self {
+        case .terminate(let payload), .state(let payload), .subscribe(let payload): payload.sessionID
+        case .control(let payload): payload.sessionID
+        case .agentSignal(let payload): payload.event.sessionID
+        case .ackAgentSignals(let payload): payload.sessionID
+        case .resolveTerminalLink(let payload): payload.sessionID
+        case .readTerminalLinkChunk(let payload): payload.sessionID
+        default: nil
+        }
     }
 
-    public func withAuthToken(_ authToken: String?) -> TerminalServiceRequest {
-        TerminalServiceRequest(
-            command: command, authToken: authToken, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: runtimeManifest,
-            worktreeRefresh: worktreeRefresh, workspaceCommand: workspaceCommand, controlRequest: controlRequest, terminalLink: terminalLink,
-            terminalLinkID: terminalLinkID, chunkOffset: chunkOffset, chunkLimit: chunkLimit, agentSignal: agentSignal,
-            agentSignalEventIDs: agentSignalEventIDs, profileCommand: profileCommand, mobileCredentialRequest: mobileCredentialRequest)
+    public var controlCommandName: String? {
+        if case .control(let payload) = self { return payload.controlRequest.command }
+        return nil
+    }
+}
+
+extension TerminalServiceCommand: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case ping
+        case shutdownIfIdle
+        case shutdown
+        case create
+        case prepareWorkspace
+        case runWorkspaceCommand
+        case terminate
+        case list
+        case state
+        case subscribe
+        case control
+        case agentSignal
+        case ackAgentSignals
+        case profileCommand
+        case mobileCredential
+        case resolveTerminalLink
+        case readTerminalLinkChunk
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.allKeys.count == 1, let key = container.allKeys.first else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Terminal service command must contain exactly one payload."))
+        }
+        switch key {
+        case .ping:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .ping
+        case .shutdownIfIdle:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .shutdownIfIdle
+        case .shutdown:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .shutdown
+        case .create: self = .create(try container.decode(TerminalServiceCreateRequest.self, forKey: key))
+        case .prepareWorkspace: self = .prepareWorkspace(try container.decode(TerminalServicePrepareWorkspaceRequest.self, forKey: key))
+        case .runWorkspaceCommand: self = .runWorkspaceCommand(try container.decode(TerminalServiceRunWorkspaceCommandRequest.self, forKey: key))
+        case .terminate: self = .terminate(try container.decode(TerminalServiceSessionRequest.self, forKey: key))
+        case .list:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .list
+        case .state: self = .state(try container.decode(TerminalServiceSessionRequest.self, forKey: key))
+        case .subscribe: self = .subscribe(try container.decode(TerminalServiceSessionRequest.self, forKey: key))
+        case .control: self = .control(try container.decode(TerminalServiceControlCommandRequest.self, forKey: key))
+        case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceAgentSignalRequest.self, forKey: key))
+        case .ackAgentSignals: self = .ackAgentSignals(try container.decode(TerminalServiceAgentSignalAcknowledgementRequest.self, forKey: key))
+        case .profileCommand: self = .profileCommand(try container.decode(TerminalServiceProfileCommandRequest.self, forKey: key))
+        case .mobileCredential: self = .mobileCredential(try container.decode(TerminalServiceMobileCredentialRequest.self, forKey: key))
+        case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(TerminalServiceTerminalLinkResolveRequest.self, forKey: key))
+        case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(TerminalServiceTerminalLinkChunkRequest.self, forKey: key))
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .ping: try container.encode(TerminalServiceEmptyPayload(), forKey: .ping)
+        case .shutdownIfIdle: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdownIfIdle)
+        case .shutdown: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdown)
+        case .create(let payload): try container.encode(payload, forKey: .create)
+        case .prepareWorkspace(let payload): try container.encode(payload, forKey: .prepareWorkspace)
+        case .runWorkspaceCommand(let payload): try container.encode(payload, forKey: .runWorkspaceCommand)
+        case .terminate(let payload): try container.encode(payload, forKey: .terminate)
+        case .list: try container.encode(TerminalServiceEmptyPayload(), forKey: .list)
+        case .state(let payload): try container.encode(payload, forKey: .state)
+        case .subscribe(let payload): try container.encode(payload, forKey: .subscribe)
+        case .control(let payload): try container.encode(payload, forKey: .control)
+        case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
+        case .ackAgentSignals(let payload): try container.encode(payload, forKey: .ackAgentSignals)
+        case .profileCommand(let payload): try container.encode(payload, forKey: .profileCommand)
+        case .mobileCredential(let payload): try container.encode(payload, forKey: .mobileCredential)
+        case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
+        case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
+        }
     }
 }
 

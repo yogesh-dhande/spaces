@@ -61,6 +61,30 @@ final class TerminalServicePathsTests: XCTestCase {
         XCTAssertFalse(linkedPaths.terminalRoot.contains("/linked/"))
     }
 
+    func testExistingExplicitPrivateRuntimePathHashesResolvedTerminalRoot() throws {
+        let root = URL(fileURLWithPath: "/private/var/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("runtime", isDirectory: true), withIntermediateDirectories: true)
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        let originalRuntimePath = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        defer {
+            restoreEnvironmentValue(originalDatabasePath, name: SpacesProfile.databasePathEnvironmentVariable)
+            restoreEnvironmentValue(originalRuntimePath, name: SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            SpacesProfile.resetCacheForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let paths = try terminalPaths(
+            databasePath: root.appendingPathComponent("spaces.db").path,
+            runtimeDirectory: root.appendingPathComponent("runtime", isDirectory: true).path)
+
+        XCTAssertEqual(paths.serviceSocketPath, serviceSocketPath(forTerminalRoot: paths.terminalRoot))
+        if paths.terminalRoot.hasPrefix("/private/var/") {
+            XCTAssertNotEqual(
+                paths.serviceSocketPath,
+                serviceSocketPath(forTerminalRoot: paths.terminalRoot.replacingOccurrences(of: "/private/var/", with: "/var/")))
+        }
+    }
+
     private func terminalPaths(databasePath: String, runtimeDirectory: String) throws -> TerminalPathSnapshot {
         setenv(SpacesProfile.databasePathEnvironmentVariable, databasePath, 1)
         setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeDirectory, 1)
@@ -71,6 +95,12 @@ final class TerminalServicePathsTests: XCTestCase {
             serviceSocketPath: try TerminalServicePaths.socketPath(), serviceLockPath: try TerminalServicePaths.instanceLockPath(),
             sessionControlSocketPath: sessionPaths.controlSocketPath, sessionSubscriptionSocketPath: sessionPaths.subscriptionSocketPath,
             terminalRoot: try TerminalServicePaths.terminalRootDirectory().path)
+    }
+
+    private func serviceSocketPath(forTerminalRoot terminalRoot: String) -> String {
+        var hash: UInt64 = 5381
+        for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
+        return String(format: "/tmp/spaces-terminal-sockets/service-%016llx.sock", hash)
     }
 
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }

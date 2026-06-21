@@ -18,7 +18,6 @@ RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/rt}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 APP_PID=""
 SERVICE_PID=""
-PROFILE_ROOT=""
 no_attach_session_id=""
 no_attach_service_pid=""
 session_id=""
@@ -110,29 +109,10 @@ extract_session_id() {
   printf '%s\n' "$output" | grep -Eo '[0-9A-F-]{36}' | tail -n 1
 }
 
-resolve_profile_root() {
-  local root
-  root="$(
-    env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" profile-show \
-      | awk -F '\t' '$1 == "profile-root" { print $2; exit }'
-  )"
-  [[ -n "$root" ]] || { echo "Failed to resolve profile root from spacese2e profile-show" >&2; exit 1; }
-  printf '%s\n' "$root"
-}
-
 control_socket_path() {
   local session_id="$1"
-  [[ -n "$PROFILE_ROOT" ]] || { echo "Profile root was not resolved before socket lookup" >&2; return 1; }
-  python3 - "$PROFILE_ROOT" "$session_id" <<'PY'
-import sys
-
-profile_root = sys.argv[1]
-session_id = sys.argv[2]
-hash_value = 5381
-for byte in f"{profile_root}|{session_id}".encode("utf-8"):
-    hash_value = (((hash_value << 5) + hash_value) + byte) & 0xFFFFFFFFFFFFFFFF
-print(f"/tmp/spaces-terminal-sockets/{hash_value:016x}.sock")
-PY
+  SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
+    spaces_profile_terminal_session_control_socket_path "$SPACES_CLI" "$session_id"
 }
 
 active_attachment_client_id() {
@@ -243,7 +223,6 @@ require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
 
 cd "$REPO_ROOT"
-PROFILE_ROOT="$(resolve_profile_root)"
 acquire_terminal_harness_lock
 "$SETUP_GHOSTTYKIT" >/dev/null
 

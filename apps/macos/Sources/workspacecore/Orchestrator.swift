@@ -2063,7 +2063,12 @@ public final class WorkspaceOrchestrator {
 
         let session: TerminalServiceSessionSummary
         if isRemote {
-            let response = try sendRemoteTerminalServiceRequest(plan: runtimePlan, command: "create", launchConfiguration: launchConfiguration)
+            let response = try sendRemoteTerminalServiceRequest(
+                plan: runtimePlan,
+                command: .create(
+                    .init(
+                        launchConfiguration: launchConfiguration, runtimeManifest: terminalServiceManifest(runtimePlan.manifest),
+                        worktreeRefresh: remoteWorktreeRefreshRequest(for: runtimePlan))))
             guard let remoteSession = response.session else {
                 throw WorkspaceError.invalidArgument(message: "\(runtimePlan.daemonTarget.displayName): spacesd did not return session metadata.")
             }
@@ -3368,13 +3373,8 @@ public final class WorkspaceOrchestrator {
         return TerminalServiceWorktreeRefreshRequest(path: path, branch: branch, hostName: plan.daemonTarget.displayName)
     }
 
-    private func sendRemoteTerminalServiceRequest(
-        plan: WorkspaceRuntimePlan, command: String, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil,
-        workspaceCommand: TerminalServiceWorkspaceCommandRequest? = nil, refreshWorktree: Bool = true
-    ) throws -> TerminalServiceResponse {
-        let request = TerminalServiceRequest(
-            command: command, launchConfiguration: launchConfiguration, sessionID: sessionID, runtimeManifest: terminalServiceManifest(plan.manifest),
-            worktreeRefresh: refreshWorktree ? remoteWorktreeRefreshRequest(for: plan) : nil, workspaceCommand: workspaceCommand)
+    private func sendRemoteTerminalServiceRequest(plan: WorkspaceRuntimePlan, command: TerminalServiceCommand) throws -> TerminalServiceResponse {
+        let request = TerminalServiceRequest(command: command)
         let response = try remoteTerminalServiceClient(plan.daemonTarget, request)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: "\(plan.daemonTarget.displayName): \(response.message)") }
         return response
@@ -3389,7 +3389,12 @@ public final class WorkspaceOrchestrator {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory,
             shell: remoteShellPath(for: plan), command: command, createdAt: nowISO8601(), workspaceID: plan.workspace.id, kind: kind)
-        let response = try sendRemoteTerminalServiceRequest(plan: plan, command: "create", launchConfiguration: launchConfiguration)
+        let response = try sendRemoteTerminalServiceRequest(
+            plan: plan,
+            command: .create(
+                .init(
+                    launchConfiguration: launchConfiguration, runtimeManifest: terminalServiceManifest(plan.manifest),
+                    worktreeRefresh: remoteWorktreeRefreshRequest(for: plan))))
         guard let session = response.session else {
             throw WorkspaceError.invalidArgument(message: "\(plan.daemonTarget.displayName): spacesd did not return session metadata.")
         }
@@ -3431,7 +3436,12 @@ public final class WorkspaceOrchestrator {
         let request = TerminalServiceWorkspaceCommandRequest(
             command: command, workingDirectory: workingDirectory,
             environment: terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: false), logPath: logPath)
-        let response = try sendRemoteTerminalServiceRequest(plan: plan, command: "runWorkspaceCommand", workspaceCommand: request)
+        let response = try sendRemoteTerminalServiceRequest(
+            plan: plan,
+            command: .runWorkspaceCommand(
+                .init(
+                    runtimeManifest: terminalServiceManifest(plan.manifest), worktreeRefresh: remoteWorktreeRefreshRequest(for: plan),
+                    workspaceCommand: request)))
         guard let result = response.commandResult else {
             throw WorkspaceError.invalidArgument(message: "\(plan.daemonTarget.displayName): spacesd did not return command metadata.")
         }
@@ -4974,7 +4984,7 @@ public final class WorkspaceOrchestrator {
         let runtimePlan = try workspaceRuntimePlan(workspaceID: workspaceID)
         guard runtimePlan.selection.isRemote else { return nil }
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
-        let response = try sendRemoteTerminalServiceRequest(plan: runtimePlan, command: "state", sessionID: sessionID, refreshWorktree: false)
+        let response = try sendRemoteTerminalServiceRequest(plan: runtimePlan, command: .state(.init(sessionID: sessionID)))
         guard let payload = response.sessionState else { return false }
         try? TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
         return payload.runtimeState?.state.isInteractive ?? false
@@ -5936,7 +5946,7 @@ public final class WorkspaceOrchestrator {
             let response: TerminalServiceResponse
             do {
                 response = try Self.sendTerminalServiceRequest(
-                    to: plan.daemonTarget, request: TerminalServiceRequest(command: "state", sessionID: sessionID))
+                    to: plan.daemonTarget, request: TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
             } catch { continue }
             guard response.ok else { continue }
             var acknowledgedIDs: [String] = []
@@ -5949,7 +5959,7 @@ public final class WorkspaceOrchestrator {
             guard !acknowledgedIDs.isEmpty else { continue }
             _ = try? Self.sendTerminalServiceRequest(
                 to: plan.daemonTarget,
-                request: TerminalServiceRequest(command: "ackAgentSignals", sessionID: sessionID, agentSignalEventIDs: acknowledgedIDs))
+                request: TerminalServiceRequest(command: .ackAgentSignals(.init(sessionID: sessionID, eventIDs: acknowledgedIDs))))
         }
         return didApply
     }
@@ -6419,7 +6429,7 @@ public final class WorkspaceOrchestrator {
     private func terminateRemoteTerminalSession(_ sessionID: String?, plan: WorkspaceRuntimePlan) {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return }
         builtInTerminalWindowCloser(sessionID)
-        _ = try? sendRemoteTerminalServiceRequest(plan: plan, command: "terminate", sessionID: sessionID, refreshWorktree: false)
+        _ = try? sendRemoteTerminalServiceRequest(plan: plan, command: .terminate(.init(sessionID: sessionID)))
     }
 
     private func terminateRemoteTerminalSession(for process: RunningProcessRecord, plan: WorkspaceRuntimePlan) {

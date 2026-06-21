@@ -477,7 +477,6 @@ sample_count = int(os.environ["SAMPLES"])
 summary_json = Path(os.environ["SUMMARY_JSON"])
 performance_log_path = Path(os.environ["PERFORMANCE_LOG_PATH"])
 work_root = Path(os.environ["WORK_ROOT"])
-profile_root = Path(os.environ["SPACES_DB_PATH"]).expanduser().resolve().parent
 spaces_cli = os.environ["SPACES_CLI"]
 spacese2e = os.environ["SPACES_E2E"]
 base_env = os.environ.copy()
@@ -487,6 +486,7 @@ stream_records: list[dict] = []
 decode_failures = 0
 render_update_baselines: dict[str, dict] = {}
 remote_daemon_endpoints: dict[str, dict] = {}
+socket_path_cache: dict[str, Path] = {}
 
 budgets = {
     ("ios-input-latency", "local", "local"): {"gross_p95_ms": 1000, "target_p95_ms": 150},
@@ -583,11 +583,21 @@ def extract_session_id(output: str) -> str:
     return match[-1].upper()
 
 
-def control_socket_path(profile_root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{profile_root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
+def control_socket_path(session_id: str) -> Path:
+    cached = socket_path_cache.get(session_id)
+    if cached is not None:
+        return cached
+    result = subprocess.run(
+        [spacese2e, "profile-socket-paths", "--session-id", session_id],
+        env=base_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    path = Path(json.loads(result.stdout)["sessionControlSocketPath"])
+    socket_path_cache[session_id] = path
+    return path
 
 
 def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
@@ -599,7 +609,7 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
                 (title,),
             ).fetchall()
         for session_id, root_directory in rows:
-            if control_socket_path(profile_root, session_id).exists():
+            if control_socket_path(session_id).exists():
                 return session_id.upper()
         time.sleep(0.1)
     raise TimeoutError(f"timed out recovering session id for title {title}")
@@ -714,13 +724,33 @@ def device_api_connect_stream(payload: dict) -> subprocess.Popen:
 
 def terminal_service_payload(payload: dict, endpoint: dict) -> dict:
     command = payload["command"]
-    service_payload: dict = {
-        "command": "control" if command in ("attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "resize", "scroll") else command,
-        "authToken": endpoint["authToken"],
-        "sessionID": payload.get("sessionID"),
-    }
     if command == "state" or command == "subscribe":
-        return service_payload
+        return {
+            "authToken": endpoint["authToken"],
+            "command": {command: {"sessionID": payload.get("sessionID")}},
+        }
+    if command == "resolveTerminalLink":
+        return {
+            "authToken": endpoint["authToken"],
+            "command": {
+                "resolveTerminalLink": {
+                    "sessionID": payload.get("sessionID"),
+                    "terminalLink": payload.get("terminalLink"),
+                }
+            },
+        }
+    if command == "readTerminalLinkChunk":
+        return {
+            "authToken": endpoint["authToken"],
+            "command": {
+                "readTerminalLinkChunk": {
+                    "sessionID": payload.get("sessionID"),
+                    "terminalLinkID": payload.get("terminalLinkID"),
+                    "offset": payload.get("offset"),
+                    "limit": payload.get("limit"),
+                }
+            },
+        }
     control_command = "clearScreen" if command == "clear" else command
     control_request: dict = {"command": control_command}
     for source_key, target_key in (
@@ -739,8 +769,15 @@ def terminal_service_payload(payload: dict, endpoint: dict) -> dict:
     ):
         if source_key in payload and payload[source_key] is not None:
             control_request[target_key] = payload[source_key]
-    service_payload["controlRequest"] = control_request
-    return service_payload
+    return {
+        "authToken": endpoint["authToken"],
+        "command": {
+            "control": {
+                "sessionID": payload.get("sessionID"),
+                "controlRequest": control_request,
+            }
+        },
+    }
 
 
 def direct_request(endpoint: dict, payload: dict, timeout: float = 20) -> tuple[dict, float]:

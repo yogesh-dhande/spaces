@@ -66,7 +66,9 @@ private final class RemoteStateCapture: @unchecked Sendable {
         recordedRequests.append(request)
         lock.unlock()
 
-        guard request.command == "state", request.sessionID == sessionID else { return TerminalServiceResponse(ok: true, message: "ok") }
+        guard case .state(let payload) = request.command, payload.sessionID == sessionID else {
+            return TerminalServiceResponse(ok: true, message: "ok")
+        }
         let timestamp = "2026-06-11T00:00:00Z"
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 42, childPID: 4242, state: .running, updatedAt: timestamp, title: "shell-1",

@@ -20,7 +20,7 @@ import Foundation
             let response: TerminalServiceResponse
             do {
                 response = try TerminalServiceClient.send(
-                    request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration), socketPath: socketPath,
+                    request: TerminalServiceRequest(command: .create(.init(launchConfiguration: launchConfiguration))), socketPath: socketPath,
                     timeout: rpcTimeout)
             } catch {
                 if let recovered = waitForCreatedSessionSummary(launchConfiguration, timeout: requestTimeout) {
@@ -53,7 +53,7 @@ import Foundation
             try ensureRunning()
             let socketPath = try TerminalServicePaths.socketPath()
             let response = try TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "terminate", sessionID: sessionID), socketPath: socketPath, timeout: 10)
+                request: TerminalServiceRequest(command: .terminate(.init(sessionID: sessionID))), socketPath: socketPath, timeout: 10)
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
         }
 
@@ -61,7 +61,7 @@ import Foundation
             if shouldUseXCTestCompatibilityBackend() { return try listXCTestCompatibilitySessions() }
             let socketPath = try TerminalServicePaths.socketPath()
             guard FileManager.default.fileExists(atPath: socketPath) else { return [] }
-            let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: "list"), socketPath: socketPath, timeout: 5)
+            let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .list), socketPath: socketPath, timeout: 5)
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
             return response.sessions ?? []
         }
@@ -72,7 +72,7 @@ import Foundation
             try ensureRunning(timeout: min(timeout, 5))
             let socketPath = try TerminalServicePaths.socketPath()
             let response = try TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "profileCommand", profileCommand: profileCommand), socketPath: socketPath, timeout: timeout)
+                request: TerminalServiceRequest(command: .profileCommand(profileCommand)), socketPath: socketPath, timeout: timeout)
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
             guard let profile = response.profile else { throw TerminalServiceError.requestFailed("spacesd did not return a profile response.") }
             return profile
@@ -125,7 +125,7 @@ import Foundation
 
         private static func pingResponse(timeout: TimeInterval = 2) throws -> TerminalServiceResponse {
             let socketPath = try TerminalServicePaths.socketPath()
-            return try TerminalServiceClient.send(request: TerminalServiceRequest(command: "ping"), socketPath: socketPath, timeout: timeout)
+            return try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: timeout)
         }
 
         private static func stopExistingService(socketPath: String, timeout: TimeInterval) {
@@ -135,7 +135,7 @@ import Foundation
             }
 
             if let response = try? TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "shutdown"), socketPath: socketPath, timeout: min(timeout, 1))
+                request: TerminalServiceRequest(command: .shutdown), socketPath: socketPath, timeout: min(timeout, 1))
             {
                 if let servicePID = response.servicePID { candidatePIDs.insert(pid_t(servicePID)) }
                 if response.ok, waitForServiceExit(socketPath: socketPath, candidatePIDs: candidatePIDs, timeout: timeout) { return }
@@ -367,7 +367,7 @@ import Foundation
         public static func createSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
             try ensureRunning()
             let response = try TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "create", launchConfiguration: launchConfiguration),
+                request: TerminalServiceRequest(command: .create(.init(launchConfiguration: launchConfiguration))),
                 socketPath: try TerminalServicePaths.socketPath(), timeout: createSessionRequestTimeout())
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
             guard let session = response.session else { throw TerminalServiceError.requestFailed("spacesd did not return a session summary.") }
@@ -377,7 +377,7 @@ import Foundation
         public static func terminateSession(id sessionID: String) throws {
             try ensureRunning()
             let response = try TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "terminate", sessionID: sessionID), socketPath: try TerminalServicePaths.socketPath(),
+                request: TerminalServiceRequest(command: .terminate(.init(sessionID: sessionID))), socketPath: try TerminalServicePaths.socketPath(),
                 timeout: 10)
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
         }
@@ -385,7 +385,7 @@ import Foundation
         public static func listSessions() throws -> [TerminalServiceSessionSummary] {
             let socketPath = try TerminalServicePaths.socketPath()
             guard FileManager.default.fileExists(atPath: socketPath) else { return [] }
-            let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: "list"), socketPath: socketPath, timeout: 5)
+            let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .list), socketPath: socketPath, timeout: 5)
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
             return response.sessions ?? []
         }
@@ -395,8 +395,8 @@ import Foundation
         {
             try ensureRunning(timeout: min(timeout, 5))
             let response = try TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "profileCommand", profileCommand: profileCommand),
-                socketPath: try TerminalServicePaths.socketPath(), timeout: timeout)
+                request: TerminalServiceRequest(command: .profileCommand(profileCommand)), socketPath: try TerminalServicePaths.socketPath(),
+                timeout: timeout)
             guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
             guard let profile = response.profile else { throw TerminalServiceError.requestFailed("spacesd did not return a profile response.") }
             return profile
@@ -416,7 +416,7 @@ import Foundation
             let socketPath = try TerminalServicePaths.socketPath()
             if FileManager.default.fileExists(atPath: socketPath) {
                 _ = try? TerminalServiceClient.send(
-                    request: TerminalServiceRequest(command: "shutdown"), socketPath: socketPath, timeout: min(timeout, 1))
+                    request: TerminalServiceRequest(command: .shutdown), socketPath: socketPath, timeout: min(timeout, 1))
             }
             return try ensureRunning(timeout: timeout)
         }
@@ -428,7 +428,7 @@ import Foundation
 
         private static func pingResponse(timeout: TimeInterval = 2) throws -> TerminalServiceResponse {
             try TerminalServiceClient.send(
-                request: TerminalServiceRequest(command: "ping"), socketPath: try TerminalServicePaths.socketPath(), timeout: timeout)
+                request: TerminalServiceRequest(command: .ping), socketPath: try TerminalServicePaths.socketPath(), timeout: timeout)
         }
     }
 

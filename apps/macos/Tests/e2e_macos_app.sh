@@ -952,24 +952,8 @@ PY
 }
 
 mac_client_installation_id() {
-  local profile_root
-  profile_root="$(
-    HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" "$SPACES_E2E_CLI" profile-show |
-      awk -F '\t' '$1 == "profile-root" { print $2; exit }'
-  )"
-  [[ -n "$profile_root" ]] || fail "Unable to resolve macOS E2E profile root for remote pairing."
-  if [[ "$profile_root" == /private/tmp/* ]]; then
-    profile_root="/tmp/${profile_root#/private/tmp/}"
-  fi
-  python3 - "$profile_root" <<'PY'
-import sys
-profile_root = sys.argv[1]
-value = 14695981039346656037
-for byte in profile_root.encode():
-    value ^= byte
-    value = (value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
-print(f"macos-{value:x}")
-PY
+  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    spaces_profile_mac_client_installation_id "$SPACES_E2E_CLI"
 }
 
 seed_remote_active_device_for_macos() {
