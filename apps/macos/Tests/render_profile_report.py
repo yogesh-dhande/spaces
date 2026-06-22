@@ -20,6 +20,8 @@ FIELDNAMES = [
     "workspace_scope",
     "sample_count",
     "avg_ms",
+    "p50_ms",
+    "p95_ms",
     "min_ms",
     "max_ms",
     "samples_ms",
@@ -65,6 +67,12 @@ def load_metric_samples(path: Path) -> dict[tuple[str, str, str], list[int]]:
     return grouped
 
 
+def percentile(samples: list[int], quantile: float) -> int:
+    sorted_samples = sorted(samples)
+    index = max(int(len(sorted_samples) * quantile + 0.999999) - 1, 0)
+    return sorted_samples[min(index, len(sorted_samples) - 1)]
+
+
 def build_rows(args: argparse.Namespace, grouped: dict[tuple[str, str, str], list[int]]) -> list[dict[str, str]]:
     machine_slug = args.machine_name.lower().replace(" ", "-")
     run_id = f"{args.timestamp}-{args.git_sha[:12]}-{args.git_state}-{args.worktree_fingerprint[:12]}-{machine_slug}"
@@ -87,6 +95,8 @@ def build_rows(args: argparse.Namespace, grouped: dict[tuple[str, str, str], lis
                 "workspace_scope": workspace_scope,
                 "sample_count": str(len(samples)),
                 "avg_ms": f"{avg_ms:.1f}",
+                "p50_ms": str(percentile(samples, 0.50)),
+                "p95_ms": str(percentile(samples, 0.95)),
                 "min_ms": str(min(samples)),
                 "max_ms": str(max(samples)),
                 "samples_ms": ",".join(str(sample) for sample in samples),
@@ -136,9 +146,14 @@ def timing_heat_style(value: float) -> str:
     return f"background-color: rgba({red}, {green}, {blue}, {alpha:.2f});"
 
 
+def stat(row: dict[str, str], key: str) -> str:
+    value = row.get(key, "")
+    return value if value else "n/a"
+
+
 def render_snapshot_row(label: str, row: dict[str, str] | None) -> str:
     if row is None:
-        return "<tr><th>{}</th><td colspan=\"10\">No run yet</td></tr>".format(html.escape(label))
+        return "<tr><th>{}</th><td colspan=\"12\">No run yet</td></tr>".format(html.escape(label))
     row_style = timing_heat_style(float(row["avg_ms"]))
     return (
         f"<tr style=\"{row_style}\">"
@@ -149,9 +164,11 @@ def render_snapshot_row(label: str, row: dict[str, str] | None) -> str:
         f"<td>{html.escape(row['git_state'])}</td>"
         f"<td>{html.escape(row['machine_name'])}</td>"
         f"<td>{html.escape(row['machine_model'])}</td>"
-        f"<td>{html.escape(row['avg_ms'])}</td>"
-        f"<td>{html.escape(row['min_ms'])}</td>"
-        f"<td>{html.escape(row['max_ms'])}</td>"
+        f"<td>{html.escape(stat(row, 'avg_ms'))}</td>"
+        f"<td>{html.escape(stat(row, 'p50_ms'))}</td>"
+        f"<td>{html.escape(stat(row, 'p95_ms'))}</td>"
+        f"<td>{html.escape(stat(row, 'min_ms'))}</td>"
+        f"<td>{html.escape(stat(row, 'max_ms'))}</td>"
         f"<td>{html.escape(row['sample_count'])}</td>"
         "</tr>"
     )
@@ -238,6 +255,8 @@ def render_report(rows: list[dict[str, str]], report_path: Path) -> None:
         <th>Machine</th>
         <th>Model</th>
         <th>Avg ms</th>
+        <th>p50 ms</th>
+        <th>p95 ms</th>
         <th>Min ms</th>
         <th>Max ms</th>
         <th>Count</th>

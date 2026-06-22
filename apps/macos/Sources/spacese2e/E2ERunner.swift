@@ -485,9 +485,10 @@ private struct E2ERunner {
     private func shouldCollectArtifact(_ url: URL) -> Bool {
         let name = url.lastPathComponent
         let ext = url.pathExtension.lowercased()
-        if ["metrics.json", "summary.txt", "terminal-latency-summary.json", "result.json", "metrics.log", "results.log", "events.log", "debug.log"]
-            .contains(name)
-        {
+        if [
+            "metrics.json", "summary.txt", "terminal-latency-summary.json", "result.json", "metrics.log", "results.log", "events.log", "debug.log",
+            "perf.log",
+        ].contains(name) {
             return true
         }
         if ext == "jsonl" || ext == "tsv" { return true }
@@ -501,7 +502,7 @@ private struct E2ERunner {
         if ext == "json" { return .json }
         if ext == "jsonl" { return .jsonl }
         if ext == "tsv" || name == "metrics.log" || name == "results.log" { return .tsv }
-        if name == "summary.txt" || name == "events.log" || name == "debug.log" { return .text }
+        if name == "summary.txt" || name == "events.log" || name == "debug.log" || name == "perf.log" { return .text }
         return .other
     }
 

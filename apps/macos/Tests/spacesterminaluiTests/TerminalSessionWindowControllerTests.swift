@@ -245,6 +245,66 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(didRestart)
     }
 
+    @MainActor func testRuntimeControlsReuseCachedValueDuringFocusUntilDirty() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-controls-cache", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-controls-cache", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        var refreshCount = 0
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-controls-cache", paths: paths,
+            runtimeControlsProvider: { _ in
+                refreshCount += 1
+                return TerminalSessionRuntimeControls(title: "frontend", canRun: false, canStop: true, canRestart: true)
+            })
+
+        XCTAssertEqual(refreshCount, 1)
+        controller.focusWindow()
+        XCTAssertEqual(refreshCount, 1)
+
+        controller.markRuntimeControlsDirty()
+        controller.debugForceRefresh()
+        XCTAssertEqual(refreshCount, 2)
+    }
+
+    @MainActor func testRuntimeControlsRefreshAfterRuntimeNotification() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-controls-notify", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-controls-notify", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        var refreshCount = 0
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-controls-notify", paths: paths,
+            runtimeControlsProvider: { _ in
+                refreshCount += 1
+                return TerminalSessionRuntimeControls(title: "frontend", canRun: false, canStop: true, canRestart: true)
+            })
+
+        XCTAssertEqual(refreshCount, 1)
+        controller.debugSimulateRuntimeStateDidChange()
+        XCTAssertEqual(refreshCount, 2)
+    }
+
     @MainActor func testShowAttachesClientAndCloseDetachesClient() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1941,6 +2001,29 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             TerminalSessionWindowController.shouldActivateDeferredInitialOwnerPresentation(appIsActive: false, requestID: UUID().uuidString))
         XCTAssertFalse(TerminalSessionWindowController.shouldActivateDeferredInitialOwnerPresentation(appIsActive: false, requestID: nil))
         XCTAssertFalse(TerminalSessionWindowController.shouldActivateDeferredInitialOwnerPresentation(appIsActive: false, requestID: ""))
+    }
+
+    func testWindowActivationRetryPredicate() {
+        XCTAssertFalse(
+            TerminalSessionWindowController.shouldRetryWindowActivation(
+                forceFrontmost: true, appWasActive: true, windowIsKeyAfterInitialActivation: true, isDeferredOwnerPresentation: false,
+                takeoverPending: false))
+        XCTAssertTrue(
+            TerminalSessionWindowController.shouldRetryWindowActivation(
+                forceFrontmost: true, appWasActive: true, windowIsKeyAfterInitialActivation: true, isDeferredOwnerPresentation: true,
+                takeoverPending: false))
+        XCTAssertTrue(
+            TerminalSessionWindowController.shouldRetryWindowActivation(
+                forceFrontmost: true, appWasActive: true, windowIsKeyAfterInitialActivation: true, isDeferredOwnerPresentation: false,
+                takeoverPending: true))
+        XCTAssertTrue(
+            TerminalSessionWindowController.shouldRetryWindowActivation(
+                forceFrontmost: true, appWasActive: true, windowIsKeyAfterInitialActivation: false, isDeferredOwnerPresentation: false,
+                takeoverPending: false))
+        XCTAssertFalse(
+            TerminalSessionWindowController.shouldRetryWindowActivation(
+                forceFrontmost: false, appWasActive: true, windowIsKeyAfterInitialActivation: false, isDeferredOwnerPresentation: false,
+                takeoverPending: false))
     }
 
     @MainActor func testGhosttyOwnerFocusWindowReassertsOwnerSurfaceFocus() throws {
