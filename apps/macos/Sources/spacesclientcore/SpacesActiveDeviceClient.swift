@@ -352,7 +352,7 @@ public enum SpacesActiveDeviceClient {
         #if canImport(Network)
             if let requestError = error as? SpacesDeviceAPIRequestClientError {
                 switch requestError {
-                case .timeout, .emptyResponse: return true
+                case .timeout, .emptyResponse, .connectionFailed: return true
                 case .invalidPort: return false
                 }
             }

@@ -625,7 +625,20 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
     return true;
 }
 
-bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, intptr_t delta_rows) {
+static SpacesGhosttyVtScrollbar spaces_ghostty_vt_scrollbar_from_ghostty(GhosttyTerminalScrollbar scrollbar) {
+    SpacesGhosttyVtScrollbar result = {0};
+    result.total = scrollbar.total;
+    result.offset = scrollbar.offset;
+    result.len = scrollbar.len;
+    return result;
+}
+
+bool spaces_ghostty_vt_session_scroll_viewport_with_info(
+    SpacesGhosttyVtSession *session,
+    intptr_t delta_rows,
+    SpacesGhosttyVtScrollbar *out_before,
+    SpacesGhosttyVtScrollbar *out_after
+) {
     if (session == NULL || session->terminal == NULL || delta_rows == 0) return false;
 
     GhosttyTerminalScrollbar before = {0};
@@ -642,6 +655,15 @@ bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, 
     if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &after) != GHOSTTY_SUCCESS) {
         return false;
     }
+    if (out_before != NULL) *out_before = spaces_ghostty_vt_scrollbar_from_ghostty(before);
+    if (out_after != NULL) *out_after = spaces_ghostty_vt_scrollbar_from_ghostty(after);
+    return true;
+}
+
+bool spaces_ghostty_vt_session_scroll_viewport(SpacesGhosttyVtSession *session, intptr_t delta_rows) {
+    SpacesGhosttyVtScrollbar before = {0};
+    SpacesGhosttyVtScrollbar after = {0};
+    if (!spaces_ghostty_vt_session_scroll_viewport_with_info(session, delta_rows, &before, &after)) return false;
     return before.offset != after.offset;
 }
 

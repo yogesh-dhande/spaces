@@ -35,8 +35,8 @@ struct SpacesE2ECommand: ParsableCommand {
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
             ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self,
             MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self, TerminalServiceTLSRequestCommand.self,
-            TerminalServiceTLSSessionCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
-            DragApplicationWindowCommand.self,
+            TerminalServiceTLSSessionCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self,
+            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -586,6 +586,7 @@ private struct MobileRequestCommand: ParsableCommand {
     @Option(help: "Base64url Device API transport key. Defaults to the pairing link PSK.") var transportKey: String?
     @Option(help: "JSON Device API request. Reads stdin when omitted.") var requestJSON: String?
     @Flag(help: "Keep the connection open and print newline-delimited Device API messages.") var stream = false
+    @Flag(help: "Read newline-delimited Device API requests from stdin and reuse one request connection.") var requestLines = false
 
     func run() throws {
         let link = try pairingLink.map { try SpacesDevicePairingLink.parse($0) }
@@ -594,6 +595,13 @@ private struct MobileRequestCommand: ParsableCommand {
         guard (1...65_535).contains(resolvedPort) else { throw ValidationError("Port must be between 1 and 65535.") }
         guard let resolvedTransportKey = transportKey ?? link?.transportKey else {
             throw ValidationError("Provide --transport-key or a pairing link.")
+        }
+
+        if requestLines {
+            guard !stream else { throw ValidationError("--request-lines cannot be combined with --stream.") }
+            guard requestJSON == nil else { throw ValidationError("--request-lines reads requests from stdin; omit --request-json.") }
+            try sendRequestLines(host: resolvedHost, port: resolvedPort, transportKey: resolvedTransportKey, pairingLink: link)
+            return
         }
 
         var requestData = try readRequestData()
@@ -626,6 +634,85 @@ private struct MobileRequestCommand: ParsableCommand {
         }
         return try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
     }
+
+    private func sendRequestLines(host: String, port: Int, transportKey: String, pairingLink link: SpacesDevicePairingLink?) throws {
+        let client = try SpacesDeviceAPIRequestSessionClient(host: host, port: port, transportKey: transportKey)
+        defer { client.cancel() }
+        while let line = readLine(strippingNewline: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            var requestData = Data(trimmed.utf8)
+            if let link { requestData = try requestDataByApplying(pairingLink: link, to: requestData) }
+            let request = try SpacesDeviceAPICodec.decodeRequest(requestData)
+            let response = try client.send(request, timeoutSeconds: 30)
+            FileHandle.standardOutput.write(try SpacesDeviceAPICodec.encodeResponse(response))
+            FileHandle.standardOutput.write(Data([0x0A]))
+            fflush(stdout)
+        }
+    }
+}
+
+private struct RenderUpdateTextCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "render-update-text", abstract: "Decode terminal render update payload lines for harnesses.")
+
+    func run() throws {
+        let encoder = JSONEncoder()
+        var baseline: GhosttyRenderUpdateBaseline?
+
+        while let line = readLine(strippingNewline: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            let response: RenderUpdateTextLine
+            do {
+                let payload = try GhosttyRemoteSessionStateCodec.decodeLine(Data(trimmed.utf8))
+                var appliedRenderUpdate = false
+                var updateKind: String?
+                var applyError: String?
+
+                if let renderUpdate = payload.decodedRenderUpdate {
+                    updateKind = renderUpdate.kind.rawValue
+                    do {
+                        baseline = try GhosttyRenderUpdateApplier.apply(renderUpdate, to: baseline)
+                        appliedRenderUpdate = true
+                    } catch {
+                        baseline = nil
+                        applyError = String(describing: error)
+                    }
+                } else if payload.renderUpdate != nil {
+                    baseline = nil
+                    applyError = "render_update_decode_failed"
+                }
+
+                response = RenderUpdateTextLine(
+                    ok: true, hasRenderUpdate: payload.renderUpdate != nil, appliedRenderUpdate: appliedRenderUpdate, updateKind: updateKind,
+                    text: baseline.map { GhosttyTerminalSnapshotLayout.plainText(for: $0.snapshot) }, reason: payload.reason,
+                    outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision, error: applyError)
+            } catch {
+                response = RenderUpdateTextLine(
+                    ok: false, hasRenderUpdate: nil, appliedRenderUpdate: nil, updateKind: nil, text: nil, reason: nil, outputByteCount: nil,
+                    screenStateRevision: nil, error: String(describing: error))
+            }
+
+            var data = try encoder.encode(response)
+            data.append(0x0A)
+            FileHandle.standardOutput.write(data)
+            fflush(stdout)
+        }
+    }
+}
+
+private struct RenderUpdateTextLine: Encodable {
+    let ok: Bool
+    let hasRenderUpdate: Bool?
+    let appliedRenderUpdate: Bool?
+    let updateKind: String?
+    let text: String?
+    let reason: String?
+    let outputByteCount: Int?
+    let screenStateRevision: UInt64?
+    let error: String?
 }
 
 private struct TerminalServiceTLSRequestCommand: ParsableCommand {

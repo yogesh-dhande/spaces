@@ -359,6 +359,7 @@ service_dir="$HOME/.config/systemd/user"
 service_path="$service_dir/spacesd.service"
 device_api_host="${SPACES_DEVICE_API_HOST:-0.0.0.0}"
 device_api_port="${SPACES_DEVICE_API_PORT:-47847}"
+performance_log_path="${SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH:-}"
 
 cleanup_install_staging() {
     rm -rf "$release_staging_dir"
@@ -424,6 +425,11 @@ Environment=SPACES_DB_PATH=%h/.spaces/spaces.db
 Environment=SPACES_RUNTIME_DIR=%h/.spaces/runtime
 Environment=SPACES_DEVICE_API_HOST=$device_api_host
 Environment=SPACES_DEVICE_API_PORT=$device_api_port
+SERVICE
+if [ -n "$performance_log_path" ]; then
+    printf 'Environment=SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=%s\n' "$performance_log_path" >> "$service_path"
+fi
+cat >> "$service_path" <<SERVICE
 
 [Install]
 WantedBy=default.target

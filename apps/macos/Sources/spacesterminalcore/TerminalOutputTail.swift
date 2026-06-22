@@ -19,7 +19,7 @@ public enum TerminalOutputTail {
     private static let renderedSuffixScanWindows: [UInt64] = [64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024]
     private static let defaultColumns = 120
     private static let defaultRows = 40
-    fileprivate static let maxScrollback = 20_000
+    fileprivate static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
     private static let clearScreenBoundaryPatterns: [Data] = [
         Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A]), Data([0x1B, 0x5B, 0x4A]),
     ]
@@ -308,8 +308,8 @@ private enum TerminalOutputVTRenderer {
         let succeeded = data.withUnsafeBytes { rawBuffer in
             let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress
             return spaces_ghostty_vt_render_plain(
-                baseAddress, rawBuffer.count, UInt16(clamping: columns), UInt16(clamping: rows), TerminalOutputTail.maxScrollback, &outputPointer,
-                &outputLength)
+                baseAddress, rawBuffer.count, UInt16(clamping: columns), UInt16(clamping: rows), TerminalOutputTail.maxScrollbackBytes,
+                &outputPointer, &outputLength)
         }
         guard succeeded, let outputPointer else { throw TerminalOutputTailError.ghosttyVTRenderFailed }
         defer { spaces_ghostty_vt_free_buffer(outputPointer) }

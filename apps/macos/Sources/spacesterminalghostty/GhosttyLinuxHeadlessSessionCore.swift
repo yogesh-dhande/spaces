@@ -18,7 +18,7 @@
     }
 
     @MainActor public final class GhosttyEmbeddedSessionCore {
-        private static let maxScrollback = 20_000
+        private static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
 
         private enum RenderStateExportMode {
             case selfContained
@@ -46,6 +46,7 @@
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var forceNextBroadcastFullRenderUpdate = false
         private var localOwnerCommandInputOutputResyncPending = false
+        private var scrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         private var inputOutputResyncTask: Task<Void, Never>?
         private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
 
@@ -70,7 +71,7 @@
             try ensureOutputHandle()
             guard
                 let vtSession = spaces_ghostty_vt_session_new(
-                    UInt16(clamping: terminalSize.columns), UInt16(clamping: terminalSize.rows), Self.maxScrollback)
+                    UInt16(clamping: terminalSize.columns), UInt16(clamping: terminalSize.rows), Self.maxScrollbackBytes)
             else { throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable }
             self.vtSession = vtSession
             started = true
@@ -133,6 +134,9 @@
 
         private func handleOutput(_ data: Data) {
             guard started, !data.isEmpty else { return }
+            logMobileTakeoverPerformance(
+                name: "terminal_output_observed", count: data.count,
+                attributes: ["output_bytes": String(data.count), "output_byte_count_before": String(outputByteCount)])
             do {
                 try outputHandle?.write(contentsOf: data)
                 outputByteCount += data.count
@@ -175,18 +179,27 @@
         }
 
         public func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let startedAt = Date()
+            let response: TerminalControlResponse
             switch request.command {
-            case "attach": return attach(request)
-            case "detach": return detach(request)
-            case "heartbeat": return heartbeat(request)
-            case "takeover": return takeover(request)
-            case "send": return send(request)
-            case "key": return key(request)
-            case "clearScreen": return clearScreen(request)
-            case "resize": return resize(request)
-            case "scroll": return scroll(request)
-            default: return TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+            case "attach": response = attach(request)
+            case "detach": response = detach(request)
+            case "heartbeat": response = heartbeat(request)
+            case "takeover": response = takeover(request)
+            case "send": response = send(request)
+            case "key": response = key(request)
+            case "clearScreen": response = clearScreen(request)
+            case "resize": response = resize(request)
+            case "scroll": response = scroll(request)
+            default: response = TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
             }
+            logMobileTakeoverPerformance(
+                name: "terminal_control_host_handle", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                attributes: [
+                    "action": request.command, "ok": response.ok ? "1" : "0", "client_id": request.clientID ?? "nil",
+                    "owner_epoch": request.ownerEpoch.map(String.init) ?? "nil",
+                ])
+            return response
         }
 
         private func attach(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -243,7 +256,6 @@
             if request.appendNewline { payload.append(0x0A) }
             markLocalOwnerCommandInputOutputResyncPending()
             ptyDriver.sendRawBytes(payload)
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
             return TerminalControlResponse(ok: true, message: "Sent input.")
         }
 
@@ -254,7 +266,6 @@
             }
             if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
             ptyDriver.sendRawBytes(Data(bytes))
-            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
             return TerminalControlResponse(ok: true, message: "Sent key.")
         }
 
@@ -288,13 +299,33 @@
             }
             guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
             let vertical = request.scrollVertical ?? 0
-            let deltaRows = -Int(vertical.rounded(.toNearestOrAwayFromZero))
+            let scrollMods = request.scrollMods ?? 0
+            let deltaRows = scrollDeltaNormalizer.terminalViewportDeltaRows(vertical: vertical, scrollMods: scrollMods)
             guard deltaRows != 0 else { return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.") }
-            guard spaces_ghostty_vt_session_scroll_viewport(vtSession, deltaRows) else {
+            var attributes = [
+                "action": request.command, "client_id": request.clientID ?? "nil", "delta_rows": String(deltaRows),
+                "owner_epoch": request.ownerEpoch.map(String.init) ?? "nil", "scroll_mods": String(scrollMods), "scroll_vertical": String(vertical),
+            ]
+            let nativeStartedAt = Date()
+            var beforeScrollbar = SpacesGhosttyVtScrollbar()
+            var afterScrollbar = SpacesGhosttyVtScrollbar()
+            guard spaces_ghostty_vt_session_scroll_viewport_with_info(vtSession, deltaRows, &beforeScrollbar, &afterScrollbar) else {
                 return TerminalControlResponse(ok: false, message: "Unable to scroll terminal.")
             }
+            attributes["scrollbar_before"] = "\(beforeScrollbar.offset)/\(beforeScrollbar.total)"
+            attributes["scrollbar_after"] = "\(afterScrollbar.offset)/\(afterScrollbar.total)"
+            guard beforeScrollbar.offset != afterScrollbar.offset else {
+                logMobileTakeoverPerformance(
+                    name: "scroll_native_end", elapsedMS: TerminalPerformance.elapsedMS(since: nativeStartedAt), attributes: attributes)
+                return TerminalControlResponse(ok: true, message: "Already at scroll boundary.")
+            }
+            logMobileTakeoverPerformance(
+                name: "scroll_native_end", elapsedMS: TerminalPerformance.elapsedMS(since: nativeStartedAt), attributes: attributes)
             screenStateRevision &+= 1
+            let broadcastStartedAt = Date()
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll)
+            logMobileTakeoverPerformance(
+                name: "scroll_broadcast_end", elapsedMS: TerminalPerformance.elapsedMS(since: broadcastStartedAt), attributes: attributes)
             return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
         }
 
@@ -344,7 +375,7 @@
 
         private func recreateVTRenderer(columns: Int, rows: Int) {
             if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
-            vtSession = spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), Self.maxScrollback)
+            vtSession = spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), Self.maxScrollbackBytes)
             renderUpdateBaseline = nil
             forceNextBroadcastFullRenderUpdate = true
             guard let vtSession, let data = try? Data(contentsOf: URL(fileURLWithPath: paths.outputPath)), !data.isEmpty else { return }
@@ -368,9 +399,31 @@
         }
 
         private func broadcastCurrentState(reason: String) {
+            let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
+            let startedAt = performanceLoggingEnabled ? Date() : nil
             guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed) else { return }
-            try? TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
             stateStreamServer?.broadcast(payload)
+            guard performanceLoggingEnabled, let startedAt else { return }
+            let payloadEncodeStartedAt = Date()
+            let encodedPayload = try? GhosttyRemoteSessionStateCodec.encodeLine(payload)
+            let payloadEncodeMS = TerminalPerformance.elapsedMS(since: payloadEncodeStartedAt)
+            let payloadBytes = encodedPayload?.count ?? 0
+            let decodedUpdate = payload.decodedRenderUpdate
+            let attributes = GhosttyRenderFrameMetrics.attributes(
+                reason: payload.reason, frame: decodedUpdate?.fullFrame, payloadByteCount: payloadBytes, payloadEncodeMS: payloadEncodeMS,
+                outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
+                baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+                operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
+                scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
+            logMobileTakeoverPerformance(
+                name: "remote_state_publish", count: payloadBytes,
+                attributes: [
+                    "reason": payload.reason, "owner_kind": activeOwnerClient()?.kind.rawValue ?? "nil", "payload_bytes": String(payloadBytes),
+                    "render_update": payload.renderUpdate == nil ? "0" : "1", "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
+                ])
+            logMobileTakeoverPerformance(
+                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payloadBytes,
+                attributes: attributes)
         }
 
         private func makeStatePayload(
@@ -387,9 +440,35 @@
             } else {
                 runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: started ? .running : .exited)
             }
-            let frame = includeScreenState ? try? renderFrame() : nil
-            let renderUpdate = frame.flatMap {
-                try? GhosttyRenderUpdateBinaryCodec.encode(makeRenderUpdate(for: $0, reason: reason, exportMode: exportMode))
+            let frame: GhosttyRenderFrame?
+            let renderUpdateValue: GhosttyRenderUpdate?
+            let renderUpdate: Data?
+            if includeScreenState {
+                let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
+                let snapshotExportStartedAt = performanceLoggingEnabled ? Date() : nil
+                frame = try? renderFrame()
+                let renderUpdateEncodeStartedAt = performanceLoggingEnabled ? Date() : nil
+                renderUpdateValue = frame.map { makeRenderUpdate(for: $0, reason: reason, exportMode: exportMode) }
+                renderUpdate = renderUpdateValue.flatMap { try? GhosttyRenderUpdateBinaryCodec.encode($0) }
+                if performanceLoggingEnabled, let snapshotExportStartedAt, let renderUpdateEncodeStartedAt {
+                    let renderUpdateEncodeMS = TerminalPerformance.elapsedMS(since: renderUpdateEncodeStartedAt)
+                    var attributes = GhosttyRenderFrameMetrics.attributes(
+                        reason: reason, frame: frame, outputByteCount: outputByteCount, screenStateRevision: screenStateRevision,
+                        frameKind: renderUpdateValue?.frameKindMetricValue, baseRevision: renderUpdateValue?.baseRevision,
+                        targetRevision: renderUpdateValue?.targetRevision ?? screenStateRevision, operationCount: renderUpdateValue?.operationCount,
+                        changedCellCount: renderUpdateValue?.changedCellCount, scrollOperationCount: renderUpdateValue?.scrollOperationCount,
+                        fullFrameFallbackReason: renderUpdateValue?.fallbackReason)
+                    attributes["owner_kind"] = ownerKind?.rawValue ?? "nil"
+                    attributes["render_update_bytes"] = String(renderUpdate?.count ?? 0)
+                    attributes["render_update_encode_ms"] = String(renderUpdateEncodeMS)
+                    logMobileTakeoverPerformance(
+                        name: "render_frame_export_end", elapsedMS: TerminalPerformance.elapsedMS(since: snapshotExportStartedAt),
+                        count: renderUpdate?.count, attributes: attributes)
+                }
+            } else {
+                frame = nil
+                renderUpdateValue = nil
+                renderUpdate = nil
             }
             if renderUpdate != nil, markNextBroadcastFull { forceNextBroadcastFullRenderUpdate = true }
             return GhosttyRemoteSessionStatePayload(
@@ -463,6 +542,13 @@
         }
 
         private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }
+
+        private func logMobileTakeoverPerformance(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
+            SpacesDeviceTerminalPerformanceLogger.emit(
+                .init(
+                    sessionID: launchConfiguration.sessionID, source: "linux-host", name: name, elapsedMS: elapsedMS, count: count,
+                    attributes: attributes))
+        }
 
         nonisolated private static func runOnMainActorSynchronously<T: Sendable>(_ work: @MainActor @Sendable @escaping () -> T) -> T {
             if Thread.isMainThread { return MainActor.assumeIsolated(work) }

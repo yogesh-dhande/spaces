@@ -437,12 +437,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 var requestBuffer = Data()
                 while true {
                     guard let requestData = try Self.readTLSRequestLine(ssl: ssl, buffer: &requestBuffer) else { return }
+                    let requestReceivedUptime = DispatchTime.now().uptimeNanoseconds
                     let request: SpacesDeviceAPIRequest
                     do { request = try SpacesDeviceAPICodec.decodeRequest(requestData) } catch {
                         try Self.writeTLSResponse(
                             try SpacesDeviceAPICodec.encodeResponseLine(.init(ok: false, message: String(describing: error))), ssl: ssl)
                         return
                     }
+                    logRequestPerformance(
+                        name: "request_line_received", request: request, emittedUptimeNanoseconds: requestReceivedUptime, count: requestData.count,
+                        fileDescriptor: fileDescriptor)
 
                     if request.command.isSubscriptionCommand {
                         let action = try server.syncOnQueue {
@@ -450,8 +454,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             return try server.prepareLinuxSubscribe(request)
                         }
                         switch action {
-                        case .response(let response): try Self.writeTLSResponse(try SpacesDeviceAPICodec.encodeResponseLine(response), ssl: ssl)
-                        case .finalPayload(let payload): try Self.writeTLSResponse(try GhosttyRemoteSessionStateCodec.encodeLine(payload), ssl: ssl)
+                        case .response(let response):
+                            let responseLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
+                            try writeLoggedTLSResponse(
+                                responseLine, ssl: ssl, request: request, responseOK: response.ok, fileDescriptor: fileDescriptor)
+                        case .finalPayload(let payload):
+                            let payloadLine = try GhosttyRemoteSessionStateCodec.encodeLine(payload)
+                            try writeLoggedTLSResponse(payloadLine, ssl: ssl, request: request, responseOK: true, fileDescriptor: fileDescriptor)
                         case .relay(let subscription):
                             registerActiveConnection(fileDescriptor, installationID: subscription.installationID)
                             try server.relayLinuxSubscription(subscription, ssl: ssl)
@@ -469,9 +478,48 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
                         response = SpacesDeviceAPIResponse(ok: false, message: message)
                     }
-                    try Self.writeTLSResponse(try SpacesDeviceAPICodec.encodeResponseLine(response), ssl: ssl)
+                    let responseLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
+                    try writeLoggedTLSResponse(responseLine, ssl: ssl, request: request, responseOK: response.ok, fileDescriptor: fileDescriptor)
                     if !response.ok, response.message.localizedStandardContains("unauthorized") { return }
                 }
+            }
+
+            private func writeLoggedTLSResponse(
+                _ data: Data, ssl: OpaquePointer, request: SpacesDeviceAPIRequest, responseOK: Bool, fileDescriptor: Int32
+            ) throws {
+                let startedAt = Date()
+                let attributes = requestAttributes(request, fileDescriptor: fileDescriptor, extra: ["ok": responseOK ? "1" : "0"])
+                if let sessionID = request.sessionID {
+                    server.logDeviceAPIPerformance(
+                        sessionID: sessionID, name: "request_response_write_begin", count: data.count, attributes: attributes)
+                }
+                try Self.writeTLSResponse(data, ssl: ssl)
+                if let sessionID = request.sessionID {
+                    server.logDeviceAPIPerformance(
+                        sessionID: sessionID, name: "request_response_write_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        count: data.count, attributes: attributes)
+                }
+            }
+
+            private func logRequestPerformance(
+                name: String, request: SpacesDeviceAPIRequest, emittedUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds,
+                elapsedMS: Int? = nil, count: Int? = nil, fileDescriptor: Int32
+            ) {
+                guard let sessionID = request.sessionID else { return }
+                server.logDeviceAPIPerformance(
+                    sessionID: sessionID, name: name, emittedUptimeNanoseconds: emittedUptimeNanoseconds, elapsedMS: elapsedMS, count: count,
+                    attributes: requestAttributes(request, fileDescriptor: fileDescriptor))
+            }
+
+            private func requestAttributes(_ request: SpacesDeviceAPIRequest, fileDescriptor: Int32, extra: [String: String] = [:]) -> [String:
+                String]
+            {
+                var attributes: [String: String] = [
+                    "command": request.commandName, "peer": "linux:\(fileDescriptor)", "transport": "linux_tls",
+                    "client_id": request.clientID ?? request.clientApp?.installationID ?? "nil",
+                ]
+                for (key, value) in extra { attributes[key] = value }
+                return attributes
             }
 
             private static func makeSSLContext(transportKey: String) throws -> OpaquePointer {
@@ -928,16 +976,30 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
         }
 
+        let attributes: [String: String] = [
+            "action": payload.action.rawValue, "client_id": clientID ?? "nil", "owner_epoch": payload.ownerEpoch.map(String.init) ?? "nil",
+        ]
         let terminalRequest = TerminalControlRequest(
             command: payload.action.rawValue, text: payload.text, key: payload.key, clientID: clientID, client: payload.client,
             attachmentMode: payload.attachmentMode, columns: payload.columns, rows: payload.rows, ownerEpoch: payload.ownerEpoch,
             resizeSerial: payload.resizeSerial, scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical,
             scrollMods: payload.scrollMods, appendNewline: payload.appendNewline)
+        let dispatchStartedAt = Date()
+        logDeviceAPIPerformance(sessionID: sessionID, name: "terminal_control_dispatch_begin", attributes: attributes)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
+        let dispatchMS = TerminalPerformance.elapsedMS(since: dispatchStartedAt)
+        var responseAttributes = attributes
+        responseAttributes["ok"] = response.ok ? "1" : "0"
+        responseAttributes["control_socket_ms"] = String(dispatchMS)
+        logDeviceAPIPerformance(sessionID: sessionID, name: "terminal_control_dispatch_end", elapsedMS: dispatchMS, attributes: responseAttributes)
         TerminalPerformance.logMetric(
             "device_api_\(payload.action.rawValue)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
         let sessionState = response.ok && payload.action == .takeover ? try? loadCurrentState(sessionID: sessionID) : nil
+        responseAttributes["include_session_state"] = sessionState == nil ? "0" : "1"
+        logDeviceAPIPerformance(
+            sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            attributes: responseAttributes)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, result: sessionState.map(SpacesDeviceAPIResult.terminalState))
     }
 
@@ -1558,6 +1620,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             defer { heartbeatTimer?.cancel() }
 
             let startedAt = Date()
+            let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             var buffer = [UInt8](repeating: 0, count: Self.streamRelayReadBufferSize)
             while true {
                 let count = read(relaySocketFD, &buffer, buffer.count)
@@ -1568,12 +1631,52 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 }
                 try buffer.withUnsafeBytes { rawBuffer in
                     guard let baseAddress = rawBuffer.baseAddress else { return }
-                    try LinuxServer.writeTLSResponse(Data(bytes: baseAddress, count: count), ssl: ssl)
+                    let data = Data(bytes: baseAddress, count: count)
+                    let attributes = performanceLoggingEnabled ? linuxStreamRelayAttributes(for: data) : [:]
+                    let writeStartedAt = performanceLoggingEnabled ? Date() : nil
+                    if performanceLoggingEnabled {
+                        logDeviceAPIPerformance(
+                            sessionID: subscription.sessionID, name: "stream_relay_read",
+                            emittedUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds, count: count, attributes: attributes)
+                        logDeviceAPIPerformance(
+                            sessionID: subscription.sessionID, name: "stream_network_send_begin", count: count, attributes: attributes)
+                    }
+                    try LinuxServer.writeTLSResponse(data, ssl: ssl)
+                    if let writeStartedAt {
+                        logDeviceAPIPerformance(
+                            sessionID: subscription.sessionID, name: "stream_network_send_end",
+                            elapsedMS: TerminalPerformance.elapsedMS(since: writeStartedAt), count: count, attributes: attributes)
+                    }
                 }
             }
             TerminalPerformance.logMetric(
                 "device_api_subscribe", target: "session=\(subscription.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                 success: true)
+        }
+
+        private func linuxStreamRelayAttributes(for data: Data) -> [String: String] {
+            var attributes: [String: String] = [
+                "payload_bytes": String(data.count), "payload_count": String(data.split(separator: 0x0A, omittingEmptySubsequences: true).count),
+            ]
+            guard let firstLine = data.split(separator: 0x0A, maxSplits: 1, omittingEmptySubsequences: true).first,
+                let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(firstLine))
+            else {
+                attributes["render_update"] = "unknown"
+                return attributes
+            }
+            attributes["reason"] = payload.reason
+            attributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
+            attributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+            if let update = payload.decodedRenderUpdate {
+                attributes["frame_kind"] = update.frameKindMetricValue
+                attributes["operation_count"] = String(update.operationCount)
+                attributes["changed_cell_count"] = String(update.changedCellCount)
+                attributes["scroll_operation_count"] = String(update.scrollOperationCount)
+                attributes["base_revision"] = update.baseRevision.map(String.init) ?? "nil"
+                attributes["full_frame_fallback_reason"] = update.fallbackReason ?? "none"
+            }
+            attributes["target_revision"] = payload.screenStateRevision.map(String.init) ?? "nil"
+            return attributes
         }
     #endif
 
@@ -1733,12 +1836,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             _ data: Data, firstReadUptimeNanoseconds: UInt64?, to connection: NWConnection, closeAfterSend: Bool = false
         ) {
             guard let relay = streamRelays[ObjectIdentifier(connection)] else { return }
-            let attributes = streamRelayAttributes(for: data)
-            logDeviceAPIPerformance(
-                sessionID: relay.sessionID, name: "stream_relay_read",
-                emittedUptimeNanoseconds: firstReadUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds, count: data.count,
-                attributes: attributes)
-            relay.sendSequencer.enqueue { [weak self, weak connection, sessionID = relay.sessionID, attributes, data, closeAfterSend] finish in
+            let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
+            let attributes = performanceLoggingEnabled ? streamRelayAttributes(for: data) : [:]
+            if performanceLoggingEnabled {
+                logDeviceAPIPerformance(
+                    sessionID: relay.sessionID, name: "stream_relay_read",
+                    emittedUptimeNanoseconds: firstReadUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds, count: data.count,
+                    attributes: attributes)
+            }
+            relay.sendSequencer.enqueue {
+                [weak self, weak connection, sessionID = relay.sessionID, attributes, data, closeAfterSend, performanceLoggingEnabled] finish in
                 guard let self, let connection else {
                     finish(nil)
                     return
@@ -1746,6 +1853,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 self.networkShaper.send(
                     content: data, to: connection, on: self.queue,
                     onSendBegin: { [weak self, sessionID, attributes, count = data.count] in
+                        guard performanceLoggingEnabled else { return }
                         var sendAttributes = attributes
                         sendAttributes["network_send_bytes"] = String(count)
                         self?.logDeviceAPIPerformance(
@@ -2021,13 +2129,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func logDeviceAPIPerformance(
-        sessionID: String, name: String, emittedUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds, count: Int? = nil,
-        attributes: [String: String] = [:]
+        sessionID: String, name: String, emittedUptimeNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds, elapsedMS: Int? = nil,
+        count: Int? = nil, attributes: [String: String] = [:]
     ) {
         SpacesDeviceTerminalPerformanceLogger.emit(
             .init(
-                sessionID: sessionID, source: "device-api", name: name, emittedUptimeNanoseconds: emittedUptimeNanoseconds, count: count,
-                attributes: attributes))
+                sessionID: sessionID, source: "device-api", name: name, emittedUptimeNanoseconds: emittedUptimeNanoseconds, elapsedMS: elapsedMS,
+                count: count, attributes: attributes))
     }
 
     private func setRunning(_ value: Bool) {

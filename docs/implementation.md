@@ -733,6 +733,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Focus and capture paths should avoid unnecessary blocking work.
 - Hot paths that do not need stdout or stderr should use lightweight process spawning.
 - Long-running GUI actions should execute off the main thread and reconcile state back into the UI afterward.
+- Terminal input hot paths should avoid publishing state frames that cannot contain render updates. Live terminal streams should use in-memory subscription delivery for current frames and reserve remote-session-state persistence for final state and explicit state snapshots.
 
 ## External Dependencies
 - macOS 14+

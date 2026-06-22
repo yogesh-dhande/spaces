@@ -9,7 +9,7 @@
         @Sendable (
             _ sessionID: String, _ onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
             _ onDisconnect: @escaping @Sendable ((any Error)?) -> Void
-        ) throws -> TerminalServicePinnedTLSStateStreamClient
+        ) throws -> any TerminalRemoteStateStreamClient
 
     @MainActor public final class RemoteGhosttySessionHost: TerminalGhosttySessionHosting {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
@@ -23,7 +23,7 @@
         private var persistedFinalStateLoadInProgress = false
         private var stateReducer = TerminalRemoteStateReducer()
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
-        private var directStateStreamClient: TerminalServicePinnedTLSStateStreamClient?
+        private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
         private var attachedClient: TerminalClient?

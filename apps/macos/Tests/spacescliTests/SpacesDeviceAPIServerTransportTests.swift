@@ -2,13 +2,87 @@ import Darwin
 import Foundation
 import Network
 import XCTest
-import spacesdevicecore
 import spacesterminalcore
 import workspacecore
 
 @testable import spacesdeviceapi
+@testable import spacesdevicecore
 
 final class SpacesDeviceAPIServerTransportTests: XCTestCase {
+    func testReusableRequestSessionConnectsLazily() throws {
+        let client = try SpacesDeviceAPIRequestSessionClient(
+            host: "127.0.0.1", port: makeAvailableTCPPort(), transportKey: SpacesDeviceAPISettings.generateTransportKey())
+
+        XCTAssertEqual(client.openedConnectionCountForTesting, 0)
+    }
+
+    func testReusableRequestSessionTreatsEOFAsClosedConnectionForReplaySafeRequests() {
+        XCTAssertTrue(SpacesDeviceAPIRequestSessionClient.debugIsClosedConnectionErrorForTesting(SpacesDeviceAPIRequestClientError.emptyResponse))
+    }
+
+    func testReusableRequestSessionSendsMultipleRequestsOnOneConnection() throws {
+        try withTemporaryProfile { _ in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-SESSION-REUSE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+            let client = try SpacesDeviceAPIRequestSessionClient(host: "127.0.0.1", port: server.listeningPort, transportKey: transportKey)
+
+            let request = SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp)
+            let firstResponse = try client.send(request)
+            XCTAssertTrue(firstResponse.ok, firstResponse.message)
+            XCTAssertEqual(firstResponse.message, "pong")
+            XCTAssertTrue(waitForRequestConnectionCount(1, on: server, timeout: 5))
+
+            let secondResponse = try client.send(request)
+            XCTAssertTrue(secondResponse.ok, secondResponse.message)
+            XCTAssertEqual(secondResponse.message, "pong")
+            XCTAssertTrue(waitForRequestConnectionCount(1, on: server, timeout: 5))
+
+            client.cancel()
+            XCTAssertTrue(waitForRequestConnectionCount(0, on: server, timeout: 5))
+        }
+    }
+
+    func testReusableRequestSessionReconnectsBeforeNonReplayableRequestAfterIdleCutoff() throws {
+        try withTemporaryProfile { _ in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let uptime = DeviceAPITransportTestUptime()
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-SESSION-IDLE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
+                deviceName: "Mac", appVersion: "1.0")
+            let client = try SpacesDeviceAPIRequestSessionClient(
+                host: "127.0.0.1", port: server.listeningPort, transportKey: transportKey, idleReconnectInterval: 1, uptime: uptime.value)
+            defer { client.cancel() }
+
+            let pingRequest = SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp)
+            let firstResponse = try client.send(pingRequest)
+            XCTAssertTrue(firstResponse.ok, firstResponse.message)
+            XCTAssertEqual(client.openedConnectionCountForTesting, 1)
+
+            uptime.set(0.5)
+            let secondResponse = try client.send(pingRequest)
+            XCTAssertTrue(secondResponse.ok, secondResponse.message)
+            XCTAssertEqual(client.openedConnectionCountForTesting, 1)
+
+            uptime.set(2)
+            let controlResponse = try client.send(
+                SpacesDeviceAPIRequest(
+                    command: .terminalControl(.init(action: .send, sessionID: "missing-session", text: "x")), authToken: pairingStore.authToken,
+                    clientApp: clientApp))
+            XCTAssertFalse(controlResponse.ok)
+            XCTAssertEqual(client.openedConnectionCountForTesting, 2)
+        }
+    }
+
     func testTLSPskClientCanPairAndPlaintextClientCannotReadResponse() throws {
         try withTemporaryProfile { _ in
             let transportKey = SpacesDeviceAPISettings.generateTransportKey()
@@ -635,6 +709,31 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         return server.requestConnectionCountForTesting == expectedCount
     }
 
+    private func makeAvailableTCPPort() throws -> Int {
+        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(socketFD) }
+
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(0)
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                Darwin.bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+
+        var boundAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in getsockname(socketFD, sockaddrPointer, &length) }
+        }
+        guard nameResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return Int(UInt16(bigEndian: boundAddress.sin_port))
+    }
+
     private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -684,6 +783,23 @@ private final class AlwaysAuthorizedDevicePairingStore: SpacesDevicePairingStore
         }
     }
     func validate(clientApp _: SpacesDeviceClientApp) throws {}
+}
+
+private final class DeviceAPITransportTestUptime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: TimeInterval = 0
+
+    func set(_ value: TimeInterval) {
+        lock.lock()
+        storedValue = value
+        lock.unlock()
+    }
+
+    func value() -> TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
 }
 
 private final class DeviceAPITerminalLaunchCapture: @unchecked Sendable {

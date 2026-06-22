@@ -341,17 +341,15 @@
         }
 
         static func makeScrollMods(hasPreciseDeltas: Bool, phase: NSEvent.Phase) -> Int32 {
-            var mods: Int32 = 0
-            if hasPreciseDeltas { mods |= 0b0000_0001 }
-            guard !phase.isEmpty else { return mods }
-            if phase.contains(.mayBegin) {
-                mods |= 6 << 1
-            } else if phase.contains(.ended) || phase.contains(.cancelled) {
-                mods |= (phase.contains(.cancelled) ? 5 : 4) << 1
-            } else {
-                mods |= 3 << 1
-            }
-            return mods
+            TerminalScrollModifiers.make(hasPreciseDeltas: hasPreciseDeltas, momentumPhase: scrollMomentumPhase(for: phase))
+        }
+
+        private static func scrollMomentumPhase(for phase: NSEvent.Phase) -> TerminalScrollMomentumPhase {
+            guard !phase.isEmpty else { return .none }
+            if phase.contains(.mayBegin) { return .mayBegin }
+            if phase.contains(.cancelled) { return .cancelled }
+            if phase.contains(.ended) { return .ended }
+            return .changed
         }
 
         func focusWindow(_ window: NSWindow?) {

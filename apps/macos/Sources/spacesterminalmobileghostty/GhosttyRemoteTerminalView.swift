@@ -207,8 +207,6 @@ import Foundation
         private var currentRenderedSnapshot: GhosttyTerminalSnapshot?
         private var lastRenderKey = ""
         private var lastSurfaceGeometry: SurfaceGeometry?
-        private var snapshotScrollOffsetRows: Int?
-        private var snapshotScrollRemainderRows: CGFloat = 0
         private var lastReportedViewportSize: (columns: Int, rows: Int)?
         private var lastRenderedText = ""
         private var lastReportedInputReadiness = false
@@ -423,11 +421,7 @@ import Foundation
                     ownerEpoch.bootstrapSnapshot.map { GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: ownerEpoch.ownerEpoch, snapshot: $0) }
                 } ?? endedRender.map { GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: 0, snapshot: $0.snapshot) }
             let nextKey = ownerEpoch.map { "owner|\($0.id)" } ?? endedRender.map { "ended|\($0.id)" } ?? "status|\(fallbackText)"
-            if nextKey != lastRenderKey {
-                snapshotScrollOffsetRows = nil
-                snapshotScrollRemainderRows = 0
-                lastRenderKey = nextKey
-            }
+            if nextKey != lastRenderKey { lastRenderKey = nextKey }
             latestSnapshot = nextSnapshot
             renderLatestSnapshot()
             reportInputReadinessIfNeeded()
@@ -484,15 +478,16 @@ import Foundation
         }
 
         public static func makeScrollMods(hasPreciseDeltas: Bool, momentumState: UIGestureRecognizer.State) -> Int32 {
-            var mods: Int32 = 0
-            if hasPreciseDeltas { mods |= 0b0000_0001 }
-            switch momentumState {
-            case .possible: mods |= 6 << 1
-            case .ended: mods |= 4 << 1
-            case .cancelled, .failed: mods |= 5 << 1
-            default: mods |= 3 << 1
+            TerminalScrollModifiers.make(hasPreciseDeltas: hasPreciseDeltas, momentumPhase: scrollMomentumPhase(for: momentumState))
+        }
+
+        private static func scrollMomentumPhase(for state: UIGestureRecognizer.State) -> TerminalScrollMomentumPhase {
+            switch state {
+            case .possible: return .mayBegin
+            case .ended: return .ended
+            case .cancelled, .failed: return .cancelled
+            default: return .changed
             }
-            return mods
         }
 
         @objc private func handleTapToActivateInput(_ recognizer: UITapGestureRecognizer) {
@@ -862,10 +857,7 @@ import Foundation
 
         private func viewportWindow(for snapshot: GhosttyTerminalSnapshot) -> GhosttyTerminalSnapshotViewport.Window {
             let size = viewportSize()
-            let base = GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: size.columns, rows: size.rows, horizontalAlignment: .leading)
-            let rowOffset = min(max(snapshotScrollOffsetRows ?? base.rowOffset, 0), max(snapshot.rows - base.rows, 0))
-            return GhosttyTerminalSnapshotViewport.Window(
-                columnOffset: base.columnOffset, rowOffset: rowOffset, columns: base.columns, rows: base.rows)
+            return GhosttyTerminalSnapshotViewport.window(for: snapshot, columns: size.columns, rows: size.rows, horizontalAlignment: .leading)
         }
 
         private func viewportSize() -> (columns: Int, rows: Int) {

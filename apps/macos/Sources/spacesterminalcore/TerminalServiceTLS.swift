@@ -1181,7 +1181,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         }
     }
 
-    public final class TerminalServicePinnedTLSStateStreamClient: @unchecked Sendable {
+    public final class TerminalServicePinnedTLSStateStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable {
         private let request: TerminalServiceRequest
         private let host: String
         private let port: Int

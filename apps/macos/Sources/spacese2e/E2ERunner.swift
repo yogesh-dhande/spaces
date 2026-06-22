@@ -6,7 +6,7 @@ struct E2ECommand: ParsableCommand {
 
     @Argument(help: "Lane to run: app, terminal, mobile, device-api, all, exhaustive, or mobile-demo.") var lane: E2ELane
 
-    @Argument(help: "Optional device-api target: all, local, remote, or profile.") var deviceAPITarget: E2EDeviceAPITarget?
+    @Argument(help: "Optional device-api target: all, local, remote, profile, or latency-compare.") var deviceAPITarget: E2EDeviceAPITarget?
 
     @Flag(name: .long, help: "List scenarios for the selected lane.") var list = false
 
@@ -53,7 +53,7 @@ struct E2ECommand: ParsableCommand {
             let mobileScenarios = E2ELane.mobile.scenarios.filter { $0 != "demo" }
             print("mobile: \(mobileScenarios.joined(separator: " "))")
             print("mobile latency network profiles: local ios-constrained")
-            print("device-api: local remote profile")
+            print("device-api: local remote profile latency-compare")
             print("mobile-demo: demo")
         default: for item in lane.scenarios { print(item) }
         }
@@ -95,6 +95,7 @@ enum E2EDeviceAPITarget: String, CaseIterable, ExpressibleByArgument {
     case local
     case remote
     case profile
+    case latencyCompare = "latency-compare"
 }
 
 enum E2ENetworkProfile: String, ExpressibleByArgument {
@@ -268,6 +269,11 @@ private struct E2ERunner {
         case .local: try runScript("e2e_local_device_api.sh", environment: deviceAPIEnvironment(remote: false))
         case .remote: try runScript("e2e_remote_device_api.sh", environment: deviceAPIEnvironment(remote: true))
         case .profile: try runScript("profile_device_api.sh", environment: remoteEnvironment(enabled: false))
+        case .latencyCompare:
+            var arguments: [String] = []
+            if let samples = command.samples { arguments += ["--samples", String(samples)] }
+            if command.keepRoot { arguments.append("--keep-root") }
+            try runScript("e2e_remote_terminal_latency_compare.sh", arguments: arguments, environment: deviceAPIEnvironment(remote: true))
         }
     }
 
@@ -428,6 +434,9 @@ private struct E2ERunner {
         case "e2e_remote_device_api.sh":
             environment["SPACES_E2E_REMOTE_DEVICE_RESULT_JSON"] = stepWorkRoot.appendingPathComponent("result.json").path
             environment["SPACES_E2E_REMOTE_DEVICE_TERMINAL_LATENCY_JSON"] = stepWorkRoot.appendingPathComponent("terminal-latency-summary.json").path
+        case "e2e_remote_terminal_latency_compare.sh":
+            environment["SPACES_E2E_REMOTE_TERMINAL_COMPARE_SUMMARY_JSON"] =
+                stepWorkRoot.appendingPathComponent("remote-terminal-latency-compare-summary.json").path
         case "profile_device_api.sh": environment["METRICS_PATH"] = stepWorkRoot.appendingPathComponent("metrics.json").path
         case "run_mobile_terminal_demo.sh":
             environment["SPACES_MOBILE_DEMO_ROOT_PARENT"] = stepWorkRoot.appendingPathComponent("mobile-demo", isDirectory: true).path

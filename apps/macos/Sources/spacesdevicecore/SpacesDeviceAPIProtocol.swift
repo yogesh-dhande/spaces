@@ -1239,6 +1239,13 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         if case .subscribe = self { return true }
         return false
     }
+
+    var isSafeToReplayAfterConnectionFailure: Bool {
+        switch self {
+        case .ping, .overview, .workspaceCreateOptions, .state, .resolveTerminalLink, .readTerminalLinkChunk: true
+        default: false
+        }
+    }
 }
 
 extension SpacesDeviceAPICommand: Codable {
@@ -1378,6 +1385,7 @@ public struct SpacesDeviceAPIRequest: Codable, Sendable, Equatable {
     public var commandName: String { command.name }
     public var sessionID: String? { command.terminalSessionID }
     public var clientID: String? { command.terminalClientID }
+    var isSafeToReplayAfterConnectionFailure: Bool { command.isSafeToReplayAfterConnectionFailure }
 }
 
 public struct SpacesDeviceIssuedAuthTokenResult: Codable, Sendable, Equatable {

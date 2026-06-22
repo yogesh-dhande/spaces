@@ -1,10 +1,45 @@
 import XCTest
-import spacesdevicecore
 import spacesterminalcore
 
 @testable import spacesdeviceapi
+@testable import spacesdevicecore
 
 final class SpacesDeviceAPIProtocolTests: XCTestCase {
+    func testTerminalControlRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(.init(action: .send, sessionID: "session-1", clientID: "client-1", text: "a")), authToken: "SECRET")
+
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+    }
+
+    func testReadOnlyRequestsAreReplaySafeAfterAmbiguousConnectionFailure() throws {
+        let requests = [
+            SpacesDeviceAPIRequest(command: .ping, authToken: "SECRET"), SpacesDeviceAPIRequest(command: .overview, authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .workspaceCreateOptions(.init(projectID: "project-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .state(.init(sessionID: "session-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "file:///tmp/a")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .readTerminalLinkChunk(.init(sessionID: "session-1", terminalLinkID: "link-1", offset: 0, limit: 128)), authToken: "SECRET"),
+        ]
+
+        for request in requests { XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
+    }
+
+    func testMutatingRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
+        let requests = [
+            SpacesDeviceAPIRequest(command: .launchSpacesApp, authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .openWorkspaceTerminal(.init(workspaceID: "workspace-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(command: .stopWorkspaceTerminal(.init(workspaceID: "workspace-1", sessionID: "session-1")), authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .runWorkspaceProcess(.init(workspaceID: "workspace-1", processKey: "api", processTemplateID: "template-1")),
+                authToken: "SECRET"),
+            SpacesDeviceAPIRequest(
+                command: .runCodingAgent(.init(workspaceID: "workspace-1", agentName: "Codex", agentLauncherID: "launcher-1")), authToken: "SECRET"),
+        ]
+
+        for request in requests { XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure, request.commandName) }
+    }
+
     func testRequestRoundTripsScrollModsThroughCodec() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(

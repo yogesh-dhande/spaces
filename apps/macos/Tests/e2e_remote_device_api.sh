@@ -14,6 +14,7 @@ REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_HOST}"
 REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
 REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 REMOTE_E2E_ROOT="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+REMOTE_PERFORMANCE_LOG="${SPACES_E2E_REMOTE_PERFORMANCE_LOG:-$REMOTE_E2E_ROOT/mobile-terminal-performance.jsonl}"
 TMP_ROOT="${TMPDIR:-/tmp}/spaces-remote-device-e2e.$$"
 RESULT_JSON="${SPACES_E2E_REMOTE_DEVICE_RESULT_JSON:-$TMP_ROOT/result.json}"
 TERMINAL_LATENCY_JSON="${SPACES_E2E_REMOTE_DEVICE_TERMINAL_LATENCY_JSON:-$TMP_ROOT/terminal-latency-summary.json}"
@@ -98,7 +99,7 @@ require_remote_config() {
 }
 
 prepare_remote_daemon() {
-  local artifact_assignments artifact_url artifact_sha256 archive_path install_root quoted_archive quoted_install
+  local artifact_assignments artifact_url artifact_sha256 archive_path install_root performance_log_path quoted_archive quoted_install quoted_performance_log
   SPACES_E2E_REMOTE_DAEMON_PORT="$REMOTE_DAEMON_PORT" \
     SPACES_E2E_REMOTE_WORKSPACE_ROOT="$REMOTE_WORKSPACE_ROOT" \
     SPACES_E2E_REMOTE_INSTALL_ROOT="$REMOTE_E2E_ROOT" \
@@ -115,9 +116,11 @@ prepare_remote_daemon() {
     return
   fi
   install_root="$(remote_expand_path "$REMOTE_E2E_ROOT/install")"
+  performance_log_path="$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")"
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
-  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT $quoted_install/install.sh" >/dev/null
+  quoted_performance_log="$(shell_quote "$performance_log_path")"
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$quoted_performance_log $quoted_install/install.sh" >/dev/null
   write_remote_daemon_cache_marker "$artifact_sha256"
 }
 
@@ -189,7 +192,7 @@ remote_daemon_cache_marker_path() {
 
 remote_daemon_cache_marker_value() {
   local artifact_sha256="$1"
-  printf '%s port=%s\n' "$artifact_sha256" "$REMOTE_DAEMON_PORT"
+  printf '%s port=%s performance_log=%s\n' "$artifact_sha256" "$REMOTE_DAEMON_PORT" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")"
 }
 
 remote_daemon_cache_ready() {
@@ -472,7 +475,7 @@ print("device-" + slug[:48])
 PY
   )"
   mkdir -p "$(dirname "$RESULT_JSON")"
-  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$device_id" "$AUTH_TOKEN" "$TRANSPORT_KEY" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" <<'PY'
+  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$device_id" "$AUTH_TOKEN" "$TRANSPORT_KEY" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")" <<'PY'
 import json
 import sys
 (
@@ -490,6 +493,7 @@ import sys
     certificate_fingerprint,
     mac_client_installation_id,
     mac_auth_token,
+    remote_performance_log_path,
 ) = sys.argv[1:]
 payload = {
     "deviceID": device_id,
@@ -501,6 +505,7 @@ payload = {
     "certificateFingerprint": certificate_fingerprint,
     "macClientInstallationID": mac_client_installation_id,
     "macAuthToken": mac_auth_token,
+    "remotePerformanceLogPath": remote_performance_log_path,
     "projectDir": project_dir,
     "projectID": project_id,
     "defaultWorkspaceID": default_workspace_id,

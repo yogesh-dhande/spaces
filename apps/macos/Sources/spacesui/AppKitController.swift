@@ -1190,22 +1190,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }, launchConfiguration: launchConfiguration)
     }
 
-    private func activeDeviceRemoteTerminalSessionRoute(_ request: ActiveDeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord)
+    private func activeDeviceRemoteTerminalSessionRoute(_ request: ActiveDeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord) throws
         -> RemoteTerminalSessionRoute
     {
+        guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id) else {
+            throw SpacesActiveDeviceClientError.missingTransportKey(device.name)
+        }
+        let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id)
+        let clientApp = SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        let requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, transportKey: transportKey)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
             shell: "/bin/bash", command: nil, createdAt: ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID,
             kind: request.kind)
         return RemoteTerminalSessionRoute(
-            requestSender: Self.activeDeviceTerminalServiceRequestSender(device: device), stateStreamSubscriber: nil,
-            launchConfiguration: launchConfiguration)
+            requestSender: Self.activeDeviceTerminalServiceRequestSender(requestClient: requestClient, authToken: authToken, clientApp: clientApp),
+            stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
+                let request = SpacesDeviceAPIRequest(
+                    command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)), authToken: authToken,
+                    clientApp: clientApp)
+                let client = try SpacesDeviceAPIStateStreamClient(
+                    request: request, host: device.host, port: device.port, transportKey: transportKey, onEvent: onEvent, onDisconnect: onDisconnect)
+                try client.start()
+                return client
+            }, launchConfiguration: launchConfiguration)
     }
 
     private func openActiveDeviceTerminalSession(
         _ request: ActiveDeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
     ) -> Bool {
-        let route = activeDeviceRemoteTerminalSessionRoute(request, device: device)
+        let route: RemoteTerminalSessionRoute
+        do { route = try activeDeviceRemoteTerminalSessionRoute(request, device: device) } catch {
+            showError(error)
+            return false
+        }
         return openTerminalSessionWindow(sessionID: request.sessionID, mode: .owner, requestID: requestID, remoteRouteOverride: route) != nil
     }
 
@@ -1225,21 +1243,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             scrollMods: request.scrollMods, appendNewline: request.appendNewline)
     }
 
-    nonisolated private static func activeDeviceTerminalServiceRequestSender(device: SpacesPairedDeviceRecord)
-        -> RemoteGhosttyTerminalServiceRequestSender
-    {
+    nonisolated private static func activeDeviceTerminalServiceRequestSender(
+        requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?, clientApp: SpacesDeviceClientApp
+    ) -> RemoteGhosttyTerminalServiceRequestSender {
         { request in
-            let clientApp = SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
             switch request.command {
             case .state(let payload):
-                let response = try SpacesActiveDeviceClient.request(
-                    SpacesDeviceAPIRequest(command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID))), device: device,
-                    clientApp: clientApp)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID)), authToken: authToken, clientApp: clientApp)
+                )
                 return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
             case .control(let payload):
                 let deviceRequest = try activeDeviceTerminalControlRequest(sessionID: payload.sessionID, controlRequest: payload.controlRequest)
-                let response = try SpacesActiveDeviceClient.request(
-                    SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest)), device: device, clientApp: clientApp)
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest), authToken: authToken, clientApp: clientApp))
                 return TerminalServiceResponse(
                     ok: response.ok, message: response.message, sessionState: response.sessionState,
                     controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
