@@ -2024,12 +2024,14 @@ for terminal_target in terminal_targets:
         raise RuntimeError(f"unknown terminal target: {terminal_target}")
     for scenario in scenarios:
         result_key = f"{scenario}:{terminal_target}"
+        scenario_started_ns = now_ns()
         if scenario == "ios-input-latency":
             scenario_results[result_key] = run_ios_input_latency(terminal_target)
         elif scenario == "ios-scrollback-latency":
             scenario_results[result_key] = run_ios_scrollback_latency(terminal_target)
         else:
             raise RuntimeError(f"unknown scenario: {scenario}")
+        scenario_results[result_key]["duration_ms"] = ms_between(scenario_started_ns, now_ns())
 
 payload_metrics = payload_rate_summary(stream_records)
 failures = []

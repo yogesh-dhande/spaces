@@ -143,17 +143,21 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" ap
 
 For built-in terminal verification, keep exactly one `SpacesApp` process running for the chosen profile root. The current `ghostty-embedded` slice keeps live Ghostty rendering owner-only on both macOS and iOS. Opening a terminal window or mobile detail view auto-attempts takeover, live non-owner states show takeover or status UI only, and ended sessions may still show the final Ghostty render when it was persisted.
 
-If Ghostty owner or mirror setup reports `ghostty_session_new_headless failed` or `ghostty_mirror_new failed`, inspect for stale debug daemons before rerunning. Stop only current-worktree or preserved E2E-profile processes: use `pgrep -af 'SpacesApp|spacesd|spacese2e|xcodebuild|run_mobile_terminal_demo|e2e_macos_app|e2e_mobile'`, confirm each candidate with `ps eww -p <pid> -o pid,ppid,command`, and kill only processes whose executable and `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR` belong to the current checkout or a preserved `spaces-real-e2e.*`/`mobile-demo` run root. Leave other worktree profiles running.
+If Ghostty owner or mirror setup reports `ghostty_session_new_headless failed` or `ghostty_mirror_new failed`, inspect for stale debug daemons before rerunning. Stop only current-worktree or preserved E2E-profile processes: use `pgrep -af 'SpacesApp|spacesd|spacese2e|xcodebuild|e2e|mobile-demo'`, confirm each candidate with `ps eww -p <pid> -o pid,ppid,command`, and kill only processes whose executable and `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR` belong to the current checkout or a preserved E2E run root. Leave other worktree profiles running.
 
 For maintained simulator E2E coverage of the mobile terminal path:
 
 ```bash
-apps/macos/Tests/e2e_mobile.sh
+apps/macos/Tests/e2e.sh mobile
 ```
 
-The mobile suite builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against the local daemon. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, `--keep-root` to preserve the shared demo root, and `--port <port>` to pin the daemon Device API port. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon Device API, and verifies the spacesd daemon PID and live session remain stable.
+The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again. The `app-recovery` scenario kills only the current-profile `SpacesApp` owner, sends `launchSpacesApp` through the authenticated daemon Device API, and verifies the spacesd daemon PID and live session remain stable.
 
-The macOS and mobile E2E scripts load `.env` by default; use `SPACES_ENV_FILE=<path>` for another env file or `SPACES_SKIP_ENV_FILE=1` to ignore it.
+The E2E runner loads `.env` only for selected scenarios that need remote host or physical-device signing values. Local-only scenarios run without `.env` by default.
+
+Each `apps/macos/Tests/e2e.sh` invocation writes an ignored Markdown report under `apps/macos/.artifacts/e2e-runs/<timestamp>-<lane>/summary.md`. The run directory stores collected metric artifacts as flat step-prefixed files alongside the report. The report includes the command timeline, per-case timing table, per-step logs, flattened tables for collected JSON metrics and result files, TSV tables for app metric/result logs, and links to raw JSONL performance logs.
+
+`apps/macos/Tests/e2e.sh all` is the shared-setup smoke lane for app, terminal, mobile, and paired-device coverage. `apps/macos/Tests/e2e.sh exhaustive` is the full manual lane: app full coverage, every terminal scenario, every mobile scenario, local and constrained iOS latency profiles, local and remote Device API parity, and Device API profiling.
 
 Remote mobile terminal latency sweeps use `spacese2e terminal-service-tls-session` for direct daemon commands so input and scroll samples reuse one pinned-TLS command connection while a separate direct subscribe stream observes render visibility. The sweep reports `direct_command_request` for the direct daemon round trip and validates that each direct command receives the expected response shape before recording the sample.
 
@@ -162,11 +166,13 @@ The daemon-hosted Device API is a paired Spaces-only transport rather than a thi
 Focused paired-device parity checks use one shared Device API flow for local and remote daemons:
 
 ```bash
-apps/macos/Tests/e2e_local_device_api.sh
-apps/macos/Tests/e2e_remote_device_api.sh
+apps/macos/Tests/e2e.sh device-api local
+apps/macos/Tests/e2e.sh device-api remote
 ```
 
-Both scripts create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. The remote script relies on the Linux installer enabling user lingering and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime.
+Both targets create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. During the terminal portion, the parity flow writes `terminal-latency-summary.json` with open-terminal request timing, state-readiness timing, send-to-state-progress samples, state request timing, and state progress counters. The remote target relies on the Linux installer enabling user lingering and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime. `apps/macos/Tests/e2e.sh device-api` runs local and remote parity.
+
+Remote Device API runs cache the Linux daemon archive under `apps/macos/.build/linux-e2e-cache/artifacts/` using a source fingerprint, skip re-upload when the remote archive checksum already matches, and reuse the installed remote daemon when the artifact checksum and Device API port marker match and the daemon is healthy.
 
 The lower-level Linux artifact build command is:
 
@@ -198,22 +204,22 @@ Remote Macs are installed from the signed DMG instead of a headless artifact. Th
 For focused terminal latency probes:
 
 ```bash
-apps/macos/Tests/e2e_terminal_latency.sh --list
-apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-input-latency
-apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-scrollback-latency
-apps/macos/Tests/e2e_terminal_latency.sh --scenario mac-scrollback-partial-latency
-apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local
-apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile ios-constrained
-apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --network-profile local
-apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-scrollback-latency --network-profile ios-constrained
+apps/macos/Tests/e2e.sh terminal --list
+apps/macos/Tests/e2e.sh terminal --scenario mac-input-latency
+apps/macos/Tests/e2e.sh terminal --scenario mac-scrollback-latency
+apps/macos/Tests/e2e.sh terminal --scenario mac-scrollback-partial-latency
+apps/macos/Tests/e2e.sh mobile --scenario ios-input-latency --network-profile local
+apps/macos/Tests/e2e.sh mobile --scenario ios-input-latency --network-profile ios-constrained
+apps/macos/Tests/e2e.sh mobile --scenario ios-scrollback-latency --network-profile local
+apps/macos/Tests/e2e.sh mobile --scenario ios-scrollback-latency --network-profile ios-constrained
 ```
 
-The latency scripts are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, visible render frame mix, median visible render-update bytes, and render payload rates. Input scenarios fail on gross latency regressions, render-frame decode failures, or measured typed echoes that arrive as full, missing, or `explicit_resync` frames instead of live stream deltas; report-only targets stay visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-frame-apply, scroll totals are wheel-event-to-frame-apply with alternating directions across samples, and command-catchup totals use command-submit-to-frame-apply from one warmed shell session across samples. `mac-scrollback-latency` uses large scroll deltas and `mac-scrollback-partial-latency` uses smaller within-screen deltas. Mac summaries also split owner input activity to state change, state change to frame export, frame export to mirror apply, and frame apply to dumped-state visibility. Mobile summaries split host publish to relay read, relay read to network send begin, network send begin to stream-visible, full versus delta visible sample counts, and average plus peak stream bytes per second. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes standalone Device API requests with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks unless `SPACES_DEVICE_API_NETWORK_RTT_MS`, `SPACES_DEVICE_API_NETWORK_BANDWIDTH_BPS`, or `SPACES_DEVICE_API_NETWORK_CHUNK_BYTES` override those values; normal terminal stream frames remain ordered but are not per-frame delayed by the shaper.
+The latency scenarios are fast performance iteration lanes rather than the canonical correctness gate. They write `terminal-latency-summary.json`, print p50, p95, max, per-sample timings, visible render frame mix, median visible render-update bytes, and render payload rates. Input scenarios fail on gross latency regressions, render-frame decode failures, or measured typed echoes that arrive as full, missing, or `explicit_resync` frames instead of live stream deltas; report-only targets stay visible in the terminal output. Input summaries include enqueue-to-RPC-begin, RPC duration, frame-apply or frame-publish timing, RPC-end-to-render-visible, and event-to-visible totals. Mac probes target the debug app by executable name; input totals are key-down-to-frame-apply, scroll totals are wheel-event-to-frame-apply with alternating directions across samples, and command-catchup totals use command-submit-to-frame-apply from one warmed shell session across samples. `mac-scrollback-latency` uses large scroll deltas and `mac-scrollback-partial-latency` uses smaller within-screen deltas. Mac summaries also split owner input activity to state change, state change to frame export, frame export to mirror apply, and frame apply to dumped-state visibility. Mobile summaries split host publish to relay read, relay read to network send begin, network send begin to stream-visible, full versus delta visible sample counts, and average plus peak stream bytes per second. Scrollback summaries measure rendered text changes, no-op gesture counts, and render cadence as report-only metrics. The `ios-constrained` mobile profile shapes standalone Device API requests with `80ms` RTT, `8Mbps` bandwidth, and `16KB` chunks; normal terminal stream frames remain ordered but are not per-frame delayed by the shaper.
 
-For render-update profiling, run the latency scenario with a fixed sample count, terminal size, fixture command, target, and network profile. The scripts exercise the production v2 stream: self-contained full v2 updates for initial baselines, state fetches, and resyncs, plus delta updates with native scroll-rectangle operations for steady output, live `state_change`, and scrollback.
+For render-update profiling, run the latency scenario with a fixed sample count, terminal size, fixture command, target, and network profile. The scenarios exercise the production v2 stream: self-contained full v2 updates for initial baselines, state fetches, and resyncs, plus delta updates with native scroll-rectangle operations for steady output, live `state_change`, and scrollback.
 
 ```bash
-KEEP_ROOT=1 apps/macos/Tests/e2e_mobile_latency.sh --scenario ios-input-latency --network-profile local --samples 12
+apps/macos/Tests/e2e.sh mobile --scenario ios-input-latency --network-profile local --samples 12 --keep-root
 ```
 
 Summarize each preserved `mobile-terminal-performance.jsonl` or `terminal-performance.jsonl` with the latency summary JSON from the same work root. Render-update summaries report total selected payload bytes plus split fields for network send bytes, local publish/receive payload bytes, materialized render-update bytes, frame-kind byte totals, fallback reasons, and drop reasons:
@@ -233,10 +239,10 @@ The summarizer copies the raw JSONL log and writes normalized JSON under `apps/m
 For direct CLI verification of Spaces terminal commands:
 
 ```bash
-apps/macos/Tests/e2e_terminal_cli_commands.sh
+apps/macos/Tests/e2e.sh terminal --scenario cli
 ```
 
-That script exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
+That scenario exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
 
 The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifacts. Set them up before building or profiling terminal changes:
 
@@ -248,12 +254,12 @@ The setup script installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolch
 For a browser view of fork drift against upstream, open [ghostty-org/ghostty compare view](https://github.com/ghostty-org/ghostty/compare/main...yogesh-dhande:ghostty:spaces).
 The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `GhosttyKit`, `libghostty-vt` headers, and dylib available.
 
-The terminal E2E, profiling, and soak scripts that launch `SpacesApp` acquire a shared harness lock before they run the Ghostty setup script or launch a new app instance. They stop only the app instance for their own profile. Hotkey-sensitive and real-system desktop-control workflows also wait for desktop-global control instead of killing unrelated running Spaces instances. When desktop control is already owned by another Spaces instance, the wait path also posts a macOS notification that asks you to close the running app when you are done with it.
+Terminal E2E, profiling, and soak scenarios that launch `SpacesApp` acquire a shared harness lock before they launch a profile-owned app instance. They stop only the app instance for their own profile. Hotkey-sensitive and real-system desktop-control workflows also wait for desktop-global control instead of killing unrelated running Spaces instances. When desktop control is already owned by another Spaces instance, the wait path also posts a macOS notification that asks you to close the running app when you are done with it.
 
 For repeatable profiling of the built-in terminal owner and ownership-transfer flows:
 
 ```bash
-ITERATIONS=3 apps/macos/Tests/profile_built_in_terminal.sh
+apps/macos/Tests/e2e.sh terminal --scenario built-in-terminal-profile --samples 3
 ```
 
 The profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, exercises owner attach, remote viewer attach, send, `tail`, and takeover, then summarizes the built-in terminal perf metrics captured from the app log.
@@ -262,7 +268,7 @@ It also writes `summary.txt` and `metrics.json` under its temp work root so base
 For repeatable profiling of the first-party iOS bridge and ownership transfer path:
 
 ```bash
-apps/macos/Tests/profile_device_api.sh
+apps/macos/Tests/e2e.sh device-api profile
 ```
 
 That profiler runs against an isolated `SPACES_DB_PATH`, pairs a first-party iOS-shaped installation, attaches a local-window owner plus remote client, measures time-to-owner-render, ownership transfer to iOS, ownership transfer back to the macOS owner, and the streamed visibility latency for both iOS-side and macOS-side input.
@@ -279,7 +285,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-On first launch, the iOS client opens its Devices sheet. Open Devices in the Mac sidebar or run `spaces pair`, then scan the QR code. The `run_mobile_terminal_demo.sh` harness opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. The harness stores Mac client metadata in an isolated SQLite file by exporting `SPACES_CLIENT_DB_PATH` and stores harness-only Mac client secrets under `SPACES_CLIENT_SECRET_DIR`; these overrides are for E2E and demo profiles so test pairings do not mix with the user client database or Keychain. When `SPACES_E2E_REMOTE_SSH_HOST` is set, the harness also pairs the Mac client and both iOS simulators with that remote daemon over SSH-backed pairing windows before launching the apps. The demo keeps a local SSH forward to the remote daemon Device API and seeds the demo clients with that forwarded endpoint so the demo works from networks where the remote daemon port is not directly reachable. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The client lists workspaces and live terminal sessions from the selected daemon, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
+On first launch, the iOS client opens its Devices sheet. Open Devices in the Mac sidebar or run `spaces pair`, then scan the QR code. The mobile demo lane opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. The harness stores Mac client metadata in an isolated SQLite file by exporting `SPACES_CLIENT_DB_PATH` and stores harness-only Mac client secrets under `SPACES_CLIENT_SECRET_DIR`; these overrides are for E2E and demo profiles so test pairings do not mix with the user client database or Keychain. Remote mobile scenarios pair the Mac client and iOS simulators with the remote daemon over SSH-backed pairing windows before launching the apps. The demo keeps a local SSH forward to the remote daemon Device API and seeds the demo clients with that forwarded endpoint so the demo works from networks where the remote daemon port is not directly reachable. After pairing, the iOS client stores the issued credential and transport key and reconnects automatically on later launches. The client lists workspaces and live terminal sessions from the selected daemon, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
 For the iOS simulator, a seeded pairing link with `127.0.0.1` works because the daemon Device API binds all IPv4 interfaces by default. A real device scans the Mac QR code from the Devices panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
 
 For manual real-device verification of the iOS client:
@@ -316,11 +322,11 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 For a disposable one-command demo stack that launches the macOS app, uses the daemon-hosted Device API, pairs both the iPad and iPhone simulators, and opens the mobile app on each:
 
 ```bash
-apps/macos/Tests/run_mobile_terminal_demo.sh
+apps/macos/Tests/e2e.sh mobile-demo
 ```
 
-The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. It builds the repo-local macOS debug products, builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, then installs that same app bundle on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The launcher stops the current-profile app owner, current-profile terminal service, and stale repo-local listeners on the selected Device API port before launch. It provisions one live local Beacon workspace terminal session and one live remote Scout workspace terminal session, waits for their owner attachments before launching the device clients, then reads the daemon Device API details through `spacese2e mobile-status`. It prints the demo root, profile mode, PIDs, logs, screenshots, local and remote project directories, local and remote terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
-The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E suite consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback behavior.
+The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/`. The runner builds the repo-local macOS debug products, the demo builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, and that same app bundle is installed on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The launcher stops the current-profile app owner, current-profile terminal service, and stale repo-local listeners on the selected Device API port before launch. It provisions live Beacon and Scout workspace terminal sessions, waits for their owner attachments before launching the device clients, then reads the daemon Device API details through `spacese2e mobile-status`. It prints the demo root, profile mode, PIDs, logs, screenshots, project directories, terminal session IDs, the iOS app path, iOS build paths, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E lane consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback behavior.
 
 Useful overrides:
 - `SPACES_MOBILE_DEMO_KEEP_ROOT=1` keeps the demo root after shutdown for log inspection.
@@ -330,21 +336,21 @@ Useful overrides:
 - `SPACES_MOBILE_DEMO_IPAD_NAME=...` and `SPACES_MOBILE_DEMO_IPHONE_NAME=...` target different simulator names when the defaults are unavailable.
 - `SPACES_MOBILE_DEMO_APP_PATH=...` skips the scripted `xcodebuild` and installs an explicit `SpacesMobile.app` bundle.
 - `SPACES_MOBILE_DEMO_PORT=...` sets the daemon Device API port for the demo profile.
-- `SPACES_MOBILE_E2E_DEVICE_KEY=iphone|ipad` and `SPACES_MOBILE_E2E_DEVICE_NAME=...` select the simulator used by `e2e_mobile.sh`; the default E2E target is `iPhone 17 Pro`.
+- `SPACES_MOBILE_E2E_DEVICE_KEY=iphone|ipad` and `SPACES_MOBILE_E2E_DEVICE_NAME=...` select the simulator used by the mobile E2E lane; the default E2E target is `iPhone 17 Pro`.
 
 For targeted mobile E2E runs, use `--scenario`:
 
 ```bash
-apps/macos/Tests/e2e_mobile.sh --scenario takeover
-apps/macos/Tests/e2e_mobile.sh --scenario codex
-apps/macos/Tests/e2e_mobile.sh --scenario codex-resume-reopen
-apps/macos/Tests/e2e_mobile.sh --scenario roundtrip
-apps/macos/Tests/e2e_mobile.sh --scenario scrollback
-apps/macos/Tests/e2e_mobile.sh --scenario two-session
-apps/macos/Tests/e2e_mobile.sh --scenario ctrl-c-final-frame
-apps/macos/Tests/e2e_mobile.sh --scenario ctrl-c-final-frame-codex-survivor
-apps/macos/Tests/e2e_mobile.sh --scenario ownership-guard
-apps/macos/Tests/e2e_mobile.sh --scenario app-recovery
+apps/macos/Tests/e2e.sh mobile --scenario takeover
+apps/macos/Tests/e2e.sh mobile --scenario codex
+apps/macos/Tests/e2e.sh mobile --scenario codex-resume-reopen
+apps/macos/Tests/e2e.sh mobile --scenario roundtrip
+apps/macos/Tests/e2e.sh mobile --scenario scrollback
+apps/macos/Tests/e2e.sh mobile --scenario two-session
+apps/macos/Tests/e2e.sh mobile --scenario ctrl-c-final-frame
+apps/macos/Tests/e2e.sh mobile --scenario ctrl-c-final-frame-codex-survivor
+apps/macos/Tests/e2e.sh mobile --scenario ownership-guard
+apps/macos/Tests/e2e.sh mobile --scenario app-recovery
 ```
 
 `codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ctrl-c-final-frame` creates `interrupt-target` and `survivor-peer` process-style sessions, sends `ctrl+c` to `interrupt-target` from the iOS owner path, checks the persisted final Ghostty frame on iOS and Mac, and verifies the `survivor-peer` session remains running. `ctrl-c-final-frame-codex-survivor` uses the same interrupt path with a real Codex TUI as the survivor session. `ownership-guard` exercises the Device API ownership rules without UI automation. `app-recovery` exercises iOS-to-daemon Mac app recovery without UI automation by keeping the service and session alive while replacing the profile app-owner process.
@@ -360,7 +366,7 @@ When debugging mobile owner render dumps, keep terminal UI rendering frame-based
 For sustained throughput, repaint-heavy output, tail latency, and scrollback completeness on the built-in terminal path:
 
 ```bash
-apps/macos/Tests/profile_built_in_terminal_stress.sh
+apps/macos/Tests/e2e.sh terminal --scenario stress
 ```
 
 That profiler runs four isolated scenarios against the embedded Ghostty backend:
@@ -385,7 +391,7 @@ Those CLI metrics make it easier to distinguish the internal tail implementation
 For longer-running stability sampling of the same built-in terminal path:
 
 ```bash
-DURATION_SECONDS=300 apps/macos/Tests/soak_built_in_terminal.sh
+apps/macos/Tests/e2e.sh terminal --scenario soak --duration-seconds 300
 ```
 
 That soak harness supports `SOAK_MODE=repaint`, `SOAK_MODE=mixed`, and `SOAK_MODE=codex_churn` with `SOAK_MODE=codex` kept as an alias. The Codex-style mode adds a large initial scrollback history before the steady redraw workload so late-phase transcript pressure looks closer to real long-running Codex sessions.
@@ -394,7 +400,7 @@ The soak summary samples `SpacesApp` RSS, CPU, output growth, and `terminal tail
 For repeatable profiling of the app-triggered built-in workspace-terminal open path:
 
 ```bash
-ITERATIONS=3 apps/macos/Tests/profile_workspace_terminal_open.sh
+apps/macos/Tests/e2e.sh terminal --scenario workspace-terminal-open --samples 3
 ```
 
 That profiler seeds an isolated fixture workspace, triggers the app-side workspace-terminal open route through the manual E2E IPC helper, and summarizes:
@@ -406,15 +412,15 @@ That profiler seeds an isolated fixture workspace, triggers the app-side workspa
 For real-system verification of live terminal edit and find shortcuts:
 
 ```bash
-apps/macos/Tests/e2e_terminal_edit_shortcuts.sh
+apps/macos/Tests/e2e.sh terminal --scenario edit-shortcuts
 ```
 
-That harness runs the debug app against an isolated `SPACES_DB_PATH`, opens a `cat` session, verifies `Cmd+V` through `spaces terminal tail`, verifies mouse selection plus `Cmd+C` through `pbpaste`, and verifies `Cmd+F`, `Cmd+G`, `Cmd+Shift+G`, and `Esc` through the terminal-window debug dump. It requires the same Accessibility permissions as the other desktop-control E2E scripts.
+That scenario runs the debug app against an isolated `SPACES_DB_PATH`, opens a `cat` session, verifies `Cmd+V` through `spaces terminal tail`, verifies mouse selection plus `Cmd+C` through `pbpaste`, and verifies `Cmd+F`, `Cmd+G`, `Cmd+Shift+G`, and `Esc` through the terminal-window debug dump. It requires the same Accessibility permissions as the other desktop-control E2E scenarios.
 
 For repeatable profiling of the built-in `Spaces terminal -> main window -> tracked process terminal` hotkey loop:
 
 ```bash
-ITERATIONS=3 apps/macos/Tests/profile_spaces_terminal_hotkeys.sh
+apps/macos/Tests/e2e.sh terminal --scenario spaces-terminal-hotkeys --samples 3
 ```
 
 That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly toggles back to the main window with `Cmd+Opt+=`, then refocuses the tracked terminal through the normal workspace-process path while summarizing:
@@ -430,7 +436,7 @@ That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focu
 For repeatable profiling of the built-in `Spaces terminal -> command palette -> tracked process terminal` hotkey loop:
 
 ```bash
-ITERATIONS=3 apps/macos/Tests/profile_spaces_terminal_palette.sh
+apps/macos/Tests/e2e.sh terminal --scenario spaces-terminal-palette --samples 3
 ```
 
 That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly opens the command palette with `Cmd+Opt+-`, then dismisses it and refocuses the tracked terminal through the normal workspace-process path while summarizing:
@@ -444,7 +450,7 @@ That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focu
 For workspace-process profiling, use:
 
 ```bash
-apps/macos/Tests/profile_workspace_process_terminal.sh
+apps/macos/Tests/e2e.sh terminal --scenario workspace-process-terminal
 ```
 
 That profiler waits for the built-in session summon metric instead of sleeping a fixed second after refocus, so the reported close or reopen timings track the actual app-side window path more closely.
@@ -480,27 +486,23 @@ Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.y
 Run the real-system GUI/CLI suite from the repository root with:
 
 ```bash
-apps/macos/Tests/e2e_macos_app.sh
+apps/macos/Tests/e2e.sh app
 ```
 
 Before the suite launches its isolated app instance, it waits for desktop-global control. A timeout from that wait is an environment-contention result and should be retried without killing unrelated running Spaces instances.
 
 The macOS E2E suite seeds the shared Beacon, Scout, and Prism fixture repositories and runs the app-level launch, focus, cycling, workspace, and agent-status assertions against the current profile's same-machine daemon.
 
-To capture a product-demo video from the same suite, record the run with the native `ScreenCaptureKit` helper and optionally add short editing-friendly pauses between visible transitions:
+For a focused app smoke pass:
 
 ```bash
-apps/macos/Tests/e2e_macos_app.sh \
-  --record-video /tmp/spaces-real-e2e.mp4 \
-  --pause-transitions
+apps/macos/Tests/e2e.sh app --scenario smoke
 ```
 
-The recorder follows the current main display. `--capture-device` remains accepted as a no-op compatibility flag for older invocations.
-
-To prepare the same fixture projects, localhost browser-session servers, and workspace records for manual exploration without running the assertions, use:
+For the combined smoke lane:
 
 ```bash
-apps/macos/Tests/e2e_macos_app.sh --setup-fixtures-only
+apps/macos/Tests/e2e.sh all
 ```
 
 This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.

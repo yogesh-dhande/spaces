@@ -8,7 +8,7 @@ source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
 spaces_e2e_load_env "$ROOT_DIR"
 
 DEMO_SCRIPT="$ROOT_DIR/apps/macos/Tests/run_mobile_terminal_demo.sh"
-REMOTE_DEVICE_E2E_SCRIPT="${REMOTE_DEVICE_E2E_SCRIPT:-$ROOT_DIR/apps/macos/Tests/e2e_remote_device_api.sh}"
+REMOTE_DEVICE_E2E_SCRIPT="$ROOT_DIR/apps/macos/Tests/e2e_remote_device_api.sh"
 SPACES_CLI_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 TERMINAL_SERVICE_BIN="${SPACESD_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/spacesd}"
@@ -86,6 +86,7 @@ CURRENT_SCENARIO=""
 CURRENT_TARGET="local"
 SCENARIO_DIR=""
 SCENARIO_LOG=""
+SCENARIO_RESULTS_LOG=""
 UI_TEST_CONFIG=""
 UI_TEST_LOG=""
 PRESERVE_ROOT=0
@@ -201,6 +202,24 @@ tail_if_present() {
   fi
 }
 
+timestamp_ms() {
+  python3 - <<'PY'
+import time
+print(int(time.time() * 1000))
+PY
+}
+
+record_scenario_result() {
+  local status="$1"
+  local target="$2"
+  local scenario="$3"
+  local duration_ms="$4"
+  local detail="${5:-}"
+  [[ -n "$SCENARIO_RESULTS_LOG" ]] || return 0
+  mkdir -p "$(dirname "$SCENARIO_RESULTS_LOG")"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$status" "$target" "$scenario" "$duration_ms" "${detail:-"-"}" >>"$SCENARIO_RESULTS_LOG"
+}
+
 capture_desktop_screenshot() {
   local path="$1"
   command -v screencapture >/dev/null 2>&1 || return 0
@@ -299,7 +318,7 @@ cleanup() {
 
   rm -f "$DEFAULT_UI_TEST_CONFIG"
   if [[ -n "$SUITE_ROOT" && -d "$SUITE_ROOT" ]]; then
-    if [[ "$PRESERVE_ROOT" == "1" || $exit_code -ne 0 ]]; then
+    if [[ "$REQUESTED_KEEP_ROOT" == "1" || "$PRESERVE_ROOT" == "1" || $exit_code -ne 0 ]]; then
       printf 'Preserved mobile E2E build root: %s\n' "$SUITE_ROOT" >&2
     else
       rm -rf "$SUITE_ROOT" || true
@@ -350,6 +369,9 @@ PY
 }
 
 build_macos_debug_products() {
+  if [[ "${SPACES_E2E_SKIP_MACOS_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
   printf 'Building macOS debug products...\n'
   run_demo_env "$ROOT_DIR/scripts/swiftpm.sh" build
 }
@@ -4050,6 +4072,8 @@ PY
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
+    local started_ms duration_ms
+    started_ms="$(timestamp_ms)"
     case "$scenario" in
       takeover)
         run_takeover_scenario
@@ -4085,6 +4109,8 @@ run_selected_scenarios() {
         fail "unknown scenario: $scenario"
         ;;
     esac
+    duration_ms="$(( $(timestamp_ms) - started_ms ))"
+    record_scenario_result "PASS" "$CURRENT_TARGET" "$scenario" "$duration_ms"
     cleanup_current_scenario_sessions
   done
 }
@@ -4096,6 +4122,8 @@ run_remote_ui_scenarios() {
     if [[ " ${SELECTED_SCENARIOS[*]} " != *" $scenario "* ]]; then
       continue
     fi
+    local started_ms duration_ms
+    started_ms="$(timestamp_ms)"
     case "$scenario" in
       takeover)
         run_takeover_scenario
@@ -4107,6 +4135,8 @@ run_remote_ui_scenarios() {
         fail "unknown remote UI scenario: $scenario"
         ;;
     esac
+    duration_ms="$(( $(timestamp_ms) - started_ms ))"
+    record_scenario_result "PASS" "$CURRENT_TARGET" "$scenario" "$duration_ms"
     cleanup_current_scenario_sessions
     ran=1
   done
@@ -4124,9 +4154,12 @@ case "$MOBILE_DEVICE_KEY" in
     ;;
 esac
 SUITE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-e2e.XXXXXX")"
+SCENARIO_RESULTS_LOG="$SUITE_ROOT/scenario-results.tsv"
 MOBILE_UDID="$(resolve_simulator_udid "$MOBILE_DEVICE_NAME")"
 build_macos_debug_products
-run_remote_device_e2e
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  run_remote_device_e2e
+fi
 build_ios_for_testing "$MOBILE_UDID"
 start_demo
 run_local_device_api_parity
@@ -4136,7 +4169,13 @@ case "$MOBILE_DEVICE_KEY" in
 esac
 configure_target "local"
 run_selected_scenarios
-configure_target "remote"
-run_remote_ui_scenarios
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  configure_target "remote"
+  run_remote_ui_scenarios
+fi
 
-printf '\nMobile E2E passed: scenarios=%s targets=local,remote-device-api,remote-ui\n' "${SELECTED_SCENARIOS[*]}"
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  printf '\nMobile E2E passed: scenarios=%s targets=local,remote-device-api,remote-ui\n' "${SELECTED_SCENARIOS[*]}"
+else
+  printf '\nMobile E2E passed: scenarios=%s targets=local\n' "${SELECTED_SCENARIOS[*]}"
+fi

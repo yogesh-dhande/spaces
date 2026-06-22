@@ -30,6 +30,7 @@ export SPACESD_EXECUTABLE="$terminal_service"
 mkdir -p "$SPACES_RUNTIME_DIR"
 service_log="$temp_root/terminal-service.log"
 device_api_log="$temp_root/device-api.log"
+metrics_path="${METRICS_PATH:-$temp_root/metrics.json}"
 trap 'pkill -P $$ >/dev/null 2>&1 || true; rm -rf "$temp_root"' EXIT
 
 "$terminal_service" >"$service_log" 2>&1 &
@@ -104,6 +105,7 @@ PAIRING_NONCE="$pairing_nonce" \
 DEVICE_API_PORT="$device_api_port" \
 TRANSPORT_KEY="$transport_key" \
 SPACES_E2E="$spacese2e" \
+METRICS_PATH="$metrics_path" \
 python3 - <<'PY'
 import base64
 import json
@@ -632,6 +634,11 @@ metrics = {
     "mac_input_visible_ms": round(mac_input_visible_ms, 1),
     "mac_input_visible_bytes": mac_input_visible_bytes,
 }
+metrics_path = os.environ.get("METRICS_PATH")
+if metrics_path:
+    path = Path(metrics_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
 print(json.dumps(metrics, indent=2, sort_keys=True))
 PY
 

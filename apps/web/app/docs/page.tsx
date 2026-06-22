@@ -35,6 +35,11 @@ const terms = [
     description:
       "Named port definitions allocated per workspace so parallel work never collides on the same local port.",
   },
+  {
+    name: "Worktree",
+    description:
+      "A Git feature that checks out a branch into its own directory, so multiple branches can be open at once. Spaces gives each workspace its own worktree.",
+  },
 ];
 
 export default function DocsPage() {

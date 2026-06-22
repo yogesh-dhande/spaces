@@ -150,5 +150,5 @@ The terminal slice is considered healthy when these flows work:
 - iOS attach, auto-takeover to the remote client, ownership transfer back to a macOS owner, and streamed render or input freshness on top of the same session boundary
 - large-transcript iPhone takeover through the standalone demo path with a non-blank first owner frame, one owner bootstrap epoch, and preserved live updates after takeover
 - long-output iPhone scrollback after takeover, with preserved scroll position while scrolled up and no stray prompt repaint rows during owner rendering
-- built-in terminal churn profiling through `profile_built_in_terminal_stress.sh`, with `codex_churn` kept as the primary redraw-heavy regression scenario
-- longer manual churn sampling through `soak_built_in_terminal.sh`, including `SOAK_MODE=codex_churn` for sustained scrollback pressure and redraw churn
+- built-in terminal churn profiling through `apps/macos/Tests/e2e.sh terminal --scenario stress`, with `codex_churn` kept as the primary redraw-heavy regression scenario
+- longer manual churn sampling through `apps/macos/Tests/e2e.sh terminal --scenario soak`, including `SOAK_MODE=codex_churn` for sustained scrollback pressure and redraw churn

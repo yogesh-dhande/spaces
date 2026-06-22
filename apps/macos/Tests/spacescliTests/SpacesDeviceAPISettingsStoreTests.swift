@@ -92,11 +92,20 @@ final class SpacesDeviceAPISettingsStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         let originalRuntimePath = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        let deviceAPIEnvironmentNames = [
+            SpacesDeviceAPIDefaults.disabledEnvironmentVariable, SpacesDeviceAPIDefaults.hostEnvironmentVariable,
+            SpacesDeviceAPIDefaults.portEnvironmentVariable, SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable,
+            SpacesDeviceAPIDefaults.certificateFingerprintEnvironmentVariable,
+        ]
+        let originalDeviceAPIEnvironment = Dictionary(
+            uniqueKeysWithValues: deviceAPIEnvironmentNames.map { ($0, ProcessInfo.processInfo.environment[$0]) })
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
         unsetenv("SPACES_RUNTIME_DIR")
+        for name in deviceAPIEnvironmentNames { unsetenv(name) }
         defer {
             if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
             if let originalRuntimePath { setenv("SPACES_RUNTIME_DIR", originalRuntimePath, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+            for (name, value) in originalDeviceAPIEnvironment { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
             try? FileManager.default.removeItem(at: root)
         }
 

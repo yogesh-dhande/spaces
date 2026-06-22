@@ -20,7 +20,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/projects",
     title: "Projects",
     summary:
-      "Configure a codebase once so every workspace you create starts with all of the configured processes running on their reserved ports, and dedicated browser windows.",
+      "Configure a codebase once so every workspace you create starts with its processes running on reserved ports and its browser sessions ready to focus.",
   },
   {
     href: "/docs/workspaces",
@@ -50,7 +50,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Attach Chrome URLs to a workspace so the pages you need reopen with it and stay focusable by keyboard shortcuts.",
+      "Attach Chrome URLs to a workspace so the pages you need are one keyboard shortcut away while it runs.",
   },
   {
     href: "/docs/coding-agents",
@@ -80,7 +80,13 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the spaces CLI for same-machine workspace actions, pairing links, built-in terminal session commands, owner-seeking terminal windows, and ownership takeover.",
+      "Use the spaces CLI for same-machine workspace actions, pairing links, Spaces terminal session commands, owner-seeking terminal windows, and ownership takeover.",
+  },
+  {
+    href: "/docs/ios",
+    title: "iOS Companion",
+    summary:
+      "Pair the Spaces iOS app with your Mac to browse live terminal sessions, watch coding agents, and relaunch the Mac app from your phone.",
   },
 ];
 
@@ -143,4 +149,5 @@ export const docsPublishingOrder = [
   "Troubleshooting",
   "Cookbook Guides",
   "CLI Reference",
+  "iOS Companion",
 ];

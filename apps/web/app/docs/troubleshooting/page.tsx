@@ -28,7 +28,7 @@ export default function TroubleshootingDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use <code>spaces workspace restart --workspace &lt;id&gt;</code> to reset state.</li>
           <li>• <strong>No terminal windows appear</strong> &mdash; confirm your processes are running.</li>
-          <li>• <strong>No browser windows appear</strong> &mdash; confirm Chrome is installed and the workspace has browser sessions configured.</li>
+          <li>• <strong>Focusing a browser session opens nothing</strong> &mdash; confirm Chrome is installed and the session has a valid URL. Browser sessions open only when you focus them, not at launch.</li>
           <li>• <strong>Something is left running after stop</strong> &mdash; add the teardown command to the project or workspace stop script to clean up state not managed by Spaces.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">

@@ -16,6 +16,7 @@ SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-edit-shortcuts.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
+export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 DUMP_PATH="$WORK_ROOT/terminal-window.json"
 SESSION_TITLE="terminal-edit-shortcuts"
@@ -260,7 +261,9 @@ touch "$APP_LOG"
 
 cd "$REPO_ROOT"
 acquire_terminal_harness_lock
-"$SETUP_GHOSTTYKIT" >/dev/null
+if [[ "${SPACES_E2E_SKIP_GHOSTTYKIT_SETUP:-0}" != "1" ]]; then
+  "$SETUP_GHOSTTYKIT" >/dev/null
+fi
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 

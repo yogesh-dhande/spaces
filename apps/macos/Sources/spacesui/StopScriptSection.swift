@@ -208,12 +208,14 @@ import AppKit
         ])
         inputBg.heightAnchor.constraint(equalToConstant: 88).isActive = true
 
-        let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+        let cancelButton = NSButton(title: "Cancel (Esc)", target: nil, action: nil)
+        cancelButton.keyEquivalent = "\u{1b}"
         cancelButton.setAccessibilityIdentifier("workspace-stop-script-cancel")
         Theme.applySecondaryStyle(to: cancelButton)
 
-        let saveButton = NSButton(title: "Save", target: nil, action: nil)
+        let saveButton = NSButton(title: "Save (⌘↩)", target: nil, action: nil)
         saveButton.keyEquivalent = "\r"
+        saveButton.keyEquivalentModifierMask = [.command]
         saveButton.setAccessibilityIdentifier("workspace-stop-script-save")
         Theme.applyPrimaryStyle(to: saveButton)
 
@@ -225,7 +227,7 @@ import AppKit
         saveButton.target = target
         saveButton.action = #selector(StopScriptSectionTarget.triggerSave)
 
-        let buttonRow = NSStackView(views: [NSView(), cancelButton, saveButton])
+        let buttonRow = NSStackView(views: [cancelButton, saveButton, NSView()])
         buttonRow.orientation = .horizontal
         buttonRow.alignment = .centerY
         buttonRow.spacing = 6

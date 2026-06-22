@@ -5117,16 +5117,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let setupScriptSection = SetupScriptSection(
             value: projectSettings.setupScript ?? "", subtitle: "Runs when each new workspace is created or revived from archive.")
         let stopScriptSection = StopScriptSection(
-            value: projectSettings.stopScript ?? "", subtitle: "Runs on stop/restart/archive after process termination.")
-        let portsSection = PortsSection(
-            ports: projectSettings.ports, subtitle: "Named ports allocated per workspace. Available as env vars in scripts and commands.")
+            value: projectSettings.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
+        let portsSection = PortsSection(ports: projectSettings.ports, subtitle: "Per-workspace named ports, exposed as env vars.")
         let processesSection = ProcessesSection(
-            processes: projectSettings.processes, subtitle: "Define the commands that run inside your workspace.", showsRuntimeControls: false)
+            processes: projectSettings.processes, subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(
-            sessions: projectSettings.browserSessions, subtitle: "Optional names with URL prefixes to open automatically.")
+            sessions: projectSettings.browserSessions, subtitle: "Named URLs that open in Chrome when you focus them.")
         let agentLaunchersSection = AgentLaunchersSection(
-            launchers: projectSettings.agentLaunchers, subtitle: "Named interactive coding agents that open in the built-in Spaces terminal.",
-            showsRuntimeControls: false)
+            launchers: projectSettings.agentLaunchers, subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
 
         setupScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         stopScriptSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
@@ -5437,12 +5435,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Theme.applySecondaryStyle(to: prepareButton)
 
         let setupScriptSection = SetupScriptSection(value: "", subtitle: "Runs when each new workspace is created or revived from archive.")
-        let stopScriptSection = StopScriptSection(value: "", subtitle: "Runs on workspace stop, restart, or archive.")
-        let portsSection = PortsSection(subtitle: "Named ports allocated per workspace, available as env vars.")
-        let processesSection = ProcessesSection(subtitle: "Commands that run inside each workspace.", showsRuntimeControls: false)
-        let browserSessionsSection = BrowserSessionsSection(subtitle: "Browser windows opened automatically on launch.")
-        let agentLaunchersSection = AgentLaunchersSection(
-            subtitle: "Interactive coding agents that open in the built-in Spaces terminal.", showsRuntimeControls: false)
+        let stopScriptSection = StopScriptSection(value: "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
+        let portsSection = PortsSection(subtitle: "Per-workspace named ports, exposed as env vars.")
+        let processesSection = ProcessesSection(subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
+        let browserSessionsSection = BrowserSessionsSection(subtitle: "Named URLs that open in Chrome when you focus them.")
+        let agentLaunchersSection = AgentLaunchersSection(subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
 
         // --- Source section: segmented control on top, input below ---
         let localSourceSection = NSStackView()
@@ -6023,9 +6020,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             constrainFormFieldToFillWidth(section, in: stack)
             stack.setCustomSpacing(10, after: section)
         }
-        if let agentLaunchersSection { stack.setCustomSpacing(36, after: agentLaunchersSection) }
+        if let agentLaunchersSection { stack.setCustomSpacing(20, after: agentLaunchersSection) }
         if let portsSection { stack.setCustomSpacing(20, after: portsSection) }
-        stack.setCustomSpacing(16, after: headerAndActionsRow)
+        stack.setCustomSpacing(20, after: headerAndActionsRow)
         stack.setCustomSpacing(20, after: inlineNotesRow)
         constrainFormFieldToFillWidth(inlineNotesRow, in: stack)
         constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
@@ -6876,8 +6873,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             buttonRow.alignment = .centerY
             buttonRow.spacing = 8
             buttonRow.translatesAutoresizingMaskIntoConstraints = false
-            buttonRow.addArrangedSubview(saveButton)
             buttonRow.addArrangedSubview(cancelButton)
+            buttonRow.addArrangedSubview(saveButton)
 
             contentStack.addArrangedSubview(valueLabel)
             contentStack.addArrangedSubview(editorContainer)
@@ -6886,8 +6883,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else {
             row.addArrangedSubview(valueLabel)
             row.addArrangedSubview(editorContainer)
-            row.addArrangedSubview(saveButton)
             row.addArrangedSubview(cancelButton)
+            row.addArrangedSubview(saveButton)
         }
 
         if isEditable {
@@ -8238,7 +8235,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func openDevicePairingWindow() {
         do {
-            let response = try SpacesDeviceAPIControlClient.openPairingWindow()
+            let response = try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService()
             if let window = response.pairingWindow {
                 currentDevicePairingWindow = ClientDevicePairingWindow(
                     deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: response.status?.bonjourServiceName ?? "This Mac",

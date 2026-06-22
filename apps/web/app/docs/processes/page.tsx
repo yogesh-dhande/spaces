@@ -20,7 +20,7 @@ export default function ProcessesDocsPage() {
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Spaces gives each process its own terminal window when the workspace launches.</li>
-          <li>• Process terminals are backed by the built-in Spaces terminal runtime, so if you close the window the process keeps running and Spaces can reopen the session view without restarting the work.</li>
+          <li>• Each process runs in a Spaces terminal, so if you close the window the process keeps running and Spaces can reopen the session view without restarting the work.</li>
         </ul>
       </article>
 

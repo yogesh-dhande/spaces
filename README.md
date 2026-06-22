@@ -16,7 +16,7 @@ A workspace is one feature, branch, or experiment with:
 - a directory (Git worktree or separate clone)
 - reserved ports exposed as named env vars (`$FRONTEND_PORT`, `$BACKEND_PORT`, ...)
 - configured processes, browser URLs, and coding-agent terminals
-- a tracked set of windows managed through [yabai](https://github.com/koekeishiya/yabai)
+- a tracked set of windows managed through [yabai](https://github.com/asmvik/yabai)
 
 Launching a workspace starts its processes, opens its windows, and tracks them. Keyboard shortcuts focus or cycle windows scoped to the current workspace. Stopping shuts down processes and closes windows. Reopening restores state.
 
@@ -64,7 +64,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 
 ## How it works
 
-- [yabai](https://github.com/koekeishiya/yabai) is the source of truth for window IDs and cross-app focus.
+- [yabai](https://github.com/asmvik/yabai) is the source of truth for window IDs and cross-app focus.
 - Built-in process and ad hoc terminals run through the paired device's `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
 - Every Mac or Linux `spacesd` owns its own database, projects, workspaces, runtime rows, terminal sessions, and workspace filesystem. macOS and iOS apps are thin clients connected to one active paired device.
 - iOS pairing uses the short-lived QR/deep link from `spaces pair` or the Mac Devices panel. Remote-device pairing validates SSH, prepares supported Linux hosts from the signed release artifact when needed, opens the remote daemon's pairing window over `~/.spaces/bin/spaces pair --json`, pins the daemon TLS identity, and stores the client token in Keychain. Remote Macs require the DMG install.
@@ -75,7 +75,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 ## Requirements
 
 - macOS 14+
-- [`yabai`](https://github.com/koekeishiya/yabai)
+- [`yabai`](https://github.com/asmvik/yabai)
 - Google Chrome (for browser-session focus)
 - Accessibility permission, granted via the in-app setup flow on first launch
 

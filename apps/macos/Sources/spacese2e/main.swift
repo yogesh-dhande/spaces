@@ -19,7 +19,7 @@ struct SpacesE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
-            SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
+            E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
             OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
             LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
@@ -363,8 +363,7 @@ private struct OpenDevicePairingWindowCommand: ParsableCommand {
     @Option(name: .long) var timeoutSeconds: Double = 5
 
     func run() throws {
-        _ = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService(timeout: timeoutSeconds)
-        let response = try SpacesDeviceAPIControlClient.openPairingWindow(timeout: timeoutSeconds)
+        let response = try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService(timeout: timeoutSeconds)
         guard response.ok else { throw ValidationError(response.message) }
         guard let status = response.status else { throw ValidationError("Device API response did not include address details.") }
         guard let window = response.pairingWindow else { throw ValidationError("Device API response did not include a pairing window.") }
@@ -427,7 +426,7 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
 private struct ProfileShowCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "profile-show", abstract: "Show resolved Spaces profile paths for harnesses.")
 
-    @Flag(name: .long, help: "Emit shell exports for SPACES_DB_PATH and SPACES_RUNTIME_DIR.") var shell = false
+    @Flag(name: .long, help: "Emit shell exports for the repo-local Spaces profile.") var shell = false
     @Flag(name: .long, help: "Emit JSON instead of text.") var json = false
 
     func run() throws {
@@ -436,6 +435,7 @@ private struct ProfileShowCommand: ParsableCommand {
         if shell {
             print("export \(SpacesProfile.databasePathEnvironmentVariable)=\(profileShellQuoted(profile.databasePath))")
             print("export \(SpacesProfile.runtimeDirectoryEnvironmentVariable)=\(profileShellQuoted(profile.runtimeDirectory))")
+            print("export \(SpacesDeviceAPIDefaults.portEnvironmentVariable)=0")
             return
         }
         if json {

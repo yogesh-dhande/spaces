@@ -83,6 +83,86 @@ import workspacecore
         XCTAssertEqual(relaunchCount, 0)
     }
 
+    func testControlResponseRelaunchesTerminalServiceWhenDeviceAPIReportsNotRunning() throws {
+        var relaunchCount = 0
+        var sendCount = 0
+
+        let response = try SpacesDeviceAPIControlClient.responseEnsuringCurrentTerminalService(
+            timeout: 1, ensureRunning: { _ in false },
+            relaunch: { _ in
+                relaunchCount += 1
+                return true
+            },
+            send: { _ in
+                sendCount += 1
+                if sendCount < 3 { return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") }
+                return SpacesDeviceAPIControlResponse(ok: true, message: "Opened device pairing window.")
+            }, hasLiveTerminalSessions: { false }, retryInterval: 0)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(relaunchCount, 1)
+        XCTAssertEqual(sendCount, 3)
+    }
+
+    func testControlResponseKeepsRetryingAfterRelaunchConsumesInitialTimeout() throws {
+        var relaunchCount = 0
+        var sendCount = 0
+
+        let response = try SpacesDeviceAPIControlClient.responseEnsuringCurrentTerminalService(
+            timeout: 0.01, ensureRunning: { _ in false },
+            relaunch: { _ in
+                relaunchCount += 1
+                Thread.sleep(forTimeInterval: 0.02)
+                return true
+            },
+            send: { _ in
+                sendCount += 1
+                if sendCount == 1 { return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") }
+                return SpacesDeviceAPIControlResponse(ok: true, message: "Opened device pairing window.")
+            }, hasLiveTerminalSessions: { false }, retryInterval: 0)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(relaunchCount, 1)
+        XCTAssertEqual(sendCount, 2)
+    }
+
+    func testControlResponseDoesNotRelaunchTerminalServiceWhenDeviceAPIReportsNotRunningWithLiveSessions() throws {
+        var relaunchCount = 0
+
+        let response = try SpacesDeviceAPIControlClient.responseEnsuringCurrentTerminalService(
+            timeout: 1, ensureRunning: { _ in false },
+            relaunch: { _ in
+                relaunchCount += 1
+                return true
+            }, send: { _ in SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") }, hasLiveTerminalSessions: { true })
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.message, "Device API is not running.")
+        XCTAssertEqual(relaunchCount, 0)
+    }
+
+    func testStatusReportsUnavailableWhenConfiguredPortIsBusy() async throws {
+        try await withTemporaryProfile { _ in
+            let occupiedSocket = try makeOccupiedPortSocket()
+            defer { close(occupiedSocket.fileDescriptor) }
+
+            let environment = [
+                SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)",
+                SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable: SpacesDeviceAPISettings.generateTransportKey(),
+            ]
+            let supervisor = SpacesDeviceAPISupervisor(
+                settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
+            supervisor.start()
+            defer { supervisor.stop() }
+
+            let response = try await Task.detached { try SpacesDeviceAPIControlClient.status() }.value
+            XCTAssertFalse(response.ok)
+            XCTAssertEqual(response.message, "Device API is not running.")
+            XCTAssertEqual(response.status?.port, occupiedSocket.port)
+            XCTAssertNil(response.pairingWindow)
+        }
+    }
+
     func testOpenPairingWindowReportsUnavailableWhenConfiguredPortIsBusy() async throws {
         try await withTemporaryProfile { _ in
             let occupiedSocket = try makeOccupiedPortSocket()

@@ -35,8 +35,10 @@ app_path, log_path, db_path, runtime_dir = sys.argv[1:]
 log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
 try:
     env = os.environ.copy()
+    env.pop("SPACES_DEVICE_API_DISABLED", None)
     env["SPACES_DB_PATH"] = db_path
     env["SPACES_RUNTIME_DIR"] = runtime_dir
+    env["SPACES_DEVICE_API_PORT"] = "0"
     process = subprocess.Popen(
         [app_path],
         stdin=subprocess.DEVNULL,

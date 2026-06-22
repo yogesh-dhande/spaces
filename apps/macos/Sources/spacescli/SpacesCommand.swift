@@ -177,8 +177,7 @@ struct PairingWindowPayload: Codable, Sendable, Equatable {
 
 func pairCommandLines(
     loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = {
-        _ = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService()
-        return try SpacesDeviceAPIControlClient.openPairingWindow()
+        try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService()
     }
 ) throws -> [String] {
     let response = try loadControlResponse()
@@ -189,8 +188,7 @@ func pairCommandLines(
 
 func pairCommandPayload(
     loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = {
-        _ = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService()
-        return try SpacesDeviceAPIControlClient.openPairingWindow()
+        try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService()
     }
 ) throws -> PairingWindowPayload {
     let response = try loadControlResponse()

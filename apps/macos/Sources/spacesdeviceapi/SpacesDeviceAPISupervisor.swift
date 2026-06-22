@@ -145,9 +145,14 @@ import workspacecore
         do {
             switch request.command {
             case .status:
-                return SpacesDeviceAPIControlResponse(
-                    ok: true, message: "Loaded Device API status.",
-                    result: .status(.init(status: try status(), pairingWindow: server?.pairingWindowSnapshot(), devices: try pairedDevices())))
+                startDeviceAPIIfNeeded()
+                let currentStatus = try status()
+                let result = SpacesDeviceAPIControlStatusResult(
+                    status: currentStatus, pairingWindow: server?.pairingWindowSnapshot(), devices: try pairedDevices())
+                guard server != nil else {
+                    return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.", result: .status(result))
+                }
+                return SpacesDeviceAPIControlResponse(ok: true, message: "Loaded Device API status.", result: .status(result))
             case .openPairingWindow:
                 startDeviceAPIIfNeeded()
                 guard let server else {

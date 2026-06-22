@@ -135,7 +135,9 @@ export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 
 cd "$REPO_ROOT"
 acquire_terminal_harness_lock
-"$SETUP_GHOSTTYKIT"
+if [[ "${SPACES_E2E_SKIP_GHOSTTYKIT_SETUP:-0}" != "1" ]]; then
+  "$SETUP_GHOSTTYKIT"
+fi
 spaces_profile_stop_running_app "$SPACES_CLI"
 
 env \
@@ -964,6 +966,7 @@ def run_mac_command_output_catchup() -> dict:
 
 
 for scenario in scenarios:
+    scenario_started_ns = now_ns()
     if scenario == "mac-input-latency":
         scenario_results[scenario] = run_mac_input_latency()
     elif scenario == "mac-scrollback-latency":
@@ -978,6 +981,7 @@ for scenario in scenarios:
         scenario_results[scenario] = run_mac_command_output_catchup()
     else:
         raise RuntimeError(f"unknown scenario: {scenario}")
+    scenario_results[scenario]["duration_ms"] = ms_between(scenario_started_ns, now_ns())
 
 failures = []
 for name, result in scenario_results.items():

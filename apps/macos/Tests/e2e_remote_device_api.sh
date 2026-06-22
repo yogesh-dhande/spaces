@@ -16,6 +16,8 @@ REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspa
 REMOTE_E2E_ROOT="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
 TMP_ROOT="${TMPDIR:-/tmp}/spaces-remote-device-e2e.$$"
 RESULT_JSON="${SPACES_E2E_REMOTE_DEVICE_RESULT_JSON:-$TMP_ROOT/result.json}"
+TERMINAL_LATENCY_JSON="${SPACES_E2E_REMOTE_DEVICE_TERMINAL_LATENCY_JSON:-$TMP_ROOT/terminal-latency-summary.json}"
+TERMINAL_LATENCY_SAMPLES="${SPACES_E2E_REMOTE_DEVICE_TERMINAL_LATENCY_SAMPLES:-${SPACES_E2E_DEVICE_TERMINAL_LATENCY_SAMPLES:-3}}"
 RUN_ID="${SPACES_E2E_REMOTE_DEVICE_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"
 
 PAIRING_CODE=""
@@ -96,17 +98,27 @@ require_remote_config() {
 }
 
 prepare_remote_daemon() {
-  "$ROOT_DIR/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
-  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
+  local artifact_assignments artifact_url artifact_sha256 archive_path install_root quoted_archive quoted_install
+  SPACES_E2E_REMOTE_DAEMON_PORT="$REMOTE_DAEMON_PORT" \
+    SPACES_E2E_REMOTE_WORKSPACE_ROOT="$REMOTE_WORKSPACE_ROOT" \
+    SPACES_E2E_REMOTE_INSTALL_ROOT="$REMOTE_E2E_ROOT" \
+    SPACES_E2E_REMOTE_DEVICE_ROOT="$REMOTE_E2E_ROOT" \
+    "$ROOT_DIR/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
   artifact_assignments="$("$ROOT_DIR/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
+  artifact_sha256="${artifact_sha256:-}"
   [[ "$artifact_url" == file://* ]] || fail "Remote artifact URL must be file://, got: $artifact_url"
   archive_path="${artifact_url#file://}"
+  if remote_daemon_cache_ready "$artifact_sha256"; then
+    printf '[remote-device] reusing installed Linux spacesd artifact %s\n' "$artifact_sha256"
+    return
+  fi
   install_root="$(remote_expand_path "$REMOTE_E2E_ROOT/install")"
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
   remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT $quoted_install/install.sh" >/dev/null
+  write_remote_daemon_cache_marker "$artifact_sha256"
 }
 
 wait_for_remote_daemon_from_mac() {
@@ -136,6 +148,18 @@ wait_until_reachable("follow-up check")
 PY
 }
 
+remote_daemon_reachable_from_mac() {
+  python3 - "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+with socket.create_connection((host, port), timeout=2):
+    pass
+PY
+}
+
 wait_for_remote_daemon() {
   local quoted_port
   quoted_port="$(shell_quote "$REMOTE_DAEMON_PORT")"
@@ -157,6 +181,36 @@ while time.time() < deadline:
 raise SystemExit(f"remote daemon port {port} did not open: {last_error}")
 PY
   remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null
+}
+
+remote_daemon_cache_marker_path() {
+  remote_expand_path "~/.spaces/daemon/current/.spaces-e2e-artifact-cache"
+}
+
+remote_daemon_cache_marker_value() {
+  local artifact_sha256="$1"
+  printf '%s port=%s\n' "$artifact_sha256" "$REMOTE_DAEMON_PORT"
+}
+
+remote_daemon_cache_ready() {
+  local artifact_sha256="$1"
+  local marker_path expected actual
+  [[ -n "$artifact_sha256" ]] || return 1
+  marker_path="$(remote_daemon_cache_marker_path)" || return 1
+  expected="$(remote_daemon_cache_marker_value "$artifact_sha256")"
+  actual="$(remote_ssh "cat $(shell_quote "$marker_path") 2>/dev/null || true" 2>/dev/null || true)"
+  [[ "$actual" == "$expected" ]] || return 1
+  remote_daemon_reachable_from_mac || return 1
+  remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null 2>&1 || return 1
+}
+
+write_remote_daemon_cache_marker() {
+  local artifact_sha256="$1"
+  local marker_path expected
+  [[ -n "$artifact_sha256" ]] || return 0
+  marker_path="$(remote_daemon_cache_marker_path)"
+  expected="$(remote_daemon_cache_marker_value "$artifact_sha256")"
+  remote_ssh "printf '%s\n' $(shell_quote "$expected") > $(shell_quote "$marker_path")" >/dev/null
 }
 
 open_remote_pairing_window() {
@@ -328,7 +382,9 @@ remote_device_parity() {
     --label "remote-device" \
     --client-installation-id "REMOTE-DEVICE-E2E" \
     --client-device-name "Remote Device E2E" \
-    --result-json "$parity_json" >"$parity_stdout" 2>"$parity_log" \
+    --result-json "$parity_json" \
+    --terminal-latency-json "$TERMINAL_LATENCY_JSON" \
+    --terminal-latency-samples "$TERMINAL_LATENCY_SAMPLES" >"$parity_stdout" 2>"$parity_log" \
     || fail "Remote Device API parity flow failed. See $parity_log"
   project_id="$(json_file_field "$parity_json" "projectID")"
   default_workspace_id="$(json_file_field "$parity_json" "defaultWorkspaceID")"

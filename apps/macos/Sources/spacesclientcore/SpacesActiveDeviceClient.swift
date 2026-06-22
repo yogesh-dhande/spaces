@@ -3,6 +3,10 @@ import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
 
+#if canImport(Network)
+    import Network
+#endif
+
 public struct SpacesActiveDeviceOverview: Sendable, Equatable {
     public let device: SpacesPairedDeviceRecord
     public let overview: SpacesDeviceOverviewPayload
@@ -37,6 +41,8 @@ public enum SpacesActiveDeviceClientError: LocalizedError, Equatable {
 
 public enum SpacesActiveDeviceClient {
     public typealias LocalBootstrapProvider = @Sendable (SpacesDeviceClientApp) throws -> SpacesDeviceAPIControlResponse
+    typealias DeviceRequestProvider =
+        @Sendable (SpacesDeviceAPIRequest, SpacesPairedDeviceRecord, SpacesDeviceClientApp, SpacesProfile?) throws -> SpacesDeviceAPIResponse
     static let defaultRequestTimeoutSeconds: TimeInterval = 10
     static let longRunningMutationTimeoutSeconds: TimeInterval = 60
 
@@ -89,9 +95,30 @@ public enum SpacesActiveDeviceClient {
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         bootstrap: LocalBootstrapProvider = SpacesActiveDeviceClient.defaultLocalBootstrapProvider
     ) throws -> SpacesActiveDeviceOverview {
+        try overview(
+            database: providedDatabase, clientApp: clientApp, profile: profile, bootstrap: bootstrap,
+            requestProvider: { request, device, clientApp, profile in
+                try SpacesActiveDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
+            })
+    }
+
+    static func overview(
+        database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        bootstrap: LocalBootstrapProvider = SpacesActiveDeviceClient.defaultLocalBootstrapProvider, requestProvider: DeviceRequestProvider
+    ) throws -> SpacesActiveDeviceOverview {
         let database = try providedDatabase ?? SpacesClientDatabase()
         let device = try activeDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
-        let response = try request(.init(command: .overview), device: device, clientApp: clientApp, profile: profile)
+        do { return try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
+            guard device.id == SpacesPairedDeviceRecord.localDeviceID, isRetryableLocalDeviceAPIConnectionError(error) else { throw error }
+            let refreshedDevice = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
+            return try overview(device: refreshedDevice, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
+        }
+    }
+
+    private static func overview(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
+    ) throws -> SpacesActiveDeviceOverview {
+        let response = try requestProvider(.init(command: .overview), device, clientApp, profile)
         guard let overview = response.overview else { throw SpacesActiveDeviceClientError.missingOverview }
         return SpacesActiveDeviceOverview(device: device, overview: overview)
     }
@@ -318,8 +345,36 @@ public enum SpacesActiveDeviceClient {
     { SpacesDeviceAPIRequest(command: request.command, authToken: authToken, clientApp: clientApp) }
 
     public static func defaultLocalBootstrapProvider(_ clientApp: SpacesDeviceClientApp) throws -> SpacesDeviceAPIControlResponse {
-        _ = try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService()
-        return try SpacesDeviceAPIControlClient.bootstrapLocalClient(clientApp: clientApp)
+        try SpacesDeviceAPIControlClient.bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: clientApp)
+    }
+
+    static func isRetryableLocalDeviceAPIConnectionError(_ error: any Error) -> Bool {
+        #if canImport(Network)
+            if let requestError = error as? SpacesDeviceAPIRequestClientError {
+                switch requestError {
+                case .timeout, .emptyResponse: return true
+                case .invalidPort: return false
+                }
+            }
+            if let networkError = error as? NWError {
+                switch networkError {
+                case .posix(let code): return isRetryableLocalDeviceAPIPOSIXCode(code)
+                default: return false
+                }
+            }
+        #endif
+
+        if let posixError = error as? POSIXError { return isRetryableLocalDeviceAPIPOSIXCode(posixError.code) }
+        let nsError = error as NSError
+        guard nsError.domain == NSPOSIXErrorDomain, let code = POSIXErrorCode(rawValue: Int32(nsError.code)) else { return false }
+        return isRetryableLocalDeviceAPIPOSIXCode(code)
+    }
+
+    private static func isRetryableLocalDeviceAPIPOSIXCode(_ code: POSIXErrorCode) -> Bool {
+        switch code {
+        case .ECONNABORTED, .ECONNREFUSED, .ECONNRESET, .EHOSTDOWN, .EHOSTUNREACH, .ENETDOWN, .ENETUNREACH, .ENOTCONN, .ETIMEDOUT: return true
+        default: return false
+        }
     }
 
     static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {

@@ -17,7 +17,7 @@ BUILD_CMD="${BUILD_CMD:-$ROOT_DIR/scripts/swiftpm.sh build}"
 SPACES_APP="${SPACES_APP:-$MACOS_DIR/.build/debug/SpacesApp}"
 SPACES_CLI="${SPACES_CLI:-$MACOS_DIR/.build/debug/spaces}"
 SPACES_E2E_CLI="${SPACES_E2E_CLI:-$MACOS_DIR/.build/debug/spacese2e}"
-REMOTE_DEVICE_E2E_SCRIPT="${REMOTE_DEVICE_E2E_SCRIPT:-$MACOS_DIR/Tests/e2e_remote_device_api.sh}"
+REMOTE_DEVICE_E2E_SCRIPT="$MACOS_DIR/Tests/e2e_remote_device_api.sh"
 GHOSTTYKIT_XCFRAMEWORK="${SPACES_GHOSTTYKIT_XCFRAMEWORK:-$MACOS_DIR/.local/ghosttykit/GhosttyKit.xcframework}"
 if [[ ! -d "$GHOSTTYKIT_XCFRAMEWORK" ]]; then
   echo "FAIL: GhosttyKit.xcframework is required at $GHOSTTYKIT_XCFRAMEWORK. Run apps/macos/scripts/setup_ghostty.sh --build." >&2
@@ -39,7 +39,6 @@ SECOND_SEED_FILE="${SECOND_SEED_FILE:-/tmp/spaces-e2e-seed-2.json}"
 THIRD_SEED_FILE="${THIRD_SEED_FILE:-/tmp/spaces-e2e-seed-3.json}"
 TRANSITION_PAUSE_SECONDS="${TRANSITION_PAUSE_SECONDS:-0}"
 RECORD_VIDEO_PATH="${RECORD_VIDEO_PATH:-}"
-RECORD_VIDEO_CAPTURE_DEVICE="${RECORD_VIDEO_CAPTURE_DEVICE:-}"
 RECORD_VIDEO_FRAMERATE="${RECORD_VIDEO_FRAMERATE:-15}"
 RECORDER_OUTPUT_START_TIMEOUT_SECONDS="${RECORDER_OUTPUT_START_TIMEOUT_SECONDS:-8}"
 RECORDER_STOP_TIMEOUT_SECONDS="${RECORDER_STOP_TIMEOUT_SECONDS:-10}"
@@ -48,7 +47,7 @@ REAL_SYSTEM_PROFILE_REPETITIONS="${REAL_SYSTEM_PROFILE_REPETITIONS:-5}"
 PROFILE_ARTIFACT_DIR="${PROFILE_ARTIFACT_DIR:-$MACOS_DIR/.artifacts/real-system-profiles}"
 PROFILE_HISTORY_CSV="${PROFILE_HISTORY_CSV:-$PROFILE_ARTIFACT_DIR/metrics-history.csv}"
 PROFILE_REPORT_HTML="${PROFILE_REPORT_HTML:-$PROFILE_ARTIFACT_DIR/report.html}"
-PROFILE_RENDER_SCRIPT="${PROFILE_RENDER_SCRIPT:-$MACOS_DIR/Tests/render_profile_report.py}"
+PROFILE_RENDER_SCRIPT="$MACOS_DIR/Tests/render_profile_report.py"
 WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS="${WORKSPACE_SERVICE_CONTENT_TIMEOUT_SECONDS:-60}"
 SPACES_CYCLE_LATENCY_BUDGET_MS_WAS_SET="${SPACES_CYCLE_LATENCY_BUDGET_MS+x}"
 SPACES_CYCLE_LATENCY_BUDGET_MS="${SPACES_CYCLE_LATENCY_BUDGET_MS:-2000}"
@@ -85,6 +84,7 @@ RECORDER_PID=""
 RECORDER_READY_FILE=""
 FINAL_RECORDING_PATH=""
 CURRENT_CASE=""
+CURRENT_CASE_STARTED_MS=""
 SUMMARY_PRINTED=0
 APP_LOG_SEARCH_FROM_LINE=1
 APP_LOG_LAST_MATCH=""
@@ -135,6 +135,7 @@ export SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR"
 export SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB"
 export SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR"
 export SPACES_E2E_EVENTS_LOG="$EVENT_LOG"
+export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 
 cleanup() {
   local exit_code="$?"
@@ -209,22 +210,28 @@ record_case_result() {
   local status="$1"
   local name="$2"
   local detail="${3:-}"
-  python3 - "$RESULTS_LOG" "$name" "$status" "$detail" <<'PY'
+  local duration_ms="${4:-}"
+  if [[ -z "$duration_ms" && -n "$CURRENT_CASE_STARTED_MS" && "$CURRENT_CASE" == "$name" ]]; then
+    duration_ms="$(( $(timestamp_ms) - CURRENT_CASE_STARTED_MS ))"
+  fi
+  [[ -n "$duration_ms" ]] || duration_ms="-"
+  python3 - "$RESULTS_LOG" "$name" "$status" "$duration_ms" "$detail" <<'PY'
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 name = sys.argv[2]
 status = sys.argv[3]
-detail = sys.argv[4]
+duration_ms = sys.argv[4]
+detail = sys.argv[5]
 entries = []
 if path.exists():
     for line in path.read_text().splitlines():
-        parts = line.split("\t", 2)
+        parts = line.split("\t", 3)
         if len(parts) < 2 or parts[1] != name:
             entries.append(line)
 detail_field = detail if detail else "-"
-entries.append(f"{status}\t{name}\t{detail_field}")
+entries.append(f"{status}\t{name}\t{duration_ms}\t{detail_field}")
 path.write_text("\n".join(entries) + ("\n" if entries else ""))
 PY
 }
@@ -232,6 +239,7 @@ PY
 begin_case() {
   assert_no_spaces_modal_dialog
   CURRENT_CASE="$1"
+  CURRENT_CASE_STARTED_MS="$(timestamp_ms)"
   log_step "$CURRENT_CASE"
 }
 
@@ -239,6 +247,7 @@ pass_case() {
   assert_no_spaces_modal_dialog
   record_case_result "PASS" "$CURRENT_CASE"
   CURRENT_CASE=""
+  CURRENT_CASE_STARTED_MS=""
 }
 
 skip_case() {
@@ -265,7 +274,6 @@ Usage: apps/macos/Tests/e2e_macos_app.sh [options]
 
 Options:
   --record-video PATH            Capture the full run to PATH with ScreenCaptureKit.
-  --capture-device DEVICE        Legacy option. Ignored by native recording.
   --capture-framerate FPS        Screen recording frame rate. Default: 15.
   --pause-transitions            Add a 1 second pause after visible transitions.
   --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
@@ -281,11 +289,6 @@ parse_args() {
       --record-video)
         [[ $# -ge 2 ]] || fail "missing value for --record-video"
         RECORD_VIDEO_PATH="$2"
-        shift 2
-        ;;
-      --capture-device)
-        [[ $# -ge 2 ]] || fail "missing value for --capture-device"
-        RECORD_VIDEO_CAPTURE_DEVICE="$2"
         shift 2
         ;;
       --capture-framerate)
@@ -368,6 +371,12 @@ terminate_process_group_for_recovery() {
 
 build_binaries() {
   log_step "building macOS binaries"
+  if [[ "${SPACES_E2E_SKIP_MACOS_BUILD:-0}" == "1" ]]; then
+    require_file "$SPACES_APP"
+    require_file "$SPACES_CLI"
+    require_file "$SPACES_E2E_CLI"
+    return 0
+  fi
   (cd "$ROOT_DIR" && eval "$BUILD_CMD") >/dev/null
   require_file "$SPACES_APP"
   require_file "$SPACES_CLI"
@@ -544,9 +553,6 @@ start_screen_recording() {
   RECORDER_READY_FILE="$TMP_ROOT/recording.ready"
   rm -f "$RECORDER_READY_FILE"
   log_step "starting screen recording -> $RECORD_VIDEO_PATH"
-  if [[ -n "$RECORD_VIDEO_CAPTURE_DEVICE" ]]; then
-    log_debug "ignoring legacy capture-device=$RECORD_VIDEO_CAPTURE_DEVICE; using ScreenCaptureKit main display recorder"
-  fi
   "$SPACES_E2E_CLI" record-screen \
     --output "$RECORD_VIDEO_PATH" \
     --ready-file "$RECORDER_READY_FILE" \
@@ -3945,11 +3951,15 @@ print_case_summary() {
     return 0
   fi
   printf 'Test summary:\n'
-  while IFS=$'\t' read -r status name detail; do
+  while IFS=$'\t' read -r status name duration_ms detail; do
+    local duration_text=""
+    if [[ -n "$duration_ms" && "$duration_ms" != "-" ]]; then
+      duration_text=" duration=${duration_ms}ms"
+    fi
     if [[ -n "$detail" && "$detail" != "-" ]]; then
-      printf '  [%s] %s (%s)\n' "$status" "$name" "$detail"
+      printf '  [%s] %s%s (%s)\n' "$status" "$name" "$duration_text" "$detail"
     else
-      printf '  [%s] %s\n' "$status" "$name"
+      printf '  [%s] %s%s\n' "$status" "$name" "$duration_text"
     fi
   done <"$RESULTS_LOG"
 }
@@ -5721,7 +5731,7 @@ main() {
   build_binaries
   cleanup_existing_fixture_projects
   mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
-  if (( SETUP_FIXTURES_ONLY == 0 )); then
+  if (( SETUP_FIXTURES_ONLY == 0 )) && [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
     run_remote_device_e2e
     seed_remote_active_device_for_macos
   fi
@@ -5736,8 +5746,10 @@ main() {
     start_screen_recording
   fi
   launch_spaces
-  run_remote_active_device_ui_parity
-  relaunch_spaces_with_local_active_device
+  if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+    run_remote_active_device_ui_parity
+    relaunch_spaces_with_local_active_device
+  fi
   run_local_device_api_parity
   create_workspace_via_gui
   create_scout_branch_workspace

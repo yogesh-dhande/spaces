@@ -70,7 +70,7 @@ Workspaces can be visible or hidden in the sidebar, and can be running or stoppe
 Hidden workspaces live in a collapsed `Hidden` section at the bottom of the sidebar.
 Running and stopped should be easy to explain:
 - `Running` means Spaces explicitly launched the workspace or another explicit workspace action marked it running.
-- `Stopped` means Spaces has not explicitly launched it, or Spaces explicitly stopped it.
+- `Stopped` means the workspace is idle. This covers two cases that behave the same: a workspace Spaces has never launched, and one Spaces explicitly stopped after a run. In both, nothing is running and the workspace is directly launchable.
 - Stale runtime leftovers should not silently change `Stopped` back to `Running`; they should surface as warnings on top of the existing lifecycle state.
 
 ### Window Set
@@ -80,6 +80,12 @@ A workspace owns a tracked set of dedicated windows, such as:
 - coding-agent terminal windows
 
 Spaces focuses those windows; it does not decide their geometry.
+
+### Terminal sessions
+Every terminal runs in the built-in terminal, never an external terminal app. A workspace can hold three kinds:
+- a process terminal hosting a configured process
+- a coding-agent terminal hosting a configured or detected coding agent
+- an ad hoc terminal the user opens directly (for example through `New terminal`), rooted at the workspace directory
 
 ## Onboarding
 - On launch, the main window should immediately show a neutral loading state while Spaces checks prerequisites and loads workspace data, so startup never presents a blank window.

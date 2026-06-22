@@ -30,7 +30,7 @@ export default function GettingStartedDocsPage() {
           <li>2. Follow the in-app setup flow through any missing prerequisites or permissions.</li>
           <li>3. Add a project from a local directory or a Git URL.</li>
           <li>4. Create a workspace for the branch or task you&apos;re starting.</li>
-          <li>5. Launch the workspace. Spaces starts its processes and opens its browser sessions.</li>
+          <li>5. Launch the workspace. Spaces starts its processes; browser sessions open when you focus them.</li>
           <li>6. Focus any of the workspace&apos;s windows with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+1</code> through <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+9</code>, or cycle through them with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+alt+]</code> / <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+alt+[</code>.</li>
         </ol>
       </article>
@@ -52,12 +52,12 @@ export default function GettingStartedDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Launch and Validate</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Launching a workspace starts its processes in Spaces&apos;s built-in terminal windows and opens its browser sessions in Chrome. Confirm it worked:
+          Launching a workspace starts its processes in Spaces terminal windows. Confirm it worked:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• The workspace shows as running in the sidebar.</li>
           <li>• Processes start in dedicated Spaces terminal windows.</li>
-          <li>• Configured URLs open in Chrome.</li>
+          <li>• Focusing a browser session opens its URL in Chrome.</li>
         </ul>
       </article>
     </DocsShell>

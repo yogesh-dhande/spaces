@@ -86,5 +86,6 @@ cd "$root"
 "$root/scripts/swiftpm.sh" build
 spaces_profile_eval_shell_env "$root/.build/debug/spaces"
 stop_current_profile_runtime_for_tests
+unset SPACES_DEVICE_API_PORT
 "$root/scripts/coverage.sh"
 run_ios_tests

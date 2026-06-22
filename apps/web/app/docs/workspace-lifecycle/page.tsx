@@ -35,7 +35,7 @@ export default function WorkspaceLifecycleDocsPage() {
           Launching a stopped workspace:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Starts each configured process in its own Spaces terminal window backed by the built-in Spaces terminal runtime.</li>
+          <li>• Starts each configured process in its own Spaces terminal window.</li>
           <li>• Leaves browser sessions unopened until you explicitly focus them.</li>
           <li>• Remembers those windows so you can jump back to any of them by keyboard shortcuts.</li>
         </ul>
@@ -44,9 +44,9 @@ export default function WorkspaceLifecycleDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Update While Running</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Add a process &mdash; Spaces starts it right away in a new terminal window.</li>
-          <li>• Edit a process command &mdash; Spaces restarts just that process.</li>
-          <li>• Add a browser session &mdash; Spaces opens it in Chrome immediately.</li>
+          <li>• Add a process &mdash; it appears immediately with a non-running status; launch it when you&apos;re ready.</li>
+          <li>• Edit a process command &mdash; Spaces asks you to confirm, then restarts just that process.</li>
+          <li>• Add a browser session &mdash; it appears immediately and opens in Chrome when you focus it.</li>
         </ul>
       </article>
 

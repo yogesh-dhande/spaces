@@ -712,6 +712,10 @@ start_device_api() {
 }
 
 pair_remote_demo_device() {
+  if [[ "${SPACES_E2E_RUN_REMOTE:-0}" != "1" ]]; then
+    echo "Skipping remote demo device pairing for the selected scenario." >&2
+    return
+  fi
   if [[ -z "$remote_ssh_host" ]]; then
     echo "Skipping remote demo device pairing because SPACES_E2E_REMOTE_SSH_HOST is not set." >&2
     return

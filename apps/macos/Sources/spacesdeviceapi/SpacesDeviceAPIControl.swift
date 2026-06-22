@@ -404,6 +404,10 @@ public enum SpacesDeviceAPIControlClient {
         try send(SpacesDeviceAPIControlRequest(command: .openPairingWindow), timeout: timeout)
     }
 
+    public static func openPairingWindowEnsuringCurrentTerminalService(timeout: TimeInterval = 5) throws -> SpacesDeviceAPIControlResponse {
+        try responseEnsuringCurrentTerminalService(timeout: timeout, send: { try openPairingWindow(timeout: $0) })
+    }
+
     public static func listDevices(timeout: TimeInterval = 5) throws -> SpacesDeviceAPIControlResponse {
         try send(SpacesDeviceAPIControlRequest(command: .listDevices), timeout: timeout)
     }
@@ -420,6 +424,10 @@ public enum SpacesDeviceAPIControlClient {
         try send(SpacesDeviceAPIControlRequest(command: .bootstrapLocalClient(.init(clientApp: clientApp))), timeout: timeout)
     }
 
+    public static func bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: SpacesDeviceClientApp, timeout: TimeInterval = 5) throws
+        -> SpacesDeviceAPIControlResponse
+    { try responseEnsuringCurrentTerminalService(timeout: timeout, send: { try bootstrapLocalClient(clientApp: clientApp, timeout: $0) }) }
+
     public static func isControlEndpointUnavailable(_ error: Error) -> Bool {
         if let posixError = error as? POSIXError { return isUnavailablePOSIXCode(posixError.code) }
         let nsError = error as NSError
@@ -432,11 +440,34 @@ public enum SpacesDeviceAPIControlClient {
         status: (TimeInterval) throws -> SpacesDeviceAPIControlResponse,
         hasLiveTerminalSessions: () throws -> Bool = { !((try? TerminalService.listSessions()) ?? []).isEmpty }, retryInterval: TimeInterval = 0.05
     ) throws -> SpacesDeviceAPIControlResponse {
+        try responseEnsuringCurrentTerminalService(
+            timeout: timeout, ensureRunning: ensureRunning, relaunch: relaunch, send: status, hasLiveTerminalSessions: hasLiveTerminalSessions,
+            retryInterval: retryInterval)
+    }
+
+    static func responseEnsuringCurrentTerminalService(
+        timeout: TimeInterval, ensureRunning: (TimeInterval) throws -> Bool = { try TerminalService.ensureRunning(timeout: $0) },
+        relaunch: (TimeInterval) throws -> Bool = { try TerminalService.relaunch(timeout: $0) },
+        send: (TimeInterval) throws -> SpacesDeviceAPIControlResponse,
+        hasLiveTerminalSessions: () throws -> Bool = { !((try? TerminalService.listSessions()) ?? []).isEmpty }, retryInterval: TimeInterval = 0.05
+    ) throws -> SpacesDeviceAPIControlResponse {
         _ = try ensureRunning(timeout)
-        let deadline = Date().addingTimeInterval(timeout)
+        var deadline = Date().addingTimeInterval(timeout)
         var lastEndpointError: (any Error)?
+        var relaunchedAfterNotRunning = false
         repeat {
-            do { return try status(timeout) } catch {
+            do {
+                let response = try send(timeout)
+                guard isDeviceAPINotRunningResponse(response), (try? hasLiveTerminalSessions()) != true else { return response }
+                if !relaunchedAfterNotRunning {
+                    _ = try relaunch(timeout)
+                    deadline = Date().addingTimeInterval(timeout)
+                    relaunchedAfterNotRunning = true
+                }
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0 else { return response }
+                Thread.sleep(forTimeInterval: min(max(retryInterval, 0), remaining))
+            } catch {
                 guard isControlEndpointUnavailable(error) else { throw error }
                 lastEndpointError = error
                 let remaining = deadline.timeIntervalSinceNow
@@ -450,7 +481,11 @@ public enum SpacesDeviceAPIControlClient {
             if let lastEndpointError { throw lastEndpointError }
         #endif
         _ = try relaunch(timeout)
-        return try status(timeout)
+        return try send(timeout)
+    }
+
+    static func isDeviceAPINotRunningResponse(_ response: SpacesDeviceAPIControlResponse) -> Bool {
+        !response.ok && response.message == "Device API is not running."
     }
 
     static func socketPath(fileManager: FileManager = .default) throws -> String {

@@ -14,6 +14,8 @@ TMP_HOME="$TMP_ROOT/home"
 TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
 TMP_DB="$TMP_ROOT/spaces.db"
 RESULT_JSON="${SPACES_E2E_LOCAL_DEVICE_RESULT_JSON:-$TMP_ROOT/result.json}"
+TERMINAL_LATENCY_JSON="${SPACES_E2E_LOCAL_DEVICE_TERMINAL_LATENCY_JSON:-$TMP_ROOT/terminal-latency-summary.json}"
+TERMINAL_LATENCY_SAMPLES="${SPACES_E2E_LOCAL_DEVICE_TERMINAL_LATENCY_SAMPLES:-${SPACES_E2E_DEVICE_TERMINAL_LATENCY_SAMPLES:-3}}"
 RUN_ID="${SPACES_E2E_LOCAL_DEVICE_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"
 
 SERVICE_PID=""
@@ -174,7 +176,9 @@ local_device_parity() {
     --label "local-device" \
     --client-installation-id "LOCAL-DEVICE-E2E" \
     --client-device-name "Local Device E2E" \
-    --result-json "$RESULT_JSON" >"$TMP_ROOT/local-device-api-parity.stdout" 2>"$TMP_ROOT/local-device-api-parity.log" \
+    --result-json "$RESULT_JSON" \
+    --terminal-latency-json "$TERMINAL_LATENCY_JSON" \
+    --terminal-latency-samples "$TERMINAL_LATENCY_SAMPLES" >"$TMP_ROOT/local-device-api-parity.stdout" 2>"$TMP_ROOT/local-device-api-parity.log" \
     || fail "Local Device API parity flow failed. See $TMP_ROOT/local-device-api-parity.log"
   cat "$RESULT_JSON"
 }

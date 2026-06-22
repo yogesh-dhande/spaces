@@ -42,7 +42,7 @@ export default function CliReferencePage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control built-in terminal sessions.
+          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions.
         </p>
         <CodeBlock>{`spaces --version
 spaces project list

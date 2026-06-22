@@ -1,4 +1,5 @@
 import XCTest
+import spacesdeviceapi
 import spacesdevicecore
 
 @testable import spacesclientcore
@@ -20,6 +21,57 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
             SpacesActiveDeviceClient.requestTimeoutSeconds(
                 for: .restartCodingAgent(.init(workspaceID: "workspace-1", agentID: nil, agentName: "Codex", agentLauncherID: nil))),
             SpacesActiveDeviceClient.longRunningMutationTimeoutSeconds)
+    }
+
+    func testOverviewRefreshesLocalBootstrapAfterTransientConnectionFailure() throws {
+        try withClientSecretDirectory { root in
+            let database = try SpacesClientDatabase(path: root.appendingPathComponent("Client/spaces-client.db").path)
+            let clientApp = SpacesActiveDeviceClient.macOSClientApp(installationID: "client-test", deviceName: "Test Mac")
+            let probe = ActiveDeviceOverviewRetryProbe()
+            let bootstrap: SpacesActiveDeviceClient.LocalBootstrapProvider = { _ in
+                probe.bootstrapCount += 1
+                return Self.localBootstrapResponse(port: probe.bootstrapCount == 1 ? 11_111 : 22_222)
+            }
+            let requestProvider: SpacesActiveDeviceClient.DeviceRequestProvider = { _, device, _, _ in
+                probe.requestedPorts.append(device.port)
+                guard probe.requestedPorts.count > 1 else { throw POSIXError(.ECONNREFUSED) }
+                return Self.emptyOverviewResponse()
+            }
+
+            let overview = try SpacesActiveDeviceClient.overview(
+                database: database, clientApp: clientApp, bootstrap: bootstrap, requestProvider: requestProvider)
+
+            XCTAssertEqual(probe.bootstrapCount, 2)
+            XCTAssertEqual(probe.requestedPorts, [11_111, 22_222])
+            XCTAssertEqual(overview.device.id, SpacesPairedDeviceRecord.localDeviceID)
+            XCTAssertEqual(overview.device.port, 22_222)
+            XCTAssertEqual(try database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)?.port, 22_222)
+        }
+    }
+
+    func testOverviewDoesNotRefreshRemoteDeviceAfterConnectionFailure() throws {
+        try withClientSecretDirectory { root in
+            let database = try SpacesClientDatabase(path: root.appendingPathComponent("Client/spaces-client.db").path)
+            try database.upsert(device: Self.remoteDevice())
+            try database.setActiveDeviceID("remote-test")
+            let clientApp = SpacesActiveDeviceClient.macOSClientApp(installationID: "client-test", deviceName: "Test Mac")
+            let probe = ActiveDeviceOverviewRetryProbe()
+            let bootstrap: SpacesActiveDeviceClient.LocalBootstrapProvider = { _ in
+                probe.bootstrapCount += 1
+                return Self.localBootstrapResponse(port: 22_222)
+            }
+            let requestProvider: SpacesActiveDeviceClient.DeviceRequestProvider = { _, device, _, _ in
+                probe.requestedPorts.append(device.port)
+                throw POSIXError(.ECONNREFUSED)
+            }
+
+            XCTAssertThrowsError(
+                try SpacesActiveDeviceClient.overview(
+                    database: database, clientApp: clientApp, bootstrap: bootstrap, requestProvider: requestProvider)
+            ) { error in XCTAssertEqual((error as? POSIXError)?.code, .ECONNREFUSED) }
+            XCTAssertEqual(probe.bootstrapCount, 0)
+            XCTAssertEqual(probe.requestedPorts, [7_443])
+        }
     }
 
     func testProjectActionsDoNotDependOnDeviceLocation() {
@@ -201,4 +253,47 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
                     runState: .running, canOpenTerminal: true, canStop: true)
             ])
     }
+
+    private func withClientSecretDirectory(_ body: (URL) throws -> Void) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let secretDirectory = root.appendingPathComponent("Client/Secrets", isDirectory: true)
+        let originalSecretDirectory = currentEnvironmentValue(SpacesDeviceCredentialStore.secretDirectoryEnvironmentVariable)
+        setenv(SpacesDeviceCredentialStore.secretDirectoryEnvironmentVariable, secretDirectory.path, 1)
+        defer {
+            restoreEnvironmentValue(originalSecretDirectory, name: SpacesDeviceCredentialStore.secretDirectoryEnvironmentVariable)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try body(root)
+    }
+
+    private func currentEnvironmentValue(_ name: String) -> String? {
+        guard let value = getenv(name) else { return nil }
+        return String(cString: value)
+    }
+
+    private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+
+    private static func localBootstrapResponse(port: Int) -> SpacesDeviceAPIControlResponse {
+        SpacesDeviceAPIControlResponse(
+            ok: true, message: "ok",
+            result: .localClientBootstrap(
+                SpacesDeviceAPILocalClientBootstrap(
+                    deviceID: SpacesPairedDeviceRecord.localDeviceID, name: "Local Mac", platform: "macos", host: "127.0.0.1", port: port,
+                    certificateFingerprint: "local-fingerprint", authToken: "token-\(port)", transportKey: "transport-\(port)")))
+    }
+
+    private static func emptyOverviewResponse() -> SpacesDeviceAPIResponse {
+        SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [])))
+    }
+
+    private static func remoteDevice() -> SpacesPairedDeviceRecord {
+        SpacesPairedDeviceRecord(
+            id: "remote-test", name: "Remote", platform: "linux", host: "192.0.2.10", port: 7_443, certificateFingerprint: "remote-fingerprint",
+            createdAt: "2026-06-21T00:00:00Z", updatedAt: "2026-06-21T00:00:00Z", lastSelectedAt: "2026-06-21T00:00:00Z")
+    }
+}
+
+private final class ActiveDeviceOverviewRetryProbe: @unchecked Sendable {
+    var bootstrapCount = 0
+    var requestedPorts: [Int] = []
 }
