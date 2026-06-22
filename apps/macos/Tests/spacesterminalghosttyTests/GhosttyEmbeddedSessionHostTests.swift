@@ -77,6 +77,12 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         return try XCTUnwrap(foregroundPID, file: file, line: line)
     }
 
+    private func processIsAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
     func testHostManagedPTYLaunchesInteractiveShellAsLoginShell() {
         let command = HostManagedPTYTerminalSessionDriver.execCommand(
             for: TerminalSessionLaunchConfiguration(
@@ -130,12 +136,104 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(driver.foregroundPID(), foregroundPID)
     }
 
+    @MainActor func testHostManagedPTYResetsIgnoredInterruptSignalBeforeExec() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("interrupt-marker")
+        let scriptPath = root.appendingPathComponent("interrupt-target.sh")
+        try """
+        #!/bin/sh
+        printf 'ready\\n' > "\(markerPath.path)"
+        sleep 20
+        printf 'survived\\n' >> "\(markerPath.path)"
+        """.write(to: scriptPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+
+        // Simulate a daemon launched from a background/noninteractive shell where
+        // SIGINT can be inherited as ignored by child terminal sessions.
+        let previousInterruptHandler = signal(SIGINT, SIG_IGN)
+        defer { _ = signal(SIGINT, previousInterruptHandler) }
+
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "interrupt-signal-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "interrupt", workingDirectory: root.path,
+                shell: "/bin/zsh", command: scriptPath.path, createdAt: "2026-06-06T00:00:00Z"))
+        defer { driver.terminate() }
+
+        try driver.startIfNeeded()
+        try waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        driver.sendRawBytes(Data([0x03]))
+        try waitUntil(timeout: 5) { driver.childPID() == nil }
+
+        let markerText = try String(contentsOf: markerPath, encoding: .utf8)
+        XCTAssertTrue(markerText.contains("ready"))
+        // If the child inherited ignored SIGINT, sleep completes and writes this.
+        XCTAssertFalse(markerText.contains("survived"))
+    }
+
+    @MainActor func testHostManagedPTYTerminateEscalatesWhenHUPIsIgnored() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("termination-marker")
+        let scriptPath = root.appendingPathComponent("ignore-hup-target.sh")
+        try """
+        #!/bin/sh
+        trap 'printf "hup\\n" >> "\(markerPath.path)"' HUP
+        trap 'printf "term\\n" >> "\(markerPath.path)"; exit 0' TERM
+        printf 'ready\\n' > "\(markerPath.path)"
+        while :; do sleep 1; done
+        """.write(to: scriptPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "terminate-escalates-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-escalates",
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec \(scriptPath.path)", createdAt: "2026-06-19T00:00:00Z"))
+
+        try driver.startIfNeeded()
+        try waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        driver.terminate()
+
+        try waitUntil(timeout: 5) {
+            guard let markerText = try? String(contentsOf: markerPath, encoding: .utf8) else { return false }
+            return markerText.contains("term")
+        }
+        try waitUntil(timeout: 5) { !self.processIsAlive(childPID) }
+
+        let markerText = try String(contentsOf: markerPath, encoding: .utf8)
+        XCTAssertTrue(markerText.contains("hup"))
+        XCTAssertTrue(markerText.contains("term"))
+    }
+
     func testHostManagedPTYForegroundPIDFallsBackToLiveChildPID() {
         let currentPID = getpid()
 
         XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: nil, childPID: currentPID), currentPID)
         XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: Int32.max, childPID: currentPID), currentPID)
         XCTAssertEqual(HostManagedPTYTerminalSessionDriver.resolvedForegroundPID(foregroundProcessGroup: currentPID, childPID: nil), currentPID)
+    }
+
+    func testHostManagedPTYDoesNotGroupSignalCurrentProcessGroup() {
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldSignalProcessGroup(childPID: 42, processGroupID: 42, currentProcessGroupID: 42))
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldSignalProcessGroup(childPID: 42, processGroupID: 41, currentProcessGroupID: 1))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldSignalProcessGroup(childPID: 42, processGroupID: 42, currentProcessGroupID: 1))
+    }
+
+    func testHostManagedPTYRemovesDaemonEnvironmentBeforeExec() {
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("INVOCATION_ID"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("JOURNAL_STREAM"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("NOTIFY_SOCKET"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACESD_AUTH_TOKEN"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACESD_AUTH_TOKEN_REMOTE"))
+        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DEVICE_API_PORT"))
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DB_PATH"))
+        XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("PATH"))
     }
 
     func testHostManagedPTYStripsGhosttyCommandPrefixesBeforeShellExecution() {
@@ -156,33 +254,6 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(HostManagedPTYTerminalSessionDriver.readLoopOwnsDescriptor(currentFD: 12, currentGeneration: 4, readFD: 12, readGeneration: 4))
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.readLoopOwnsDescriptor(currentFD: 12, currentGeneration: 5, readFD: 12, readGeneration: 4))
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.readLoopOwnsDescriptor(currentFD: 13, currentGeneration: 4, readFD: 12, readGeneration: 4))
-    }
-
-    @MainActor func testRemoteStateScreenSnapshotPolicyPublishesOwnerBootstrapSnapshots() {
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "initial", ownerKind: .remoteViewer))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "attachment_state", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "attachment_state", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input"))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "terminated"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "output", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "output", ownerKind: .remoteViewer))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "state_change", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "state_change", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize"))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .remoteViewer))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "resize", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "clear_screen"))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "runtime_state"))
-    }
-
-    @MainActor func testInputOutputResyncPublishesScreenStateForLocalOwnerOnly() {
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output", ownerKind: .remoteViewer))
-        XCTAssertFalse(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input", ownerKind: .localWindow))
-        XCTAssertTrue(GhosttyEmbeddedSessionCore.remoteStateShouldIncludeScreenState(reason: "input_output", ownerKind: .localWindow))
     }
 
     @MainActor func testScreenStateChangeRequestsLiveSurfaceRefresh() throws {
@@ -428,6 +499,35 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         XCTAssertEqual(update.kind, .full)
         XCTAssertEqual(update.fallbackReason, "explicit_resync")
+    }
+
+    @MainActor func testInputStateDoesNotExportStaleRenderUpdate() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-input-no-render-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-06-03T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let owner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone"), connectedAt: "2026-06-03T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-06-03T00:00:00Z")
+
+        GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = { _ in self.snapshot(text: "before input") }
+        defer { GhosttyTerminalSnapshotCapture.sessionCaptureHandlerForTesting = nil }
+
+        host.applySessionStateChange(.init(flags: [.screen], revision: 1, title: nil, workingDirectory: nil))
+        let initialPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.initial))
+        XCTAssertNotNil(initialPayload.renderUpdate)
+
+        let inputPayload = try XCTUnwrap(host.debugCurrentRemoteSessionState(reason: TerminalRemoteSessionStateReason.input))
+        XCTAssertNil(inputPayload.renderUpdate)
+        XCTAssertNil(inputPayload.decodedRenderUpdate)
     }
 
     @MainActor func testScrollRenderUpdateAdvancesRevisionWithoutSessionStateChange() throws {
@@ -1209,6 +1309,28 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertNotNil(runtimeState.exitedAt)
     }
 
+    @MainActor func testLateOutputAfterTerminateDoesNotRecreateOutputFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-late-output-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+            shell: "/bin/zsh", command: "zsh", createdAt: "2026-06-11T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+
+        host.debugHandleIncomingOutput(Data("before terminate\n".utf8))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.outputPath))
+
+        host.terminate()
+        try? FileManager.default.removeItem(atPath: paths.outputPath)
+        host.debugHandleIncomingOutput(Data("late output\n".utf8))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.outputPath))
+    }
+
     @MainActor func testStartIfNeededRefreshesExitedRuntimeStateForReusedSessionID() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
@@ -1700,6 +1822,29 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         XCTAssertFalse(response.ok)
         XCTAssertEqual(response.message, "Ignoring stale owner epoch 1; current owner epoch is 0.")
+    }
+
+    @MainActor func testControlScrollAcceptsZeroDeltaLifecyclePackets() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-zero-scroll-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-06-15T00:00:00Z")
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let owner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-06-15T00:00:00Z")
+        XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
+        XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
+
+        let response = host.handleControlRequest(.init(command: "scroll", clientID: owner.id, scrollHorizontal: 0, scrollVertical: 0, scrollMods: 7))
+
+        XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "Ignored zero scroll delta."))
     }
 
     @MainActor func testControlKeyCommandKClearsScreenThroughHostAction() throws {

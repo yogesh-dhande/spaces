@@ -36,7 +36,7 @@ export default function ProjectsDocsPage() {
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Processes</strong> &mdash; commands Spaces runs alongside the workspace (servers, workers, coding agents).</li>
-          <li>• <strong>Browser Sessions</strong> &mdash; URLs Spaces opens in Chrome when the workspace launches.</li>
+          <li>• <strong>Browser Sessions</strong> &mdash; URLs tied to a workspace; each opens in a Chrome window when you focus it.</li>
           <li>• <strong>Named Ports</strong> &mdash; placeholder names like <code>FRONTEND_PORT</code> and <code>API_PORT</code>. Spaces assigns each workspace a unique port number per name so two workspaces never clash.</li>
         </ul>
       </article>

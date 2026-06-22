@@ -45,7 +45,7 @@ public final class SetupChecker {
         let results = run(SetupCheckID.allCases)
         if setupProfileEnabled {
             let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-            fputs("spaces: setup_check stage=run_all elapsed_ms=\(elapsedMS)\n", stderr)
+            Self.writeStandardError("spaces: setup_check stage=run_all elapsed_ms=\(elapsedMS)\n")
         }
         return results
     }
@@ -56,7 +56,7 @@ public final class SetupChecker {
         let results = run(Self.startupBlockingCheckIDs)
         if setupProfileEnabled {
             let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-            fputs("spaces: setup_check stage=startup_blocking elapsed_ms=\(elapsedMS)\n", stderr)
+            Self.writeStandardError("spaces: setup_check stage=startup_blocking elapsed_ms=\(elapsedMS)\n")
         }
         return results
     }
@@ -87,6 +87,8 @@ public final class SetupChecker {
     private func logSetupCheckProfile(id: SetupCheckID, passed: Bool, startedAt: TimeInterval) {
         guard setupProfileEnabled else { return }
         let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-        fputs("spaces: setup_check id=\(id.rawValue) elapsed_ms=\(elapsedMS) passed=\(passed ? 1 : 0)\n", stderr)
+        Self.writeStandardError("spaces: setup_check id=\(id.rawValue) elapsed_ms=\(elapsedMS) passed=\(passed ? 1 : 0)\n")
     }
+
+    private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
 }

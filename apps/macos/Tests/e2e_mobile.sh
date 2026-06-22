@@ -4,11 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
+spaces_e2e_load_env "$ROOT_DIR"
 
 DEMO_SCRIPT="$ROOT_DIR/apps/macos/Tests/run_mobile_terminal_demo.sh"
+REMOTE_DEVICE_E2E_SCRIPT="$ROOT_DIR/apps/macos/Tests/e2e_remote_device_api.sh"
 SPACES_CLI_BIN="${SPACES_CLI:-$ROOT_DIR/apps/macos/.build/debug/spaces}"
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
-TERMINAL_SERVICE_BIN="${SPACES_TERMINAL_SERVICE_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/SpacesTerminalService}"
+TERMINAL_SERVICE_BIN="${SPACESD_EXECUTABLE:-$ROOT_DIR/apps/macos/.build/debug/spacesd}"
 TERMINAL_CREATE_TIMEOUT="${SPACES_MOBILE_E2E_TERMINAL_CREATE_TIMEOUT:-60}"
 DEFAULT_UI_TEST_CONFIG="/tmp/spaces-mobile-ui-test-config.json"
 BUNDLE_ID="dev.usespaces.spacesmobile"
@@ -29,10 +32,11 @@ USER_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$USER_HOME/.config}"
 E2E_GHOSTTY_XDG_CONFIG_HOME="${SPACES_MOBILE_GHOSTTY_XDG_CONFIG_HOME:-$USER_XDG_CONFIG_HOME}"
 FIXTURE_LINE_COUNT=520
 SCROLLBACK_SWIPE_COUNT=2
-TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-Screen Recording 2026-03-20 at 11.17.57 AM.png}"
+TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
+SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard app-recovery)
+REMOTE_UI_SCENARIOS=(takeover two-session)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
 DEMO_PORT="${SPACES_MOBILE_DEMO_PORT:-}"
@@ -44,21 +48,45 @@ IOS_BUILD_LOG=""
 DEMO_STDOUT_LOG=""
 DEMO_PID=""
 DEMO_APP_PID=""
-DEMO_BRIDGE_PID=""
+DEMO_DEVICE_API_PID=""
 DEMO_TERMINAL_SERVICE_PID=""
 DEMO_ROOT=""
 PROJECT_DIR=""
+DEMO_PROJECT_DIR=""
+LOCAL_PROJECT_DIR=""
+LOCAL_SESSION_ID=""
 DB_PATH=""
 RUNTIME_DIR=""
-BRIDGE_HOST=""
-BRIDGE_PORT=""
+DEVICE_API_HOST=""
+DEVICE_API_PORT=""
+REMOTE_DEVICE_RESULT_JSON=""
+REMOTE_DEVICE_ID=""
+REMOTE_DEVICE_NAME=""
+REMOTE_DEVICE_API_HOST=""
+REMOTE_DEVICE_API_PORT=""
+REMOTE_DEVICE_AUTH_TOKEN=""
+REMOTE_DEVICE_TRANSPORT_KEY=""
+REMOTE_DEVICE_CERTIFICATE_FINGERPRINT=""
+REMOTE_DEVICE_PROJECT_DIR=""
+REMOTE_DEVICE_WORKSPACE_ID=""
+TARGET_DEVICE_ID=""
+TARGET_DEVICE_NAME=""
+TARGET_DEVICE_API_HOST=""
+TARGET_DEVICE_API_PORT=""
+TARGET_DEVICE_AUTH_TOKEN=""
+TARGET_DEVICE_TRANSPORT_KEY=""
+TARGET_DEVICE_CERTIFICATE_FINGERPRINT=""
+TARGET_DEVICE_INSTALLATION_ID=""
+TARGET_WORKSPACE_ID=""
 IPAD_UDID=""
 IPHONE_UDID=""
 MOBILE_UDID=""
 PERFORMANCE_LOG_PATH=""
 CURRENT_SCENARIO=""
+CURRENT_TARGET="local"
 SCENARIO_DIR=""
 SCENARIO_LOG=""
+SCENARIO_RESULTS_LOG=""
 UI_TEST_CONFIG=""
 UI_TEST_LOG=""
 PRESERVE_ROOT=0
@@ -72,10 +100,11 @@ Options:
   --list                 List available mobile E2E scenarios.
   --scenario NAME        Run only one scenario. May be passed multiple times.
   --keep-root            Preserve the shared demo root after a successful run.
-  --port PORT            Use a specific daemon mobile bridge port.
+  --port PORT            Use a specific daemon device API port.
   --help                 Show this help text.
 
 Scenarios:
+  takeover
   codex
   codex-resume-reopen
   roundtrip
@@ -149,17 +178,18 @@ run_demo_env() {
 }
 
 demo_env() {
-  run_demo_env \
-    HOME="$DEMO_ROOT/home" \
-    CODEX_HOME="$E2E_CODEX_HOME" \
-    XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
-    SPACES_DB_PATH="$DB_PATH" \
-    SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
-    SPACES_TERMINAL_SERVICE_EXECUTABLE="$TERMINAL_SERVICE_BIN" \
-    SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
-    SPACES_MOBILE_BRIDGE_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}" \
-    SPACES_MOBILE_BRIDGE_PORT="$BRIDGE_PORT" \
-    "$@"
+  local -a env_args=(
+    HOME="$DEMO_ROOT/home"
+    CODEX_HOME="$E2E_CODEX_HOME"
+    XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME"
+    SPACES_DB_PATH="$DB_PATH"
+    SPACES_RUNTIME_DIR="$RUNTIME_DIR"
+    SPACESD_EXECUTABLE="$TERMINAL_SERVICE_BIN"
+    SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT"
+    SPACES_DEVICE_API_HOST="${SPACES_MOBILE_DEMO_BIND_HOST:-0.0.0.0}"
+    SPACES_DEVICE_API_PORT="$DEVICE_API_PORT"
+  )
+  run_demo_env "${env_args[@]}" "$@"
 }
 
 tail_if_present() {
@@ -172,19 +202,60 @@ tail_if_present() {
   fi
 }
 
+timestamp_ms() {
+  python3 - <<'PY'
+import time
+print(int(time.time() * 1000))
+PY
+}
+
+record_scenario_result() {
+  local status="$1"
+  local target="$2"
+  local scenario="$3"
+  local duration_ms="$4"
+  local detail="${5:-}"
+  [[ -n "$SCENARIO_RESULTS_LOG" ]] || return 0
+  mkdir -p "$(dirname "$SCENARIO_RESULTS_LOG")"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$status" "$target" "$scenario" "$duration_ms" "${detail:-"-"}" >>"$SCENARIO_RESULTS_LOG"
+}
+
+capture_desktop_screenshot() {
+  local path="$1"
+  command -v screencapture >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$path")"
+  screencapture -x "$path" >/dev/null 2>&1 || true
+}
+
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   PRESERVE_ROOT=1
+  if [[ -n "$DEMO_ROOT" && -d "$DEMO_ROOT" ]]; then
+    local failure_screenshot="$DEMO_ROOT/failure-desktop.png"
+    capture_desktop_screenshot "$failure_screenshot"
+    [[ -f "$failure_screenshot" ]] && printf 'Failure desktop screenshot: %s\n' "$failure_screenshot" >&2
+  fi
   tail_if_present "Scenario log tail" "$SCENARIO_LOG" 160
   tail_if_present "UI test output tail" "$UI_TEST_LOG" 160
   tail_if_present "Demo output tail" "$DEMO_STDOUT_LOG" 120
   tail_if_present "iOS build-for-testing output tail" "$IOS_BUILD_LOG" 120
   if [[ -n "$DEMO_ROOT" ]]; then
     tail_if_present "Mac app log tail" "$DEMO_ROOT/app.log" 160
-    tail_if_present "Bridge log tail" "$DEMO_ROOT/bridge.log" 160
+    tail_if_present "Device API log tail" "$DEMO_ROOT/device-api.log" 160
     tail_if_present "$MOBILE_DEVICE_LABEL app stderr tail" "$DEMO_ROOT/$MOBILE_ARTIFACT_NAME-app.stderr.log" 160
   fi
   exit 1
+}
+
+device_api_connect_host() {
+  case "$1" in
+    "" | "0.0.0.0" | "::")
+      printf '127.0.0.1'
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
 }
 
 terminate_pid_if_command_matches() {
@@ -223,10 +294,10 @@ cleanup() {
     fi
   fi
   terminate_pid_if_command_matches "$DEMO_APP_PID" "demo app" "SpacesApp"
-  if [[ "$DEMO_BRIDGE_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
-    terminate_pid_if_command_matches "$DEMO_BRIDGE_PID" "demo bridge" "SpacesTerminalService"
+  if [[ "$DEMO_DEVICE_API_PID" != "$DEMO_TERMINAL_SERVICE_PID" ]]; then
+    terminate_pid_if_command_matches "$DEMO_DEVICE_API_PID" "demo Device API" "spacesd"
   fi
-  terminate_pid_if_command_matches "$DEMO_TERMINAL_SERVICE_PID" "terminal service" "SpacesTerminalService"
+  terminate_pid_if_command_matches "$DEMO_TERMINAL_SERVICE_PID" "spacesd" "spacesd"
   if [[ -n "$IPAD_UDID" ]]; then
     xcrun simctl terminate "$IPAD_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
   fi
@@ -247,7 +318,7 @@ cleanup() {
 
   rm -f "$DEFAULT_UI_TEST_CONFIG"
   if [[ -n "$SUITE_ROOT" && -d "$SUITE_ROOT" ]]; then
-    if [[ "$PRESERVE_ROOT" == "1" || $exit_code -ne 0 ]]; then
+    if [[ "$REQUESTED_KEEP_ROOT" == "1" || "$PRESERVE_ROOT" == "1" || $exit_code -ne 0 ]]; then
       printf 'Preserved mobile E2E build root: %s\n' "$SUITE_ROOT" >&2
     else
       rm -rf "$SUITE_ROOT" || true
@@ -298,6 +369,9 @@ PY
 }
 
 build_macos_debug_products() {
+  if [[ "${SPACES_E2E_SKIP_MACOS_BUILD:-0}" == "1" ]]; then
+    return 0
+  fi
   printf 'Building macOS debug products...\n'
   run_demo_env "$ROOT_DIR/scripts/swiftpm.sh" build
 }
@@ -346,17 +420,24 @@ while True:
         index = start + 1
         continue
     if isinstance(payload, dict) and payload.get("root") and payload.get("sessionID"):
+        required_keys = ["localProjectDir", "localSessionID"]
+        missing = [key for key in required_keys if not payload.get(key)]
+        if missing:
+            print(f"DEMO_METADATA_ERROR={shlex.quote('Mobile demo metadata is missing: ' + ', '.join(missing))}")
+            raise SystemExit(0)
         fields = {
             "DEMO_ROOT": payload["root"],
             "PROJECT_DIR": payload["projectDir"],
+            "LOCAL_PROJECT_DIR": payload["localProjectDir"],
+            "LOCAL_SESSION_ID": payload["localSessionID"],
             "DB_PATH": payload["dbPath"],
             "RUNTIME_DIR": payload.get("runtimeDir") or str(pathlib.Path(payload["root"]) / "runtime"),
-            "BRIDGE_HOST": payload["bridgeHost"],
-            "BRIDGE_PORT": str(payload["bridgePort"]),
+            "DEVICE_API_HOST": payload["deviceAPIHost"],
+            "DEVICE_API_PORT": str(payload["deviceAPIPort"]),
             "IPAD_UDID": payload["ipadSimulatorUDID"],
             "IPHONE_UDID": payload["iphoneSimulatorUDID"],
             "DEMO_APP_PID": str(payload.get("appPID") or ""),
-            "DEMO_BRIDGE_PID": str(payload.get("bridgePID") or ""),
+            "DEMO_DEVICE_API_PID": str(payload.get("deviceAPIPID") or ""),
             "DEMO_TERMINAL_SERVICE_PID": str(payload.get("terminalServicePID") or ""),
             "PERFORMANCE_LOG_PATH": payload.get("performanceLogPath") or str(pathlib.Path(payload["root"]) / "mobile-terminal-performance.jsonl"),
         }
@@ -374,6 +455,10 @@ PY
     sleep 0.25
   done
   eval "$metadata"
+  if [[ -n "${DEMO_METADATA_ERROR:-}" ]]; then
+    fail "$DEMO_METADATA_ERROR"
+  fi
+  DEVICE_API_HOST="$(device_api_connect_host "$DEVICE_API_HOST")"
 }
 
 start_demo() {
@@ -394,25 +479,156 @@ start_demo() {
     SPACES_MOBILE_DEMO_IPHONE_NAME="$demo_iphone_name" \
     SPACES_MOBILE_DEMO_IPAD_NAME="$demo_ipad_name" \
     SPACES_MOBILE_DEMO_PORT="$DEMO_PORT" \
-    SPACES_TERMINAL_SERVICE_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
+    SPACESD_CREATE_TIMEOUT="$TERMINAL_CREATE_TIMEOUT" \
     CODEX_HOME="$E2E_CODEX_HOME" \
     XDG_CONFIG_HOME="$E2E_GHOSTTY_XDG_CONFIG_HOME" \
     "$DEMO_SCRIPT" >"$DEMO_STDOUT_LOG" 2>&1 &
   DEMO_PID=$!
   wait_for_demo_metadata
+  DEMO_PROJECT_DIR="$LOCAL_PROJECT_DIR"
+  PROJECT_DIR="$LOCAL_PROJECT_DIR"
   printf 'Shared demo root: %s\n' "$DEMO_ROOT"
+}
+
+run_remote_device_e2e() {
+  local remote_result="$SUITE_ROOT/remote-device-e2e.json"
+  local remote_stdout="$SUITE_ROOT/remote-device-e2e.stdout"
+  local remote_log="$SUITE_ROOT/remote-device-e2e.log"
+  printf 'Running remote paired-device Device API parity flow...\n'
+  SPACES_E2E="$SPACES_E2E_BIN" \
+    SPACES_E2E_REMOTE_DEVICE_RESULT_JSON="$remote_result" \
+    "$REMOTE_DEVICE_E2E_SCRIPT" >"$remote_stdout" 2>"$remote_log" \
+    || fail "Remote paired-device E2E failed. See $remote_log"
+  REMOTE_DEVICE_RESULT_JSON="$remote_result"
+  local parsed
+  parsed="$(
+    python3 - "$REMOTE_DEVICE_RESULT_JSON" <<'PY'
+import json
+import shlex
+import sys
+payload = json.load(open(sys.argv[1]))
+fields = {
+    "REMOTE_DEVICE_ID": "deviceID",
+    "REMOTE_DEVICE_NAME": "name",
+    "REMOTE_DEVICE_API_HOST": "remoteDaemonHost",
+    "REMOTE_DEVICE_API_PORT": "remoteDaemonPort",
+    "REMOTE_DEVICE_AUTH_TOKEN": "authToken",
+    "REMOTE_DEVICE_TRANSPORT_KEY": "transportKey",
+    "REMOTE_DEVICE_CERTIFICATE_FINGERPRINT": "certificateFingerprint",
+    "REMOTE_DEVICE_PROJECT_DIR": "projectDir",
+    "REMOTE_DEVICE_WORKSPACE_ID": "workspaceID",
+}
+for env_name, json_name in fields.items():
+    value = payload.get(json_name)
+    if value is None or str(value).strip() == "":
+        raise SystemExit(f"remote device result missing {json_name}")
+    print(f"{env_name}={shlex.quote(str(value))}")
+PY
+  )"
+  eval "$parsed"
+}
+
+create_device_api_parity_fixture() {
+  local project_dir="$1"
+  rm -rf "$project_dir"
+  mkdir -p "$project_dir"
+  printf 'local device api sentinel\n' >"$project_dir/README.txt"
+  cat >"$project_dir/spaces.yaml" <<'YAML'
+version: 1
+processes:
+  - name: parity-process
+    command: >-
+      python3 -c "import time; print('device-api-process-ready', flush=True); time.sleep(120)"
+    on_exit: none
+agent_launchers:
+  - name: parity-agent
+    command: >-
+      python3 -c "import time; print('device-api-agent-ready', flush=True); time.sleep(120)"
+YAML
+  git -C "$project_dir" init >/dev/null
+  git -C "$project_dir" config user.email "spaces-e2e@example.invalid"
+  git -C "$project_dir" config user.name "Spaces E2E"
+  git -C "$project_dir" add README.txt spaces.yaml
+  git -C "$project_dir" commit -m "Initial device API parity fixture" >/dev/null
+}
+
+run_local_device_api_parity() {
+  local parity_project_dir="$DEMO_ROOT/device-api-parity/local"
+  local parity_result="$SUITE_ROOT/local-device-api-parity.json"
+  local parity_stdout="$SUITE_ROOT/local-device-api-parity.stdout"
+  local parity_log="$SUITE_ROOT/local-device-api-parity.log"
+  local parsed auth_token transport_key installation_id
+  create_device_api_parity_fixture "$parity_project_dir"
+  parsed="$(
+    python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" <<'PY'
+import json
+import shlex
+import sys
+payload = json.load(open(sys.argv[1]))[sys.argv[2]]
+for key, name in (("authToken", "auth_token"), ("transportKey", "transport_key"), ("installationID", "installation_id")):
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"pairing payload missing {key}")
+    print(f"{name}={shlex.quote(value)}")
+PY
+  )"
+  eval "$parsed"
+  printf 'Running local paired-device Device API parity flow...\n'
+  "$ROOT_DIR/apps/macos/Tests/device_api_parity.py" \
+    --spacese2e "$SPACES_E2E_BIN" \
+    --host "$DEVICE_API_HOST" \
+    --port "$DEVICE_API_PORT" \
+    --transport-key "$transport_key" \
+    --auth-token "$auth_token" \
+    --project-dir "$parity_project_dir" \
+    --label "local-device" \
+    --client-installation-id "$installation_id" \
+    --client-device-name "$MOBILE_DEVICE_LABEL Device API E2E" \
+    --result-json "$parity_result" >"$parity_stdout" 2>"$parity_log" \
+    || fail "Local Device API parity flow failed. See $parity_log"
+}
+
+configure_target() {
+  CURRENT_TARGET="$1"
+  case "$CURRENT_TARGET" in
+    local)
+      PROJECT_DIR="$LOCAL_PROJECT_DIR"
+      TARGET_DEVICE_ID="local"
+      TARGET_DEVICE_NAME="This Mac"
+      TARGET_DEVICE_API_HOST="$DEVICE_API_HOST"
+      TARGET_DEVICE_API_PORT="$DEVICE_API_PORT"
+      TARGET_WORKSPACE_ID=""
+      ;;
+    remote)
+      [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "remote target requested before remote Device API E2E result was available"
+      PROJECT_DIR="$REMOTE_DEVICE_PROJECT_DIR"
+      TARGET_DEVICE_ID="$REMOTE_DEVICE_ID"
+      TARGET_DEVICE_NAME="$REMOTE_DEVICE_NAME"
+      TARGET_DEVICE_API_HOST="$REMOTE_DEVICE_API_HOST"
+      TARGET_DEVICE_API_PORT="$REMOTE_DEVICE_API_PORT"
+      TARGET_DEVICE_AUTH_TOKEN="$REMOTE_DEVICE_AUTH_TOKEN"
+      TARGET_DEVICE_TRANSPORT_KEY="$REMOTE_DEVICE_TRANSPORT_KEY"
+      TARGET_DEVICE_CERTIFICATE_FINGERPRINT="$REMOTE_DEVICE_CERTIFICATE_FINGERPRINT"
+      TARGET_DEVICE_INSTALLATION_ID="REMOTE-DEVICE-E2E"
+      TARGET_WORKSPACE_ID="$REMOTE_DEVICE_WORKSPACE_ID"
+      ;;
+    *)
+      fail "unsupported mobile E2E target without a paired remote-daemon harness: $CURRENT_TARGET"
+      ;;
+  esac
+  printf '\n[%s] Using mobile E2E target: %s project=%s\n' "$(date +%H:%M:%S)" "$CURRENT_TARGET" "$PROJECT_DIR"
 }
 
 begin_scenario() {
   CURRENT_SCENARIO="$1"
   SCENARIO_CREATED_SESSIONS=()
-  SCENARIO_DIR="$DEMO_ROOT/mobile-e2e/$CURRENT_SCENARIO"
+  SCENARIO_DIR="$DEMO_ROOT/mobile-e2e/$CURRENT_TARGET/$CURRENT_SCENARIO"
   SCENARIO_LOG="$SCENARIO_DIR/scenario.log"
   UI_TEST_CONFIG="$SCENARIO_DIR/ui-test-config.json"
   UI_TEST_LOG="$SCENARIO_DIR/ui-test.log"
   mkdir -p "$SCENARIO_DIR"
   : >"$SCENARIO_LOG"
-  printf '\n[%s] Running mobile scenario: %s\n' "$(date +%H:%M:%S)" "$CURRENT_SCENARIO"
+  printf '\n[%s] Running mobile scenario: %s target=%s\n' "$(date +%H:%M:%S)" "$CURRENT_SCENARIO" "$CURRENT_TARGET"
 }
 
 discover_session_ids() {
@@ -460,7 +676,459 @@ raise SystemExit(f"Timed out waiting for active owner attachment for {session_id
 PY
 }
 
+profile_app_owner_json() {
+  demo_env "$SPACES_E2E_BIN" profile-app-owner --json
+}
+
+profile_app_owner_pid() {
+  python3 -c '
+import json
+import os
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+
+owner = payload.get("owner")
+if not owner:
+    raise SystemExit(1)
+pid = owner.get("pid")
+if not isinstance(pid, int) or pid <= 0:
+    raise SystemExit(1)
+try:
+    os.kill(pid, 0)
+except OSError:
+    raise SystemExit(1)
+print(pid)
+'
+}
+
+record_profile_app_owner_pid() {
+  local owner_pid="$1"
+  [[ -n "$owner_pid" && "$owner_pid" =~ ^[0-9]+$ ]] || return 0
+  if [[ -n "$DEMO_ROOT" && -d "$DEMO_ROOT" && -n "$DEMO_APP_PID" && "$DEMO_APP_PID" != "$owner_pid" ]]; then
+    python3 - "$DEMO_ROOT/app-recovery-state.json" "$DEMO_APP_PID" "$owner_pid" <<'PY' || true
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+old_pid = int(sys.argv[2])
+new_pid = int(sys.argv[3])
+if path.exists():
+    raise SystemExit(0)
+payload = {
+    "status": "recovered",
+    "oldAppPID": old_pid,
+    "newAppPID": new_pid,
+    "observedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+}
+temp_path = path.with_suffix(".tmp")
+temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+temp_path.replace(path)
+PY
+  fi
+  DEMO_APP_PID="$owner_pid"
+}
+
+mobile_device_api_request() {
+  local request_json="$1"
+  [[ -f "$DEMO_ROOT/pairing.json" ]] || return 1
+  demo_env python3 - "$SPACES_E2E_BIN" "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$request_json" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+spacese2e = Path(sys.argv[1])
+pairing_path = Path(sys.argv[2])
+device_key = sys.argv[3]
+bundle_id = sys.argv[4]
+device_name = sys.argv[5]
+device_api_host = sys.argv[6]
+device_api_port = int(sys.argv[7])
+request = json.loads(sys.argv[8])
+pairing = json.loads(pairing_path.read_text())[device_key]
+client_app = {
+    "installationID": pairing["installationID"],
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": device_name,
+    "appVersion": "1.0",
+}
+
+def typed_device_request(request):
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
+request = typed_device_request(request)
+completed = subprocess.run(
+    [
+        str(spacese2e),
+        "mobile-request",
+        "--host",
+        device_api_host,
+        "--port",
+        str(device_api_port),
+        "--transport-key=" + pairing["transportKey"],
+        "--request-json",
+        json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
+    ],
+    capture_output=True,
+    text=True,
+    env=os.environ,
+    timeout=15,
+    check=True,
+)
+print(completed.stdout, end="")
+PY
+}
+
+remote_device_api_request() {
+  local request_json="$1"
+  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || return 1
+  python3 - "$SPACES_E2E_BIN" "$REMOTE_DEVICE_RESULT_JSON" "$BUNDLE_ID" "$request_json" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+spacese2e = Path(sys.argv[1])
+remote_result_path = Path(sys.argv[2])
+bundle_id = sys.argv[3]
+request = json.loads(sys.argv[4])
+remote = json.loads(remote_result_path.read_text())
+client_app = {
+    "installationID": "REMOTE-DEVICE-E2E",
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": "Remote Device E2E",
+    "appVersion": "1.0",
+}
+
+def typed_device_request(request):
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
+request = typed_device_request(request)
+completed = subprocess.run(
+    [
+        str(spacese2e),
+        "mobile-request",
+        "--host",
+        str(remote["remoteDaemonHost"]),
+        "--port",
+        str(remote["remoteDaemonPort"]),
+        "--transport-key=" + remote["transportKey"],
+        "--request-json",
+        json.dumps({"authToken": remote["authToken"], "clientApp": client_app, **request}),
+    ],
+    capture_output=True,
+    text=True,
+    env=os.environ,
+    timeout=20,
+    check=True,
+)
+print(completed.stdout, end="")
+PY
+}
+
+device_api_response_ok() {
+  local response_json="$1"
+  python3 - "$response_json" <<'PY'
+import json
+import sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if payload.get("ok") else 1)
+PY
+}
+
+wait_for_mobile_overview_sessions() {
+  local overview_log="$SCENARIO_DIR/mobile-overview-wait.log"
+  demo_env python3 - "$SPACES_E2E_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_NAME" "$UI_TEST_CONFIG" "$overview_log" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+spacese2e = Path(sys.argv[1])
+bundle_id = sys.argv[2]
+fallback_device_name = sys.argv[3]
+config_path = Path(sys.argv[4])
+log_path = Path(sys.argv[5])
+
+config = json.loads(config_path.read_text())
+required_session_ids = [
+    value for value in (config.get("sessionID"), config.get("secondarySessionID"))
+    if isinstance(value, str) and value
+]
+if not required_session_ids:
+    raise SystemExit(0)
+
+client_app = {
+    "installationID": config["installationID"],
+    "bundleID": bundle_id,
+    "platform": "ios",
+    "deviceName": config.get("deviceName") or fallback_device_name,
+    "appVersion": "1.0",
+}
+command = [
+    str(spacese2e),
+    "mobile-request",
+    "--host",
+    config["host"],
+    "--port",
+    str(config["port"]),
+    "--transport-key=" + config["transportKey"],
+    "--request-json",
+    json.dumps({"authToken": config["authToken"], "clientApp": client_app, "command": {"overview": {}}}),
+]
+
+def session_id_for_row(row):
+    if not isinstance(row, dict):
+        return None
+    for key in ("sessionID", "id"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+def collect_terminal_rows(value, rows):
+    if isinstance(value, dict):
+        row_session_id = session_id_for_row(value)
+        if row_session_id in required_session_ids:
+            rows.append(value)
+        for child in value.values():
+            collect_terminal_rows(child, rows)
+    elif isinstance(value, list):
+        for child in value:
+            collect_terminal_rows(child, rows)
+
+deadline = time.time() + 30
+last_detail = ""
+attempt = 0
+while time.time() < deadline:
+    attempt += 1
+    completed = subprocess.run(command, capture_output=True, text=True, env=os.environ, timeout=20)
+    if completed.returncode == 0:
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            last_detail = f"attempt {attempt}: invalid JSON: {error}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        else:
+            terminal_rows = []
+            collect_terminal_rows(((payload.get("result") or {}).get("overview") or {}), terminal_rows)
+            visible_ids = {session_id_for_row(row) for row in terminal_rows}
+            missing = [session_id for session_id in required_session_ids if session_id not in visible_ids]
+            missing_direct_credentials = []
+            for row in terminal_rows:
+                endpoint = row.get("daemonEndpoint")
+                if isinstance(endpoint, dict) and not str(endpoint.get("authToken") or "").strip():
+                    missing_direct_credentials.append(session_id_for_row(row))
+            last_detail = json.dumps(
+                {
+                    "attempt": attempt,
+                    "requiredSessionIDs": required_session_ids,
+                    "visibleSessionIDs": sorted(session_id for session_id in visible_ids if session_id),
+                    "missingSessionIDs": missing,
+                    "missingDirectCredentialSessionIDs": missing_direct_credentials,
+                    "ok": payload.get("ok"),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            if payload.get("ok") and not missing and not missing_direct_credentials:
+                log_path.write_text(last_detail + "\n")
+                raise SystemExit(0)
+    else:
+        last_detail = f"attempt {attempt}: exit={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+    time.sleep(1)
+
+log_path.write_text(last_detail + "\n")
+raise SystemExit(f"Device API overview did not include required sessions before UI test.\n{last_detail}")
+PY
+}
+
+wait_for_profile_app_owner() {
+  local timeout_seconds="${1:-20}"
+  local log_path="$2"
+  local deadline=$((SECONDS + timeout_seconds))
+  local owner_json=""
+  local owner_pid=""
+  while (( SECONDS < deadline )); do
+    if owner_json="$(profile_app_owner_json 2>&1)" && owner_pid="$(printf '%s' "$owner_json" | profile_app_owner_pid 2>/dev/null)"; then
+      record_profile_app_owner_pid "$owner_pid"
+      printf 'profile app owner ready: pid=%s\n' "$owner_pid" >>"$log_path" || true
+      return 0
+    fi
+    sleep 0.2
+  done
+  {
+    printf 'Timed out waiting for profile app owner.\n'
+    printf 'last profile-app-owner payload:\n%s\n' "$owner_json"
+  } >>"$log_path" || true
+  return 1
+}
+
+ensure_profile_app_owner() {
+  local log_path="$1"
+  local owner_json=""
+  local owner_pid=""
+  if owner_json="$(profile_app_owner_json 2>&1)"; then
+    {
+      printf 'profile-app-owner before terminal show:\n'
+      printf '%s\n' "$owner_json"
+    } >>"$log_path" || true
+    if owner_pid="$(printf '%s' "$owner_json" | profile_app_owner_pid 2>/dev/null)"; then
+      record_profile_app_owner_pid "$owner_pid"
+      return 0
+    fi
+  else
+    {
+      printf 'profile-app-owner failed before terminal show:\n'
+      printf '%s\n' "$owner_json"
+    } >>"$log_path" || true
+  fi
+
+  local launch_response
+  {
+    printf 'No live profile app owner; requesting launchSpacesApp through the daemon Device API.\n'
+  } >>"$log_path" || true
+  if ! launch_response="$(mobile_device_api_request '{"command":"launchSpacesApp"}' 2>&1)"; then
+    {
+      printf 'launchSpacesApp request failed:\n'
+      printf '%s\n' "$launch_response"
+    } >>"$log_path" || true
+    return 1
+  fi
+  {
+    printf 'launchSpacesApp response:\n'
+    printf '%s\n' "$launch_response"
+  } >>"$log_path" || true
+  wait_for_profile_app_owner 20 "$log_path"
+}
+
+new_remote_workspace_terminal_session() {
+  local title="${1:-e2e-$CURRENT_SCENARIO}"
+  local command_text="${2:-}"
+  [[ -z "$command_text" ]] || fail "remote mobile E2E terminal creation does not support scenario-specific launch commands: $CURRENT_SCENARIO"
+  [[ -n "$TARGET_WORKSPACE_ID" ]] || fail "remote mobile E2E target is missing a workspace ID"
+  local create_request create_response session_id primer_request primer_response seed_request seed_response
+  create_request="$(
+    python3 - "$TARGET_WORKSPACE_ID" <<'PY'
+import json
+import sys
+print(json.dumps({"command": "openWorkspaceTerminal", "workspaceID": sys.argv[1]}, separators=(",", ":")))
+PY
+  )"
+  create_response="$(remote_device_api_request "$create_request")" || fail "Failed to create remote workspace terminal for $CURRENT_SCENARIO."
+  session_id="$(
+    python3 - "$create_response" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+mutation = ((payload.get("result") or {}).get("mutation") or {})
+session_id = mutation.get("sessionID")
+if not payload.get("ok") or not session_id:
+    raise SystemExit(f"openWorkspaceTerminal did not return a session ID: {payload}")
+print(session_id)
+PY
+  )" || fail "Unable to parse remote workspace terminal session ID for $CURRENT_SCENARIO."
+  primer_request="$(
+    python3 - "$session_id" "$title" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+session_id, title = sys.argv[1:3]
+client_id = f"mobile-e2e-primer-{session_id}"
+payload = {
+    "command": "attach",
+    "sessionID": session_id,
+    "client": {
+        "id": client_id,
+        "kind": "remoteViewer",
+        "identity": {
+            "label": "Remote E2E Primer",
+            "deviceName": "Remote E2E Primer",
+            "networkAddress": "127.0.0.1",
+        },
+        "connectedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    },
+    "attachmentMode": "owner",
+}
+print(json.dumps(payload, separators=(",", ":")))
+PY
+  )"
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    primer_response="$(remote_device_api_request "$primer_request" 2>&1 || true)"
+    if device_api_response_ok "$primer_response"; then
+      break
+    fi
+    if [[ "$attempt" == "10" ]]; then
+      printf '%s\n' "$primer_response" >>"$SCENARIO_LOG" || true
+      fail "Remote primer owner attach failed for mobile E2E."
+    fi
+    sleep 0.5
+  done
+  seed_request="$(
+    python3 - "$session_id" "$title" <<'PY'
+import json
+import sys
+session_id, title = sys.argv[1:3]
+client_id = f"mobile-e2e-primer-{session_id}"
+command = f"printf '__spaces_remote_mobile_ready__ {title}\\n'; pwd"
+print(json.dumps({
+    "command": "send",
+    "sessionID": session_id,
+    "clientID": client_id,
+    "text": command,
+    "appendNewline": True,
+}, separators=(",", ":")))
+PY
+  )"
+  for attempt in 1 2 3 4 5; do
+    seed_response="$(remote_device_api_request "$seed_request" 2>&1 || true)"
+    if device_api_response_ok "$seed_response"; then
+      break
+    fi
+    if [[ "$attempt" == "5" ]]; then
+      printf '%s\n' "$seed_response" >>"$SCENARIO_LOG" || true
+      fail "Remote terminal output seed failed for mobile E2E."
+    fi
+    sleep 0.5
+  done
+  printf '%s\n' "$session_id"
+}
+
 new_terminal_session() {
+  if [[ "$CURRENT_TARGET" == "remote" ]]; then
+    new_remote_workspace_terminal_session "$@"
+    return
+  fi
   local title="${1:-e2e-$CURRENT_SCENARIO}"
   local command_text="${2:-}"
   local create_log="$SCENARIO_DIR/start-terminal-session.log"
@@ -469,7 +1137,8 @@ new_terminal_session() {
   : >"$create_log"
   for attempt in 1 2 3 4 5; do
     local attempt_log="$SCENARIO_DIR/start-terminal-session-attempt-$attempt.log"
-    local create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
+    local -a create_args
+    create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
     if [[ -n "$command_text" ]]; then
       create_args+=(--command "$command_text")
     fi
@@ -520,9 +1189,40 @@ PY
   )"; then
     fail "Unable to parse fresh service terminal session ID for $CURRENT_SCENARIO."
   fi
+  python3 - "$create_log" "$SCENARIO_DIR/session-$session_id.output-path" "$RUNTIME_DIR" "$session_id" <<'PY'
+import json
+import pathlib
+import sys
+
+create_log = pathlib.Path(sys.argv[1])
+output_path_file = pathlib.Path(sys.argv[2])
+runtime_dir = pathlib.Path(sys.argv[3])
+session_id = sys.argv[4]
+decoder = json.JSONDecoder()
+text = create_log.read_text()
+payload = None
+index = 0
+while True:
+    start = text.find("{", index)
+    if start < 0:
+        break
+    try:
+        decoded, end = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError:
+        index = start + 1
+        continue
+    if isinstance(decoded, dict) and (decoded.get("id") or decoded.get("sessionID")):
+        payload = decoded
+    index = start + max(end, 1)
+output_path = (payload or {}).get("outputPath") or str(runtime_dir / "terminal" / "sessions" / session_id / "output.log")
+output_path_file.write_text(output_path)
+PY
   : >"$show_log"
   for attempt in 1 2 3; do
     local show_attempt_log="$SCENARIO_DIR/show-terminal-attempt-$attempt.log"
+    if ! ensure_profile_app_owner "$show_log"; then
+      fail "No current-profile SpacesApp owner was available for fresh terminal session $session_id."
+    fi
     if ! demo_env "$SPACES_CLI_BIN" terminal show "$session_id" >"$show_attempt_log" 2>&1; then
       cat "$show_attempt_log" >>"$SCENARIO_LOG" || true
       fail "Failed to open Mac owner window for fresh service terminal session $session_id."
@@ -536,9 +1236,22 @@ PY
       printf '%s\n' "$session_id"
       return
     fi
+    local screenshot_path="$SCENARIO_DIR/show-terminal-attempt-$attempt-desktop.png"
+    capture_desktop_screenshot "$screenshot_path"
+    [[ -f "$screenshot_path" ]] && printf 'Desktop screenshot: %s\n' "$screenshot_path" >>"$show_log"
     sleep 1
   done
   fail "Fresh terminal session did not become owner-ready: $session_id"
+}
+
+session_output_path() {
+  local session_id="$1"
+  local path_file="$SCENARIO_DIR/session-$session_id.output-path"
+  if [[ -f "$path_file" ]]; then
+    cat "$path_file"
+  else
+    printf '%s/terminal/sessions/%s/output.log\n' "$RUNTIME_DIR" "$session_id"
+  fi
 }
 
 track_current_scenario_session() {
@@ -559,6 +1272,30 @@ cleanup_current_scenario_sessions() {
       continue
     fi
     seen+=" $session_id "
+    if [[ "$CURRENT_TARGET" == "remote" ]]; then
+      local stop_request
+      stop_request="$(
+        python3 - "$TARGET_WORKSPACE_ID" "$session_id" <<'PY'
+import json
+import sys
+workspace_id, session_id = sys.argv[1:3]
+print(json.dumps({
+    "command": "stopWorkspaceTerminal",
+    "workspaceID": workspace_id,
+    "sessionID": session_id,
+}, separators=(",", ":")))
+PY
+      )"
+      if [[ -n "$SCENARIO_LOG" ]]; then
+        {
+          printf -- '--- stop remote workspace terminal %s ---\n' "$session_id"
+          remote_device_api_request "$stop_request"
+        } >>"$SCENARIO_LOG" 2>&1 || true
+      else
+        remote_device_api_request "$stop_request" >/dev/null 2>&1 || true
+      fi
+      continue
+    fi
     if [[ -n "$SCENARIO_LOG" ]]; then
       {
         printf -- '--- terminate session %s ---\n' "$session_id"
@@ -572,8 +1309,65 @@ cleanup_current_scenario_sessions() {
 }
 
 reset_mobile_app() {
+  local launch_env=()
+  local assignment
+  while IFS= read -r assignment; do
+    [[ -n "$assignment" ]] && launch_env+=("$assignment")
+  done < <(python3 - "$UI_TEST_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+payload = json.loads(config_path.read_text())
+mapping = {
+    "host": "SPACES_MOBILE_TEST_HOST",
+    "port": "SPACES_MOBILE_TEST_PORT",
+    "authToken": "SPACES_MOBILE_TEST_AUTH_TOKEN",
+    "transportKey": "SPACES_MOBILE_TEST_TRANSPORT_KEY",
+    "certificateFingerprint": "SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT",
+    "installationID": "SPACES_MOBILE_TEST_INSTALLATION_ID",
+    "sessionID": "SPACES_MOBILE_E2E_TARGET_SESSION_ID",
+    "secondarySessionID": "SPACES_MOBILE_E2E_SECONDARY_SESSION_ID",
+    "renderDumpPath": "SPACES_MOBILE_E2E_RENDER_DUMP_PATH",
+    "eventLogPath": "SPACES_MOBILE_E2E_EVENT_LOG_PATH",
+}
+for json_key, environment_key in mapping.items():
+    value = payload.get(json_key)
+    if value is not None and str(value).strip():
+        print(f"SIMCTL_CHILD_{environment_key}={value}")
+required_seed_keys = [
+    "host",
+    "port",
+    "authToken",
+    "transportKey",
+    "certificateFingerprint",
+]
+if all(str(payload.get(key, "")).strip() for key in required_seed_keys):
+    device_id = str(payload.get("deviceID") or "").strip()
+    device_name = str(payload.get("deviceName") or "This Mac").strip() or "This Mac"
+    device = {
+        "name": device_name,
+        "host": payload["host"],
+        "port": int(payload["port"]),
+        "authToken": payload["authToken"],
+        "transportKey": payload["transportKey"],
+        "certificateFingerprint": payload["certificateFingerprint"],
+    }
+    if device_id:
+        device["id"] = device_id
+    seed = {
+        "devices": [device]
+    }
+    if device_id:
+        seed["activeDeviceID"] = device_id
+    print(f"SIMCTL_CHILD_SPACES_MOBILE_TEST_DEVICE_SEED_JSON={json.dumps(seed, separators=(',', ':'))}")
+print(f"SIMCTL_CHILD_SPACES_MOBILE_UI_TEST_CONFIG_PATH={config_path}")
+PY
+  )
   xcrun simctl terminate "$MOBILE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
   env \
+    "${launch_env[@]}" \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
     xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
@@ -584,7 +1378,7 @@ write_ui_test_config() {
   local scenario="$1"
   local session_id="$2"
   local secondary_session_id="${3:-}"
-  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" <<'PY'
+  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" "$CURRENT_TARGET" "$TARGET_DEVICE_ID" "$TARGET_DEVICE_NAME" "$TARGET_DEVICE_API_HOST" "$TARGET_DEVICE_API_PORT" "$TARGET_DEVICE_AUTH_TOKEN" "$TARGET_DEVICE_TRANSPORT_KEY" "$TARGET_DEVICE_CERTIFICATE_FINGERPRINT" "$TARGET_DEVICE_INSTALLATION_ID" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -594,8 +1388,8 @@ from pathlib import Path
     scenario,
     session_id,
     secondary_session_id,
-    bridge_host,
-    bridge_port_raw,
+    device_api_host,
+    device_api_port_raw,
     mobile_udid,
     mobile_device_key,
     mobile_artifact_name,
@@ -605,30 +1399,54 @@ from pathlib import Path
     scrollback_swipe_count_raw,
     terminal_link_preview_image_name,
     terminal_link_preview_path,
+    current_target,
+    target_device_id,
+    target_device_name,
+    target_device_api_host,
+    target_device_api_port_raw,
+    target_device_auth_token,
+    target_device_transport_key,
+    target_device_certificate_fingerprint,
+    target_device_installation_id,
 ) = sys.argv[1:]
 
 demo_root = Path(demo_root_raw)
-bridge_port = int(bridge_port_raw)
+artifacts_dir = Path(scenario_config_raw).parent
+device_api_port = int(device_api_port_raw)
 scrollback_swipe_count = int(scrollback_swipe_count_raw)
 config_paths = [Path(scenario_config_raw), Path(default_config_raw)]
 pairing = json.loads((demo_root / "pairing.json").read_text())
 mobile_pairing = pairing[mobile_device_key]
+if current_target == "remote":
+    device_api_host = target_device_api_host
+    device_api_port = int(target_device_api_port_raw)
+    mobile_pairing = {
+        "authToken": target_device_auth_token,
+        "transportKey": target_device_transport_key,
+        "certificateFingerprint": target_device_certificate_fingerprint,
+        "installationID": target_device_installation_id,
+    }
+    if not all(str(mobile_pairing.get(key, "")).strip() for key in ("authToken", "transportKey", "certificateFingerprint", "installationID")):
+        raise SystemExit("remote UI test target credentials are incomplete")
 prefix = scenario
 artifact_prefix = f"{prefix}-{mobile_artifact_name}"
 
 payload = {
     "sessionID": session_id,
     "secondarySessionID": None,
-    "host": bridge_host,
-    "port": bridge_port,
+    "deviceID": target_device_id or None,
+    "deviceName": target_device_name or ("This Mac" if current_target == "local" else "Remote Device"),
+    "host": device_api_host,
+    "port": device_api_port,
     "authToken": mobile_pairing["authToken"],
     "transportKey": mobile_pairing["transportKey"],
+    "certificateFingerprint": mobile_pairing["certificateFingerprint"],
     "installationID": mobile_pairing["installationID"],
-    "renderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-render.json"),
-    "eventLogPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-events.jsonl"),
-    "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-immediate.png"),
-    "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-plus-2s.png"),
-    "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-takeover-plus-6s.png"),
+    "renderDumpPath": str(artifacts_dir / f"{artifact_prefix}-render.json"),
+    "eventLogPath": str(artifacts_dir / f"{artifact_prefix}-events.jsonl"),
+    "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-takeover-immediate.png"),
+    "shortDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-takeover-plus-2s.png"),
+    "longDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-takeover-plus-6s.png"),
     "proceedTakeOverPath": None,
     "firstCommandRequestPath": None,
     "firstCommandFocusedPath": None,
@@ -641,6 +1459,8 @@ payload = {
     "proceedFinishPath": None,
     "firstCommandText": "",
     "secondCommandText": None,
+    "firstCommandOutputText": None,
+    "secondCommandOutputText": None,
     "manualRetakeoverAttempts": 0,
     "manualRetakeoverObservedPrefix": None,
     "manualRetakeoverContinuePrefix": None,
@@ -651,7 +1471,7 @@ payload = {
     "finalMacRetakeoverRequestPath": None,
     "finalMacRetakeoverObservedPath": None,
     "postFinalMacRetakeoverScreenshotPath": None,
-    "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final.png"),
+    "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-final.png"),
     "terminalLinkText": "",
     "expectedLinkPreviewTitle": "",
     "linkPreviewScreenshotPath": None,
@@ -675,36 +1495,38 @@ if scenario == "codex-resume-reopen":
     payload["secondarySessionID"] = session_id
 elif scenario == "roundtrip":
     payload.update({
-        "proceedTakeOverPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-proceed-takeover"),
-        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-request"),
-        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-focused"),
-        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-completed"),
-        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-observed"),
-        "secondCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-request"),
-        "secondCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-focused"),
-        "secondCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-completed"),
-        "secondCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-second-command-observed"),
-        "proceedFinishPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-proceed-finish"),
-        "firstCommandText": f"echo __roundtrip_{mobile_artifact_name}_one__",
-        "secondCommandText": f"echo __roundtrip_{mobile_artifact_name}_two__",
+        "proceedTakeOverPath": str(artifacts_dir / f"{artifact_prefix}-proceed-takeover"),
+        "firstCommandRequestPath": str(artifacts_dir / f"{artifact_prefix}-first-command-request"),
+        "firstCommandFocusedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-focused"),
+        "firstCommandCompletedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-completed"),
+        "firstCommandObservedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-observed"),
+        "secondCommandRequestPath": str(artifacts_dir / f"{artifact_prefix}-second-command-request"),
+        "secondCommandFocusedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-focused"),
+        "secondCommandCompletedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-completed"),
+        "secondCommandObservedPath": str(artifacts_dir / f"{artifact_prefix}-second-command-observed"),
+        "proceedFinishPath": str(artifacts_dir / f"{artifact_prefix}-proceed-finish"),
+        "firstCommandText": "printf '__rt_i1__\\n\\n\\n'",
+        "secondCommandText": "printf '__rt_i2__\\n\\n\\n'",
+        "firstCommandOutputText": "__rt_i1__",
+        "secondCommandOutputText": "__rt_i2__",
         "manualRetakeoverAttempts": 2,
-        "manualRetakeoverObservedPrefix": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-manual-retakeover-observed"),
-        "manualRetakeoverContinuePrefix": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-manual-retakeover-continue"),
-        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-command.png"),
-        "postSecondCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-second-command.png"),
-        "finalMacRetakeoverRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-request"),
-        "finalMacRetakeoverObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-final-mac-retakeover-observed"),
-        "postFinalMacRetakeoverScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-final-mac-retakeover.png"),
+        "manualRetakeoverObservedPrefix": str(artifacts_dir / f"{artifact_prefix}-manual-retakeover-observed"),
+        "manualRetakeoverContinuePrefix": str(artifacts_dir / f"{artifact_prefix}-manual-retakeover-continue"),
+        "postFirstCommandScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-command.png"),
+        "postSecondCommandScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-second-command.png"),
+        "finalMacRetakeoverRequestPath": str(artifacts_dir / f"{artifact_prefix}-final-mac-retakeover-request"),
+        "finalMacRetakeoverObservedPath": str(artifacts_dir / f"{artifact_prefix}-final-mac-retakeover-observed"),
+        "postFinalMacRetakeoverScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-final-mac-retakeover.png"),
         "minimumVisibleTerminalInkBands": 3,
         "maximumTerminalTopBlankRatio": 0.20,
     })
 elif scenario == "scrollback":
     payload.update({
-        "firstCommandRequestPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-request"),
-        "firstCommandFocusedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-focused"),
-        "firstCommandCompletedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-completed"),
-        "firstCommandObservedPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-first-command-observed"),
-        "postFirstCommandScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-command-while-scrolled.png"),
+        "firstCommandRequestPath": str(artifacts_dir / f"{artifact_prefix}-first-command-request"),
+        "firstCommandFocusedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-focused"),
+        "firstCommandCompletedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-completed"),
+        "firstCommandObservedPath": str(artifacts_dir / f"{artifact_prefix}-first-command-observed"),
+        "postFirstCommandScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-command-while-scrolled.png"),
         "scrollbackSwipeCount": scrollback_swipe_count,
         "minimumVisibleTerminalInkBands": 3,
         "maximumTerminalTopBlankRatio": 0.20,
@@ -713,26 +1535,26 @@ elif scenario == "terminal-link-preview":
     payload.update({
         "terminalLinkText": terminal_link_preview_path,
         "expectedLinkPreviewTitle": terminal_link_preview_image_name,
-        "linkPreviewScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-preview.png"),
+        "linkPreviewScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-preview.png"),
         "minimumVisibleTerminalInkBands": 2,
         "maximumTerminalTopBlankRatio": 0.30,
     })
 elif scenario == "two-session":
     payload.update({
         "secondarySessionID": secondary_session_id,
-        "immediateScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover.png"),
-        "shortDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover-plus-2s.png"),
-        "longDelayScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-first-takeover-plus-6s.png"),
-        "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-post-second-takeover.png"),
+        "immediateScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-takeover.png"),
+        "shortDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-takeover-plus-2s.png"),
+        "longDelayScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-first-takeover-plus-6s.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-post-second-takeover.png"),
         "firstCommandText": "pwd",
     })
 elif scenario in ("ctrl-c-final-frame", "ctrl-c-final-frame-codex-survivor"):
     expected_secondary_text = "" if scenario == "ctrl-c-final-frame-codex-survivor" else "__spaces_survivor_peer_ready__"
     payload.update({
         "secondarySessionID": secondary_session_id,
-        "interruptedRenderDumpPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-interrupted-render.json"),
-        "postInterruptScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-interrupted-final-frame.png"),
-        "finalScreenshotPath": str(demo_root / "mobile-e2e" / scenario / f"{artifact_prefix}-secondary-live-after-interrupt.png"),
+        "interruptedRenderDumpPath": str(artifacts_dir / f"{artifact_prefix}-interrupted-render.json"),
+        "postInterruptScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-interrupted-final-frame.png"),
+        "finalScreenshotPath": str(artifacts_dir / f"{artifact_prefix}-secondary-live-after-interrupt.png"),
         "expectedInterruptedText": "__spaces_ctrl_c_target_ready__",
         "expectedSecondaryText": expected_secondary_text,
         "minimumVisibleTerminalInkBands": 1,
@@ -749,6 +1571,7 @@ PY
 run_ui_test() {
   local test_name="$1"
   printf 'Running %s UI test: %s\n' "$MOBILE_DEVICE_LABEL" "$test_name"
+  wait_for_mobile_overview_sessions
   reset_mobile_app
   if ! SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
     xcodebuild \
@@ -765,10 +1588,12 @@ run_ui_test() {
 launch_codex_on_mac_owner() {
   local session_id="$1"
   local command_text="$2"
-  python3 - "$DEMO_ROOT" "$session_id" "$SPACES_E2E_BIN" "$command_text" "$SCENARIO_DIR" <<'PY'
+  local output_path
+  output_path="$(session_output_path "$session_id")"
+  python3 - "$DEMO_ROOT" "$session_id" "$SPACES_E2E_BIN" "$command_text" "$SCENARIO_DIR" "$output_path" <<'PY'
 import json
 import os
-import socket
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -780,9 +1605,9 @@ session_id = sys.argv[2]
 spacese2e = Path(sys.argv[3])
 command_text = sys.argv[4]
 scenario_dir = Path(sys.argv[5])
+output_log_path = Path(sys.argv[6])
 runtime_root = demo_root / "runtime"
 owner_dump_path = scenario_dir / "codex-mac-owner-dump.json"
-output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
 
 env = os.environ | {
     "HOME": str(demo_root / "home"),
@@ -792,45 +1617,63 @@ env = os.environ | {
     "SPACES_RUNTIME_DIR": str(runtime_root),
 }
 
-def socket_path(root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
-
 def current_owner_client_id() -> str:
     root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
-    with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
-        row = db.execute(
-            """
-            SELECT client_id
-            FROM terminal_attachments
-            WHERE root_directory = ?
-              AND mode = 'owner'
-              AND detached_at IS NULL
-            ORDER BY attached_at DESC
-            LIMIT 1
-            """,
-            (root_directory,),
-        ).fetchone()
-    if row:
-        return row[0]
-    raise RuntimeError("No active owner attachment was found for the demo session.")
+    deadline = time.time() + 30
+    rows = []
+    while time.time() < deadline:
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, mode, detached_at
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        for client_id, mode, detached_at in rows:
+            if client_id and mode == "owner" and detached_at is None:
+                return client_id
+        time.sleep(0.1)
+    raise RuntimeError(f"No active owner attachment was found for the demo session. rows={rows!r}")
 
 def send_request(request: dict) -> dict:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(5)
-    client.connect(str(socket_path(demo_root, session_id)))
-    client.sendall(json.dumps(request).encode("utf-8"))
-    client.shutdown(socket.SHUT_WR)
-    response = bytearray()
-    while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-    client.close()
-    return json.loads(response.decode("utf-8"))
+    command = [
+        str(spacese2e),
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        request["command"],
+        "--client-id",
+        request["clientID"],
+    ]
+    if request.get("text") is not None:
+        command.extend(["--text", request["text"]])
+    if request.get("key") is not None:
+        command.extend(["--key", request["key"]])
+    if request.get("appendNewline"):
+        command.append("--append-newline")
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
+
+def wait_for_owner_control_ready(owner_client_id: str) -> None:
+    deadline = time.time() + 15
+    last_response = None
+    while time.time() < deadline:
+        response = send_request(
+            {"command": "send", "text": "", "clientID": owner_client_id}
+        )
+        last_response = response
+        message = response.get("message", "")
+        if response.get("ok"):
+            return
+        if "Only the active owner" in message:
+            time.sleep(0.1)
+            continue
+        raise RuntimeError(f"Owner control readiness probe failed: {response}")
+    raise RuntimeError(f"Timed out waiting for owner control readiness. last_response={last_response!r}")
 
 def dump_owner_window() -> dict:
     if owner_dump_path.exists():
@@ -853,6 +1696,7 @@ def dump_owner_window() -> dict:
     )
 
 owner_client_id = current_owner_client_id()
+wait_for_owner_control_ready(owner_client_id)
 for request in (
     {"command": "send", "text": command_text, "clientID": owner_client_id},
     {"command": "key", "key": "enter", "clientID": owner_client_id},
@@ -1232,18 +2076,28 @@ PY
   printf 'Mobile scenario passed: %s\n' "$scenario"
 }
 
+run_takeover_scenario() {
+  begin_scenario "takeover"
+  local session_id
+  session_id="$(new_terminal_session)"
+  track_current_scenario_session "$session_id"
+  write_ui_test_config "takeover" "$session_id"
+  run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList"
+  printf 'Mobile scenario passed: takeover\n'
+}
+
 run_roundtrip_scenario() {
   begin_scenario "roundtrip"
   local session_id
   session_id="$(new_terminal_session)"
   track_current_scenario_session "$session_id"
   write_ui_test_config "roundtrip" "$session_id"
+  wait_for_mobile_overview_sessions
   reset_mobile_app
-  python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$MOBILE_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" "$MOBILE_DEVICE_LABEL" "$MOBILE_ARTIFACT_NAME" <<'PY'
+  python3 - "$ROOT_DIR" "$DEMO_ROOT" "$session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$UI_TEST_CONFIG" "$UI_TEST_LOG" "$IOS_DERIVED_DATA" "$SCENARIO_DIR" "$MOBILE_DEVICE_LABEL" "$MOBILE_ARTIFACT_NAME" <<'PY'
 import json
 import os
 import re
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -1253,8 +2107,8 @@ from pathlib import Path
 repo_root = Path(sys.argv[1])
 demo_root = Path(sys.argv[2])
 session_id = sys.argv[3]
-bridge_host = sys.argv[4]
-bridge_port = int(sys.argv[5])
+device_api_host = sys.argv[4]
+device_api_port = int(sys.argv[5])
 mobile_udid = sys.argv[6]
 spaces_cli = Path(sys.argv[7])
 spacese2e = Path(sys.argv[8])
@@ -1293,13 +2147,15 @@ env = os.environ | {
 }
 
 mac_prepare_commands = [
+    "export PS1='READY PROMPT > '",
     "printf '__roundtrip_mac_before_takeover_one__\\n'",
-    "printf '__roundtrip_mac_before_takeover_two__\\n'",
+    "printf '__roundtrip_mac_before_takeover_two__\\nMAC BEFORE TAKEOVER TWO\\n'",
 ]
+mac_ready_prompt_text = "READY PROMPT"
 ios_first_command = config["firstCommandText"]
-ios_first_output = f"__roundtrip_{mobile_artifact_name}_one__"
+ios_first_output = config.get("firstCommandOutputText") or f"__roundtrip_{mobile_artifact_name}_one__"
 ios_second_command = config["secondCommandText"]
-ios_second_output = f"__roundtrip_{mobile_artifact_name}_two__"
+ios_second_output = config.get("secondCommandOutputText") or f"__roundtrip_{mobile_artifact_name}_two__"
 bare_command_lines = (
     "s",
     ios_first_command,
@@ -1325,12 +2181,6 @@ def wait_for_file(path: Path, timeout: float, process: subprocess.Popen[str]) ->
 def write_marker(path: Path, value: str = "done\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value)
-
-def socket_path(root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
 
 def current_owner_client_id(excluded_client_ids: set[str] | None = None) -> str:
     excluded_client_ids = excluded_client_ids or set()
@@ -1376,37 +2226,44 @@ def wait_for_active_owner(excluded_client_ids: set[str] | None = None, timeout: 
         time.sleep(0.1)
     raise RuntimeError(f"Timed out waiting for active owner.\n{last_snapshot}")
 
-def send_unix_control_request(request: dict) -> dict:
-    path = socket_path(demo_root, session_id)
-    deadline = time.time() + 10
-    while True:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(5)
-        try:
-            client.connect(str(path))
-            client.sendall(json.dumps(request).encode("utf-8"))
-            client.shutdown(socket.SHUT_WR)
-            response = bytearray()
-            while True:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                response.extend(chunk)
-            return json.loads(response.decode("utf-8"))
-        except (ConnectionRefusedError, FileNotFoundError):
-            if time.time() >= deadline:
-                raise
-            time.sleep(0.2)
-        finally:
-            client.close()
+def send_terminal_control_request(request: dict) -> dict:
+    command = [
+        str(spacese2e),
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        request["command"],
+    ]
+    if request.get("clientID") is not None:
+        command.extend(["--client-id", request["clientID"]])
+    if request.get("text") is not None:
+        command.extend(["--text", request["text"]])
+    if request.get("key") is not None:
+        command.extend(["--key", request["key"]])
+    if request.get("appendNewline"):
+        command.append("--append-newline")
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
 
 def send_owner_command(command_text: str) -> None:
     owner_client_id = current_owner_client_id()
-    response = send_unix_control_request(
+    response = send_terminal_control_request(
         {"command": "send", "text": command_text, "appendNewline": True, "clientID": owner_client_id}
     )
     if not response.get("ok"):
         raise RuntimeError(f"Owner control request failed: {response}")
+
+def focus_mac_terminal_window() -> None:
+    show_result = subprocess.run(
+        [str(spaces_cli), "terminal", "show", session_id],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    if "Requested owner terminal window" not in show_result.stdout:
+        raise RuntimeError(f"Mac terminal focus request did not report success:\n{show_result.stdout}\n{show_result.stderr}")
 
 def wait_for_render_dump(predicate, timeout: float, process: subprocess.Popen[str]) -> dict:
     deadline = time.time() + timeout
@@ -1463,12 +2320,20 @@ def contains_command_output(text: str, command_text: str, output_text: str) -> b
     lines = text.splitlines()
     compact_text = re.sub(r"\s+", "", text)
     compact_command = re.sub(r"\s+", "", command_text)
+    compact_prompts = tuple(re.sub(r"\s+", "", prompt) for prompt in ("%", "$", "#", mac_ready_prompt_text, f"{mac_ready_prompt_text} >"))
     return (
-        f"%{compact_command}" in compact_text
+        any(f"{prompt}{compact_command}" in compact_text for prompt in compact_prompts)
         and any(line.strip() == output_text for line in lines)
     )
 
 def assert_prompt_rendered_after_output(label: str, text: str, output_text: str) -> None:
+    if prompt_rendered_after_output(text, output_text):
+        return
+    if output_text in text:
+        raise RuntimeError(f"{label} did not render the next shell prompt after {output_text!r}:\n{text}")
+    raise RuntimeError(f"{label} did not render output marker {output_text!r}:\n{text}")
+
+def prompt_rendered_after_output(text: str, output_text: str) -> bool:
     lines = [line.rstrip() for line in text.splitlines()]
     for index, line in enumerate(lines):
         if line.strip() != output_text:
@@ -1479,10 +2344,92 @@ def assert_prompt_rendered_after_output(label: str, text: str, output_text: str)
                 continue
             if output_text in stripped or "printf " in stripped or "echo " in stripped:
                 continue
-            if re.search(r"%\s*$", next_line):
-                return
-        raise RuntimeError(f"{label} did not render the next shell prompt after {output_text!r}:\n{text}")
-    raise RuntimeError(f"{label} did not render output marker {output_text!r}:\n{text}")
+            if mac_ready_prompt_text in stripped:
+                return True
+            if re.search(r"[%#$]\s*$", next_line):
+                return True
+        return False
+    return False
+
+def normalized_ocr_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+def assert_mac_screen_prompt_rendered_after_output(label: str, payload: dict, output_text: str, prompt_text: str) -> None:
+    screenshot_path = scenario_dir / "roundtrip-mac-before-takeover-screen.png"
+    ocr_path = scenario_dir / "roundtrip-mac-before-takeover-screen-ocr.txt"
+    window_number = payload.get("windowNumber")
+    if not isinstance(window_number, int) or window_number <= 0:
+        raise RuntimeError(f"{label} did not report a captureable terminal window number:\n{json.dumps(payload, indent=2)}")
+
+    swift_script = r'''
+import AppKit
+import Foundation
+import Vision
+
+let screenshotPath = CommandLine.arguments[1]
+let screenshotURL = URL(fileURLWithPath: screenshotPath)
+guard let image = NSImage(contentsOf: screenshotURL) else {
+    fputs("Unable to load screenshot at \(screenshotPath)\n", stderr)
+    exit(1)
+}
+var proposedRect = NSRect(origin: .zero, size: image.size)
+guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+    fputs("Unable to decode screenshot at \(screenshotPath)\n", stderr)
+    exit(1)
+}
+let request = VNRecognizeTextRequest()
+request.recognitionLevel = .accurate
+request.usesLanguageCorrection = false
+let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+try handler.perform([request])
+let recognizedText = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+print(recognizedText)
+'''
+    output_needle = normalized_ocr_text(output_text)
+    prompt_needle = normalized_ocr_text(prompt_text)
+    deadline = time.time() + 2.0
+    recognized_text = ""
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            subprocess.run(
+                ["screencapture", "-x", "-l", str(window_number), str(screenshot_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"{label} could not capture a desktop screenshot for UI assertion: {error}") from error
+
+        result = subprocess.run(
+            ["swift", "-", str(screenshot_path)],
+            input=swift_script,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        recognized_text = result.stdout
+        ocr_path.write_text(recognized_text)
+        if result.returncode != 0:
+            last_error = f"OCR failed for {screenshot_path}:\n{result.stderr}\nOCR output:\n{recognized_text}"
+            time.sleep(0.2)
+            continue
+
+        normalized = normalized_ocr_text(recognized_text)
+        output_index = normalized.find(output_needle)
+        prompt_index = normalized.find(prompt_needle, output_index + len(output_needle)) if output_index >= 0 else -1
+        if output_index >= 0 and prompt_index >= 0:
+            return
+        time.sleep(0.2)
+
+    raise RuntimeError(
+        f"{label} did not visibly render command output followed by the next prompt.\n"
+        f"Screenshot: {screenshot_path}\nOCR: {ocr_path}\n"
+        f"Expected output {output_text!r} before prompt {prompt_text!r}.\n"
+        f"{last_error}\n"
+        f"OCR output:\n{recognized_text}"
+    )
 
 def mobile_rendered_text(payload: dict) -> str:
     return payload.get("renderedText") or ""
@@ -1561,14 +2508,29 @@ def write_command_request(command_text: str, send_enter: bool = True) -> None:
 def wait_for_output_log_text(text: str, timeout: float, process: subprocess.Popen[str]) -> None:
     deadline = time.time() + timeout
     last_output = ""
+    last_render_payload = None
     while time.time() < deadline:
         check_ui_test_alive(process)
         if output_log_path.exists():
             last_output = output_log_path.read_text(errors="replace")
             if text in last_output:
                 return
+        if render_dump_path.exists():
+            try:
+                last_render_payload = json.loads(render_dump_path.read_text())
+            except json.JSONDecodeError:
+                last_render_payload = None
+            if last_render_payload is not None:
+                rendered_text = last_render_payload.get("renderedText") or ""
+                snapshot_text = last_render_payload.get("snapshotText") or ""
+                if text in rendered_text or text in snapshot_text:
+                    return
         time.sleep(0.2)
-    raise RuntimeError(f"Timed out waiting for {text!r} in {output_log_path}.\nLast output tail:\n{last_output[-4000:]}")
+    raise RuntimeError(
+        f"Timed out waiting for {text!r} in {output_log_path} or the {mobile_device_label} render dump.\n"
+        f"Last output tail:\n{last_output[-4000:]}\n"
+        f"Last render payload:\n{json.dumps(last_render_payload or {}, indent=2)}"
+    )
 
 def assert_status_shell_hides_live_content(label: str, payload: dict) -> None:
     if payload.get("showsTerminalSurface") is not False:
@@ -1609,46 +2571,63 @@ ui_test_command = [
 ]
 
 mac_owner_dump_path = scenario_dir / "roundtrip-mac-owner-dump.json"
+mac_before_takeover_dump_path = scenario_dir / "roundtrip-mac-before-takeover-dump.json"
 mac_status_dump_path = scenario_dir / "roundtrip-mac-status-dump.json"
 
 with ui_test_log.open("w") as ui_test_output:
-    ui_test_process = subprocess.Popen(
-        ui_test_command,
-        cwd=repo_root,
-        stdout=ui_test_output,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=os.environ | {"SPACES_MOBILE_UI_TEST_CONFIG_PATH": str(ui_test_config)},
-    )
+    ui_test_process = None
 
     try:
+        focus_mac_terminal_window()
         for command_text in mac_prepare_commands:
             send_owner_command(command_text)
             time.sleep(0.5)
 
+        focus_mac_terminal_window()
         mac_owner_payload = wait_for_terminal_window_dump(
+            mac_owner_dump_path,
+            lambda payload: (
+                payload.get("found") is True
+                and payload.get("showsTerminalSurface") is True
+                and isinstance(payload.get("windowNumber"), int)
+            ),
+            timeout=45,
+            any_mode=False,
+        )
+        mac_before_takeover_dump_path.write_text(json.dumps(mac_owner_payload, indent=2, sort_keys=True))
+        assert_mac_screen_prompt_rendered_after_output(
+            "Mac owner before takeover",
+            mac_owner_payload,
+            "MAC BEFORE TAKEOVER TWO",
+            mac_ready_prompt_text,
+        )
+        refreshed_mac_owner_payload = wait_for_terminal_window_dump(
             mac_owner_dump_path,
             lambda payload: (
                 mac_owner_render_contains(
                     payload, "__roundtrip_mac_before_takeover_one__", "__roundtrip_mac_before_takeover_two__"
                 )
+                and prompt_rendered_after_output(
+                    payload.get("visibleSurfaceOutput") or "",
+                    "__roundtrip_mac_before_takeover_two__",
+                )
             ),
-            timeout=45,
+            timeout=5,
             any_mode=False,
         )
-        expected_render_text = mac_owner_payload.get("renderedOutput") or ""
+        expected_render_text = refreshed_mac_owner_payload.get("renderedOutput") or ""
         if not expected_render_text:
-            raise RuntimeError(f"Unable to derive canonical Mac owner render text:\n{json.dumps(mac_owner_payload, indent=2)}")
+            raise RuntimeError(f"Unable to derive canonical Mac owner render text:\n{json.dumps(refreshed_mac_owner_payload, indent=2)}")
         assert_render_output_sane("Mac owner before takeover", expected_render_text)
-        mac_visible_text = mac_owner_payload.get("visibleSurfaceOutput") or ""
-        if not mac_visible_text:
-            raise RuntimeError(f"Mac owner before takeover did not report visible surface text:\n{json.dumps(mac_owner_payload, indent=2)}")
-        assert_prompt_rendered_after_output(
-            "Mac owner before takeover",
-            mac_visible_text,
-            "__roundtrip_mac_before_takeover_two__",
-        )
 
+        ui_test_process = subprocess.Popen(
+            ui_test_command,
+            cwd=repo_root,
+            stdout=ui_test_output,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=os.environ | {"SPACES_MOBILE_UI_TEST_CONFIG_PATH": str(ui_test_config)},
+        )
         write_marker(proceed_takeover_path, "go\n")
 
         mobile_owner_payload = wait_for_mobile_owner_render(
@@ -1831,7 +2810,7 @@ with ui_test_log.open("w") as ui_test_output:
         if not event_log_path.exists():
             raise RuntimeError(f"Expected {mobile_device_label} event log at {event_log_path}")
     finally:
-        if ui_test_process.poll() is None:
+        if ui_test_process is not None and ui_test_process.poll() is None:
             ui_test_process.terminate()
             try:
                 ui_test_process.wait(timeout=10)
@@ -1848,7 +2827,6 @@ launch_scrollback_fixture_on_mac_owner() {
 import json
 import os
 import shlex
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -1870,50 +2848,87 @@ env = os.environ | {
     "SPACES_RUNTIME_DIR": str(runtime_root),
 }
 
-fixture_command = (
-    f"python3 {shlex.quote(str(repo_root / 'apps/macos/Tests/terminal_stress_fixture.py'))} "
-    f"--mode lines --lines {line_count} --width 32"
+fixture_command = "\n".join(
+    [
+        "python3 - <<'PY'",
+        "import random",
+        "import string",
+        "import sys",
+        f"line_count = {line_count}",
+        "width = 32",
+        "rng = random.Random(7)",
+        "alphabet = string.ascii_letters + string.digits",
+        (
+            "print("
+            "f'FIXTURE_START mode=lines lines={line_count} frames=300 rows=24 width={width} seed=7', "
+            "flush=True)"
+        ),
+        "for seq in range(1, line_count + 1):",
+        "    payload = ''.join(rng.choice(alphabet) for _ in range(max(width, 1)))",
+        "    print(f'SEQ {seq:08d} {payload}')",
+        "    if seq % 100 == 0:",
+        "        sys.stdout.flush()",
+        "sys.stdout.flush()",
+        "print(f'FIXTURE_DONE mode=lines emitted={line_count}', flush=True)",
+        "PY",
+    ]
 )
-
-def socket_path(root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
 
 def current_owner_client_id() -> str:
     root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
-    with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
-        row = db.execute(
-            """
-            SELECT client_id
-            FROM terminal_attachments
-            WHERE root_directory = ?
-              AND mode = 'owner'
-              AND detached_at IS NULL
-            ORDER BY attached_at DESC
-            LIMIT 1
-            """,
-            (root_directory,),
-        ).fetchone()
-    if row:
-        return row[0]
-    raise RuntimeError("No active owner attachment was found for the demo session.")
+    deadline = time.time() + 30
+    rows = []
+    while time.time() < deadline:
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, mode, detached_at
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        for client_id, mode, detached_at in rows:
+            if client_id and mode == "owner" and detached_at is None:
+                return client_id
+        time.sleep(0.1)
+    raise RuntimeError(f"No active owner attachment was found for the demo session. rows={rows!r}")
 
 def send_request(request: dict) -> dict:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(5)
-    client.connect(str(socket_path(demo_root, session_id)))
-    client.sendall(json.dumps(request).encode("utf-8"))
-    client.shutdown(socket.SHUT_WR)
-    response = bytearray()
-    while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response.extend(chunk)
-    client.close()
-    return json.loads(response.decode("utf-8"))
+    command = [
+        str(spacese2e),
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        request["command"],
+    ]
+    if request.get("clientID") is not None:
+        command.extend(["--client-id", request["clientID"]])
+    if request.get("text") is not None:
+        command.extend(["--text", request["text"]])
+    if request.get("key") is not None:
+        command.extend(["--key", request["key"]])
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+    return json.loads(completed.stdout)
+
+def wait_for_owner_control_ready(owner_client_id: str) -> None:
+    deadline = time.time() + 15
+    last_response = None
+    while time.time() < deadline:
+        response = send_request(
+            {"command": "send", "text": "", "clientID": owner_client_id}
+        )
+        last_response = response
+        message = response.get("message", "")
+        if response.get("ok"):
+            return
+        if "Only the active owner" in message:
+            time.sleep(0.1)
+            continue
+        raise RuntimeError(f"Owner control readiness probe failed: {response}")
+    raise RuntimeError(f"Timed out waiting for owner control readiness. last_response={last_response!r}")
 
 def dump_owner_window() -> dict:
     if owner_dump_path.exists():
@@ -1936,6 +2951,7 @@ def dump_owner_window() -> dict:
     )
 
 owner_client_id = current_owner_client_id()
+wait_for_owner_control_ready(owner_client_id)
 for request in (
     {"command": "send", "text": fixture_command, "clientID": owner_client_id},
     {"command": "key", "key": "enter", "clientID": owner_client_id},
@@ -1944,10 +2960,27 @@ for request in (
     if not response.get("ok"):
         raise RuntimeError(f"Fixture launch request failed: {response}")
 
+final_sequence = f"SEQ {line_count:08d}"
+done_marker = f"FIXTURE_DONE mode=lines emitted={line_count}"
+
+def rendered_fixture_complete(rendered_output: str) -> bool:
+    if final_sequence not in rendered_output:
+        return False
+    if done_marker in rendered_output:
+        return True
+    saw_final_sequence = False
+    for line in rendered_output.splitlines():
+        if final_sequence in line:
+            saw_final_sequence = True
+            continue
+        if saw_final_sequence and line.strip().endswith(("%", "$", "#")):
+            return True
+    return False
+
 deadline = time.time() + 60
 while time.time() < deadline:
     rendered_output = dump_owner_window().get("renderedOutput") or ""
-    if f"FIXTURE_DONE mode=lines emitted={line_count}" in rendered_output and f"SEQ {line_count:08d}" in rendered_output:
+    if rendered_fixture_complete(rendered_output):
         raise SystemExit(0)
     time.sleep(0.25)
 
@@ -2129,7 +3162,24 @@ if not any(event.get("kind") == "e2e_scroll_gesture_applied" for event in event_
     raise SystemExit(f"The {mobile_device_label} app never applied the scrollback drag gesture.")
 if not any(event.get("kind") == "e2e_command_request_consumed" for event in event_payloads):
     raise SystemExit(f"The {mobile_device_label} app never consumed the post-scrollback owner command.")
-if f"FIXTURE_DONE mode=lines emitted={fixture_line_count}" not in owner_text:
+final_sequence = f"SEQ {fixture_line_count:08d}"
+done_marker = f"FIXTURE_DONE mode=lines emitted={fixture_line_count}"
+
+def rendered_fixture_complete(rendered_output: str) -> bool:
+    if final_sequence not in rendered_output:
+        return False
+    if done_marker in rendered_output:
+        return True
+    saw_final_sequence = False
+    for line in rendered_output.splitlines():
+        if final_sequence in line:
+            saw_final_sequence = True
+            continue
+        if saw_final_sequence and line.strip().endswith(("%", "$", "#")):
+            return True
+    return False
+
+if not rendered_fixture_complete(owner_text):
     raise SystemExit("Owner baseline did not reach the bottom of the long-output fixture.")
 if not mobile_text.strip():
     raise SystemExit(f"{mobile_device_label} render dump was blank after scrollback.")
@@ -2170,17 +3220,17 @@ PY
 }
 
 write_terminal_link_preview_fixture() {
-  python3 - "$TERMINAL_LINK_PREVIEW_PATH" <<'PY'
+  local image_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+  python3 - "$TERMINAL_LINK_PREVIEW_PATH" "$image_base64" <<'PY'
 import base64
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_bytes(base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-))
+path.write_bytes(base64.b64decode(sys.argv[2]))
 PY
+
 }
 
 run_terminal_link_preview_scenario() {
@@ -2189,7 +3239,7 @@ run_terminal_link_preview_scenario() {
   local command_text
   local quoted_link_path
   printf -v quoted_link_path '%q' "$TERMINAL_LINK_PREVIEW_PATH"
-  command_text="printf '__spaces_mobile_link_preview__\\n%s\\n' $quoted_link_path; exec /bin/zsh -l"
+  command_text="printf '__spaces_mobile_link_preview__\\n%s\\n' $quoted_link_path; exec /bin/bash -l"
   local session_id
   session_id="$(new_terminal_session "e2e-terminal-link-preview" "$command_text")"
   track_current_scenario_session "$session_id"
@@ -2202,9 +3252,9 @@ run_two_session_scenario() {
   begin_scenario "two-session"
   local session_id
   local secondary_session_id
-  session_id="$(new_terminal_session)"
+  session_id="$(new_terminal_session "e2e-two-session-primary")"
   track_current_scenario_session "$session_id"
-  secondary_session_id="$(new_terminal_session)"
+  secondary_session_id="$(new_terminal_session "e2e-two-session-secondary")"
   track_current_scenario_session "$secondary_session_id"
   write_ui_test_config "two-session" "$session_id" "$secondary_session_id"
   run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverAcrossTwoSessionsFromList"
@@ -2215,9 +3265,10 @@ assert_ctrl_c_final_frame_scenario() {
   local session_id="$1"
   local secondary_session_id="$2"
   local expected_service_pid="$3"
-  python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$session_id" "$secondary_session_id" "$expected_service_pid" "$BRIDGE_HOST" "$BRIDGE_PORT" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
+  python3 - "$DEMO_ROOT" "$SCENARIO_DIR" "$UI_TEST_CONFIG" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$session_id" "$secondary_session_id" "$expected_service_pid" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" "$CURRENT_TARGET" <<'PY'
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -2232,12 +3283,13 @@ spacese2e = Path(sys.argv[5])
 session_id = sys.argv[6]
 secondary_session_id = sys.argv[7]
 expected_service_pid = int(sys.argv[8])
-bridge_host = sys.argv[9]
-bridge_port = int(sys.argv[10])
+device_api_host = sys.argv[9]
+device_api_port = int(sys.argv[10])
 bundle_id = sys.argv[11]
 mobile_device_key = sys.argv[12]
 mobile_device_name = sys.argv[13]
 mobile_device_label = sys.argv[14]
+current_target = sys.argv[15]
 runtime_root = demo_root / "runtime"
 config = json.loads(ui_test_config.read_text())
 expected_interrupted_text = config["expectedInterruptedText"]
@@ -2269,28 +3321,61 @@ def require(condition: bool, message: str) -> None:
 def process_is_alive(pid: int) -> bool:
     return subprocess.run(["/bin/kill", "-0", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
-def send_mobile_request(request: dict) -> dict:
+def typed_device_request(request: dict) -> dict:
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
+def send_mobile_request(request: dict, attempts: int = 3) -> dict:
+    request = typed_device_request(request)
+    command = [
+        str(spacese2e),
+        "mobile-request",
+        "--host",
+        device_api_host,
+        "--port",
+        str(device_api_port),
+        "--transport-key=" + pairing["transportKey"],
+        "--request-json",
+        json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
+    ]
+    last_detail = ""
+    for attempt in range(1, attempts + 1):
+        completed = subprocess.run(command, capture_output=True, text=True, env=env, timeout=20)
+        if completed.returncode == 0:
+            try:
+                return json.loads(completed.stdout)
+            except json.JSONDecodeError as error:
+                last_detail = f"attempt {attempt}: invalid JSON: {error}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        else:
+            last_detail = (
+                f"attempt {attempt}: exit={completed.returncode}\nstdout={completed.stdout}\nstderr={completed.stderr}"
+            )
+        time.sleep(1)
+    raise RuntimeError(f"Device API request failed after {attempts} attempts: {request}\n{last_detail}")
+
+def terminal_tail(session: str) -> str:
+    output_path = runtime_root / "terminal" / "sessions" / session / "output.log"
+    if output_path.exists():
+        return output_path.read_text(errors="replace")
     completed = subprocess.run(
-        [
-            str(spaces_cli),
-            "mobile",
-            "request",
-            "--host",
-            bridge_host,
-            "--port",
-            str(bridge_port),
-            "--transport-key",
-            pairing["transportKey"],
-            "--request-json",
-            json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
-        ],
+        [str(spaces_cli), "terminal", "tail", session],
         capture_output=True,
         text=True,
         env=env,
-        timeout=10,
-        check=True,
+        timeout=20,
     )
-    return json.loads(completed.stdout)
+    require(
+        completed.returncode == 0,
+        f"Failed to read terminal output for {session}: stdout={completed.stdout}\nstderr={completed.stderr}",
+    )
+    return completed.stdout
 
 require(interrupted_dump_path.exists(), f"Missing interrupted {mobile_device_label} render dump at {interrupted_dump_path}")
 interrupted_dump = json.loads(interrupted_dump_path.read_text())
@@ -2329,16 +3414,16 @@ with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
         "SELECT reason, payload_json FROM terminal_remote_session_states WHERE session_id = ?",
         (session_id,),
     ).fetchone()
-require(process_is_alive(expected_service_pid), f"Terminal service pid {expected_service_pid} exited after ctrl+c.")
+require(process_is_alive(expected_service_pid), f"spacesd pid {expected_service_pid} exited after ctrl+c.")
 require(primary_state and primary_state[0] == "exited", f"Primary session did not exit after ctrl+c: {primary_state!r}")
 require(
     primary_state[1] == expected_service_pid,
-    f"Primary session was closed by a different terminal service pid. expected={expected_service_pid} row={primary_state!r}",
+    f"Primary session was closed by a different spacesd pid. expected={expected_service_pid} row={primary_state!r}",
 )
 require(secondary_state and secondary_state[0] == "running", f"Secondary session did not remain running: {secondary_state!r}")
 require(
     secondary_state[1] == expected_service_pid,
-    f"Secondary session moved to a different terminal service pid. expected={expected_service_pid} row={secondary_state!r}",
+    f"Secondary session moved to a different spacesd pid. expected={expected_service_pid} row={secondary_state!r}",
 )
 require(
     secondary_state[2] and process_is_alive(int(secondary_state[2])),
@@ -2350,11 +3435,11 @@ persisted_final_payload = json.loads(persisted_final[1])
 require(bool(persisted_final_payload.get("renderUpdate")), "Persisted final payload did not include an encoded render update.")
 
 overview_response = send_mobile_request({"command": "overview"})
-require(overview_response.get("ok"), f"Bridge overview failed after ctrl+c: {overview_response}")
-overview_sessions = overview_response.get("overview", {}).get("sessions", [])
+require(overview_response.get("ok"), f"Device API overview failed after ctrl+c: {overview_response}")
+overview_sessions = ((overview_response.get("result") or {}).get("overview") or {}).get("sessions", [])
 require(
     any(session.get("id") == secondary_session_id for session in overview_sessions),
-    f"Bridge overview did not include the surviving session after ctrl+c: {json.dumps(overview_response, indent=2)}",
+    f"Device API overview did not include the surviving session after ctrl+c: {json.dumps(overview_response, indent=2)}",
 )
 
 def wait_for_terminal_window_dump(session: str, output_path: Path, predicate, timeout: float) -> dict:
@@ -2412,9 +3497,8 @@ primary_window_text = combined_terminal_text(primary_window)
 require("final render was available" not in primary_window_text, f"Mac primary window used the ended fallback:\n{primary_window_text}")
 require("Final terminal render unavailable" not in primary_window_text, f"Mac primary window used the unavailable fallback:\n{primary_window_text}")
 
-secondary_output_path = runtime_root / "terminal" / "sessions" / secondary_session_id / "output.log"
-secondary_output = secondary_output_path.read_text(errors="replace") if secondary_output_path.exists() else ""
 if expected_secondary_text:
+    secondary_output = terminal_tail(secondary_session_id)
     require(expected_secondary_text in secondary_output, f"Secondary output log missed {expected_secondary_text!r}:\n{secondary_output[-4000:]}")
 wait_for_terminal_window_dump(
     secondary_session_id,
@@ -2468,7 +3552,7 @@ run_ctrl_c_final_frame_scenario() {
   expected_service_pid="$(
     sqlite3 "$DB_PATH" "SELECT service_pid FROM terminal_runtime_states WHERE session_id = '$secondary_session_id' LIMIT 1;"
   )"
-  [[ -n "$expected_service_pid" ]] || fail "Unable to resolve terminal service pid before Ctrl+C scenario."
+  [[ -n "$expected_service_pid" ]] || fail "Unable to resolve spacesd pid before Ctrl+C scenario."
   write_ui_test_config "$scenario" "$session_id" "$secondary_session_id"
   run_ui_test "SpacesMobileUITests/SpacesMobileUITests/testTerminalInterruptShowsFinalFrameAndKeepsSecondSessionLive"
   assert_ctrl_c_final_frame_scenario "$session_id" "$secondary_session_id" "$expected_service_pid" >>"$SCENARIO_LOG" 2>&1 || fail "Ctrl+C final-frame assertions failed."
@@ -2480,7 +3564,7 @@ run_ownership_guard_scenario() {
   local session_id
   session_id="$(new_terminal_session)"
   track_current_scenario_session "$session_id"
-  python3 - "$DEMO_ROOT" "$session_id" "$BRIDGE_HOST" "$BRIDGE_PORT" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$SCENARIO_DIR" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
+  python3 - "$DEMO_ROOT" "$session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$SCENARIO_DIR" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$MOBILE_DEVICE_LABEL" <<'PY'
 import json
 import os
 import socket
@@ -2493,8 +3577,8 @@ from pathlib import Path
 
 demo_root = Path(sys.argv[1])
 session_id = sys.argv[2]
-bridge_host = sys.argv[3]
-bridge_port = int(sys.argv[4])
+device_api_host = sys.argv[3]
+device_api_port = int(sys.argv[4])
 spaces_cli = Path(sys.argv[5])
 spacese2e = Path(sys.argv[6])
 scenario_dir = Path(sys.argv[7])
@@ -2504,6 +3588,7 @@ mobile_device_name = sys.argv[10]
 mobile_device_label = sys.argv[11]
 runtime_root = demo_root / "runtime"
 output_log_path = runtime_root / "terminal" / "sessions" / session_id / "output.log"
+performance_log_path = demo_root / "mobile-terminal-performance.jsonl"
 pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
 
 env = os.environ | {
@@ -2527,18 +3612,28 @@ mobile_client = {
     "disconnectedAt": None,
 }
 
+def typed_device_request(request: dict) -> dict:
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
 def send_mobile_request(request: dict) -> dict:
+    request = typed_device_request(request)
     completed = subprocess.run(
         [
-            str(spaces_cli),
-            "mobile",
-            "request",
+            str(spacese2e),
+            "mobile-request",
             "--host",
-            bridge_host,
+            device_api_host,
             "--port",
-            str(bridge_port),
-            "--transport-key",
-            pairing["transportKey"],
+            str(device_api_port),
+            "--transport-key=" + pairing["transportKey"],
             "--request-json",
             json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
         ],
@@ -2547,6 +3642,10 @@ def send_mobile_request(request: dict) -> dict:
         env=env,
         check=True,
     )
+    return json.loads(completed.stdout)
+
+def send_terminal_control(command: list[str]) -> dict:
+    completed = subprocess.run(command, capture_output=True, text=True, env=env, check=True)
     return json.loads(completed.stdout)
 
 def active_owner(excluded: set[str] | None = None, timeout: float = 20) -> str:
@@ -2574,6 +3673,47 @@ def active_owner(excluded: set[str] | None = None, timeout: float = 20) -> str:
         time.sleep(0.1)
     raise RuntimeError(f"Timed out waiting for active owner.\n{last_snapshot}")
 
+def wait_for_registered_client(client_id: str, timeout: float = 10) -> None:
+    deadline = time.time() + timeout
+    last_snapshot = ""
+    root_directory = os.path.normpath(str(runtime_root / "terminal" / "sessions" / session_id))
+    while time.time() < deadline:
+        with sqlite3.connect(env["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, kind, disconnected_at
+                FROM terminal_clients
+                WHERE root_directory = ?
+                  AND client_id = ?
+                """,
+                (root_directory, client_id),
+            ).fetchall()
+        last_snapshot = repr(rows)
+        if any(row[0] == client_id and row[2] is None for row in rows):
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"Timed out waiting for registered client {client_id}.\n{last_snapshot}")
+
+def wait_for_attachment_activity_quiet(timeout: float = 8, quiet_for: float = 1) -> None:
+    deadline = time.time() + timeout
+    last_count = -1
+    quiet_since = time.time()
+    seen = False
+    while time.time() < deadline:
+        count = 0
+        if performance_log_path.exists():
+            for line in performance_log_path.read_text(errors="replace").splitlines():
+                if session_id in line and '"reason":"attachment_state"' in line:
+                    count += 1
+                    seen = True
+        now = time.time()
+        if count != last_count:
+            last_count = count
+            quiet_since = now
+        elif seen and now - quiet_since >= quiet_for:
+            return
+        time.sleep(0.1)
+
 def wait_for_output(text: str, timeout: float = 20) -> None:
     deadline = time.time() + timeout
     last_output = ""
@@ -2586,14 +3726,31 @@ def wait_for_output(text: str, timeout: float = 20) -> None:
     raise RuntimeError(f"Timed out waiting for {text!r} in output log.\n{last_output[-4000:]}")
 
 initial_owner = active_owner(timeout=20)
-attach = send_mobile_request({
-    "command": "attach",
-    "sessionID": session_id,
-    "client": mobile_client,
-    "attachmentMode": "viewer",
-})
+wait_for_attachment_activity_quiet(timeout=8, quiet_for=1)
+attach = send_terminal_control([
+    str(spacese2e),
+    "terminal-service-control",
+    "--session-id",
+    session_id,
+    "--command",
+    "attach",
+    "--direct-control",
+    "--client-id",
+    mobile_client["id"],
+    "--client-kind",
+    mobile_client["kind"],
+    "--client-label",
+    mobile_client["identity"]["label"],
+    "--client-device-name",
+    mobile_client["identity"]["deviceName"],
+    "--client-network-address",
+    mobile_client["identity"]["networkAddress"],
+    "--attachment-mode",
+    "viewer",
+])
 if not attach.get("ok"):
     raise RuntimeError(f"Viewer attach failed: {attach}")
+wait_for_registered_client(mobile_client["id"], timeout=10)
 
 blocked = send_mobile_request({
     "command": "send",
@@ -2604,13 +3761,15 @@ blocked = send_mobile_request({
 })
 if blocked.get("ok"):
     raise RuntimeError(f"Viewer input should have been rejected: {blocked}")
+if "Only the active owner" not in blocked.get("message", ""):
+    raise RuntimeError(f"Viewer input was not rejected by ownership guard: {blocked}")
 
 takeover = send_mobile_request({"command": "takeover", "sessionID": session_id, "clientID": mobile_client["id"]})
 if not takeover.get("ok"):
     raise RuntimeError(f"Mobile takeover failed: {takeover}")
 owner_after_takeover = active_owner(excluded={initial_owner}, timeout=20)
 if owner_after_takeover != mobile_client["id"]:
-    raise RuntimeError(f"Expected mobile client to own the session, found {owner_after_takeover}")
+    raise RuntimeError(f"Expected device client to own the session, found {owner_after_takeover}")
 
 sent = send_mobile_request({
     "command": "send",
@@ -2665,7 +3824,7 @@ run_app_recovery_scenario() {
   track_current_scenario_session "$session_id"
 
   local new_app_pid
-  if ! new_app_pid="$(python3 - "$DEMO_ROOT" "$DB_PATH" "$RUNTIME_DIR" "$session_id" "$DEMO_TERMINAL_SERVICE_PID" "$SPACES_CLI_BIN" "$BRIDGE_HOST" "$BRIDGE_PORT" "$TERMINAL_SERVICE_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$SCENARIO_DIR" <<'PY' 2>>"$SCENARIO_LOG"
+  if ! new_app_pid="$(python3 - "$DEMO_ROOT" "$DB_PATH" "$RUNTIME_DIR" "$session_id" "$DEMO_TERMINAL_SERVICE_PID" "$SPACES_CLI_BIN" "$SPACES_E2E_BIN" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$TERMINAL_SERVICE_BIN" "$BUNDLE_ID" "$MOBILE_DEVICE_KEY" "$MOBILE_DEVICE_NAME" "$SCENARIO_DIR" <<'PY' 2>>"$SCENARIO_LOG"
 import json
 import os
 import shlex
@@ -2681,13 +3840,14 @@ runtime_root = Path(sys.argv[3])
 session_id = sys.argv[4]
 metadata_terminal_service_pid = sys.argv[5]
 spaces_cli = Path(sys.argv[6])
-bridge_host = sys.argv[7]
-bridge_port = int(sys.argv[8])
-terminal_service_bin = sys.argv[9]
-bundle_id = sys.argv[10]
-mobile_device_key = sys.argv[11]
-mobile_device_name = sys.argv[12]
-scenario_dir = Path(sys.argv[13])
+spacese2e = Path(sys.argv[7])
+device_api_host = sys.argv[8]
+device_api_port = int(sys.argv[9])
+terminal_service_bin = sys.argv[10]
+bundle_id = sys.argv[11]
+mobile_device_key = sys.argv[12]
+mobile_device_name = sys.argv[13]
+scenario_dir = Path(sys.argv[14])
 pairing = json.loads((demo_root / "pairing.json").read_text())[mobile_device_key]
 app_recovery_state_path = demo_root / "app-recovery-state.json"
 
@@ -2695,7 +3855,7 @@ env = os.environ | {
     "HOME": str(demo_root / "home"),
     "SPACES_DB_PATH": str(db_path),
     "SPACES_RUNTIME_DIR": str(runtime_root),
-    "SPACES_TERMINAL_SERVICE_EXECUTABLE": terminal_service_bin,
+    "SPACESD_EXECUTABLE": terminal_service_bin,
 }
 client_app = {
     "installationID": pairing["installationID"],
@@ -2726,7 +3886,7 @@ def process_command(pid: int) -> str:
 
 def profile_app_owner() -> dict:
     completed = subprocess.run(
-        [str(spaces_cli), "profile", "app-owner", "--json"],
+        [str(spacese2e), "profile-app-owner", "--json"],
         capture_output=True,
         text=True,
         env=env,
@@ -2758,18 +3918,28 @@ def wait_for_app_owner_absent(timeout: float = 10) -> None:
         time.sleep(0.2)
     raise RuntimeError(f"Timed out waiting for app-owner lease to disappear.\nlast={json.dumps(last_payload, indent=2)}")
 
+def typed_device_request(request: dict) -> dict:
+    command = request.get("command")
+    if isinstance(command, dict):
+        return request
+    payload = {key: value for key, value in request.items() if key != "command"}
+    if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
+        payload["action"] = "clearScreen" if command == "clear" else command
+        payload.setdefault("appendNewline", False)
+        return {"command": {"terminalControl": payload}}
+    return {"command": {command: payload}}
+
 def send_mobile_request(request: dict) -> dict:
+    request = typed_device_request(request)
     completed = subprocess.run(
         [
-            str(spaces_cli),
-            "mobile",
-            "request",
+            str(spacese2e),
+            "mobile-request",
             "--host",
-            bridge_host,
+            device_api_host,
             "--port",
-            str(bridge_port),
-            "--transport-key",
-            pairing["transportKey"],
+            str(device_api_port),
+            "--transport-key=" + pairing["transportKey"],
             "--request-json",
             json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
         ],
@@ -2794,7 +3964,7 @@ def assert_session_live(expected_service_pid: int, label: str) -> None:
     state, service_pid, child_pid = session_runtime_state()
     require(state == "running", f"{label}: session state is not running: {state!r}")
     require(service_pid == expected_service_pid, f"{label}: service pid changed from {expected_service_pid} to {service_pid}.")
-    require(process_is_alive(service_pid), f"{label}: terminal service pid {service_pid} is not alive.")
+    require(process_is_alive(service_pid), f"{label}: spacesd pid {service_pid} is not alive.")
     require(child_pid is not None and process_is_alive(child_pid), f"{label}: session child pid is not alive: {child_pid!r}")
 
 def terminate_app_owner(owner: dict) -> None:
@@ -2836,7 +4006,10 @@ assert_session_live(expected_service_pid, "after app owner termination")
 overview_before = send_mobile_request({"command": "overview"})
 require(overview_before.get("ok"), f"Overview failed after app owner termination: {overview_before}")
 require(
-    any(session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid for session in overview_before.get("overview", {}).get("sessions", [])),
+    any(
+        session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid
+        for session in ((overview_before.get("result") or {}).get("overview") or {}).get("sessions", [])
+    ),
     f"Overview after app owner termination did not include the live session: {json.dumps(overview_before, indent=2)}",
 )
 
@@ -2861,7 +4034,10 @@ assert_session_live(expected_service_pid, "after app recovery")
 overview_after = send_mobile_request({"command": "overview"})
 require(overview_after.get("ok"), f"Overview failed after app recovery: {overview_after}")
 require(
-    any(session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid for session in overview_after.get("overview", {}).get("sessions", [])),
+    any(
+        session.get("id") == session_id and int(session.get("servicePID", -1)) == expected_service_pid
+        for session in ((overview_after.get("result") or {}).get("overview") or {}).get("sessions", [])
+    ),
     f"Overview after app recovery did not include the live session: {json.dumps(overview_after, indent=2)}",
 )
 
@@ -2896,7 +4072,12 @@ PY
 run_selected_scenarios() {
   local scenario
   for scenario in "${SELECTED_SCENARIOS[@]}"; do
+    local started_ms duration_ms
+    started_ms="$(timestamp_ms)"
     case "$scenario" in
+      takeover)
+        run_takeover_scenario
+        ;;
       codex|codex-resume-reopen)
         run_codex_scenario "$scenario"
         ;;
@@ -2928,8 +4109,40 @@ run_selected_scenarios() {
         fail "unknown scenario: $scenario"
         ;;
     esac
+    duration_ms="$(( $(timestamp_ms) - started_ms ))"
+    record_scenario_result "PASS" "$CURRENT_TARGET" "$scenario" "$duration_ms"
     cleanup_current_scenario_sessions
   done
+}
+
+run_remote_ui_scenarios() {
+  local scenario
+  local ran=0
+  for scenario in "${REMOTE_UI_SCENARIOS[@]}"; do
+    if [[ " ${SELECTED_SCENARIOS[*]} " != *" $scenario "* ]]; then
+      continue
+    fi
+    local started_ms duration_ms
+    started_ms="$(timestamp_ms)"
+    case "$scenario" in
+      takeover)
+        run_takeover_scenario
+        ;;
+      two-session)
+        run_two_session_scenario
+        ;;
+      *)
+        fail "unknown remote UI scenario: $scenario"
+        ;;
+    esac
+    duration_ms="$(( $(timestamp_ms) - started_ms ))"
+    record_scenario_result "PASS" "$CURRENT_TARGET" "$scenario" "$duration_ms"
+    cleanup_current_scenario_sessions
+    ran=1
+  done
+  if (( ran == 0 )); then
+    printf 'No selected mobile scenarios have a remote UI parity path.\n'
+  fi
 }
 
 parse_args "$@"
@@ -2941,14 +4154,28 @@ case "$MOBILE_DEVICE_KEY" in
     ;;
 esac
 SUITE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-e2e.XXXXXX")"
+SCENARIO_RESULTS_LOG="$SUITE_ROOT/scenario-results.tsv"
 MOBILE_UDID="$(resolve_simulator_udid "$MOBILE_DEVICE_NAME")"
 build_macos_debug_products
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  run_remote_device_e2e
+fi
 build_ios_for_testing "$MOBILE_UDID"
 start_demo
+run_local_device_api_parity
 case "$MOBILE_DEVICE_KEY" in
   iphone) MOBILE_UDID="$IPHONE_UDID" ;;
   ipad) MOBILE_UDID="$IPAD_UDID" ;;
 esac
+configure_target "local"
 run_selected_scenarios
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  configure_target "remote"
+  run_remote_ui_scenarios
+fi
 
-printf '\nMobile E2E passed: %s\n' "${SELECTED_SCENARIOS[*]}"
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  printf '\nMobile E2E passed: scenarios=%s targets=local,remote-device-api,remote-ui\n' "${SELECTED_SCENARIOS[*]}"
+else
+  printf '\nMobile E2E passed: scenarios=%s targets=local\n' "${SELECTED_SCENARIOS[*]}"
+fi

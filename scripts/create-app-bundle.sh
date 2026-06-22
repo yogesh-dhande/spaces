@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [ $# -ne 4 ]; then
-  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <terminal-service-path> <bundle-output-path>" >&2
+  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <spacesd-path> <bundle-output-path>" >&2
   exit 1
 fi
 
 SPACES_APP="$1"
 SPACES_CLI="$2"
-TERMINAL_SERVICE="$3"
+SPACESD="$3"
 BUNDLE_OUTPUT="$4"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SPARKLE_FRAMEWORK="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
@@ -24,8 +24,8 @@ if [[ ! -f "$SPACES_CLI" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$TERMINAL_SERVICE" ]]; then
-  echo "Error: terminal service binary not found at $TERMINAL_SERVICE" >&2
+if [[ ! -f "$SPACESD" ]]; then
+  echo "Error: spacesd daemon binary not found at $SPACESD" >&2
   exit 1
 fi
 
@@ -115,7 +115,7 @@ cp "$REPO_ROOT/apps/macos/Sources/SpacesApp/Info.plist" "$BUNDLE_OUTPUT/Contents
 cp "$REPO_ROOT/apps/macos/Sources/SpacesApp/AppIcon.icns" "$BUNDLE_OUTPUT/Contents/Resources/AppIcon.icns"
 cp "$SPACES_CLI" "$BUNDLE_OUTPUT/Contents/Resources/spaces"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spaces"
-cp "$TERMINAL_SERVICE" "$BUNDLE_OUTPUT/Contents/Resources/SpacesTerminalService"
-chmod +x "$BUNDLE_OUTPUT/Contents/Resources/SpacesTerminalService"
+cp "$SPACESD" "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
+chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
 cp -R "$SPARKLE_FRAMEWORK" "$BUNDLE_OUTPUT/Contents/Frameworks/"
 copy_or_build_universal_ghostty_vt_dylibs "$BUNDLE_OUTPUT/Contents/Frameworks"

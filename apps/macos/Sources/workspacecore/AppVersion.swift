@@ -2,6 +2,7 @@
 public enum AppVersion {
     public static let short = "0.1.0"
     public static let build = "1"
+    public static let remoteArtifactPublicKey = "R3qsBslT0G/A5YvsoqZu0s/lFrkSNf5zq+yuzAqmTMo="
 
     public static let current = short
 }

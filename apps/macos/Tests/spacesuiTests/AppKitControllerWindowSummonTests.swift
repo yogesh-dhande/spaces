@@ -24,7 +24,7 @@ import workspacecore
         try? FileManager.default.removeItem(at: databaseRoot)
     }
 
-    @MainActor @Test func terminalSessionHostUsesRemoteHostForServiceOwnedSession() throws {
+    @MainActor @Test func terminalSessionHostUsesRemoteSessionHostForServiceOwnedSession() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -245,6 +245,8 @@ import workspacecore
     }
 
     @Test func globalWindowNavigationUsesRememberedBuiltInTerminalSessionOnlyDuringActiveTerminalFocus() {
+        #expect(AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: true))
+        #expect(!AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: false))
         #expect(
             AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
                 appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: false))
@@ -257,6 +259,15 @@ import workspacecore
         #expect(
             !AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
                 appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: true))
+        #expect(
+            AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                focusedWindowWorkspaceID: "primary", focusedTerminalSessionWorkspaceID: "secondary", activeWorkspaceID: "secondary") == "primary")
+        #expect(
+            AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                focusedWindowWorkspaceID: nil, focusedTerminalSessionWorkspaceID: "terminal", activeWorkspaceID: "active") == "terminal")
+        #expect(
+            AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                focusedWindowWorkspaceID: nil, focusedTerminalSessionWorkspaceID: nil, activeWorkspaceID: "active") == "active")
     }
 
     @Test func commandPaletteSessionUsesCapturedMainWindowVisibilityForHotkeyState() {

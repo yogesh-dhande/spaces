@@ -1,13 +1,17 @@
 import ArgumentParser
-import Darwin
 import Dispatch
 import Foundation
-import spacesmobilebridge
-import spacesmobilecore
+import spacesdeviceapi
+import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
-import systembridge
 import workspacecore
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 extension TerminalSessionBackendKind: ExpressibleByArgument {}
 
@@ -20,20 +24,206 @@ public struct SpacesCommand: ParsableCommand {
               - Repo-local development builds default to a per-worktree profile under ~/.spaces-dev/profiles/spaces.
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
-              - Paths default to the current directory when omitted.
-              - `import` registers the current directory by default and can apply `--title` or `--notes` when creating or re-importing a workspace.
-              - `update` mutates workspace metadata after creation.
-              - `start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
-              - `restart` forces a full stop and relaunch for a workspace.
-              - `open <name>` resolves one named tracked browser, process, or coding-agent target in the workspace and brings it to the foreground.
-              - Agent events stay explicit. `import`, `start`, and `restart` do not imply agent lifecycle. `signal <event>` records those lifecycle transitions. Only built-in Spaces terminal sessions are accepted as coding-agent sources.
+              - Workspace and agent commands require explicit IDs.
+              - `workspace create` targets this device's spacesd daemon.
+              - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
+              - `workspace restart` forces a full stop and relaunch for a workspace.
+              - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
             """, version: AppVersion.current,
         subcommands: [
-            ImportCommand.self, UpdateCommand.self, StartCommand.self, RestartCommand.self, OpenCommand.self, SignalCommand.self,
-            TerminalCommand.self, MobileCommand.self, ProfileCommand.self,
+            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, PairCommand.self, MobileCommand.self,
+            MCPCommand.self,
         ])
 
     public init() {}
+}
+
+struct ProjectCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "project", abstract: "Manage Spaces projects.", subcommands: [ProjectListCommand.self])
+}
+
+struct ProjectListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List projects.")
+
+    func run() throws {
+        let context = CLIContext()
+        let projects = try TerminalService.sendProfileCommand(.init(operation: .projectList)).projects ?? []
+        try context.output.emitLines(text: projects.map { "\($0.id)\tname=\($0.name)\tdir=\($0.dir)" }, json: projects)
+    }
+}
+
+struct WorkspaceCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "workspace", abstract: "Manage Spaces workspaces.",
+        subcommands: [WorkspaceListCommand.self, WorkspaceCreateCommand.self, WorkspaceStartCommand.self, WorkspaceRestartCommand.self])
+}
+
+struct WorkspaceListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List workspaces.")
+
+    @Option(name: .long, help: "Project ID. When omitted, lists workspaces from every project.") var project: String?
+    @Flag(name: .long, help: "Include archived workspaces.") var includeArchived = false
+
+    func run() throws {
+        let context = CLIContext()
+        let workspaces =
+            try TerminalService.sendProfileCommand(.init(operation: .workspaceList, projectID: project, includeArchived: includeArchived)).workspaces
+            ?? []
+        try context.output.emitLines(
+            text: workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\ttitle=\($0.title)" },
+            json: workspaces)
+    }
+}
+
+struct WorkspaceCreateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a workspace on this device.")
+
+    @Option(name: .long, help: "Project ID.") var project: String
+    @Option(name: .long, help: "Workspace branch.") var branch: String
+    @Option(name: .long, help: "Workspace title. Defaults to the branch name.") var title: String?
+    @Option(name: .long, help: "Target branch for new branch creation.") var targetBranch: String?
+    @Flag(name: .long, help: "Use an existing branch instead of creating a new branch.") var existingBranch = false
+
+    func run() throws {
+        let context = CLIContext()
+        let workspace = try requireProfileWorkspace(
+            try TerminalService.sendProfileCommand(
+                .init(
+                    operation: .workspaceCreate, projectID: project, branch: branch, title: title, targetBranch: targetBranch,
+                    existingBranch: existingBranch)))
+        try context.output.emit(
+            text: "Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")",
+            json: MutationResultPayload(message: "Created workspace.", resource: workspace))
+    }
+}
+
+struct WorkspaceStartCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start", abstract: "Ensure a workspace is running.")
+
+    @Option(name: .long, help: "Workspace ID.") var workspace: String
+
+    func run() throws {
+        let context = CLIContext()
+        let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceStart, workspaceID: workspace)))
+        try context.output.emit(
+            text: "Workspace is running \(workspace)", json: MutationResultPayload(message: "Workspace is running.", resource: updated))
+    }
+}
+
+struct WorkspaceRestartCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "restart", abstract: "Force a full stop and relaunch for a workspace.")
+
+    @Option(name: .long, help: "Workspace ID.") var workspace: String
+
+    func run() throws {
+        let context = CLIContext()
+        let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceRestart, workspaceID: workspace)))
+        try context.output.emit(
+            text: "Workspace restarted \(workspace)", json: MutationResultPayload(message: "Workspace restarted.", resource: updated))
+    }
+}
+
+struct AgentCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "agent", abstract: "Manage coding-agent lifecycle state.", subcommands: [AgentSignalCommand.self])
+}
+
+struct AgentSignalCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "signal", abstract: "Record a lifecycle event for an explicit terminal session.")
+
+    @Option(name: .long, help: "Workspace ID.") var workspace: String
+    @Option(name: .long, help: "Spaces terminal session ID.") var session: String
+    @Argument(
+        help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
+    var type: AgentEventType
+
+    func run() throws {
+        let context = CLIContext()
+        let response = try TerminalService.sendProfileCommand(
+            .init(operation: .agentSignal, workspaceID: workspace, terminalSessionID: session, agentEvent: type.rawValue))
+        try context.output.emit(
+            text: "Agent \(type.rawValue): workspace=\(workspace)",
+            json: MutationResultPayload(
+                message: response.message, resource: ["workspaceID": workspace, "sessionID": session, "status": type.status.rawValue]))
+    }
+}
+
+struct MCPCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "mcp", abstract: "Run the Spaces MCP stdio server.")
+
+    func run() throws { try SpacesMCPStdioServer().run() }
+}
+
+struct PairCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "pair", abstract: "Open a pairing window for this device's spacesd daemon.")
+
+    @Flag(name: .long, help: "Print structured pairing metadata for SSH-assisted Mac pairing.") var json = false
+
+    func run() throws { if json { try emitPairCommandJSON() } else { for line in try pairCommandLines() { print(line) } } }
+}
+
+struct PairingWindowPayload: Codable, Sendable, Equatable {
+    let name: String
+    let host: String
+    let port: Int
+    let pairingNonce: String
+    let pairingCode: String
+    let transportKey: String
+    let certificateFingerprint: String
+    let expiresAt: String
+    let pairingLink: String
+}
+
+func pairCommandLines(
+    loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = {
+        try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService()
+    }
+) throws -> [String] {
+    let response = try loadControlResponse()
+    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+    guard let window = response.pairingWindow else { throw WorkspaceError.invalidArgument(message: "spacesd did not return a pairing window.") }
+    return pairingWindowLines(window)
+}
+
+func pairCommandPayload(
+    loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = {
+        try SpacesDeviceAPIControlClient.openPairingWindowEnsuringCurrentTerminalService()
+    }
+) throws -> PairingWindowPayload {
+    let response = try loadControlResponse()
+    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+    guard let window = response.pairingWindow else { throw WorkspaceError.invalidArgument(message: "spacesd did not return a pairing window.") }
+    return try pairingWindowPayload(window)
+}
+
+func pairingWindowLines(_ window: SpacesDevicePairingWindowSnapshot) -> [String] {
+    [
+        "Spaces pairing window", "link=\(window.linkString)", "code=\(window.code)",
+        "expires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))",
+    ]
+}
+
+func pairingWindowPayload(_ window: SpacesDevicePairingWindowSnapshot) throws -> PairingWindowPayload {
+    let link = try SpacesDevicePairingLink.parse(window.linkString)
+    return PairingWindowPayload(
+        name: link.name, host: link.host, port: link.port, pairingNonce: link.nonce, pairingCode: link.code, transportKey: link.transportKey,
+        certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
+        pairingLink: window.linkString)
+}
+
+private func emitPairCommandJSON() throws {
+    let payload = try pairCommandPayload()
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = try encoder.encode(payload)
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+}
+
+private func requireProfileWorkspace(_ response: TerminalServiceProfileCommandResponse) throws -> TerminalServiceProfileWorkspaceRecord {
+    guard let workspace = response.workspace else { throw ValidationError("spacesd did not return a workspace.") }
+    return workspace
 }
 
 struct TerminalCommand: ParsableCommand {
@@ -49,7 +239,8 @@ struct TerminalListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List available Spaces terminal sessions.")
 
     func run() throws {
-        let rows = try availableTerminalSessionRows()
+        let sessions = try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5).terminalSessions ?? []
+        let rows = terminalSessionRows(sessions)
         if rows.isEmpty {
             print("No terminal sessions.")
             return
@@ -59,9 +250,13 @@ struct TerminalListCommand: ParsableCommand {
     }
 }
 
+func terminalSessionRows(_ sessions: [TerminalServiceSessionSummary]) -> [String] {
+    sessions.map { session in "\(session.id)\tstate=\(session.state.rawValue)\tcwd=\(session.workingDirectory)" }
+}
+
 func availableTerminalSessionRows(fileManager: FileManager = .default) throws -> [String] {
-    try TerminalSessionCatalog.listLiveSessions(fileManager: fileManager).map { session in
-        "\(session.sessionID)\tstate=\(session.runtimeState.state.rawValue)\tcwd=\(session.effectiveWorkingDirectory)"
+    try TerminalSessionCatalog.listLiveSessions(fileManager: fileManager).map {
+        "\($0.sessionID)\tstate=\($0.runtimeState.state.rawValue)\tcwd=\($0.effectiveWorkingDirectory)"
     }
 }
 
@@ -74,7 +269,7 @@ struct TerminalCommandCommand: ParsableCommand {
 
     @Option(name: .long, help: "Working directory. Defaults to the current directory.") var cwd: String?
 
-    @Option(name: .long, help: "Shell executable path. Defaults to $SHELL or /bin/zsh.") var shell: String?
+    @Option(name: .long, help: "Shell executable path. Defaults to $SHELL or the platform login shell.") var shell: String?
 
     @Option(name: .long, help: "Terminal backend. Defaults to ghostty-embedded.") var backend: TerminalSessionBackendKind = .ghosttyEmbedded
 
@@ -85,17 +280,11 @@ struct TerminalCommandCommand: ParsableCommand {
         let context = CLIContext()
         let launchConfiguration = terminalCommandLaunchConfiguration(
             sessionID: UUID().uuidString, backend: backend, command: command, title: title, cwd: cwd, shell: shell, context: context)
-        let sessionID = launchConfiguration.sessionID
         let session = try TerminalService.createSession(launchConfiguration)
 
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [
-                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-            ], options: [.deliverImmediately])
-
-        print("Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tcwd=\(session.workingDirectory)")
+        print(
+            "Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tlocation=local\tcwd=\(session.workingDirectory)"
+        )
     }
 }
 
@@ -173,17 +362,23 @@ struct TerminalShowCommand: ParsableCommand {
     @Argument(help: "Terminal session ID.") var sessionID: String
 
     func run() throws {
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil else {
-            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
-        }
-        DistributedNotificationCenter.default().postNotificationName(
-            IPCNotification.openTerminalSessionWindow, object: try IPCNotification.currentObject(),
-            userInfo: [
-                IPCNotification.terminalSessionIDUserInfoKey: sessionID,
-                IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
-            ], options: [.deliverImmediately])
-        print("Requested owner terminal window for session \(sessionID)")
+        #if os(macOS)
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            guard (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil else {
+                throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' does not exist.")
+            }
+            let requestID = UUID().uuidString
+            try postCLIIPCNotification(
+                name: IPCNotification.openTerminalSessionWindow,
+                userInfo: [
+                    IPCNotification.terminalSessionIDUserInfoKey: sessionID,
+                    IPCNotification.terminalAttachmentModeUserInfoKey: TerminalAttachmentMode.owner.rawValue,
+                    IPCNotification.focusRequestIDUserInfoKey: requestID,
+                ])
+            print("Requested owner terminal window for session \(sessionID)")
+        #else
+            throw WorkspaceError.invalidArgument(message: "Native Spaces terminal windows are only available on macOS.")
+        #endif
     }
 }
 
@@ -234,308 +429,46 @@ struct TerminalProxyCommand: ParsableCommand {
             }
         }
         try server.start()
-        print("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)")
-        fflush(stdout)
+        FileHandle.standardOutput.write(Data("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)\n".utf8))
         dispatchMain()
     }
 }
 
 struct MobileCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "mobile", abstract: "Expose first-party workspace and terminal browsing for the iOS client.",
-        subcommands: [MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self], defaultSubcommand: MobileStatusCommand.self)
+        commandName: "mobile", abstract: "Inspect the same-machine Spaces Device API.", subcommands: [MobileStatusCommand.self],
+        defaultSubcommand: MobileStatusCommand.self)
 }
 
 struct MobileStatusCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the first-party mobile bridge address.")
+    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the same-machine Spaces Device API address.")
 
     func run() throws { for line in try mobileStatusLines() { print(line) } }
 }
 
 func mobileStatusLines(
-    loadControlResponse: () throws -> SpacesMobileBridgeControlResponse = {
-        try SpacesMobileBridgeControlClient.statusEnsuringCurrentTerminalService()
-    }
+    loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = { try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() }
 ) throws -> [String] {
     let response = try loadControlResponse()
     guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
     guard let status = response.status else {
-        throw WorkspaceError.invalidArgument(message: "Mobile bridge status response did not include address details.")
+        throw WorkspaceError.invalidArgument(message: "Device API status response did not include address details.")
     }
     return mobileStatusLines(status: status)
 }
 
-func mobileStatusLines(status: SpacesMobileBridgeStatus) -> [String] {
-    var lines = ["Spaces mobile bridge", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)"]
+func mobileStatusLines(status: SpacesDeviceAPIStatus) -> [String] {
+    var lines = [
+        "Spaces Device API", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)",
+        "fingerprint=\(status.certificateFingerprint)",
+    ]
     if status.networkAddresses.isEmpty {
         lines.append("addresses=(none)")
     } else {
         lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
     }
-    lines.append("iphone=Open Mobile Connection in the Mac app to show a QR code to scan with the Spaces iOS app.")
+    lines.append("pair=Run `spaces pair` to show iOS pairing details, or `spaces pair --json` for SSH-assisted Mac pairing.")
     return lines
-}
-
-struct MobileServeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run a standalone first-party mobile bridge for the iOS client.")
-
-    @Option(name: .long, help: "TCP host to bind. Defaults to all IPv4 interfaces for iPhone and simulator access.") var host =
-        SpacesMobileBridgeDefaults.host
-    @Option(name: .long, help: "TCP port to bind. Defaults to the stable first-party mobile bridge port.") var port = SpacesMobileBridgeDefaults.port
-    @Option(name: .long, help: "One-time pairing code accepted by the first-party iOS client. Defaults to a generated 8-digit code.") var pairingCode:
-        String?
-    @Option(name: .long, help: "Number of one-time pairing windows to emit in standalone harness mode.") var pairingWindowCount = 1
-
-    func run() throws {
-        guard pairingWindowCount > 0 else { throw ValidationError("--pairing-window-count must be greater than zero.") }
-        let trimmedPairingCode = pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedPairingCode =
-            if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
-                SpacesMobilePairingCoordinator.generatePairingCode()
-            }
-        let transportKey = SpacesMobileBridgeSettings.generateTransportKey()
-        let pairingWindowEmitter = MobileServePairingWindowEmitter(
-            bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
-        let server = try SpacesMobileBridgeServer(host: host, port: port, transportKey: transportKey) { _ in
-            pairingWindowEmitter.openNextWindow(label: "Spaces mobile pairing window")
-        }
-        pairingWindowEmitter.server = server
-        try server.start()
-        pairingWindowEmitter.linkHost = mobileServePairingLinkHost(host: host)
-        pairingWindowEmitter.openNextWindow(label: "Spaces mobile bridge ready")
-        withExtendedLifetime(server) { dispatchMain() }
-    }
-}
-
-private final class MobileServePairingWindowEmitter: @unchecked Sendable {
-    weak var server: SpacesMobileBridgeServer?
-    var linkHost = SpacesMobileBridgeDefaults.loopbackHost
-
-    private let lock = NSLock()
-    private let bindHost: String
-    private let totalWindowCount: Int
-    private var emittedWindowCount = 0
-    private var nextPairingCode: String?
-
-    init(bindHost: String, totalWindowCount: Int, firstPairingCode: String) {
-        self.bindHost = bindHost
-        self.totalWindowCount = totalWindowCount
-        nextPairingCode = firstPairingCode
-    }
-
-    func openNextWindow(label: String) {
-        lock.lock()
-        guard emittedWindowCount < totalWindowCount, let server else {
-            lock.unlock()
-            return
-        }
-        emittedWindowCount += 1
-        let code = nextPairingCode ?? SpacesMobilePairingCoordinator.generatePairingCode()
-        nextPairingCode = nil
-        lock.unlock()
-
-        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
-        print(
-            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesMobileFirstPartyPolicy.allowedBundleID)"
-        )
-        fflush(stdout)
-    }
-}
-
-func mobileServePairingLinkHost(host: String) -> String { SpacesMobileBridgeNetworkInterfaces.pairingLinkHost(boundHost: host) }
-
-struct ImportCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "import", abstract: "Register a workspace for the current directory or a provided path.")
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    @Option(name: .long, help: "Workspace title override.") var title: String?
-
-    @Option(name: .long, help: "Workspace notes override.") var notes: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let importDirectory = path ?? context.currentDirectoryPath()
-        let normalizedImportDirectory = context.normalizePath(importDirectory)
-        let workspace: WorkspaceRecord
-
-        if let existing = try orchestrator.store.workspace(dir: normalizedImportDirectory), !existing.isArchived {
-            if title != nil || notes != nil {
-                try orchestrator.updateWorkspaceMetadata(workspaceID: existing.id, title: title, notes: notes != nil ? .some(notes) : nil)
-            }
-
-            workspace = try orchestrator.store.workspace(id: existing.id) ?? existing
-            try context.output.emit(
-                text: "Workspace already exists: \(workspace.title)\t\(workspace.dir)",
-                json: MutationResultPayload(message: "Workspace already exists.", resource: workspace))
-            return
-        }
-
-        var created = try orchestrator.createWorkspaceFromWorktree(worktreePath: importDirectory, name: title)
-        if let notes {
-            try orchestrator.updateWorkspaceMetadata(workspaceID: created.id, notes: .some(notes))
-            created = try requireWorkspace(id: created.id, orchestrator: orchestrator)
-        }
-
-        workspace = created
-        try context.output.emit(
-            text: "Created workspace \(workspace.title)\t\(workspace.dir)",
-            json: MutationResultPayload(message: "Created workspace \(workspace.title).", resource: workspace))
-    }
-}
-
-struct UpdateCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "update", abstract: "Update workspace metadata for the current directory or a provided path.")
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    @Option(name: .long, help: "Workspace title override.") var title: String?
-
-    @Option(name: .long, help: "Workspace notes override.") var notes: String?
-
-    func validate() throws {
-        if title == nil && notes == nil { throw ValidationError("Specify at least one field to update with `--title` or `--notes`.") }
-    }
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
-
-        try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: title, notes: notes != nil ? .some(notes) : nil)
-
-        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
-        try context.output.emit(
-            text: "Updated workspace \(updatedWorkspace.title)\t\(updatedWorkspace.dir)",
-            json: MutationResultPayload(message: "Updated workspace \(updatedWorkspace.title).", resource: updatedWorkspace))
-    }
-}
-
-struct StartCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "start", abstract: "Ensure a workspace is running.")
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
-
-        try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: false, background: true)
-
-        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
-        try context.output.emit(
-            text: "Workspace is running \(workspace.id)", json: MutationResultPayload(message: "Workspace is running.", resource: updatedWorkspace))
-    }
-}
-
-struct RestartCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "restart", abstract: "Force a full stop and relaunch for a workspace.")
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
-
-        try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true, background: true)
-
-        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
-        try context.output.emit(
-            text: "Workspace restarted \(workspace.id)", json: MutationResultPayload(message: "Workspace restarted.", resource: updatedWorkspace))
-    }
-}
-
-struct OpenCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "open", abstract: "Open or focus one named tracked workspace target.")
-
-    @Argument(help: "Name of the tracked browser, process, or coding-agent target to open.") var name: String
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let workspace = try requireWorkspace(path: path, orchestrator: orchestrator, context: context)
-
-        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: name)
-
-        let updatedWorkspace = try requireWorkspace(id: workspace.id, orchestrator: orchestrator)
-        try context.output.emit(
-            text: "Opened workspace target \(name)\tworkspace=\(workspace.id)",
-            json: MutationResultPayload(message: "Opened workspace target.", resource: updatedWorkspace))
-    }
-}
-
-struct SignalCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "signal", abstract: "Record an explicit lifecycle event for the current coding-agent terminal.",
-        discussion:
-            "Events are accepted from tracked Spaces terminal sessions. Set SPACES_AGENT_LABEL to override the agent row label for custom hook integrations."
-    )
-
-    @Argument(
-        help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
-    var type: AgentEventType
-
-    @Argument(help: "Workspace directory. Defaults to the current directory.") var path: String?
-
-    func run() throws {
-        let context = CLIContext()
-        let orchestrator = try context.makeOrchestrator()
-        let environment = context.environment()
-        if let dropResult = agentEventDropResult(type: type, environment: environment, context: context) {
-            try context.output.emit(text: dropResult.text, json: dropResult.payload)
-            return
-        }
-        let directory = path ?? context.currentDirectoryPath()
-        let normalizedDirectory = context.normalizePath(directory)
-        let workspace = try requireWorkspace(path: normalizedDirectory, orchestrator: orchestrator, context: context)
-        let agentContext = try resolveAgentInvocationContext(
-            workspaceID: workspace.id, environment: environment, orchestrator: orchestrator, context: context)
-        guard let agentContext else { return }
-        let existingAgent = try existingAgentSignalTarget(workspaceID: workspace.id, agentContext: agentContext, orchestrator: orchestrator)
-        let signalLabel = agentContext.label ?? agentSignalRuntimeLabel(agentContext: agentContext) ?? normalizedNonEmpty(existingAgent?.label)
-        let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && normalizedNonEmpty(signalLabel) != nil)
-        if !canRecordSignal {
-            try context.output.emit(
-                text: "Ignored agent \(type.rawValue): no active agent row\tworkspace=\(workspace.id)",
-                json: MutationResultPayload(message: "Agent \(type.rawValue) ignored.", resource: ["workspaceID": workspace.id]))
-            return
-        }
-
-        switch type {
-        case .`init`:
-            try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id, provider: agentContext.provider, label: signalLabel, terminalTrackingID: agentContext.terminalTrackingID,
-                terminalNativeID: agentContext.terminalNativeID, codexThreadID: agentContext.codexThreadID, yabaiWindowID: agentContext.yabaiWindowID,
-                status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_signal",
-                environmentKeys: agentContext.environmentKeys)
-        case .start, .waiting, .done:
-            try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspace.id, provider: agentContext.provider, terminalTrackingID: agentContext.terminalTrackingID,
-                codexThreadID: agentContext.codexThreadID, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID,
-                label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_signal",
-                environmentKeys: agentContext.environmentKeys)
-        case .exit:
-            guard let existingAgent else { return }
-            // Exit mutates the row resolved above; runtime labels can collide with reserved launcher names
-            // and are not proof that an ad-hoc session owns a configured launcher slot.
-            try orchestrator.handleAgentExit(
-                existingAgent, terminalNativeID: agentContext.terminalNativeID, yabaiWindowID: agentContext.yabaiWindowID, eventType: type.rawValue,
-                eventSource: "spaces_signal", environmentKeys: agentContext.environmentKeys)
-        }
-
-        try context.output.emit(
-            text: "Agent \(type.rawValue): workspace=\(workspace.id)",
-            json: MutationResultPayload(
-                message: "Agent \(type.rawValue) recorded.", resource: ["workspaceID": workspace.id, "status": type.status.rawValue]))
-        context.fireAgentEventNotification()
-    }
 }
 
 enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
@@ -556,139 +489,6 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
         case .exit: .idle
         }
     }
-
-    var establishesAgentFromEvidence: Bool {
-        switch self {
-        case .start, .waiting, .done: true
-        case .`init`, .exit: false
-        }
-    }
-}
-
-struct AgentInvocationContext {
-    let provider: AgentProvider
-    let label: String?
-    let terminalTrackingID: String?
-    let terminalNativeID: String?
-    let codexThreadID: String?
-    let yabaiWindowID: Int?
-    let environmentKeys: [String]
-}
-
-func resolveAgentInvocationContext(workspaceID: String, environment: [String: String], orchestrator: WorkspaceOrchestrator, context: CLIContext)
-    throws -> AgentInvocationContext?
-{
-    guard let resolvedProvider = resolveProvider(environment: environment) else { return nil }
-    let focusedWindowID = context.currentYabaiWindowID()
-    let spacesTrackingID = environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let trackingIdentity: TerminalTrackingIdentity? =
-        if resolvedProvider == .spaces, let spacesTrackingID, !spacesTrackingID.isEmpty { .session(spacesTrackingID) } else { nil }
-    let splitIdentity = splitTrackingIdentity(trackingIdentity)
-    guard splitIdentity.sessionID?.isEmpty == false else { return nil }
-    let terminalNativeID = splitIdentity.sessionID
-    let resolvedYabaiWindowID = splitIdentity.windowID ?? focusedWindowID
-    return AgentInvocationContext(
-        provider: resolvedProvider, label: inferredAgentLabel(environment: environment), terminalTrackingID: splitIdentity.sessionID,
-        terminalNativeID: terminalNativeID, codexThreadID: environment["CODEX_THREAD_ID"], yabaiWindowID: resolvedYabaiWindowID,
-        environmentKeys: environment.keys.sorted())
-}
-
-func existingAgentSignalTarget(workspaceID: String, agentContext: AgentInvocationContext, orchestrator: WorkspaceOrchestrator) throws
-    -> AgentWindowRecord?
-{
-    let terminalIDs = Set([agentContext.terminalTrackingID, agentContext.terminalNativeID].compactMap { normalizedNonEmpty($0) })
-    let codexThreadID = normalizedNonEmpty(agentContext.codexThreadID)
-    return try orchestrator.agentWindows(workspaceID: workspaceID).first { record in
-        guard record.provider == agentContext.provider else { return false }
-        if let recordTerminalID = normalizedNonEmpty(record.terminalTrackingID), terminalIDs.contains(recordTerminalID) { return true }
-        if let codexThreadID, normalizedNonEmpty(record.codexThreadID) == codexThreadID { return true }
-        return false
-    }
-}
-
-func agentSignalRuntimeLabel(agentContext: AgentInvocationContext) -> String? {
-    guard agentContext.provider == .spaces, let sessionID = normalizedNonEmpty(agentContext.terminalTrackingID ?? agentContext.terminalNativeID),
-        let paths = try? TerminalSessionPaths.forSession(id: sessionID)
-    else { return nil }
-    if let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration.kind == .agent {
-        return normalizedNonEmpty(launchConfiguration.title)
-    }
-    guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), let kind = runtimeState.foregroundDetectedAgentKind
-    else { return nil }
-    return normalizedNonEmpty(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
-}
-
-private func normalizedNonEmpty(_ value: String?) -> String? {
-    let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let trimmed, !trimmed.isEmpty else { return nil }
-    return trimmed
-}
-
-private func requireWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
-    guard let workspace = try orchestrator.store.workspace(id: id) else { throw ValidationError("Workspace not found for id \(id)") }
-
-    return workspace
-}
-
-private func requireWorkspace(path: String?, orchestrator: WorkspaceOrchestrator, context: CLIContext) throws -> WorkspaceRecord {
-    let directory = path ?? context.currentDirectoryPath()
-    let normalizedDirectory = context.normalizePath(directory)
-    guard let workspace = try orchestrator.store.workspace(dir: normalizedDirectory) else {
-        throw ValidationError("Workspace not found at: \(normalizedDirectory). Run `spaces import [path]` first.")
-    }
-
-    return workspace
-}
-
-private func resolveProvider(environment: [String: String]) -> AgentProvider? {
-    let spacesTerminalHost = environment["SPACES_TERMINAL_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    if spacesTerminalHost == TerminalHost.spaces.rawValue { return .spaces }
-    return nil
-}
-
-func agentEventDropResult(type: AgentEventType, environment: [String: String], context: CLIContext) -> (
-    text: String, payload: MutationResultPayload<[String: String]>
-)? {
-    guard let provider = resolveProvider(environment: environment) else {
-        return (
-            "Dropped agent event \(type.rawValue): non-Spaces terminal",
-            MutationResultPayload<[String: String]>(message: "Dropped non-Spaces agent event.", resource: nil)
-        )
-    }
-    if provider == .spaces, environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.isEmpty != false {
-        return (
-            "Dropped agent event \(type.rawValue): untracked Spaces terminal",
-            MutationResultPayload<[String: String]>(message: "Dropped untracked Spaces agent event.", resource: nil)
-        )
-    }
-    return nil
-}
-
-private func inferredAgentLabel(environment: [String: String]) -> String? {
-    if let label = environment[WorkspaceOrchestrator.agentLabelEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
-        return label
-    }
-    if environment["CODEX_THREAD_ID"] != nil { return "codex cli" }
-    if environment["CODEX_MANAGED_BY_NPM"] != nil { return "codex cli" }
-    if environment["CLAUDE_CODE_ENTRYPOINT"] != nil { return "claude cli" }
-    if environment.keys.contains(where: { $0.uppercased().hasPrefix("OPENCODE") }) { return "opencode cli" }
-
-    return nil
-}
-
-private func agentProvider(for terminalApp: String?) -> AgentProvider? {
-    switch terminalApp {
-    case TerminalHost.spaces.appName: return .spaces
-    default: return nil
-    }
-}
-
-private func splitTrackingIdentity(_ identity: TerminalTrackingIdentity?) -> (sessionID: String?, windowID: Int?) {
-    switch identity {
-    case .session(let id): return (id, nil)
-    case .window(let id): return (nil, id)
-    case nil: return (nil, nil)
-    }
 }
 
 private func terminalShellPath(_ explicitPath: String?) -> String {
@@ -696,7 +496,11 @@ private func terminalShellPath(_ explicitPath: String?) -> String {
     if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
         return configured
     }
-    return "/bin/zsh"
+    #if os(Linux)
+        return "/bin/bash"
+    #else
+        return "/bin/zsh"
+    #endif
 }
 
 private func terminalDefaultTitle(command: String?, cwd: String) -> String {
@@ -704,3 +508,9 @@ private func terminalDefaultTitle(command: String?, cwd: String) -> String {
     let name = URL(fileURLWithPath: cwd).lastPathComponent
     return name.isEmpty ? "Terminal" : name
 }
+
+#if os(macOS)
+    private func postCLIIPCNotification(name: Notification.Name, userInfo: [String: String]? = nil) throws {
+        try IPCNotification.post(name, userInfo: userInfo)
+    }
+#endif

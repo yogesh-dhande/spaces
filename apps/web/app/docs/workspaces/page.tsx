@@ -46,8 +46,8 @@ export default function WorkspacesDocsPage() {
           <li>• Double-click the title, branch, or notes to rename them inline. <code>Escape</code> or click away to cancel.</li>
           <li>• Renaming the branch inline renames the underlying git branch.</li>
           <li>• Add, remove, or rename named ports per workspace.</li>
-          <li>• Edit a process command while the workspace is running and Spaces restarts just that process.</li>
-          <li>• Add a browser session and Spaces opens it right away if the workspace is already running.</li>
+          <li>• Edit a process command while the workspace is running and Spaces asks to confirm, then restarts just that process.</li>
+          <li>• Add a browser session and it opens in Chrome when you focus it.</li>
           <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on import, launch, and agent events.</li>
         </ul>
       </article>

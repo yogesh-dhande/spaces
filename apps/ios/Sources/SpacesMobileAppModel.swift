@@ -1,6 +1,7 @@
 import Foundation
 import Observation
-import spacesmobilecore
+import spacesdevicecore
+import spacesterminalcore
 
 private enum SpacesMobileSettingsStore {
     static let settingsKey = "spaces.mobile.connection-settings"
@@ -19,7 +20,10 @@ private enum SpacesMobileSettingsStore {
     }
 
     static func save(_ settings: SpacesMobileConnectionSettings) {
-        guard let data = try? JSONEncoder().encode(settings) else { return }
+        var stored = settings
+        stored.authToken = ""
+        stored.transportKey = ""
+        guard let data = try? JSONEncoder().encode(stored) else { return }
         UserDefaults.standard.set(data, forKey: settingsKey)
     }
 
@@ -40,6 +44,9 @@ private enum SpacesMobileSettingsStore {
         }
         if let transportKey = trimmed(environment["SPACES_MOBILE_TEST_TRANSPORT_KEY"]) {
             resolved.transportKey = transportKey
+        }
+        if let certificateFingerprint = trimmed(environment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"]) {
+            resolved.certificateFingerprint = certificateFingerprint
         }
         if let installationID = trimmed(environment["SPACES_MOBILE_TEST_INSTALLATION_ID"]) {
             resolved.installationID = installationID
@@ -131,7 +138,7 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let errorMessage: String?
     let isPreparingLinkPreview: Bool
     let linkPreviewTitle: String?
-    let linkPreviewMediaKind: SpacesMobileTerminalLinkMediaKind?
+    let linkPreviewMediaKind: SpacesDeviceTerminalLinkMediaKind?
     let linkPreviewErrorMessage: String?
     let visibleText: String
     let renderedText: String
@@ -192,7 +199,7 @@ struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     let projectName: String
     let workspaceTitle: String
     let workspaceDirectory: String
-    let sessions: [SpacesMobileTerminalSessionSummary]
+    let sessions: [SpacesDeviceTerminalSessionSummary]
 }
 
 enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable {
@@ -219,7 +226,7 @@ enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable 
     }
 }
 
-extension SpacesMobileRunState {
+extension SpacesDeviceRunState {
     var mobileLabel: String {
         switch self {
         case .notStarted: "Not Started"
@@ -231,9 +238,9 @@ extension SpacesMobileRunState {
 
 struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     enum Source: Sendable {
-        case process(SpacesMobileWorkspaceProcessRow)
-        case codingAgent(SpacesMobileWorkspaceCodingAgentRow)
-        case terminal(SpacesMobileWorkspaceTerminalRow)
+        case process(SpacesDeviceWorkspaceProcessRow)
+        case codingAgent(SpacesDeviceWorkspaceCodingAgentRow)
+        case terminal(SpacesDeviceWorkspaceTerminalRow)
     }
 
     let source: Source
@@ -286,7 +293,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
-    var runState: SpacesMobileRunState {
+    var runState: SpacesDeviceRunState {
         switch source {
         case .process(let row): row.runState
         case .codingAgent(let row): row.runState
@@ -344,7 +351,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
 }
 
 struct SpacesMobileWorkspaceGroup: Identifiable {
-    let workspace: SpacesMobileWorkspaceSummary
+    let workspace: SpacesDeviceWorkspaceSummary
     let rows: [SpacesMobileWorkspaceRuntimeRow]
 
     var id: String { workspace.id }
@@ -361,7 +368,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func acceptsFreshSession(_ session: SpacesMobileTerminalSessionSummary?) -> SpacesMobileTerminalSessionSummary? {
+    func acceptsFreshSession(_ session: SpacesDeviceTerminalSessionSummary?) -> SpacesDeviceTerminalSessionSummary? {
         guard let session else { return nil }
         switch self {
         case .acceptCachedOverview:
@@ -374,33 +381,43 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
 @MainActor @Observable final class SpacesMobileAppModel {
     var settings: SpacesMobileConnectionSettings
-    var overview: SpacesMobileOverviewPayload?
+    var pairedDevices: [SpacesMobilePairedDeviceRecord]
+    var activeDeviceID: String?
+    var overview: SpacesDeviceOverviewPayload?
     var isLoading = false
     var isMutating = false
     var isLaunchingSpacesApp = false
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
-    var pendingPairingLink: SpacesMobilePairingLink?
+    var pendingPairingLink: SpacesDevicePairingLink?
     var errorMessage: String?
     var searchText = ""
     var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
-    var visibleRunStates: Set<SpacesMobileRunState> = Set([.notStarted, .running, .exited])
-    var workspaceCreateOptions: SpacesMobileWorkspaceCreateOptions?
-    @ObservationIgnored private var bridgeClient: SpacesMobileBridgeClient
-    @ObservationIgnored private var commandChannel: SpacesMobileBridgeCommandChannel
+    var visibleRunStates: Set<SpacesDeviceRunState> = Set([.notStarted, .running, .exited])
+    var workspaceCreateOptions: SpacesDeviceWorkspaceCreateOptions?
+    @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
+    @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
 
     init() {
+        #if DEBUG
+            SpacesMobileDeviceStore.applyDebugSeed()
+        #endif
         let loadedSettings = SpacesMobileSettingsStore.load()
-        let bridgeClient = SpacesMobileBridgeClient(settings: loadedSettings)
-        settings = loadedSettings
+        let deviceState = SpacesMobileDeviceStore.load(fallbackSettings: loadedSettings)
+        let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
+        settings = deviceState.settings
+        pairedDevices = deviceState.devices
+        activeDeviceID = deviceState.activeDeviceID
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
-        SpacesMobileSettingsStore.save(loadedSettings)
+        SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
-    init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesMobileBridgeClient) {
+    init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient) {
         self.settings = settings
+        pairedDevices = []
+        activeDeviceID = nil
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
     }
@@ -424,8 +441,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     var terminalGroups: [SpacesMobileTerminalWorkspaceGroup] {
-        let workspaceByID = Dictionary(uniqueKeysWithValues: (overview?.workspaces ?? []).map { ($0.id, $0) })
-        let grouped = Dictionary(grouping: overview?.sessions ?? []) { session in
+        let workspaces = overview?.workspaces ?? []
+        let workspaceByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
+        let representedSessionIDs = Set(workspaces.flatMap { workspaceRuntimeRows(for: $0).compactMap(\.sessionID) })
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessions = (overview?.sessions ?? []).filter { session in
+            !representedSessionIDs.contains(session.id) && terminalSessionMatchesFilters(session, query: query)
+        }
+        let grouped = Dictionary(grouping: sessions) { session in
             session.workspaceID ?? "unassigned::\(session.projectID ?? session.projectName ?? "none")::\(session.workingDirectory)"
         }
 
@@ -448,7 +471,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         .sorted(by: groupSort)
     }
 
-    var connectionSummary: String { "\(settings.trimmedHost):\(settings.port)" }
+    var connectionSummary: String {
+        if let activeDeviceName { return activeDeviceName }
+        return "\(settings.trimmedHost):\(settings.port)"
+    }
+
+    var activeDeviceName: String? {
+        guard let activeDeviceID else { return nil }
+        return pairedDevices.first(where: { $0.id == activeDeviceID })?.name
+    }
 
     func toggleRowTypeFilter(_ type: SpacesMobileWorkspaceRowType) {
         if visibleRowTypes.contains(type) {
@@ -459,7 +490,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func toggleRunStateFilter(_ state: SpacesMobileRunState) {
+    func toggleRunStateFilter(_ state: SpacesDeviceRunState) {
         if visibleRunStates.contains(state) {
             guard visibleRunStates.count > 1 else { return }
             visibleRunStates.remove(state)
@@ -480,7 +511,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         } catch is CancellationError {
             return
         } catch {
-            if let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) {
+            if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
                 handleAuthenticationFailure(message: recoveryMessage)
                 return
             }
@@ -501,16 +532,53 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func applyConnectionSettings(_ settings: SpacesMobileConnectionSettings) {
+    func applyConnectionSettings(_ settings: SpacesMobileConnectionSettings, deviceName: String? = nil) {
         let previousCommandChannel = commandChannel
-        self.settings = settings
-        bridgeClient = SpacesMobileBridgeClient(settings: settings)
+        let deviceState =
+            settings.isPaired
+            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? "Spaces \(settings.trimmedHost)")
+            : SpacesMobileDeviceStore.load(fallbackSettings: settings)
+        self.settings = deviceState.settings
+        pairedDevices = deviceState.devices
+        activeDeviceID = deviceState.activeDeviceID
+        bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
+        commandChannel = bridgeClient.makeCommandChannel()
+        SpacesMobileSettingsStore.save(deviceState.settings)
+        overview = nil
+        workspaceCreateOptions = nil
+        connectionNotice = nil
+        pendingPairingLink = nil
+        Task { await previousCommandChannel.close() }
+    }
+
+    func selectDevice(id: String) {
+        guard let deviceState = SpacesMobileDeviceStore.select(deviceID: id, installationID: settings.installationID) else { return }
+        let previousCommandChannel = commandChannel
+        settings = deviceState.settings
+        pairedDevices = deviceState.devices
+        activeDeviceID = deviceState.activeDeviceID
+        bridgeClient = SpacesDeviceAPIClient(settings: settings)
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
-        pendingPairingLink = nil
+        errorMessage = nil
+        Task { await previousCommandChannel.close() }
+    }
+
+    func removeDevice(id: String) {
+        let previousCommandChannel = commandChannel
+        let deviceState = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: settings)
+        settings = deviceState.settings
+        pairedDevices = deviceState.devices
+        activeDeviceID = deviceState.activeDeviceID
+        bridgeClient = SpacesDeviceAPIClient(settings: settings)
+        commandChannel = bridgeClient.makeCommandChannel()
+        SpacesMobileSettingsStore.save(settings)
+        overview = nil
+        workspaceCreateOptions = nil
+        connectionNotice = pairedDevices.isEmpty ? "Scan a QR code to pair this device." : nil
         Task { await previousCommandChannel.close() }
     }
 
@@ -521,7 +589,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func handleAuthenticationFailure(message: String) {
         let previousCommandChannel = commandChannel
         settings.authToken = ""
-        bridgeClient = SpacesMobileBridgeClient(settings: settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: settings)
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
@@ -535,7 +603,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     func preparePairingLink(_ url: URL) {
         do {
-            pendingPairingLink = try SpacesMobilePairingLink.parse(url)
+            pendingPairingLink = try SpacesDevicePairingLink.parse(url)
             connectionNotice = nil
             errorMessage = nil
             isShowingConnectionSettings = true
@@ -574,13 +642,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func openWorkspaceTerminal(workspaceID: String) async -> SpacesMobileTerminalSessionSummary? {
+    func openWorkspaceTerminal(workspaceID: String) async -> SpacesDeviceTerminalSessionSummary? {
         await performMutationReturningSession {
             try await bridgeClient.openWorkspaceTerminal(workspaceID: workspaceID, commandChannel: commandChannel)
         }
     }
 
-    func run(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+    func run(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
         let timeoutRecovery = SpacesMobileMutationTimeoutRecovery.requireFreshOverview(previousSessionID: row.sessionID)
         switch row.source {
         case .process(let process):
@@ -601,7 +669,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func performPrimaryAction(for row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+    func performPrimaryAction(for row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
         if let session = terminalSession(for: row) { return session }
         return await run(row: row)
     }
@@ -611,7 +679,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isMutating = true
         defer { isMutating = false }
         do {
-            let response: SpacesMobileBridgeResponse
+            let response: SpacesDeviceAPIResponse
             switch row.source {
             case .process(let process):
                 guard let processID = process.processID else { return }
@@ -632,7 +700,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesMobileTerminalSessionSummary? {
+    func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
         let timeoutRecovery = SpacesMobileMutationTimeoutRecovery.requireFreshOverview(previousSessionID: row.sessionID)
         switch row.source {
         case .process(let process):
@@ -659,7 +727,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return lhs.workspaceTitle.localizedStandardCompare(rhs.workspaceTitle) == .orderedAscending
     }
 
-    private func sessionSort(_ lhs: SpacesMobileTerminalSessionSummary, _ rhs: SpacesMobileTerminalSessionSummary) -> Bool {
+    private func sessionSort(_ lhs: SpacesDeviceTerminalSessionSummary, _ rhs: SpacesDeviceTerminalSessionSummary) -> Bool {
         if lhs.state != rhs.state {
             return lhs.state == .running && rhs.state != .running
         }
@@ -669,13 +737,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return lhs.createdAt < rhs.createdAt
     }
 
-    private func workspaceRuntimeRows(for workspace: SpacesMobileWorkspaceSummary) -> [SpacesMobileWorkspaceRuntimeRow] {
+    private func workspaceRuntimeRows(for workspace: SpacesDeviceWorkspaceSummary) -> [SpacesMobileWorkspaceRuntimeRow] {
         workspace.processRows.map { .init(source: .process($0)) }
             + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
             + workspace.terminalRows.map { .init(source: .terminal($0)) }
     }
 
-    private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesMobileWorkspaceSummary, query: String) -> Bool {
+    private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
         guard visibleRowTypes.contains(row.type), visibleRunStates.contains(row.runState) else { return false }
         guard !query.isEmpty else { return true }
         return [workspace.projectName, workspace.title, workspace.dir, row.title, row.detail].contains { value in
@@ -683,28 +751,84 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    private func workspaceMatchesSearch(_ workspace: SpacesMobileWorkspaceSummary, query: String) -> Bool {
+    private func workspaceMatchesSearch(_ workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
         guard !query.isEmpty else { return true }
         return [workspace.projectName, workspace.title, workspace.dir].contains { $0.localizedStandardContains(query) }
     }
 
-    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesMobileTerminalSessionSummary? {
-        row.sessionID.flatMap { sessionID in overview?.sessions.first(where: { $0.id == sessionID }) }
+    private func terminalSessionMatchesFilters(_ session: SpacesDeviceTerminalSessionSummary, query: String) -> Bool {
+        guard session.rowKind == .liveSession else { return false }
+        guard visibleRowTypes.contains(.workspaceTerminals), visibleRunStates.contains(runState(for: session.state)) else { return false }
+        guard !query.isEmpty else { return true }
+        return [session.projectName, session.workspaceTitle, session.workingDirectory, session.title].compactMap(\.self).contains {
+            $0.localizedStandardContains(query)
+        }
+    }
+
+    private func runState(for state: TerminalSessionState) -> SpacesDeviceRunState {
+        switch state {
+        case .starting, .running: .running
+        case .exited, .failed: .exited
+        }
+    }
+
+    func terminalSession(for row: SpacesMobileWorkspaceRuntimeRow) -> SpacesDeviceTerminalSessionSummary? {
+        guard let sessionID = row.sessionID else { return nil }
+        if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        guard case .terminal(let terminalRow) = row.source else { return nil }
+        return terminalSession(from: terminalRow)
     }
 
     func runtimeRow(forSessionID sessionID: String) -> SpacesMobileWorkspaceRuntimeRow? {
         overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first { $0.sessionID == sessionID }
     }
 
-    func refreshedSession(forRowID rowID: String) -> SpacesMobileTerminalSessionSummary? {
+    func refreshedSession(forRowID rowID: String) -> SpacesDeviceTerminalSessionSummary? {
         overview?.workspaces.flatMap(workspaceRuntimeRows(for:)).first(where: { $0.id == rowID }).flatMap(terminalSession(for:))
+    }
+
+    private func terminalSession(from row: SpacesDeviceWorkspaceTerminalRow) -> SpacesDeviceTerminalSessionSummary? {
+        guard let sessionID = row.sessionID else { return nil }
+        let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        return SpacesDeviceTerminalSessionSummary(
+            id: sessionID,
+            title: row.title,
+            workingDirectory: row.workingDirectory,
+            state: terminalSessionState(for: row.runState),
+            backend: .ghosttyEmbedded,
+            lifetimePolicy: .persistent,
+            servicePID: 0,
+            childPID: nil,
+            workspaceID: row.workspaceID,
+            workspaceTitle: workspace?.title,
+            projectID: workspace?.projectID,
+            projectName: workspace?.projectName,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            isControlAvailable: row.runState == .running,
+            isSubscriptionAvailable: row.runState == .running,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            rowKind: .liveSession,
+            rowSourceID: row.id,
+            hasFinalRender: false,
+            daemonEndpoint: row.daemonEndpoint
+        )
+    }
+
+    private func terminalSessionState(for runState: SpacesDeviceRunState) -> TerminalSessionState {
+        switch runState {
+        case .notStarted: .starting
+        case .running: .running
+        case .exited: .exited
+        }
     }
 
     private func performMutationReturningSession(
         fallbackRowID: String? = nil,
         timeoutRecovery: SpacesMobileMutationTimeoutRecovery = .acceptCachedOverview,
-        _ operation: () async throws -> SpacesMobileBridgeResponse
-    ) async -> SpacesMobileTerminalSessionSummary? {
+        _ operation: () async throws -> SpacesDeviceAPIResponse
+    ) async -> SpacesDeviceTerminalSessionSummary? {
         guard !isMutating else { return nil }
         isMutating = true
         defer { isMutating = false }
@@ -730,7 +854,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    private func applyMutationResponse(_ response: SpacesMobileBridgeResponse) {
+    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse) {
         if let overview = response.overview {
             self.overview = overview
             connectionNotice = nil
@@ -742,7 +866,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         if error is CancellationError {
             return
         }
-        if let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) {
+        if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
             handleAuthenticationFailure(message: recoveryMessage)
             return
         }
@@ -752,7 +876,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func reconciledSessionAfterMutationTimeout(
         rowID: String,
         timeoutRecovery: SpacesMobileMutationTimeoutRecovery
-    ) async -> SpacesMobileTerminalSessionSummary? {
+    ) async -> SpacesDeviceTerminalSessionSummary? {
         if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID) {
             errorMessage = nil
             connectionNotice = nil
@@ -770,10 +894,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     private func isMutationTimeout(_ error: Error) -> Bool {
         switch error {
-        case SpacesMobileBridgeClientError.requestTimedOut:
+        case SpacesDeviceAPIClientError.requestTimedOut:
             return true
-        case SpacesMobileBridgeClientError.requestFailed(let message),
-            SpacesMobileBridgeClientError.streamFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message),
+            SpacesDeviceAPIClientError.streamFailed(let message):
             return message.localizedStandardContains("timed out")
         default:
             return false

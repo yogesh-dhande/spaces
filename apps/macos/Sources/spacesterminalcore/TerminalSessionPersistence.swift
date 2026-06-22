@@ -285,6 +285,41 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    public static func writeAttachmentSnapshot(_ snapshot: TerminalSessionAttachmentSnapshot, paths: TerminalSessionPaths) throws {
+        try paths.ensureDirectories()
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                let sessionID = try existingSessionID(rootDirectory: root, database: database)
+                for attachment in snapshot.attachments where attachment.sessionID != sessionID {
+                    throw TerminalSessionPersistenceError.unknownSession(attachment.sessionID)
+                }
+                try database.execute(sql: "DELETE FROM terminal_attachments WHERE root_directory = ?", bindings: [root])
+                try database.execute(sql: "DELETE FROM terminal_clients WHERE root_directory = ?", bindings: [root])
+                for client in snapshot.clients {
+                    try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
+                }
+                for attachment in snapshot.attachments {
+                    try database.execute(
+                        sql: """
+                            INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
+                            VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+                            """,
+                        bindings: [
+                            attachment.id, root, sessionID, attachment.clientID, attachment.mode.rawValue, attachment.attachedAt,
+                            attachment.detachedAt ?? "",
+                        ])
+                }
+            }
+        }
+    }
+
+    public static func writeRemoteStateMirror(_ payload: GhosttyRemoteSessionStatePayload, paths: TerminalSessionPaths) throws {
+        if let runtimeState = payload.runtimeState { try writeRuntimeState(runtimeState, paths: paths) }
+        if let attachmentSnapshot = payload.attachmentSnapshot { try writeAttachmentSnapshot(attachmentSnapshot, paths: paths) }
+        try writeRemoteSessionState(payload, paths: paths)
+    }
+
     public static func readLaunchConfiguration(paths: TerminalSessionPaths) throws -> TerminalSessionLaunchConfiguration {
         let root = normalizedRootDirectory(paths.rootDirectory)
         return try withDatabase(paths: paths) { database in
@@ -355,6 +390,84 @@ public enum TerminalSessionPersistence {
             guard let payloadJSON = row?.first else { throw TerminalSessionPersistenceError.unknownSession(root) }
             guard let data = payloadJSON.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>") }
             return try JSONDecoder().decode(GhosttyRemoteSessionStatePayload.self, from: data)
+        }
+    }
+
+    public static func appendPendingAgentSignal(_ event: TerminalServiceAgentSignalEvent, paths: TerminalSessionPaths) throws {
+        try paths.ensureDirectories()
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        let environmentKeysJSON = try encodeEnvironmentKeys(event.environmentKeys)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                let sessionID = try existingSessionID(rootDirectory: root, database: database)
+                guard sessionID == event.sessionID else { throw TerminalSessionPersistenceError.unknownSession(event.sessionID) }
+                try database.execute(
+                    sql: """
+                        INSERT INTO terminal_agent_signal_events(
+                          id, root_directory, session_id, event_type, workspace_id, workspace_path, provider, label, terminal_tracking_id,
+                          terminal_native_id, codex_thread_id, environment_keys_json, created_at, acknowledged_at
+                        )
+                        VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL)
+                        ON CONFLICT(id) DO UPDATE SET
+                          root_directory = excluded.root_directory,
+                          session_id = excluded.session_id,
+                          event_type = excluded.event_type,
+                          workspace_id = excluded.workspace_id,
+                          workspace_path = excluded.workspace_path,
+                          provider = excluded.provider,
+                          label = excluded.label,
+                          terminal_tracking_id = excluded.terminal_tracking_id,
+                          terminal_native_id = excluded.terminal_native_id,
+                          codex_thread_id = excluded.codex_thread_id,
+                          environment_keys_json = excluded.environment_keys_json,
+                          created_at = excluded.created_at,
+                          acknowledged_at = NULL
+                        """,
+                    bindings: [
+                        event.id, root, event.sessionID, event.type, event.workspaceID ?? "", event.workspacePath ?? "", event.provider,
+                        event.label ?? "", event.terminalTrackingID ?? "", event.terminalNativeID ?? "", event.codexThreadID ?? "",
+                        environmentKeysJSON, event.createdAt,
+                    ])
+            }
+        }
+    }
+
+    public static func pendingAgentSignals(sessionID: String, paths: TerminalSessionPaths) throws -> [TerminalServiceAgentSignalEvent] {
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        return try withDatabase(paths: paths) { database in
+            let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+            guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+            let rows = try database.queryRows(
+                sql: """
+                    SELECT id, session_id, COALESCE(workspace_id, ''), COALESCE(workspace_path, ''), event_type, provider, COALESCE(label, ''),
+                           COALESCE(terminal_tracking_id, ''), COALESCE(terminal_native_id, ''), COALESCE(codex_thread_id, ''),
+                           environment_keys_json, created_at
+                    FROM terminal_agent_signal_events
+                    WHERE root_directory = ? AND session_id = ? AND acknowledged_at IS NULL
+                    ORDER BY created_at, id
+                    """, bindings: [root, sessionID])
+            return try rows.map(decodeAgentSignalEvent(row:))
+        }
+    }
+
+    public static func acknowledgeAgentSignals(ids: [String], sessionID: String, paths: TerminalSessionPaths, acknowledgedAt: String) throws {
+        let normalizedIDs = ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !normalizedIDs.isEmpty else { return }
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+                let placeholders = Array(repeating: "?", count: normalizedIDs.count).joined(separator: ",")
+                try database.execute(
+                    sql: """
+                        UPDATE terminal_agent_signal_events
+                        SET acknowledged_at = ?
+                        WHERE root_directory = ?
+                          AND session_id = ?
+                          AND id IN (\(placeholders))
+                        """, bindings: [acknowledgedAt, root, sessionID] + normalizedIDs)
+            }
         }
     }
 
@@ -709,6 +822,29 @@ public enum TerminalSessionPersistence {
         guard !json.isEmpty else { return nil }
         guard let data = json.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("foreground_argv_json", "<non-utf8>") }
         return try JSONDecoder().decode([String].self, from: data)
+    }
+
+    private static func encodeEnvironmentKeys(_ keys: [String]) throws -> String {
+        let data = try JSONEncoder().encode(keys)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw TerminalSessionPersistenceError.invalidValue("environment_keys_json", "<non-utf8>")
+        }
+        return json
+    }
+
+    private static func decodeEnvironmentKeys(_ json: String) throws -> [String] {
+        guard !json.isEmpty else { return [] }
+        guard let data = json.data(using: .utf8) else { throw TerminalSessionPersistenceError.invalidValue("environment_keys_json", "<non-utf8>") }
+        return try JSONDecoder().decode([String].self, from: data)
+    }
+
+    private static func decodeAgentSignalEvent(row: [String]) throws -> TerminalServiceAgentSignalEvent {
+        guard row.count >= 12 else { throw TerminalSessionPersistenceError.invalidRow("terminal_agent_signal_events") }
+        return TerminalServiceAgentSignalEvent(
+            id: row[0], sessionID: row[1], workspaceID: row[2].isEmpty ? nil : row[2], workspacePath: row[3].isEmpty ? nil : row[3], type: row[4],
+            provider: row[5], label: row[6].isEmpty ? nil : row[6], terminalTrackingID: row[7].isEmpty ? nil : row[7],
+            terminalNativeID: row[8].isEmpty ? nil : row[8], codexThreadID: row[9].isEmpty ? nil : row[9],
+            environmentKeys: try decodeEnvironmentKeys(row[10]), createdAt: row[11])
     }
 
     private static func decodeRuntimeState(row: [String]) throws -> TerminalSessionRuntimeState {

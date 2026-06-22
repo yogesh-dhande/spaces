@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 
+spaces_profile_e2e_cli() {
+  local cli="$1"
+  if [[ -n "${SPACES_E2E_CLI:-}" ]]; then
+    printf '%s\n' "$SPACES_E2E_CLI"
+    return 0
+  fi
+  if [[ -n "${SPACES_E2E:-}" ]]; then
+    printf '%s\n' "$SPACES_E2E"
+    return 0
+  fi
+  local cli_dir
+  cli_dir="$(cd "$(dirname "$cli")" && pwd)"
+  printf '%s\n' "$cli_dir/spacese2e"
+}
+
 spaces_profile_eval_shell_env() {
   local cli="$1"
-  eval "$("$cli" profile show --shell)"
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  eval "$("$e2e_cli" profile-show --shell)"
 }
 
 spaces_profile_app_owner_pid() {
   local cli="$1"
-  "$cli" profile app-owner --json | python3 -c '
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-app-owner --json | python3 -c '
 import json, sys
 payload = json.load(sys.stdin)
 owner = payload.get("owner") or {}
@@ -38,34 +57,59 @@ spaces_profile_stop_running_app() {
 
 spaces_profile_terminal_service_socket_path() {
   local cli="$1"
-  local runtime_dir="${SPACES_RUNTIME_DIR:-}"
-  if [[ -z "$runtime_dir" ]]; then
-    local profile_exports
-    profile_exports="$("$cli" profile show --shell)"
-    runtime_dir="$(
-      PROFILE_EXPORTS="$profile_exports" python3 - <<'PY'
-import os
-import shlex
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-socket-paths | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+print(payload["serviceSocketPath"])
+'
+}
 
-for token in shlex.split(os.environ["PROFILE_EXPORTS"]):
-    if token.startswith("SPACES_RUNTIME_DIR="):
-        print(token.split("=", 1)[1])
-        break
-PY
-    )"
-  fi
-  [[ -n "$runtime_dir" ]] || return 1
+spaces_profile_terminal_session_control_socket_path() {
+  local cli="$1"
+  local session_id="$2"
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-socket-paths --session-id "$session_id" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+path = payload.get("sessionControlSocketPath")
+if not path:
+    raise SystemExit("missing sessionControlSocketPath")
+print(path)
+'
+}
 
-  python3 - "$runtime_dir" <<'PY'
-import pathlib
-import sys
+spaces_profile_terminal_session_subscription_socket_path() {
+  local cli="$1"
+  local session_id="$2"
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-socket-paths --session-id "$session_id" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+path = payload.get("sessionSubscriptionSocketPath")
+if not path:
+    raise SystemExit("missing sessionSubscriptionSocketPath")
+print(path)
+'
+}
 
-terminal_root = pathlib.Path(sys.argv[1]) / "terminal"
-hash_value = 5381
-for byte in str(terminal_root).encode():
-    hash_value = (((hash_value << 5) + hash_value) + byte) & 0xFFFFFFFFFFFFFFFF
-print(f"/tmp/spaces-terminal-sockets/service-{hash_value:016x}.sock")
-PY
+spaces_profile_mac_client_installation_id() {
+  local cli="$1"
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-show --json | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+profile_root = payload["profileRoot"]
+value = 14695981039346656037
+for byte in profile_root.encode("utf-8"):
+    value ^= byte
+    value = (value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+print(f"macos-{value:x}")
+'
 }
 
 spaces_profile_socket_owner_pids() {
@@ -78,11 +122,19 @@ spaces_profile_socket_owner_pids() {
 spaces_profile_stop_terminal_service() {
   local cli="$1"
   local timeout="${2:-20}"
-  local socket_path
-  if ! socket_path="$(spaces_profile_terminal_service_socket_path "$cli")"; then
+  local socket_paths
+  if ! socket_paths="$(spaces_profile_terminal_service_socket_path "$cli")"; then
     return 0
   fi
-  [[ -e "$socket_path" ]] || return 0
+  local socket_path=""
+  local candidate_socket_path
+  while IFS= read -r candidate_socket_path; do
+    if [[ -e "$candidate_socket_path" ]]; then
+      socket_path="$candidate_socket_path"
+      break
+    fi
+  done <<<"$socket_paths"
+  [[ -n "$socket_path" ]] || return 0
 
   local candidate_pids
   candidate_pids="$(spaces_profile_socket_owner_pids "$socket_path")"
@@ -95,7 +147,7 @@ import socket
 import sys
 
 socket_path = sys.argv[1]
-payload = json.dumps({"command": "shutdown"}).encode("utf-8")
+payload = json.dumps({"command": {"shutdown": {}}}).encode("utf-8")
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(1)
@@ -189,5 +241,7 @@ spaces_profile_wait_for_owner_pid() {
 spaces_wait_for_desktop_control() {
   local cli="$1"
   shift
-  "$cli" profile wait-for-desktop-control "$@"
+  local e2e_cli
+  e2e_cli="$(spaces_profile_e2e_cli "$cli")"
+  "$e2e_cli" profile-wait-for-desktop-control "$@"
 }

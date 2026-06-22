@@ -36,19 +36,19 @@ export default function CliReferencePage() {
   return (
     <DocsShell
       title="CLI Reference"
-      description="The spaces CLI is intentionally minimal. It exists for `import`, `update`, `start`, `restart`, `open`, explicit coding-agent lifecycle events through `signal`, and low-level built-in terminal session control."
+      description="The spaces CLI is intentionally minimal. It exposes grouped project, workspace, agent, terminal, and MCP commands for automation and terminal workflows."
       pagePath="/docs/cli"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>spaces</Cmd> when you are already in a terminal or when a coding agent needs to register a workspace, update its visible metadata, make sure it is running, or report its lifecycle state back to Spaces.
+          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions.
         </p>
         <CodeBlock>{`spaces --version
-spaces import
-spaces update --notes "Ready for review"
-spaces start
-spaces signal waiting`}</CodeBlock>
+spaces project list
+spaces workspace list
+spaces workspace start --workspace <id>
+spaces agent signal --workspace <id> --session <terminal-session-id> waiting`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -60,115 +60,70 @@ spaces signal waiting`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Workspace Import</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Projects</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Registers the current directory as a Spaces workspace by default. This is the normal bootstrap step for coding agents and terminal-first workflows.
+          <Cmd>spaces project list</Cmd> prints the projects in the active profile.
         </p>
-        <CodeBlock>{`# Import the current directory
-spaces import
+        <CodeBlock>{`spaces project list`}</CodeBlock>
+      </article>
 
-# Import another directory
-spaces import /path/to/worktree
-
-# Create or update visible metadata during import
-spaces import --title "OAuth rollout" --notes "Waiting on staging verification"`}</CodeBlock>
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Workspaces</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Workspace commands list, create, start, and restart workspaces on the same-machine daemon.
+        </p>
+        <CodeBlock>{`spaces workspace list
+spaces workspace list --project <project-id> --include-archived
+spaces workspace create --project <project-id> --branch <branch>
+spaces workspace start --workspace <workspace-id>
+spaces workspace restart --workspace <workspace-id>
+spaces pair
+spaces pair --json`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="[path]" description="Workspace directory to register. Defaults to the current working directory." />
-          <Flag name="--title <title>" description="Optional workspace title. If the workspace already exists, the title is updated." />
-          <Flag name="--notes <text>" description="Optional workspace notes. If the workspace already exists, the notes are updated." />
+          <Flag name="--project <id>" description="Project ID for listing or workspace creation." />
+          <Flag name="--branch <branch>" description="Workspace branch for creation." />
+          <Flag name="--workspace <id>" description="Workspace ID for runtime commands." />
+          <Flag name="--title <title>" description="Optional title for workspace creation." />
+          <Flag name="--target-branch <branch>" description="Optional target branch for new branch creation." />
+          <Flag name="--existing-branch" description="Use an existing branch instead of creating one." />
+          <Flag name="--include-archived" description="Include archived workspaces in list output." />
         </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Workspace Update</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Agent Signal</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces update</Cmd> changes workspace metadata after the workspace already exists. Use it for title or notes edits without relaunching anything.
+          Coding agents report their lifecycle explicitly for a workspace and terminal session. Spaces uses these events to surface waiting and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
         </p>
-        <CodeBlock>{`# Update the current workspace notes
-spaces update --notes "Ready for review"
-
-# Update another workspace
-spaces update /path/to/workspace --title "oauth-timeout" --notes "Waiting on staging verification"`}</CodeBlock>
+        <CodeBlock>{`spaces agent signal --workspace <workspace-id> --session <terminal-session-id> init
+spaces agent signal --workspace <workspace-id> --session <terminal-session-id> start
+spaces agent signal --workspace <workspace-id> --session <terminal-session-id> waiting
+spaces agent signal --workspace <workspace-id> --session <terminal-session-id> done
+spaces agent signal --workspace <workspace-id> --session <terminal-session-id> exit`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="[path]" description="Workspace directory to update. Defaults to the current working directory." />
-          <Flag name="--title <title>" description="Optional workspace title update." />
-          <Flag name="--notes <text>" description="Optional workspace notes update." />
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Start</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces start</Cmd> is the idempotent runtime command. It launches a stopped workspace and restores exited runtime when the workspace is already running.
-        </p>
-        <CodeBlock>{`# Ensure the current workspace is running
-spaces start
-
-# Target another workspace directory
-spaces start /path/to/workspace`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="[path]" description="Workspace directory to launch. Defaults to the current working directory." />
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Restart</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces restart</Cmd> performs the explicit full stop-and-relaunch flow. Use it when you want a clean runtime reset instead of the normal ensure-running behavior.
-        </p>
-        <CodeBlock>{`spaces restart
-spaces restart /path/to/workspace`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="[path]" description="Workspace directory to relaunch. Defaults to the current working directory." />
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Open</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces open</Cmd> focuses one named tracked browser, process, or coding-agent target. The target name is required so the CLI never guesses which window you meant.
-        </p>
-        <CodeBlock>{`spaces open frontend
-spaces open frontend /path/to/workspace`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="<name>" description="Tracked browser, process, or coding-agent name to open or focus." />
-          <Flag name="[path]" description="Workspace directory to resolve. Defaults to the current working directory." />
-        </ul>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Signal</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Coding agents report their lifecycle explicitly. Spaces uses these events to surface waiting and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
-        </p>
-        <CodeBlock>{`spaces signal init
-spaces signal start
-spaces signal waiting
-spaces signal done
-spaces signal exit`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
+          <Flag name="--workspace <id>" description="Workspace ID to associate with the event." />
+          <Flag name="--session <id>" description="Spaces terminal session ID that owns the agent." />
           <Flag name="<event>" description="Required event type: init, start, waiting, done, or exit." />
-          <Flag name="[path]" description="Workspace directory to associate with the event. Defaults to the current working directory." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces records agent lifecycle events only from Spaces-managed terminal sessions. If the current shell is not running inside a tracked Spaces terminal session, Spaces drops the event instead of recording it. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the signal context identifies the terminal as a coding agent.
+          Spaces records agent lifecycle events only for Spaces-managed terminal sessions. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the terminal runtime identifies the session as a coding agent.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Custom hook integrations can set <code>SPACES_AGENT_LABEL</code> before invoking <code>spaces signal</code>. Spaces also infers labels from known Codex, Claude Code, and opencode environments.
+          Agent labels come from configured launcher names or the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
         </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Typical Flow</h2>
-        <CodeBlock>{`spaces import --title "bugfix/login-timeout"
-spaces restart
-spaces update --notes "Investigating flaky OAuth callback"
-spaces signal init
-spaces signal start
+        <CodeBlock>{`spaces project list
+spaces workspace create --project <project-id> --branch bugfix/login-timeout
+spaces workspace start --workspace <workspace-id>
+spaces agent signal --workspace <workspace-id> --session <terminal-session-id> init
+spaces agent signal --workspace <workspace-id> --session <terminal-session-id> start
 # ... later ...
-spaces signal waiting`}</CodeBlock>
+spaces agent signal --workspace <workspace-id> --session <terminal-session-id> waiting`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          The GUI remains the primary place to create projects and configure templates. The CLI stays focused on registration, lightweight metadata updates, launch-time workflows, and agent reporting.
+          The GUI remains the primary place to configure templates and edit workspace details. The CLI stays focused on explicit profile, workspace, terminal, and agent automation.
         </p>
       </article>
     </DocsShell>

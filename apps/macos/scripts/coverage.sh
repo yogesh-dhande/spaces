@@ -25,6 +25,7 @@ cli="$root/.build/debug/spaces"
 if [ -x "$cli" ]; then
     spaces_profile_eval_shell_env "$cli"
 fi
+unset SPACES_DEVICE_API_PORT
 
 codecov_json_path="$("$root/scripts/swiftpm.sh" test --show-codecov-path)"
 codecov_dir="$(dirname "$codecov_json_path")"

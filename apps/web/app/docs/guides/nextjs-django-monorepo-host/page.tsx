@@ -68,7 +68,7 @@ cd backend && python manage.py runserver 0.0.0.0:$API_PORT`}</code>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
         <p className={prose}>
-          Add two browser sessions — each URL is its own entry — so both the frontend preview and Django admin reopen with the workspace.
+          Add two browser sessions — each URL is its own entry — so the frontend preview and Django admin are each one focus away.
         </p>
         <pre className={code}>
           <code>{`# frontend browser session

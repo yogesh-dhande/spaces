@@ -18,7 +18,7 @@ public enum TerminalPerformance {
 
     public static func logLine(_ line: String) {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
-        fputs(line, stderr)
+        FileHandle.standardError.write(Data(line.utf8))
         appendToPerfLog(line)
     }
 
@@ -29,12 +29,12 @@ public enum TerminalPerformance {
             let directoryURL = try perfLogDirectory(fileManager: fileManager)
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
             let logURL = directoryURL.appendingPathComponent("perf.log", isDirectory: false)
-            if !fileManager.fileExists(atPath: logURL.path) { fileManager.createFile(atPath: logURL.path, contents: nil) }
+            if !fileManager.fileExists(atPath: logURL.path) { _ = fileManager.createFile(atPath: logURL.path, contents: nil) }
             let handle = try FileHandle(forWritingTo: logURL)
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
             try handle.close()
-        } catch { fputs("spaces: failed to write perf log: \(error)\n", stderr) }
+        } catch { FileHandle.standardError.write(Data("spaces: failed to write perf log: \(error)\n".utf8)) }
     }
 
     private static func perfLogDirectory(fileManager: FileManager) throws -> URL {

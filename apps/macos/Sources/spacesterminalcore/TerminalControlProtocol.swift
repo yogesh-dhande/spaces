@@ -4,6 +4,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let command: String
     public let authToken: String?
     public let text: String?
+    public let bytes: Data?
     public let key: String?
     public let clientID: String?
     public let client: TerminalClient?
@@ -19,14 +20,15 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let appendNewline: Bool
 
     public init(
-        command: String, authToken: String? = nil, text: String? = nil, key: String? = nil, clientID: String? = nil, client: TerminalClient? = nil,
-        attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil, ownerEpoch: UInt64? = nil,
-        resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil, scrollMods: Int32? = nil,
-        appendNewline: Bool = false
+        command: String, authToken: String? = nil, text: String? = nil, bytes: Data? = nil, key: String? = nil, clientID: String? = nil,
+        client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil,
+        ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
+        scrollMods: Int32? = nil, appendNewline: Bool = false
     ) {
         self.command = command
         self.authToken = authToken
         self.text = text
+        self.bytes = bytes
         self.key = key
         self.clientID = clientID
         self.client = client
@@ -46,6 +48,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case command
         case authToken
         case text
+        case bytes
         case key
         case clientID
         case client
@@ -66,6 +69,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         command = try container.decode(String.self, forKey: .command)
         authToken = try container.decodeIfPresent(String.self, forKey: .authToken)
         text = try container.decodeIfPresent(String.self, forKey: .text)
+        bytes = try container.decodeIfPresent(Data.self, forKey: .bytes)
         key = try container.decodeIfPresent(String.self, forKey: .key)
         clientID = try container.decodeIfPresent(String.self, forKey: .clientID)
         client = try container.decodeIfPresent(TerminalClient.self, forKey: .client)
@@ -86,6 +90,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encode(command, forKey: .command)
         try container.encodeIfPresent(authToken, forKey: .authToken)
         try container.encodeIfPresent(text, forKey: .text)
+        try container.encodeIfPresent(bytes, forKey: .bytes)
         try container.encodeIfPresent(key, forKey: .key)
         try container.encodeIfPresent(clientID, forKey: .clientID)
         try container.encodeIfPresent(client, forKey: .client)
@@ -109,6 +114,14 @@ public struct TerminalControlResponse: Codable, Sendable, Equatable {
     public init(ok: Bool, message: String) {
         self.ok = ok
         self.message = message
+    }
+}
+
+extension TerminalControlRequest {
+    public var inputPayload: Data? {
+        if let bytes { return bytes }
+        if let text { return Data(text.utf8) }
+        return nil
     }
 }
 

@@ -1,16 +1,18 @@
-import Foundation
-import GhosttyKit
+#if canImport(GhosttyKit)
+    import Foundation
+    import GhosttyKit
 
-@MainActor final class GhosttyEmbeddedSurfaceUserData {
-    private let closeHandler: @MainActor () -> Void
-    private let surfaceProvider: @MainActor () -> ghostty_surface_t?
+    @MainActor final class GhosttyEmbeddedSurfaceUserData {
+        private let closeHandler: @MainActor () -> Void
+        private let surfaceProvider: @MainActor () -> ghostty_surface_t?
 
-    init(closeHandler: @escaping @MainActor () -> Void, surfaceProvider: @escaping @MainActor () -> ghostty_surface_t?) {
-        self.closeHandler = closeHandler
-        self.surfaceProvider = surfaceProvider
+        init(closeHandler: @escaping @MainActor () -> Void, surfaceProvider: @escaping @MainActor () -> ghostty_surface_t?) {
+            self.closeHandler = closeHandler
+            self.surfaceProvider = surfaceProvider
+        }
+
+        func handleClose() { closeHandler() }
+
+        func surface() -> ghostty_surface_t? { surfaceProvider() }
     }
-
-    func handleClose() { closeHandler() }
-
-    func surface() -> ghostty_surface_t? { surfaceProvider() }
-}
+#endif

@@ -8,6 +8,8 @@
 #   CODESIGN_CERTIFICATE_PASSWORD - Password for the .p12 certificate.
 #   SPARKLE_PUBLIC_ED_KEY - Public Sparkle EdDSA key embedded in the app bundle.
 #   SPARKLE_PRIVATE_ED_KEY - Private Sparkle EdDSA key used for appcast signing.
+#   REMOTE_ARTIFACT_PUBLIC_ED25519_KEY - Public Ed25519 key embedded for remote artifact manifest verification.
+#   REMOTE_ARTIFACT_PRIVATE_ED25519_KEY - Private Ed25519 key used for remote artifact manifest signing.
 #   FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 - Firebase Hosting service account JSON.
 #
 # Optional secrets:
@@ -26,7 +28,65 @@ permissions:
   contents: write
 
 jobs:
+  linux-spacesd-artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            docker-platform: linux/amd64
+          - arch: arm64
+            docker-platform: linux/arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync release metadata
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
+        run: |
+          scripts/sync-app-version.sh \
+            --short "${{ steps.version.outputs.version }}" \
+            --build "${{ steps.version.outputs.build }}" \
+            --feed-url "https://usespaces.dev/releases/appcast.xml" \
+            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
+            --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
+
+      - name: Set up QEMU for arm64 Docker build
+        if: ${{ matrix.docker-platform == 'linux/arm64' }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build and smoke Linux spacesd artifact
+        run: |
+          docker run --rm --platform ${{ matrix.docker-platform }} \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            swift:6.2-noble \
+            bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
+
+      - name: Upload Linux spacesd artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-${{ matrix.arch }}
+          path: |
+            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz
+            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz.sha256
+
   release:
+    needs: linux-spacesd-artifact
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -66,6 +126,8 @@ jobs:
           CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
+          REMOTE_ARTIFACT_PRIVATE_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PRIVATE_ED25519_KEY }}
           FIREBASE_SERVICE_ACCOUNT_SPACES_A1814: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
         run: |
           if [[ -z "$CODESIGN_IDENTITY" ]]; then
@@ -86,6 +148,14 @@ jobs:
           fi
           if [[ -z "$SPARKLE_PRIVATE_ED_KEY" ]]; then
             echo "::error::Missing required secret SPARKLE_PRIVATE_ED_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY" ]]; then
+            echo "::error::Missing required secret REMOTE_ARTIFACT_PUBLIC_ED25519_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$REMOTE_ARTIFACT_PRIVATE_ED25519_KEY" ]]; then
+            echo "::error::Missing required secret REMOTE_ARTIFACT_PRIVATE_ED25519_KEY." >&2
             exit 1
           fi
           if [[ -z "$FIREBASE_SERVICE_ACCOUNT_SPACES_A1814" ]]; then
@@ -116,12 +186,14 @@ jobs:
       - name: Sync release metadata
         env:
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
         run: |
           scripts/sync-app-version.sh \
             --short "${{ steps.version.outputs.version }}" \
             --build "${{ steps.version.outputs.build }}" \
             --feed-url "https://usespaces.dev/releases/appcast.xml" \
-            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY"
+            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
+            --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
 
       - name: Build release
         run: scripts/swiftpm.sh build -c release --arch arm64 --arch x86_64
@@ -133,7 +205,7 @@ jobs:
           scripts/codesign.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
             apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/SpacesTerminalService
+            apps/macos/.build/apple/Products/Release/spacesd
 
       - name: Package DMG
         env:
@@ -142,7 +214,7 @@ jobs:
           scripts/create-dmg.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
             apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/SpacesTerminalService \
+            apps/macos/.build/apple/Products/Release/spacesd \
             ${{ steps.version.outputs.version }}
           dmg_name="Spaces-${{ steps.version.outputs.version }}.dmg"
           echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
@@ -155,7 +227,7 @@ jobs:
           scripts/create-sparkle-archive.sh \
             apps/macos/.build/apple/Products/Release/SpacesApp \
             apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/SpacesTerminalService \
+            apps/macos/.build/apple/Products/Release/spacesd \
             ${{ steps.version.outputs.version }}
           zip_name="Spaces-${{ steps.version.outputs.version }}.zip"
           echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
@@ -178,6 +250,57 @@ jobs:
       - name: Verify release artifacts
         run: scripts/verify-release-artifacts.sh --require-notarization "$DMG_PATH"
 
+      - name: Download Linux x86_64 spacesd artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-x86_64
+          path: dist/remote
+
+      - name: Download Linux arm64 spacesd artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-arm64
+          path: dist/remote
+
+      - name: Verify remote spacesd artifacts
+        run: |
+          cd dist/remote
+          shasum -a 256 -c spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
+          shasum -a 256 -c spacesd-ubuntu-24.04-arm64.tar.gz.sha256
+          tar -tzf spacesd-ubuntu-24.04-x86_64.tar.gz >/dev/null
+          tar -tzf spacesd-ubuntu-24.04-arm64.tar.gz >/dev/null
+
+      - name: Install remote artifact signing dependency
+        run: python3 -m pip install --user cryptography
+
+      - name: Sign remote artifact manifest
+        env:
+          REMOTE_ARTIFACT_PRIVATE_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PRIVATE_ED25519_KEY }}
+        run: scripts/create-remote-artifact-manifest.sh "${{ steps.version.outputs.version }}" "$GITHUB_REF_NAME" dist/remote
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_title="Spaces ${{ steps.version.outputs.version }}"
+          release_assets=(
+            "$DMG_PATH"
+            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
+            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
+            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"
+            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz.sha256"
+            "dist/remote/spaces-remote-artifacts.json"
+            "dist/remote/spaces-remote-artifacts.json.sig"
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$release_title"
+            gh release upload "$GITHUB_REF_NAME" "${release_assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" \
+              --title "$release_title" \
+              --generate-notes
+          fi
+
       - name: Generate and publish Sparkle appcast
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
@@ -197,17 +320,3 @@ jobs:
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
           channelId: live
           projectId: spaces-a1814
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          release_title="Spaces ${{ steps.version.outputs.version }}"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$release_title"
-            gh release upload "$GITHUB_REF_NAME" "$DMG_PATH" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" "$DMG_PATH" \
-              --title "$release_title" \
-              --generate-notes
-          fi

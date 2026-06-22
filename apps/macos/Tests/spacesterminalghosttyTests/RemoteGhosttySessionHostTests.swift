@@ -11,6 +11,43 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
     private var databaseRoot: URL?
     private final class RuntimeNotificationProbe: @unchecked Sendable { var count = 0 }
+    private final class DirectTerminalServiceRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var payloads: [GhosttyRemoteSessionStatePayload]
+        private var recordedRequests: [TerminalServiceRequest] = []
+
+        init(payload: GhosttyRemoteSessionStatePayload) { payloads = [payload] }
+
+        init(payloads: [GhosttyRemoteSessionStatePayload]) { self.payloads = payloads }
+
+        func send(_ request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+            lock.lock()
+            recordedRequests.append(request)
+            let currentPayload: GhosttyRemoteSessionStatePayload?
+            if case .state = request.command, payloads.count > 1 { currentPayload = payloads.removeFirst() } else { currentPayload = payloads.first }
+            lock.unlock()
+
+            switch request.command {
+            case .state: return TerminalServiceResponse(ok: true, message: "state", sessionState: currentPayload)
+            case .control:
+                return TerminalServiceResponse(
+                    ok: true, message: "controlled", controlResponse: TerminalControlResponse(ok: true, message: "controlled"))
+            default: return TerminalServiceResponse(ok: false, message: "Unexpected command '\(request.commandName)'.")
+            }
+        }
+
+        func setPayload(_ payload: GhosttyRemoteSessionStatePayload) {
+            lock.lock()
+            payloads = [payload]
+            lock.unlock()
+        }
+
+        func requests() -> [TerminalServiceRequest] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedRequests
+        }
+    }
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -673,7 +710,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let liveRenderUpdate = try renderUpdate(text: "live", sessionRevision: 2)
         let server = GhosttyRemoteSessionStateStreamServer(
-            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-final-live-test")
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-device.stale-final-live-test")
         ) {
             GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T00:00:02Z", sessionStateRevision: 2,
@@ -760,7 +797,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.stream-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.stream-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-live", reason: "initial", emittedAt: "2026-05-18T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -832,7 +869,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "live", workingDirectory: "/tmp/live", outputByteCount: nil,
             renderUpdate: try renderUpdate(text: "tiny", sessionRevision: 1))
         let server = GhosttyRemoteSessionStateStreamServer(
-            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-host.stale-size-test")
+            socketPath: paths.subscriptionSocketPath, queue: DispatchQueue(label: "spaces.remote-device.stale-size-test")
         ) { initialPayload }
         try server.start()
         defer { server.stop() }
@@ -902,7 +939,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.renderable-viewer-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.renderable-viewer-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-renderable", reason: "initial", emittedAt: "2026-05-19T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -944,7 +981,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.owner-focus-render-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.owner-focus-render-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-owner-focus", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -999,7 +1036,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.attachment-state-render-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.attachment-state-render-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-attachment-state", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -1058,7 +1095,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
-        let queue = DispatchQueue(label: "spaces.remote-host.snapshot-precedence-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.snapshot-precedence-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-snapshot-precedence", reason: "initial", emittedAt: "2026-05-21T00:00:00Z", sessionStateRevision: 1,
             sessionStateFlags: 1, screenStateRevision: nil,
@@ -1117,7 +1154,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             TerminalSessionRuntimeState(
                 sessionID: "remote-handoff-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
                 updatedAt: "2026-05-29T00:00:00Z", title: "live", workingDirectory: "/tmp/live", columns: 8, rows: 2), paths: paths)
-        let queue = DispatchQueue(label: "spaces.remote-host.handoff-snapshot-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.handoff-snapshot-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-handoff-snapshot", reason: "initial", emittedAt: "2026-05-29T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: nil,
@@ -1181,7 +1218,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             attachments: [
                 TerminalAttachment(sessionID: "remote-recreate-surface", clientID: client.id, mode: .owner, attachedAt: "2026-05-30T00:00:00Z")
             ])
-        let queue = DispatchQueue(label: "spaces.remote-host.recreate-surface-test")
+        let queue = DispatchQueue(label: "spaces.remote-device.recreate-surface-test")
         let initialPayload = GhosttyRemoteSessionStatePayload(
             sessionID: "remote-recreate-surface", reason: "initial", emittedAt: "2026-05-30T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
             screenStateRevision: 1,
@@ -1302,6 +1339,97 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertFalse(renderedText.contains("^]"))
         XCTAssertFalse(renderedText.contains("rgb:"))
         XCTAssertFalse(renderedText.contains(";R"))
+    }
+
+    @MainActor func testRemoteHostFetchesStateAndSendsDirectDaemonControls() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-direct-daemon"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/bash", command: "cat",
+            createdAt: "2026-06-10T00:00:00Z")
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-10T00:00:00Z",
+            title: "remote", workingDirectory: "/tmp/work", columns: 5, rows: 1)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-10T00:00:01Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+        let recorder = DirectTerminalServiceRecorder(payload: payload)
+
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
+
+        waitForCondition("direct daemon state render") { host.snapshotText() == "alpha" }
+        XCTAssertEqual(try TerminalSessionPersistence.readRemoteSessionState(paths: paths).sessionID, sessionID)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-10T00:00:02Z")
+        try host.attach(client: client, mode: .owner, into: container)
+
+        XCTAssertTrue(host.clearScreenAndScrollback())
+        waitForCondition("direct daemon control") {
+            recorder.requests().contains {
+                if case .control(let payload) = $0.command {
+                    return payload.sessionID == sessionID && payload.controlRequest.command == "clearScreen"
+                        && payload.controlRequest.clientID == client.id
+                }
+                return false
+            }
+        }
+        XCTAssertTrue(
+            recorder.requests().contains { request in
+                if case .state(let payload) = request.command { return payload.sessionID == sessionID }
+                return false
+            })
+    }
+
+    @MainActor func testRemoteHostRequestsDirectStateResyncAfterMissingDeltaBaseline() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-direct-resync"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/bash", command: "cat",
+            createdAt: "2026-06-10T00:00:00Z")
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-10T00:00:00Z",
+            title: "remote", workingDirectory: "/tmp/work", columns: 5, rows: 1)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let firstFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
+        let secondFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 0, snapshot: snapshot(text: "bravo"))
+        let missingBaselineDelta = GhosttyRenderUpdateFactory.makeUpdate(
+            target: secondFrame, baseline: GhosttyRenderUpdateBaseline(frame: firstFrame))
+        XCTAssertEqual(missingBaselineDelta.kind, .delta)
+        let deltaPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-10T00:00:01Z", sessionStateRevision: 2,
+            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(missingBaselineDelta))
+        let fullPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-06-10T00:00:02Z", sessionStateRevision: 2,
+            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil,
+            renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(secondFrame)))
+        let recorder = DirectTerminalServiceRecorder(payloads: [deltaPayload, fullPayload])
+
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
+
+        waitForCondition("direct state resync request") {
+            recorder.requests().filter { request in
+                if case .state = request.command { return true }
+                return false
+            }.count >= 2 && host.snapshotText() == "bravo"
+        }
     }
 
     @MainActor private func waitForCondition(_ label: String, timeout: TimeInterval = 2, condition: @escaping () -> Bool) {

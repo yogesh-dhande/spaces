@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import Observation
 import UIKit
-import spacesmobilecore
+import spacesdevicecore
 import spacesterminalmobileghostty
 import spacesterminalcore
 
@@ -32,11 +32,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     let id: String
     let url: URL
     let title: String
-    let mediaKind: SpacesMobileTerminalLinkMediaKind
+    let mediaKind: SpacesDeviceTerminalLinkMediaKind
 }
 
 @MainActor @Observable final class TerminalViewerModel {
-    let session: SpacesMobileTerminalSessionSummary
+    let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
     private let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
 
@@ -74,15 +74,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private var linkPreviewRequestGeneration: UInt64 = 0
     @ObservationIgnored private var externalLinkPreviewDownloadTask: Task<URL, Error>?
 
-    private let bridgeClient: SpacesMobileBridgeClient
-    private var commandChannel: SpacesMobileBridgeCommandChannel
+    private let bridgeClient: SpacesDeviceAPIClient
+    private let directDaemonClient: SpacesDeviceTerminalDaemonClient?
+    private var commandChannel: SpacesDeviceAPICommandChannel
     @ObservationIgnored private let openExternalURL: @MainActor (URL) -> Void
     @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL) async throws -> URL
     @ObservationIgnored private let linkPreviewCacheDirectory: URL
     private let remoteClient: TerminalClient
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
-    private var streamHandle: SpacesMobileBridgeStreamHandle?
+    private var streamHandle: SpacesDeviceAPIStreamHandle?
     private var reconnectTask: Task<Void, Never>?
+    private var directHeartbeatTask: Task<Void, Never>?
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
@@ -104,7 +106,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
     private var ownerRenderEpochState: GhosttyRemoteTerminalOwnerEpoch?
-    private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
+    private var stateReducer = TerminalRemoteStateReducer()
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     private var hasRetriedEndedStateAfterStreamClose = false
@@ -129,12 +131,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let postResizeStateSettleIterations = 6
     private static let dismissalDetachTimeout: Duration = .seconds(3)
     private static let linkPreviewChunkLimit = 256 * 1024
+    private static let directHeartbeatInterval: Duration = .seconds(20)
 
     init(
-        session: SpacesMobileTerminalSessionSummary,
+        session: SpacesDeviceTerminalSessionSummary,
         settings: SpacesMobileConnectionSettings,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
-        bridgeClient: SpacesMobileBridgeClient? = nil,
+        bridgeClient: SpacesDeviceAPIClient? = nil,
         openExternalURL: @escaping @MainActor (URL) -> Void = { UIApplication.shared.open($0) },
         remoteMediaDownloader: @escaping @Sendable (URL) async throws -> URL = TerminalViewerModel.defaultRemoteMediaDownloader,
         linkPreviewCacheDirectory: URL? = nil
@@ -142,8 +145,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         self.session = session
         self.settings = settings
         self.onAuthenticationRequired = onAuthenticationRequired
-        let resolvedBridgeClient = bridgeClient ?? SpacesMobileBridgeClient(settings: settings)
+        let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings)
         self.bridgeClient = resolvedBridgeClient
+        directDaemonClient = SpacesMobileDirectCredentialStore.endpoint(from: session.daemonEndpoint).map {
+            SpacesDeviceTerminalDaemonClient(endpoint: $0)
+        }
         commandChannel = resolvedBridgeClient.makeCommandChannel()
         self.openExternalURL = openExternalURL
         self.remoteMediaDownloader = remoteMediaDownloader
@@ -156,7 +162,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                 label: UIDevice.current.name,
                 hostName: nil,
                 deviceName: UIDevice.current.name,
-                networkAddress: settings.trimmedHost
+                networkAddress: session.daemonEndpoint?.host ?? settings.trimmedHost
             ),
             connectedAt: ISO8601DateFormatter().string(from: Date())
         )
@@ -174,18 +180,18 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     nonisolated static func validatedRemoteMediaDownloadURL(_ downloadedURL: URL, response: URLResponse) throws -> URL {
         guard response.url?.scheme?.lowercased() == "https" else {
-            throw SpacesMobileBridgeClientError.requestFailed("The media link redirected to a non-HTTPS URL.")
+            throw SpacesDeviceAPIClientError.requestFailed("The media link redirected to a non-HTTPS URL.")
         }
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw SpacesMobileBridgeClientError.requestFailed("The media link did not return an HTTP response.")
+            throw SpacesDeviceAPIClientError.requestFailed("The media link did not return an HTTP response.")
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw SpacesMobileBridgeClientError.requestFailed("The media link returned HTTP status \(httpResponse.statusCode).")
+            throw SpacesDeviceAPIClientError.requestFailed("The media link returned HTTP status \(httpResponse.statusCode).")
         }
         guard let mimeType = httpResponse.mimeType?.trimmingCharacters(in: .whitespacesAndNewlines), !mimeType.isEmpty,
-            SpacesMobileTerminalLinkClassifier.mediaKind(contentType: mimeType, pathExtension: nil) != nil
+            SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: mimeType, pathExtension: nil) != nil
         else {
-            throw SpacesMobileBridgeClientError.requestFailed("The media link did not return image or video content.")
+            throw SpacesDeviceAPIClientError.requestFailed("The media link did not return image or video content.")
         }
         return downloadedURL
     }
@@ -281,7 +287,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         trace("back_detach_end")
     }
 
-    private func beginStop() -> (channel: SpacesMobileBridgeCommandChannel, shouldDetach: Bool)? {
+    private func beginStop() -> (channel: SpacesDeviceAPICommandChannel, shouldDetach: Bool)? {
         guard !hasSentStopDetach else { return nil }
         hasSentStopDetach = true
         let shouldDetach = hasAttachedToSession && !isEndedState
@@ -293,6 +299,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isInputSurfaceReady = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        directHeartbeatTask?.cancel()
+        directHeartbeatTask = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
@@ -305,7 +313,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         resizeSerial = 0
         needsOwnershipSynchronizationAfterCurrentRun = false
         ownerRenderEpochState = nil
-        renderUpdateBaseline = nil
+        stateReducer.resetRenderUpdateBaseline()
         invalidateLinkPreviewRequests()
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
@@ -321,16 +329,24 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         return (commandChannel, shouldDetach)
     }
 
-    private func detachForStop(using currentChannel: SpacesMobileBridgeCommandChannel, shouldDetach: Bool, timeout: Duration) async {
+    private func detachForStop(using currentChannel: SpacesDeviceAPICommandChannel, shouldDetach: Bool, timeout: Duration) async {
         if shouldDetach {
             do {
-                try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: currentChannel)
+                try await detachTerminal(timeout: timeout, commandChannel: currentChannel)
                 trace("detach_success")
             } catch {
                 trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
             }
         }
         await currentChannel.close()
+    }
+
+    private func detachTerminal(timeout: Duration, commandChannel: SpacesDeviceAPICommandChannel) async throws {
+        if let directDaemonClient {
+            try await directDaemonClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
+            return
+        }
+        try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: commandChannel)
     }
 
     private func loadEndedState() async {
@@ -362,18 +378,18 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         defer { isBusy = false }
         trace("takeover_begin")
         do {
-            let takeoverState = try await bridgeClient.takeOver(
-                sessionID: session.id,
-                clientID: remoteClient.id,
-                timeout: Self.inputRequestTimeout
-            )
-            replaceCommandChannel()
+            let takeoverState = try await takeOverTerminal(timeout: Self.inputRequestTimeout)
             if let takeoverState { applyLatestState(takeoverState) }
             if !isOwner {
                 await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation")
             }
-            isAwaitingTakeoverConfirmation = !isOwner
             errorMessage = nil
+            if !isOwner {
+                isAwaitingTakeoverConfirmation = false
+                trace("takeover_unconfirmed")
+                return
+            }
+            isAwaitingTakeoverConfirmation = false
             trace("takeover_success state=\(takeoverState == nil ? 0 : 1) owner=\(isOwner ? 1 : 0)")
         } catch {
             isAwaitingTakeoverConfirmation = false
@@ -386,6 +402,18 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             trace("takeover_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func takeOverTerminal(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload? {
+        if let directDaemonClient {
+            return try await directDaemonClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
+        }
+        if session.daemonEndpoint != nil {
+            throw SpacesDeviceAPIClientError.requestFailed("Remote terminal credential is missing. Refresh the mobile overview from the paired Mac.")
+        }
+        let takeoverState = try await bridgeClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
+        replaceCommandChannel()
+        return takeoverState
     }
 
     func updateViewportSize(columns: Int, rows: Int) {
@@ -460,18 +488,28 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         defer { completeLinkPreviewRequest(requestGeneration) }
 
         do {
-            let previewCommandChannel = bridgeClient.makeCommandChannel()
-            defer { Task { await previewCommandChannel.close() } }
-            let metadata = try await bridgeClient.resolveTerminalLink(
-                sessionID: session.id,
-                link: normalizedLink,
-                commandChannel: previewCommandChannel)
-            try Task.checkCancellation()
-            try ensureCurrentLinkPreviewRequest(requestGeneration)
-            try await handleResolvedTerminalLink(
-                metadata,
-                commandChannel: previewCommandChannel,
-                requestGeneration: requestGeneration)
+            if let directDaemonClient {
+                let metadata = try await directDaemonClient.resolveTerminalLink(sessionID: session.id, link: normalizedLink)
+                try Task.checkCancellation()
+                try ensureCurrentLinkPreviewRequest(requestGeneration)
+                try await handleResolvedTerminalLink(
+                    metadata,
+                    commandChannel: nil,
+                    requestGeneration: requestGeneration)
+            } else {
+                let previewCommandChannel = bridgeClient.makeCommandChannel()
+                defer { Task { await previewCommandChannel.close() } }
+                let metadata = try await bridgeClient.resolveTerminalLink(
+                    sessionID: session.id,
+                    link: normalizedLink,
+                    commandChannel: previewCommandChannel)
+                try Task.checkCancellation()
+                try ensureCurrentLinkPreviewRequest(requestGeneration)
+                try await handleResolvedTerminalLink(
+                    metadata,
+                    commandChannel: previewCommandChannel,
+                    requestGeneration: requestGeneration)
+            }
         } catch {
             if error is TerminalLinkPreviewRequestError { return }
             if Task.isCancelled { return }
@@ -532,6 +570,12 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func performSendTextRequest(_ text: String, appendNewline: Bool = false) async throws {
         let ownerEpoch = currentOwnerEpoch
+        if let directDaemonClient {
+            try await directDaemonClient.sendText(
+                sessionID: session.id, clientID: remoteClient.id, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline,
+                timeout: Self.inputRequestTimeout)
+            return
+        }
         try await performRequestUsingInputChannel {
             [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline] commandChannel in
             try await bridgeClient.sendText(
@@ -549,6 +593,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func performSendKeyRequest(_ key: String) async throws {
         let ownerEpoch = currentOwnerEpoch
         if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
+            if let directDaemonClient {
+                try await directDaemonClient.clearScreen(
+                    sessionID: session.id, clientID: remoteClient.id, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout)
+                return
+            }
             try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
                 try await bridgeClient.clearScreen(
                     sessionID: sessionID,
@@ -558,6 +607,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                     commandChannel: commandChannel
                 )
             }
+            return
+        }
+        if let directDaemonClient {
+            try await directDaemonClient.sendKey(
+                sessionID: session.id, clientID: remoteClient.id, key: key, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout)
             return
         }
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
@@ -574,6 +628,12 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func performSendScrollRequest(horizontal: Double, vertical: Double, scrollMods: Int32) async throws {
         let ownerEpoch = currentOwnerEpoch
+        if let directDaemonClient {
+            try await directDaemonClient.scroll(
+                sessionID: session.id, clientID: remoteClient.id, horizontal: horizontal, vertical: vertical, ownerEpoch: ownerEpoch,
+                scrollMods: scrollMods == 0 ? nil : scrollMods, timeout: Self.inputRequestTimeout)
+            return
+        }
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.scroll(
                 sessionID: sessionID,
@@ -601,7 +661,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func performRequestUsingInputChannel(
-        _ request: @escaping @Sendable (SpacesMobileBridgeCommandChannel) async throws -> Void
+        _ request: @escaping @Sendable (SpacesDeviceAPICommandChannel) async throws -> Void
     ) async throws {
         do {
             try await request(commandChannel)
@@ -669,19 +729,25 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func handleInputSendError(_ error: Error) {
         guard !Self.isTransientInputTransportError(error) else { return }
         if handleAuthenticationFailure(error) { return }
+        if Self.isTerminalNoLongerLiveError(error) {
+            Task { [weak self] in
+                await self?.recoverEndedStateAfterTerminalStopped(error, reason: "input_terminal_stopped")
+            }
+            return
+        }
         errorMessage = error.localizedDescription
     }
 
     private func handleResolvedTerminalLink(
-        _ metadata: SpacesMobileTerminalLinkMetadata,
-        commandChannel: SpacesMobileBridgeCommandChannel,
+        _ metadata: SpacesDeviceTerminalLinkMetadata,
+        commandChannel: SpacesDeviceAPICommandChannel?,
         requestGeneration: UInt64
     ) async throws {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         switch metadata.source {
         case .externalURL:
             guard let externalURLValue = metadata.externalURL, let url = URL(string: externalURLValue) else {
-                throw SpacesMobileBridgeClientError.requestFailed("The terminal link URL is invalid.")
+                throw SpacesDeviceAPIClientError.requestFailed("The terminal link URL is invalid.")
             }
             guard let mediaKind = metadata.mediaKind else {
                 try ensureCurrentLinkPreviewRequest(requestGeneration)
@@ -694,7 +760,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             linkPreview = TerminalLinkPreview(id: metadata.id, url: localURL, title: metadata.displayName, mediaKind: mediaKind)
         case .localFile:
             guard let mediaKind = metadata.mediaKind else {
-                throw SpacesMobileBridgeClientError.requestFailed("Only image and video files can be previewed on iOS.")
+                throw SpacesDeviceAPIClientError.requestFailed("Only image and video files can be previewed on iOS.")
             }
             let localURL = try await downloadLocalPreview(
                 metadata: metadata,
@@ -707,7 +773,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func downloadExternalPreview(
-        metadata: SpacesMobileTerminalLinkMetadata,
+        metadata: SpacesDeviceTerminalLinkMetadata,
         url: URL,
         requestGeneration: UInt64
     ) async throws -> URL {
@@ -746,8 +812,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func downloadLocalPreview(
-        metadata: SpacesMobileTerminalLinkMetadata,
-        commandChannel: SpacesMobileBridgeCommandChannel,
+        metadata: SpacesDeviceTerminalLinkMetadata,
+        commandChannel: SpacesDeviceAPICommandChannel?,
         requestGeneration: UInt64
     ) async throws -> URL {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
@@ -765,18 +831,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         var offset: Int64 = 0
         while true {
             try ensureCurrentLinkPreviewRequest(requestGeneration)
-            let chunk = try await bridgeClient.readTerminalLinkChunk(
-                sessionID: session.id,
+            let chunk = try await readTerminalLinkChunk(
                 linkID: metadata.id,
                 offset: offset,
                 limit: Self.linkPreviewChunkLimit,
                 commandChannel: commandChannel)
             try ensureCurrentLinkPreviewRequest(requestGeneration)
             guard chunk.offset == offset, let data = Data(base64Encoded: chunk.base64Data) else {
-                throw SpacesMobileBridgeClientError.requestFailed("The terminal link transfer returned invalid data.")
+                throw SpacesDeviceAPIClientError.requestFailed("The terminal link transfer returned invalid data.")
             }
             guard data.count == chunk.byteCount else {
-                throw SpacesMobileBridgeClientError.requestFailed("The terminal link transfer returned an invalid chunk size.")
+                throw SpacesDeviceAPIClientError.requestFailed("The terminal link transfer returned an invalid chunk size.")
             }
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
@@ -790,10 +855,24 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         return localURL
     }
 
-    private func previewCacheURL(for metadata: SpacesMobileTerminalLinkMetadata) throws -> URL {
+    private func readTerminalLinkChunk(
+        linkID: String,
+        offset: Int64,
+        limit: Int,
+        commandChannel: SpacesDeviceAPICommandChannel?
+    ) async throws -> SpacesDeviceTerminalLinkChunk {
+        if let directDaemonClient {
+            return try await directDaemonClient.readTerminalLinkChunk(
+                sessionID: session.id, linkID: linkID, offset: offset, limit: limit)
+        }
+        return try await bridgeClient.readTerminalLinkChunk(
+            sessionID: session.id, linkID: linkID, offset: offset, limit: limit, commandChannel: commandChannel)
+    }
+
+    private func previewCacheURL(for metadata: SpacesDeviceTerminalLinkMetadata) throws -> URL {
         try FileManager.default.createDirectory(at: linkPreviewCacheDirectory, withIntermediateDirectories: true)
         let fallbackExtension = URL(fileURLWithPath: metadata.displayName).pathExtension
-        let fileExtension = SpacesMobileTerminalLinkClassifier.preferredFilenameExtension(
+        let fileExtension = SpacesDeviceTerminalLinkClassifier.preferredFilenameExtension(
             contentType: metadata.contentType,
             fallback: fallbackExtension)
         let identity = Data("\(session.id)\u{0}\(metadata.id)".utf8)
@@ -881,6 +960,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         } else {
             isConnecting = true
         }
+        if directDaemonClient != nil {
+            await connectDirectDaemon(reconnectSilently: reconnectSilently)
+            return
+        }
+        if session.daemonEndpoint != nil {
+            reconnectTask = nil
+            isConnecting = false
+            errorMessage = "Remote terminal credential is missing. Refresh the mobile overview from the paired Mac."
+            trace("direct_connect_missing_credential")
+            return
+        }
         do {
             if shouldAttachBeforeSubscribing {
                 try await bridgeClient.attach(
@@ -917,6 +1007,57 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
+    private func connectDirectDaemon(reconnectSilently: Bool) async {
+        do {
+            guard let directDaemonClient else { return }
+            if shouldAttachBeforeSubscribing {
+                try await directDaemonClient.attach(
+                    sessionID: session.id,
+                    client: remoteClient,
+                    mode: .viewer
+                )
+                hasAttachedToSession = true
+                trace("direct_connect_attach_success")
+            }
+            let handle = try directDaemonClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
+                guard let self else { return }
+                applyLatestState(payload)
+            } onDisconnect: { [weak self] error in
+                Task { @MainActor [weak self] in
+                    await self?.handleDisconnect(error)
+                }
+            }
+            streamHandle = handle
+            startDirectHeartbeat()
+            errorMessage = nil
+            reconnectTask = nil
+            trace("direct_connect_subscribe_success")
+        } catch {
+            reconnectTask = nil
+            isConnecting = false
+            trace("direct_connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
+            await handleConnectError(error)
+        }
+    }
+
+    private func startDirectHeartbeat() {
+        guard let directDaemonClient, hasAttachedToSession, !isStopping, !isEndedState else { return }
+        directHeartbeatTask?.cancel()
+        directHeartbeatTask = Task { [weak self, directDaemonClient, sessionID = session.id, clientID = remoteClient.id] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.directHeartbeatInterval)
+                guard !Task.isCancelled else { break }
+                do {
+                    try await directDaemonClient.heartbeat(sessionID: sessionID, clientID: clientID, timeout: Self.inputRequestTimeout)
+                } catch {
+                    await MainActor.run { [weak self] in
+                        self?.trace("direct_heartbeat_failure error=\(self?.sanitizedTraceDetail(error.localizedDescription) ?? "unknown")")
+                    }
+                }
+            }
+        }
+    }
+
     @discardableResult
     private func refreshLatestState(
         timeout: Duration = .seconds(3),
@@ -937,10 +1078,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         )
         let startedAt = Date()
         do {
-            let fetchedState = try await bridgeClient.fetchState(
-                sessionID: session.id,
-                timeout: timeout
-            )
+            let fetchedState = try await fetchTerminalState(timeout: timeout)
             trace(
                 "fetch_state_success reason=\(fetchedState.reason) runtime=\(traceSize(columns: fetchedState.runtimeState?.columns, rows: fetchedState.runtimeState?.rows)) frame=\(traceSize(columns: fetchedState.renderSnapshot?.columns, rows: fetchedState.renderSnapshot?.rows)) owner=\(traceOwnerID(fetchedState.attachmentSnapshot))"
             )
@@ -979,6 +1117,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             errorMessage = error.localizedDescription
             return nil
         }
+    }
+
+    private func fetchTerminalState(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload {
+        if let directDaemonClient {
+            return try await directDaemonClient.fetchState(sessionID: session.id, timeout: timeout)
+        }
+        return try await bridgeClient.fetchState(sessionID: session.id, timeout: timeout)
     }
 
     private func handleDisconnect(_ error: Error?) async {
@@ -1044,6 +1189,27 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func recoverEndedStateIfLiveStreamIsMissing(_ error: Error, reason: String) async -> Bool {
         guard Self.isMissingLiveStateStreamError(error), !isStopping else { return false }
         trace("missing_live_stream_state_refresh reason=\(reason)")
+        isBusy = false
+        isConnecting = true
+        let refreshedState = await refreshLatestState(
+            timeout: Self.stateRequestTimeout,
+            ignoreTransientTimeout: true,
+            reason: reason
+        )
+        isConnecting = false
+        guard let refreshedState else { return false }
+        if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
+            isSessionUnavailable = false
+            isAwaitingTakeoverConfirmation = false
+            errorMessage = nil
+            return true
+        }
+        return false
+    }
+
+    private func recoverEndedStateAfterTerminalStopped(_ error: Error, reason: String) async -> Bool {
+        guard Self.isTerminalNoLongerLiveError(error), !isStopping else { return false }
+        trace("terminal_stopped_state_refresh reason=\(reason)")
         isBusy = false
         isConnecting = true
         let refreshedState = await refreshLatestState(
@@ -1208,18 +1374,32 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                     lastSentResizeSize = targetViewportSize
                     resizeSerial &+= 1
                     let currentResizeSerial = resizeSerial
-                    try await bridgeClient.resize(
-                        sessionID: session.id,
-                        clientID: remoteClient.id,
-                        columns: targetViewportSize.columns,
-                        rows: targetViewportSize.rows,
-                        ownerEpoch: currentOwnerEpoch,
-                        resizeSerial: currentResizeSerial,
-                        timeout: Self.inputRequestTimeout
-                    )
+                    if let directDaemonClient {
+                        try await directDaemonClient.resize(
+                            sessionID: session.id,
+                            clientID: remoteClient.id,
+                            columns: targetViewportSize.columns,
+                            rows: targetViewportSize.rows,
+                            ownerEpoch: currentOwnerEpoch,
+                            resizeSerial: currentResizeSerial,
+                            timeout: Self.inputRequestTimeout)
+                    } else {
+                        try await bridgeClient.resize(
+                            sessionID: session.id,
+                            clientID: remoteClient.id,
+                            columns: targetViewportSize.columns,
+                            rows: targetViewportSize.rows,
+                            ownerEpoch: currentOwnerEpoch,
+                            resizeSerial: currentResizeSerial,
+                            timeout: Self.inputRequestTimeout
+                        )
+                    }
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
                 } catch {
                     trace("ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))")
+                    if await recoverEndedStateAfterTerminalStopped(error, reason: "ownership_resize_terminal_stopped") {
+                        return
+                    }
                     if !Self.isTransientReconnectError(error) {
                         if handleAuthenticationFailure(error) { return }
                         errorMessage = error.localizedDescription
@@ -1334,8 +1514,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func unavailableMessage(for error: Error) -> String? {
         switch error {
-        case SpacesMobileBridgeClientError.requestFailed(let message),
-             SpacesMobileBridgeClientError.streamFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message),
+             SpacesDeviceAPIClientError.streamFailed(let message):
             guard message.localizedStandardContains("is not available") else { return nil }
             return "This terminal session ended. Return to Terminals to open the current live session."
         default:
@@ -1344,11 +1524,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func handleAuthenticationFailure(_ error: Error) -> Bool {
-        guard let recoveryMessage = SpacesMobileBridgeAuthentication.recoveryMessage(for: error) else { return false }
+        guard let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) else { return false }
+        if session.daemonEndpoint != nil {
+            errorMessage = "Remote terminal credential was rejected. Refresh terminals from the paired Mac to reprovision direct access."
+            return true
+        }
         isStopping = true
         isAwaitingTakeoverConfirmation = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        directHeartbeatTask?.cancel()
+        directHeartbeatTask = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         inputSendQueue.cancelAll()
@@ -1382,9 +1568,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             return true
         }
         switch error {
-        case SpacesMobileBridgeClientError.requestTimedOut:
+        case SpacesDeviceAPIClientError.requestTimedOut:
             return true
-        case SpacesMobileBridgeClientError.requestFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message):
             return message.localizedStandardContains("cancelled")
                 || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
@@ -1404,10 +1590,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             return true
         }
         switch error {
-        case SpacesMobileBridgeClientError.requestTimedOut:
+        case SpacesDeviceAPIClientError.requestTimedOut:
             return true
-        case SpacesMobileBridgeClientError.requestFailed(let message),
-             SpacesMobileBridgeClientError.streamFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message),
+             SpacesDeviceAPIClientError.streamFailed(let message):
             return message.localizedStandardContains("cancelled")
                 || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
@@ -1419,9 +1605,20 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private static func isMissingLiveStateStreamError(_ error: Error) -> Bool {
         switch error {
-        case SpacesMobileBridgeClientError.requestFailed(let message),
-             SpacesMobileBridgeClientError.streamFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message),
+             SpacesDeviceAPIClientError.streamFailed(let message):
             return message.localizedStandardContains("no live state stream")
+        default:
+            return false
+        }
+    }
+
+    private static func isTerminalNoLongerLiveError(_ error: Error) -> Bool {
+        switch error {
+        case SpacesDeviceAPIClientError.requestFailed(let message),
+             SpacesDeviceAPIClientError.streamFailed(let message):
+            return message.localizedStandardContains("terminal session")
+                && (message.localizedStandardContains("not running") || message.localizedStandardContains("not live"))
         default:
             return false
         }
@@ -1473,14 +1670,16 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
         let applyStartedAt = Date()
         let decodeStartedAt = Date()
-        let resolvedRenderState = payloadByResolvingRenderUpdate(incomingPayload)
-        let payload = resolvedRenderState.payload
-        let decodedFrame = payload.decodedRenderUpdate?.fullFrame
-        let decodedUpdate = resolvedRenderState.decodedUpdate
+        let reduction = stateReducer.reduce(
+            incomingPayload: incomingPayload, previousPayload: latestState, requestResyncOnApplyFailure: true)
+        let payload = reduction.payload
+        let decodedFrame = reduction.frameToApply
+        let decodedUpdate = reduction.decodedUpdate
         let decodeMS = TerminalPerformance.elapsedMS(since: decodeStartedAt)
         let wasOwner = isOwner
         let wasTakingOver = isBusy || isAwaitingTakeoverConfirmation
-        latestState = latestState?.merged(with: payload) ?? payload
+        requestRenderUpdateResyncIfNeeded(reduction)
+        latestState = reduction.storedPayload
         if payload.attachmentSnapshot != nil {
             isAwaitingTakeoverConfirmation = false
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
@@ -1490,6 +1689,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             streamHandle = nil
             reconnectTask?.cancel()
             reconnectTask = nil
+            directHeartbeatTask?.cancel()
+            directHeartbeatTask = nil
             bufferedInputFlushTask?.cancel()
             bufferedInputFlushTask = nil
             scrollCoalescer.cancel()
@@ -1530,7 +1731,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             if wasOwner, !isEndedState, let latestState {
                 self.latestState = payloadByClearingScreenState(latestState)
             }
-            if wasOwner { renderUpdateBaseline = nil }
+            if wasOwner { stateReducer.resetRenderUpdateBaseline() }
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
             lastSentResizeSize = nil
@@ -1554,9 +1755,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             outputByteCount: payload.outputByteCount,
             screenStateRevision: payload.screenStateRevision,
             dropped: incomingPayload.renderUpdate == nil ? nil : decodedFrame == nil,
-            dropReason: resolvedRenderState.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
+            dropReason: reduction.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
             renderMode: renderMode,
-            frameKind: decodedUpdate?.frameKindMetricValue ?? "full",
+            frameKind: decodedUpdate?.frameKindMetricValue,
             baseRevision: decodedUpdate?.baseRevision,
             targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
             appliedRevision: decodedFrame == nil && incomingPayload.renderUpdate != nil ? nil : payload.screenStateRevision,
@@ -1565,8 +1766,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             changedCellCount: decodedUpdate?.changedCellCount,
             scrollOperationCount: decodedUpdate?.scrollOperationCount,
             fullFrameFallbackReason: decodedUpdate?.fallbackReason,
-            droppedDeltaCount: resolvedRenderState.dropReason == nil ? nil : 1,
-            resyncCount: resolvedRenderState.didRequestResync ? 1 : nil)
+            droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
+            resyncCount: reduction.didRequestResync ? 1 : nil)
         renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
         renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
         renderUpdateAttributes["materialized_render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
@@ -1586,40 +1787,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         attemptAutomaticTakeoverIfNeeded()
     }
 
-    private func payloadByResolvingRenderUpdate(
-        _ payload: GhosttyRemoteSessionStatePayload
-    ) -> (payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, dropReason: String?, didRequestResync: Bool) {
-        guard payload.renderUpdate != nil else { return (payload, nil, nil, false) }
-        guard let decodedUpdate = payload.decodedRenderUpdate else {
-            return (payload.replacingRenderUpdate(nil), nil, "render_update_decode_failed", false)
-        }
-        do {
-            let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
-            renderUpdateBaseline = baseline
-            let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
-            let materializedUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
-            return (payload.replacingRenderUpdate(materializedUpdate), decodedUpdate, nil, false)
-        } catch {
-            renderUpdateBaseline = nil
-            Task { [weak self] in
-                await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
-            }
-            return (payload.replacingRenderUpdate(nil), decodedUpdate, Self.renderUpdateDropReason(for: error), true)
-        }
-    }
-
-    private static func renderUpdateDropReason(for error: Error) -> String {
-        switch error as? GhosttyRenderUpdateApplyError {
-        case .missingBaseline: "missing_baseline"
-        case .versionMismatch: "version_mismatch"
-        case .missingFullFrame: "missing_full_frame"
-        case .missingDelta: "missing_delta"
-        case .resyncRequired: "resync_required"
-        case .baseRevisionMismatch: "base_revision_mismatch"
-        case .ownerEpochMismatch: "owner_epoch_mismatch"
-        case .dimensionMismatch: "dimension_mismatch"
-        case .invalidOperation: "invalid_operation"
-        case nil: "render_update_apply_failed"
+    private func requestRenderUpdateResyncIfNeeded(_ reduction: TerminalRemoteStateReductionResult) {
+        guard reduction.didRequestResync else { return }
+        Task { [weak self] in
+            await self?.refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "render_update_resync")
         }
     }
 
@@ -1674,7 +1845,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func logPerformanceEvent(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
-        SpacesMobileTerminalPerformanceLogger.emit(
+        SpacesDeviceTerminalPerformanceLogger.emit(
             .init(
                 sessionID: session.id,
                 source: "ios-viewer",

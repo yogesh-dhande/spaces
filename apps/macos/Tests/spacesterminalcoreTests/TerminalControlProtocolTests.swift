@@ -10,8 +10,9 @@ final class TerminalControlProtocolTests: XCTestCase {
             id: "client-1", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
             connectedAt: "2026-05-15T00:00:00Z")
         let request = TerminalControlRequest(
-            command: "attach", authToken: "SECRET", text: "hello", clientID: "client-1", client: client, attachmentMode: .viewer, lineCount: 20,
-            columns: 80, rows: 24, ownerEpoch: 7, resizeSerial: 3, scrollHorizontal: 1.5, scrollVertical: -2.5, scrollMods: 7, appendNewline: true)
+            command: "attach", authToken: "SECRET", text: "hello", bytes: Data([0, 10, 255]), clientID: "client-1", client: client,
+            attachmentMode: .viewer, lineCount: 20, columns: 80, rows: 24, ownerEpoch: 7, resizeSerial: 3, scrollHorizontal: 1.5,
+            scrollVertical: -2.5, scrollMods: 7, appendNewline: true)
         let response = TerminalControlResponse(ok: true, message: "ok")
 
         XCTAssertEqual(try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request)), request)

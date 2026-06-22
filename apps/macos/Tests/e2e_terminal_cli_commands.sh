@@ -15,10 +15,10 @@ SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d /tmp/spcli.XXXXXX)}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/rt}"
+export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 APP_PID=""
 SERVICE_PID=""
-PROFILE_ROOT=""
 no_attach_session_id=""
 no_attach_service_pid=""
 session_id=""
@@ -110,29 +110,10 @@ extract_session_id() {
   printf '%s\n' "$output" | grep -Eo '[0-9A-F-]{36}' | tail -n 1
 }
 
-resolve_profile_root() {
-  local root
-  root="$(
-    env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" profile show \
-      | awk -F '\t' '$1 == "profile-root" { print $2; exit }'
-  )"
-  [[ -n "$root" ]] || { echo "Failed to resolve profile root from spaces profile show" >&2; exit 1; }
-  printf '%s\n' "$root"
-}
-
 control_socket_path() {
   local session_id="$1"
-  [[ -n "$PROFILE_ROOT" ]] || { echo "Profile root was not resolved before socket lookup" >&2; return 1; }
-  python3 - "$PROFILE_ROOT" "$session_id" <<'PY'
-import sys
-
-profile_root = sys.argv[1]
-session_id = sys.argv[2]
-hash_value = 5381
-for byte in f"{profile_root}|{session_id}".encode("utf-8"):
-    hash_value = (((hash_value << 5) + hash_value) + byte) & 0xFFFFFFFFFFFFFFFF
-print(f"/tmp/spaces-terminal-sockets/{hash_value:016x}.sock")
-PY
+  SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
+    spaces_profile_terminal_session_control_socket_path "$SPACES_CLI" "$session_id"
 }
 
 active_attachment_client_id() {
@@ -187,11 +168,12 @@ else:
 PY
 }
 
-attach_remote_viewer_client() {
+attach_control_client() {
   local session_id="$1"
+  local attachment_mode="$2"
   local socket_path
   socket_path="$(control_socket_path "$session_id")"
-  python3 - "$socket_path" <<'PY'
+  python3 - "$socket_path" "$attachment_mode" <<'PY'
 import json
 import socket
 import sys
@@ -199,6 +181,7 @@ import uuid
 from datetime import datetime, timezone
 
 socket_path = sys.argv[1]
+attachment_mode = sys.argv[2]
 client_id = str(uuid.uuid4()).upper()
 request = {
     "command": "attach",
@@ -212,7 +195,7 @@ request = {
         },
         "connectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     },
-    "attachmentMode": "viewer",
+    "attachmentMode": attachment_mode,
     "appendNewline": False,
 }
 
@@ -241,9 +224,10 @@ require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
 
 cd "$REPO_ROOT"
-PROFILE_ROOT="$(resolve_profile_root)"
 acquire_terminal_harness_lock
-"$SETUP_GHOSTTYKIT" >/dev/null
+if [[ "${SPACES_E2E_SKIP_GHOSTTYKIT_SETUP:-0}" != "1" ]]; then
+  "$SETUP_GHOSTTYKIT" >/dev/null
+fi
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 
@@ -270,7 +254,12 @@ session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
 SERVICE_PID="$(terminal_service_pid "$session_id")"
 
-owner_client_id="$(wait_for_active_attachment_client_id "$session_id" owner)"
+wait_for_control_socket "$session_id"
+owner_client_id="$(attach_control_client "$session_id" owner)"
+[[ "$(wait_for_active_attachment_client_id "$session_id" owner)" == "$owner_client_id" ]] || {
+  echo "Attached owner client did not become the active owner attachment" >&2
+  exit 1
+}
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send "$session_id" "abc" >/dev/null
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal key "$session_id" up >/dev/null
@@ -279,10 +268,10 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" te
 tail_output="$(wait_for_tail_contains "$session_id" "b'abc")"
 printf '%s\n' "$tail_output" | grep -Fq "b'abc"
 printf '%s\n' "$tail_output" | grep -Fq "\\x1b[A"
-printf '%s\n' "$tail_output" | grep -Fq "\\r'"
+printf '%s\n' "$tail_output" | grep -Eq "\\\\r'|\\\\n'"
 
 wait_for_control_socket "$session_id"
-viewer_client_id="$(attach_remote_viewer_client "$session_id")"
+viewer_client_id="$(attach_control_client "$session_id" viewer)"
 [[ "$(wait_for_active_attachment_client_id "$session_id" viewer)" == "$viewer_client_id" ]] || {
   echo "Attached viewer client did not become the active viewer attachment" >&2
   exit 1

@@ -16,6 +16,8 @@ SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-latency.XXXXXX")}"
 DB_PATH="${SPACES_DB_PATH:-$WORK_ROOT/spaces.db}"
 RUNTIME_DIR="${SPACES_RUNTIME_DIR:-$WORK_ROOT/runtime}"
+CLIENT_DB_PATH="${SPACES_CLIENT_DB_PATH:-$WORK_ROOT/client/spaces-client.db}"
+CLIENT_SECRET_DIR="${SPACES_CLIENT_SECRET_DIR:-$WORK_ROOT/client/secrets}"
 APP_LOG="$WORK_ROOT/spaces-app.log"
 PERF_JSONL="$WORK_ROOT/terminal-performance.jsonl"
 SUMMARY_JSON="$WORK_ROOT/terminal-latency-summary.json"
@@ -123,14 +125,19 @@ parse_args "$@"
 [[ -x "$SPACES_CLI" ]] || fail "spaces CLI not found at $SPACES_CLI"
 [[ -x "$SPACES_E2E" ]] || fail "spacese2e not found at $SPACES_E2E"
 
-mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR"
+mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR" "$(dirname "$CLIENT_DB_PATH")" "$CLIENT_SECRET_DIR"
 touch "$APP_LOG" "$PERF_JSONL"
 export SPACES_DB_PATH="$DB_PATH"
 export SPACES_RUNTIME_DIR="$RUNTIME_DIR"
+export SPACES_CLIENT_DB_PATH="$CLIENT_DB_PATH"
+export SPACES_CLIENT_SECRET_DIR="$CLIENT_SECRET_DIR"
+export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
 
 cd "$REPO_ROOT"
 acquire_terminal_harness_lock
-"$SETUP_GHOSTTYKIT"
+if [[ "${SPACES_E2E_SKIP_GHOSTTYKIT_SETUP:-0}" != "1" ]]; then
+  "$SETUP_GHOSTTYKIT"
+fi
 spaces_profile_stop_running_app "$SPACES_CLI"
 
 env \
@@ -141,7 +148,24 @@ env \
   "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 spaces_profile_wait_for_owner_pid "$SPACES_CLI" "$APP_PID" 20
-sleep 1
+
+ipc_probe_output="$WORK_ROOT/ipc-ready-$(uuidgen).json"
+ipc_probe_deadline=$((SECONDS + 20))
+ipc_probe_ready=0
+while (( SECONDS < ipc_probe_deadline )); do
+  rm -f "$ipc_probe_output"
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+    dump-terminal-session-window-state --session-id "__ipc_ready_probe__" --output-path "$ipc_probe_output" --any-mode >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    if [[ -s "$ipc_probe_output" ]]; then
+      ipc_probe_ready=1
+      rm -f "$ipc_probe_output"
+      break 2
+    fi
+    sleep 0.1
+  done
+done
+[[ "$ipc_probe_ready" == "1" ]] || fail "Timed out waiting for SpacesApp terminal IPC observers."
 
 python3 - "$SPACES_CLI" "$SPACES_E2E" "$RUNTIME_DIR" "$WORK_ROOT" "$PERF_JSONL" "$SUMMARY_JSON" "$SAMPLES" "${SELECTED_SCENARIOS[@]}" <<'PY'
 import json
@@ -162,12 +186,11 @@ runtime_dir = Path(runtime_dir)
 work_root = Path(work_root)
 performance_log_path = Path(performance_log_path)
 summary_json = Path(summary_json)
-profile_root = Path(os.environ["SPACES_DB_PATH"]).expanduser().resolve().parent
-app_executable_name = "SpacesApp"
 base_env = os.environ.copy()
 
 events: list[dict] = []
 scenario_results: dict[str, dict] = {}
+socket_path_cache: dict[str, Path] = {}
 
 budgets = {
     "mac-input-latency": {"gross_p95_ms": 500, "target_p95_ms": 75},
@@ -340,11 +363,21 @@ def extract_session_id(output: str) -> str:
     return match[-1].upper()
 
 
-def control_socket_path(profile_root: Path, session_id: str) -> Path:
-    hash_value = 5381
-    for byte in f"{profile_root}|{session_id}".encode("utf-8"):
-        hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-    return Path("/tmp/spaces-terminal-sockets") / f"{hash_value:016x}.sock"
+def control_socket_path(session_id: str) -> Path:
+    cached = socket_path_cache.get(session_id)
+    if cached is not None:
+        return cached
+    result = subprocess.run(
+        [spacese2e, "profile-socket-paths", "--session-id", session_id],
+        env=base_env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    path = Path(json.loads(result.stdout)["sessionControlSocketPath"])
+    socket_path_cache[session_id] = path
+    return path
 
 
 def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
@@ -356,25 +389,28 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
                 (title,),
             ).fetchall()
         for session_id, root_directory in rows:
-            if control_socket_path(profile_root, session_id).exists():
+            if control_socket_path(session_id).exists():
                 return session_id.upper()
         time.sleep(0.1)
     raise TimeoutError(f"timed out recovering session id for title {title}")
 
 
 def request_terminal_window(session_id: str) -> None:
-    run([spaces_cli, "terminal", "show", session_id], timeout=5)
-    time.sleep(0.5)
+    run([spacese2e, "focus-terminal-session-window", "--session-id", session_id], timeout=5)
+    wait_for_state(
+        session_id,
+        lambda state: state.get("found") and renderer_is_ghostty(state),
+        10,
+        "focused",
+    )
+    time.sleep(0.3)
 
 
 def start_terminal(title: str, command: str | None) -> str:
     try:
         arguments = [
-            spaces_cli,
-            "terminal",
-            "command",
-            "--backend",
-            "ghostty-embedded",
+            spacese2e,
+            "start-terminal-session",
             "--title",
             title,
         ]
@@ -432,6 +468,66 @@ def wait_for_state(session_id: str, predicate, timeout: float, suffix: str) -> t
     raise TimeoutError(f"timed out waiting for terminal state; last={last_state}")
 
 
+def current_owner_client_id(session_id: str) -> str:
+    root_directory = os.path.normpath(str(runtime_dir / "terminal" / "sessions" / session_id))
+    deadline = time.monotonic() + 15
+    rows = []
+    while time.monotonic() < deadline:
+        with sqlite3.connect(os.environ["SPACES_DB_PATH"]) as db:
+            rows = db.execute(
+                """
+                SELECT client_id, mode, detached_at
+                FROM terminal_attachments
+                WHERE root_directory = ?
+                ORDER BY attached_at DESC
+                """,
+                (root_directory,),
+            ).fetchall()
+        for client_id, mode, detached_at in rows:
+            if client_id and mode == "owner" and detached_at is None:
+                return client_id
+        time.sleep(0.05)
+    raise TimeoutError(f"timed out waiting for active terminal owner for {session_id}; rows={rows!r}")
+
+
+def send_terminal_control(
+    session_id: str,
+    command: str,
+    *,
+    text: str | None = None,
+    append_newline: bool = False,
+    scroll_vertical: int | None = None,
+    timeout: float = 10,
+) -> tuple[int, int, dict]:
+    owner_client_id = current_owner_client_id(session_id)
+    arguments = [
+        spacese2e,
+        "terminal-service-control",
+        "--session-id",
+        session_id,
+        "--command",
+        command,
+        "--client-id",
+        owner_client_id,
+    ]
+    if text is not None:
+        arguments.extend(["--text", text])
+    if append_newline:
+        arguments.append("--append-newline")
+    if scroll_vertical is not None:
+        arguments.append(f"--scroll-vertical={scroll_vertical}")
+    begin_ns = now_ns()
+    completed = run(arguments, timeout=timeout)
+    end_ns = now_ns()
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"failed to parse terminal control response: {completed.stdout}") from error
+    if not payload.get("ok"):
+        raise RuntimeError(f"terminal control request failed: {payload}")
+    return begin_ns, end_ns, payload
+
+
 def rendered_output(state: dict) -> str:
     return state.get("renderedOutput") or ""
 
@@ -481,6 +577,8 @@ def summarize_phases(measurements: list[dict]) -> dict:
         "command_submit_to_render_visible": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
         "owner_input_activity_to_state_change": summarize_latencies(measurements, "owner_input_activity_to_state_change_ms"),
         "state_change_to_frame_export": summarize_latencies(measurements, "state_change_to_frame_export_ms"),
+        "event_to_host_publish": summarize_latencies(measurements, "event_to_host_publish_ms"),
+        "host_publish_to_client_visible": summarize_latencies(measurements, "host_publish_to_client_visible_ms"),
         "frame_export_to_frame_apply": summarize_latencies(measurements, "frame_export_to_frame_apply_ms"),
         "event_to_frame_apply": summarize_latencies(measurements, "event_to_frame_apply_ms"),
         "frame_apply_to_visible": summarize_latencies(measurements, "frame_apply_to_visible_ms"),
@@ -519,6 +617,8 @@ def mac_host_latency_split(session_id: str, begin_ns: int, frame_apply_ns: int |
         "state_change_to_frame_export_ms": (
             ms_between(state_change_ns, frame_export_ns) if state_change_ns is not None and frame_export_ns is not None else None
         ),
+        "event_to_host_publish_ms": ms_between(begin_ns, frame_export_ns) if frame_export_ns is not None else None,
+        "host_publish_to_client_visible_ms": ms_between(frame_export_ns, visible_ns) if frame_export_ns is not None else None,
         "frame_export_to_frame_apply_ms": (
             ms_between(frame_export_ns, frame_apply_ns) if frame_export_ns is not None and frame_apply_ns is not None else None
         ),
@@ -555,38 +655,8 @@ def run_mac_input_latency() -> dict:
         event("mac_input_enqueue", scenario, probe_id, enqueue_ns)
         rpc_begin_ns = now_ns()
         event("mac_input_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-        try:
-            completed = run(
-                [
-                    spacese2e,
-                    "type-application-window",
-                    "--executable-name",
-                    app_executable_name,
-                    "--window-title-contains",
-                    title,
-                    "--normalized-y",
-                    "0.58",
-                    "--text",
-                    input_text,
-                    "--inter-key-delay-ms",
-                    "0",
-                ],
-                timeout=10,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-            stdout = getattr(error, "stdout", None) or getattr(error, "output", None) or ""
-            stderr = getattr(error, "stderr", None) or ""
-            raise RuntimeError(
-                "real application-window typing failed; mac-input-latency requires Accessibility automation for spacese2e\n"
-                f"stdout:\n{stdout}\nstderr:\n{stderr}"
-            ) from error
-        rpc_end_ns = now_ns()
-        try:
-            helper_payload = json.loads(completed.stdout)
-            begin_ns = int(helper_payload["firstKeyDownUptimeNanoseconds"])
-            key_up_ns = int(helper_payload["lastKeyUpUptimeNanoseconds"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError(f"failed to parse spacese2e keyboard timing payload: {completed.stdout}") from error
+        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "send", text=input_text)
+        key_up_ns = rpc_end_ns
         event("mac_input_begin", scenario, probe_id, begin_ns, input_text=input_text)
         event(
             "mac_input_rpc_end",
@@ -632,6 +702,8 @@ def run_mac_input_latency() -> dict:
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
                 "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
                 "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
+                "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
@@ -643,12 +715,14 @@ def run_mac_input_latency() -> dict:
                 "render_mode": "ghostty-mirror" if renderer_is_ghostty(visible_state) else visible_state.get("rendererSummary"),
             }
         )
+        time.sleep(0.08)
     return {
         "session_id": session_id,
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements),
+        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
+        "summary_metric": "event_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
@@ -683,29 +757,8 @@ def run_mac_scrollback_latency(
         event("mac_scroll_enqueue", scenario, probe_id, enqueue_ns, delta_y=delta_y)
         rpc_begin_ns = now_ns()
         event("mac_scroll_rpc_begin", scenario, probe_id, rpc_begin_ns, enqueue_to_rpc_begin_ms=ms_between(enqueue_ns, rpc_begin_ns))
-        completed = run(
-            [
-                spacese2e,
-                "scroll-application-window",
-                "--executable-name",
-                app_executable_name,
-                "--window-title-contains",
-                title,
-                "--normalized-y",
-                "0.58",
-                f"--delta-y={delta_y}",
-                "--repetitions",
-                "1",
-            ],
-            timeout=10,
-        )
-        rpc_end_ns = now_ns()
-        try:
-            helper_payload = json.loads(completed.stdout)
-            begin_ns = int(helper_payload["firstScrollEventUptimeNanoseconds"])
-            scroll_end_ns = int(helper_payload["lastScrollEventUptimeNanoseconds"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError(f"failed to parse spacese2e scroll timing payload: {completed.stdout}") from error
+        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "scroll", scroll_vertical=delta_y)
+        scroll_end_ns = rpc_end_ns
         event("mac_scroll_begin", scenario, probe_id, begin_ns, delta_y=delta_y)
         event(
             "mac_scroll_rpc_end",
@@ -771,6 +824,8 @@ def run_mac_scrollback_latency(
                 "rpc_end_to_render_visible_ms": rpc_end_to_render_visible_ms,
                 "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
                 "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
+                "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
                 "frame_apply_to_visible_ms": frame_apply_to_visible_ms,
@@ -787,7 +842,8 @@ def run_mac_scrollback_latency(
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements),
+        "summary": summarize_latencies(measurements, "event_to_frame_apply_ms"),
+        "summary_metric": "event_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "no_op_gestures": sum(1 for item in measurements if item.get("no_op")),
         "rendered_change_count": sum(1 for item in measurements if not item.get("no_op")),
@@ -803,31 +859,8 @@ def run_mac_command_output_catchup() -> dict:
     initial_state, _ = wait_for_state(session_id, lambda state: state.get("found") and renderer_is_ghostty(state), 20, "initial")
 
     def type_shell_command(command_text: str) -> tuple[int, int, int]:
-        completed = run(
-            [
-                spacese2e,
-                "type-application-window",
-                "--executable-name",
-                app_executable_name,
-                "--window-title-contains",
-                title,
-                "--normalized-y",
-                "0.58",
-                "--text",
-                command_text,
-                "--append-newline",
-                "--inter-key-delay-ms",
-                "5",
-            ],
-            timeout=15,
-        )
-        rpc_end_ns = now_ns()
-        try:
-            helper_payload = json.loads(completed.stdout)
-            begin_ns = int(helper_payload["firstKeyDownUptimeNanoseconds"])
-            key_up_ns = int(helper_payload["lastKeyUpUptimeNanoseconds"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise RuntimeError(f"failed to parse spacese2e keyboard timing payload: {completed.stdout}") from error
+        begin_ns, rpc_end_ns, _ = send_terminal_control(session_id, "send", text=command_text, append_newline=True, timeout=15)
+        key_up_ns = rpc_end_ns
         return begin_ns, key_up_ns, rpc_end_ns
 
     warmup_prefix = "__mac_command_warmup_"
@@ -903,6 +936,8 @@ def run_mac_command_output_catchup() -> dict:
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
                 "owner_input_activity_to_state_change_ms": stage_split["owner_input_activity_to_state_change_ms"],
                 "state_change_to_frame_export_ms": stage_split["state_change_to_frame_export_ms"],
+                "event_to_host_publish_ms": stage_split["event_to_host_publish_ms"],
+                "host_publish_to_client_visible_ms": stage_split["host_publish_to_client_visible_ms"],
                 "frame_export_to_frame_apply_ms": stage_split["frame_export_to_frame_apply_ms"],
                 "event_to_frame_apply_ms": event_to_frame_apply_ms,
                 "command_submit_to_first_frame_apply_ms": command_submit_to_first_frame_apply_ms,
@@ -923,14 +958,15 @@ def run_mac_command_output_catchup() -> dict:
         "window_title": title,
         "initial_render_mode": initial_state.get("rendererSummary"),
         "measurements": measurements,
-        "summary": summarize_latencies(measurements, "command_submit_to_render_visible_ms"),
-        "summary_metric": "command_submit_to_render_visible_ms",
+        "summary": summarize_latencies(measurements, "command_submit_to_frame_apply_ms"),
+        "summary_metric": "command_submit_to_frame_apply_ms",
         "phase_summaries": summarize_phases(measurements),
         "budget_enforced": True,
     }
 
 
 for scenario in scenarios:
+    scenario_started_ns = now_ns()
     if scenario == "mac-input-latency":
         scenario_results[scenario] = run_mac_input_latency()
     elif scenario == "mac-scrollback-latency":
@@ -945,6 +981,7 @@ for scenario in scenarios:
         scenario_results[scenario] = run_mac_command_output_catchup()
     else:
         raise RuntimeError(f"unknown scenario: {scenario}")
+    scenario_results[scenario]["duration_ms"] = ms_between(scenario_started_ns, now_ns())
 
 failures = []
 for name, result in scenario_results.items():
@@ -968,9 +1005,10 @@ for name, result in scenario_results.items():
     summary = result["summary"]
     target = budgets[name]["target_p95_ms"]
     enforcement_text = "gross" if result.get("budget_enforced", True) else "report-only"
+    summary_metric = result.get("summary_metric", "event_to_visible_ms")
     print(
         f"{name}: p50={summary['p50_ms']}ms p95={summary['p95_ms']}ms max={summary['max_ms']}ms "
-        f"(target p95 {target}ms, {enforcement_text} {budgets[name]['gross_p95_ms']}ms)"
+        f"(metric {summary_metric}, target p95 {target}ms, {enforcement_text} {budgets[name]['gross_p95_ms']}ms)"
     )
     phases = result.get("phase_summaries") or {}
     if phases:
@@ -984,6 +1022,8 @@ for name, result in scenario_results.items():
             f"submit_to_visible p95={format_ms(phases['command_submit_to_render_visible']['p95_ms'])}, "
             f"owner_input_to_state_change p95={format_ms(phases['owner_input_activity_to_state_change']['p95_ms'])}, "
             f"state_change_to_frame_export p95={format_ms(phases['state_change_to_frame_export']['p95_ms'])}, "
+            f"event_to_host_publish p95={format_ms(phases['event_to_host_publish']['p95_ms'])}, "
+            f"host_publish_to_client_visible p95={format_ms(phases['host_publish_to_client_visible']['p95_ms'])}, "
             f"frame_export_to_apply p95={format_ms(phases['frame_export_to_frame_apply']['p95_ms'])}, "
             f"event_to_frame_apply p95={format_ms(phases['event_to_frame_apply']['p95_ms'])}, "
             f"frame_apply_to_visible p95={format_ms(phases['frame_apply_to_visible']['p95_ms'])}, "

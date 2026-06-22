@@ -31,18 +31,29 @@ release_terminal_harness_lock() {
   fi
 }
 
+terminal_harness_spacese2e() {
+  if [[ -n "${SPACES_E2E:-}" ]]; then
+    printf '%s\n' "$SPACES_E2E"
+    return 0
+  fi
+  if [[ -n "${SPACES_E2E_CLI:-}" ]]; then
+    printf '%s\n' "$SPACES_E2E_CLI"
+    return 0
+  fi
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  printf '%s\n' "$(cd "$script_dir/.." && pwd)/.build/debug/spacese2e"
+}
+
 terminal_service_socket_path_for_runtime_dir() {
   local runtime_dir="$1"
-  SPACES_RUNTIME_DIR="$runtime_dir" python3 - <<'PY'
-import os
-import pathlib
-
-terminal_root = str(pathlib.Path(os.environ["SPACES_RUNTIME_DIR"]) / "terminal")
-hash_value = 5381
-for byte in terminal_root.encode("utf-8"):
-    hash_value = ((hash_value << 5) + hash_value + byte) & 0xFFFFFFFFFFFFFFFF
-print(f"/tmp/spaces-terminal-sockets/service-{hash_value:016x}.sock")
-PY
+  local e2e_cli
+  e2e_cli="$(terminal_harness_spacese2e)"
+  SPACES_RUNTIME_DIR="$runtime_dir" "$e2e_cli" profile-socket-paths | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+print(payload["serviceSocketPath"])
+'
 }
 
 stop_terminal_service_for_runtime_dir() {
@@ -63,7 +74,7 @@ socket_path = sys.argv[1]
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
     client.settimeout(1)
     client.connect(socket_path)
-    client.sendall(json.dumps({"command": "shutdown"}).encode("utf-8"))
+    client.sendall(json.dumps({"command": {"shutdown": {}}}).encode("utf-8"))
     client.shutdown(socket.SHUT_WR)
     client.recv(65536)
 PY
@@ -77,7 +88,7 @@ PY
   done
 
   local pids
-  pids="$(lsof -nP -t -U "$service_socket" 2>/dev/null | sort -u || true)"
+  pids="$(lsof -nP -t "$service_socket" 2>/dev/null | sort -u || true)"
   if [[ -z "$pids" ]]; then
     rm -f "$service_socket" >/dev/null 2>&1 || true
     return 0
@@ -87,7 +98,7 @@ PY
   for pid in $pids; do
     local command
     command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    [[ "$command" == *"SpacesTerminalService"* ]] || continue
+    [[ "$command" == *"spacesd"* ]] || continue
     kill "$pid" >/dev/null 2>&1 || true
   done
 
@@ -108,7 +119,7 @@ PY
   for pid in $pids; do
     local command
     command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    [[ "$command" == *"SpacesTerminalService"* ]] || continue
+    [[ "$command" == *"spacesd"* ]] || continue
     kill -9 "$pid" >/dev/null 2>&1 || true
   done
   rm -f "$service_socket" >/dev/null 2>&1 || true

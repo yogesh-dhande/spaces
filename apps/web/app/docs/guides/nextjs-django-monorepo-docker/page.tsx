@@ -72,7 +72,7 @@ API_PORT`}</code>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
         <p className={prose}>
-          Add two browser sessions — one URL per entry — so both open when the workspace launches.
+          Add two browser sessions — one URL per entry — so each opens in Chrome when you focus it.
         </p>
         <pre className={code}>
           <code>{`# frontend browser session

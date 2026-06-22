@@ -6,7 +6,7 @@ struct CLITextOrJSONOutput {
 
     func emitLines<Payload>(text: @autoclosure () -> [String], json: @autoclosure () -> Payload) throws { for line in text() { print(line) } }
 
-    static func emitError(_ error: Error, wantsJSON: Bool) { fputs("Error: \(error.localizedDescription)\n", stderr) }
+    static func emitError(_ error: Error, wantsJSON: Bool) { FileHandle.standardError.write(Data("Error: \(error.localizedDescription)\n".utf8)) }
 }
 
 enum CLITextRenderer {
@@ -102,6 +102,42 @@ extension WorkspaceSummaryPayload {
         isArchived = value.isArchived
         isHidden = value.isHidden
         isDefault = value.isDefault
+        notes = value.notes
+    }
+}
+
+struct WorkspaceRecordPayload: Encodable {
+    let id: String
+    let projectID: String
+    let title: String
+    let dir: String
+    let runtimePath: String
+    let dirname: String?
+    let branch: String?
+    let targetBranch: String?
+    let isDefault: Bool
+    let isArchived: Bool
+    let isHidden: Bool
+    let isRunning: Bool
+    let lastLaunchedAt: String?
+    let notes: String?
+}
+
+extension WorkspaceRecordPayload {
+    init(_ value: WorkspaceRecord) {
+        id = value.id
+        projectID = value.projectID
+        title = value.title
+        dir = value.dir
+        runtimePath = value.runtimePath
+        dirname = value.dirname
+        branch = value.branch
+        targetBranch = value.targetBranch
+        isDefault = value.isDefault
+        isArchived = value.isArchived
+        isHidden = value.isHidden
+        isRunning = value.isRunning
+        lastLaunchedAt = value.lastLaunchedAt
         notes = value.notes
     }
 }

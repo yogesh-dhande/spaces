@@ -1,4 +1,8 @@
-import CoreGraphics
+#if canImport(CoreGraphics)
+    import CoreGraphics
+#else
+    public typealias CGFloat = Double
+#endif
 
 public enum UIRadius {
     public static let compact: CGFloat = 6

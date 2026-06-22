@@ -11,7 +11,7 @@ from typing import Any
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize terminal render-update performance JSONL logs.")
     parser.add_argument("--performance-log", required=True, help="JSONL file written by SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH.")
-    parser.add_argument("--summary-json", help="Optional latency summary JSON from e2e_terminal_latency.sh or e2e_mobile_latency.sh.")
+    parser.add_argument("--summary-json", help="Optional latency summary JSON from a spacese2e e2e latency scenario.")
     parser.add_argument("--output-dir", default="apps/macos/.artifacts/terminal-render-profiles")
     parser.add_argument("--render-mode", default="production")
     parser.add_argument("--terminal-size", default="")
@@ -197,7 +197,7 @@ def latency_values(summary: dict[str, Any]) -> list[float]:
 def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_summary: dict[str, Any]) -> dict[str, Any]:
     network_events = [
         record for record in events
-        if record.get("source") == "mobile-bridge" and record.get("name") == "stream_network_send_begin"
+        if record.get("source") == "device-api" and record.get("name") == "stream_network_send_begin"
     ]
     publish_events = [record for record in events if record.get("name") == "render_frame_payload_publish"]
     receive_events = [record for record in events if record.get("name") == "render_frame_payload_receive"]

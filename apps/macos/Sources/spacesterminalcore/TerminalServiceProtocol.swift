@@ -1,15 +1,597 @@
 import Dispatch
 import Foundation
 
-public struct TerminalServiceRequest: Codable, Sendable, Equatable {
-    public let command: String
-    public let launchConfiguration: TerminalSessionLaunchConfiguration?
-    public let sessionID: String?
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
-    public init(command: String, launchConfiguration: TerminalSessionLaunchConfiguration? = nil, sessionID: String? = nil) {
+public struct TerminalServiceRequest: Codable, Sendable, Equatable {
+    public let authToken: String?
+    public let command: TerminalServiceCommand
+
+    public init(command: TerminalServiceCommand, authToken: String? = nil) {
+        self.authToken = authToken
         self.command = command
+    }
+
+    public func withAuthToken(_ authToken: String?) -> TerminalServiceRequest { TerminalServiceRequest(command: command, authToken: authToken) }
+
+    public var commandName: String { command.name }
+    public var sessionID: String? { command.sessionID }
+}
+
+public struct TerminalServiceEmptyPayload: Codable, Sendable, Equatable { public init() {} }
+
+public struct TerminalServiceSessionRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+
+    public init(sessionID: String) { self.sessionID = sessionID }
+}
+
+public struct TerminalServiceCreateRequest: Codable, Sendable, Equatable {
+    public let launchConfiguration: TerminalSessionLaunchConfiguration
+    public let runtimeManifest: TerminalServiceWorkspaceRuntimeManifest?
+    public let worktreeRefresh: TerminalServiceWorktreeRefreshRequest?
+
+    public init(
+        launchConfiguration: TerminalSessionLaunchConfiguration, runtimeManifest: TerminalServiceWorkspaceRuntimeManifest? = nil,
+        worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil
+    ) {
         self.launchConfiguration = launchConfiguration
+        self.runtimeManifest = runtimeManifest
+        self.worktreeRefresh = worktreeRefresh
+    }
+}
+
+public struct TerminalServicePrepareWorkspaceRequest: Codable, Sendable, Equatable {
+    public let runtimeManifest: TerminalServiceWorkspaceRuntimeManifest
+    public let worktreeRefresh: TerminalServiceWorktreeRefreshRequest?
+
+    public init(runtimeManifest: TerminalServiceWorkspaceRuntimeManifest, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil) {
+        self.runtimeManifest = runtimeManifest
+        self.worktreeRefresh = worktreeRefresh
+    }
+}
+
+public struct TerminalServiceRunWorkspaceCommandRequest: Codable, Sendable, Equatable {
+    public let runtimeManifest: TerminalServiceWorkspaceRuntimeManifest
+    public let worktreeRefresh: TerminalServiceWorktreeRefreshRequest?
+    public let workspaceCommand: TerminalServiceWorkspaceCommandRequest
+
+    public init(
+        runtimeManifest: TerminalServiceWorkspaceRuntimeManifest, worktreeRefresh: TerminalServiceWorktreeRefreshRequest? = nil,
+        workspaceCommand: TerminalServiceWorkspaceCommandRequest
+    ) {
+        self.runtimeManifest = runtimeManifest
+        self.worktreeRefresh = worktreeRefresh
+        self.workspaceCommand = workspaceCommand
+    }
+}
+
+public struct TerminalServiceControlCommandRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let controlRequest: TerminalControlRequest
+
+    public init(sessionID: String, controlRequest: TerminalControlRequest) {
         self.sessionID = sessionID
+        self.controlRequest = controlRequest
+    }
+}
+
+public struct TerminalServiceAgentSignalRequest: Codable, Sendable, Equatable {
+    public let event: TerminalServiceAgentSignalEvent
+
+    public init(event: TerminalServiceAgentSignalEvent) { self.event = event }
+}
+
+public struct TerminalServiceAgentSignalAcknowledgementRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let eventIDs: [String]
+
+    public init(sessionID: String, eventIDs: [String]) {
+        self.sessionID = sessionID
+        self.eventIDs = eventIDs
+    }
+}
+
+public struct TerminalServiceTerminalLinkResolveRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let terminalLink: String?
+
+    public init(sessionID: String, terminalLink: String?) {
+        self.sessionID = sessionID
+        self.terminalLink = terminalLink
+    }
+}
+
+public struct TerminalServiceTerminalLinkChunkRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let terminalLinkID: String?
+    public let offset: Int64?
+    public let limit: Int?
+
+    public init(sessionID: String, terminalLinkID: String?, offset: Int64? = nil, limit: Int? = nil) {
+        self.sessionID = sessionID
+        self.terminalLinkID = terminalLinkID
+        self.offset = offset
+        self.limit = limit
+    }
+}
+
+public enum TerminalServiceCommand: Sendable, Equatable {
+    case ping
+    case shutdownIfIdle
+    case shutdown
+    case create(TerminalServiceCreateRequest)
+    case prepareWorkspace(TerminalServicePrepareWorkspaceRequest)
+    case runWorkspaceCommand(TerminalServiceRunWorkspaceCommandRequest)
+    case terminate(TerminalServiceSessionRequest)
+    case list
+    case state(TerminalServiceSessionRequest)
+    case subscribe(TerminalServiceSessionRequest)
+    case control(TerminalServiceControlCommandRequest)
+    case agentSignal(TerminalServiceAgentSignalRequest)
+    case ackAgentSignals(TerminalServiceAgentSignalAcknowledgementRequest)
+    case profileCommand(TerminalServiceProfileCommandRequest)
+    case mobileCredential(TerminalServiceMobileCredentialRequest)
+    case resolveTerminalLink(TerminalServiceTerminalLinkResolveRequest)
+    case readTerminalLinkChunk(TerminalServiceTerminalLinkChunkRequest)
+
+    public var name: String {
+        switch self {
+        case .ping: "ping"
+        case .shutdownIfIdle: "shutdownIfIdle"
+        case .shutdown: "shutdown"
+        case .create: "create"
+        case .prepareWorkspace: "prepareWorkspace"
+        case .runWorkspaceCommand: "runWorkspaceCommand"
+        case .terminate: "terminate"
+        case .list: "list"
+        case .state: "state"
+        case .subscribe: "subscribe"
+        case .control: "control"
+        case .agentSignal: "agentSignal"
+        case .ackAgentSignals: "ackAgentSignals"
+        case .profileCommand: "profileCommand"
+        case .mobileCredential: "mobileCredential"
+        case .resolveTerminalLink: "resolveTerminalLink"
+        case .readTerminalLinkChunk: "readTerminalLinkChunk"
+        }
+    }
+
+    public var sessionID: String? {
+        switch self {
+        case .terminate(let payload), .state(let payload), .subscribe(let payload): payload.sessionID
+        case .control(let payload): payload.sessionID
+        case .agentSignal(let payload): payload.event.sessionID
+        case .ackAgentSignals(let payload): payload.sessionID
+        case .resolveTerminalLink(let payload): payload.sessionID
+        case .readTerminalLinkChunk(let payload): payload.sessionID
+        default: nil
+        }
+    }
+
+    public var controlCommandName: String? {
+        if case .control(let payload) = self { return payload.controlRequest.command }
+        return nil
+    }
+}
+
+extension TerminalServiceCommand: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case ping
+        case shutdownIfIdle
+        case shutdown
+        case create
+        case prepareWorkspace
+        case runWorkspaceCommand
+        case terminate
+        case list
+        case state
+        case subscribe
+        case control
+        case agentSignal
+        case ackAgentSignals
+        case profileCommand
+        case mobileCredential
+        case resolveTerminalLink
+        case readTerminalLinkChunk
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.allKeys.count == 1, let key = container.allKeys.first else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Terminal service command must contain exactly one payload."))
+        }
+        switch key {
+        case .ping:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .ping
+        case .shutdownIfIdle:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .shutdownIfIdle
+        case .shutdown:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .shutdown
+        case .create: self = .create(try container.decode(TerminalServiceCreateRequest.self, forKey: key))
+        case .prepareWorkspace: self = .prepareWorkspace(try container.decode(TerminalServicePrepareWorkspaceRequest.self, forKey: key))
+        case .runWorkspaceCommand: self = .runWorkspaceCommand(try container.decode(TerminalServiceRunWorkspaceCommandRequest.self, forKey: key))
+        case .terminate: self = .terminate(try container.decode(TerminalServiceSessionRequest.self, forKey: key))
+        case .list:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .list
+        case .state: self = .state(try container.decode(TerminalServiceSessionRequest.self, forKey: key))
+        case .subscribe: self = .subscribe(try container.decode(TerminalServiceSessionRequest.self, forKey: key))
+        case .control: self = .control(try container.decode(TerminalServiceControlCommandRequest.self, forKey: key))
+        case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceAgentSignalRequest.self, forKey: key))
+        case .ackAgentSignals: self = .ackAgentSignals(try container.decode(TerminalServiceAgentSignalAcknowledgementRequest.self, forKey: key))
+        case .profileCommand: self = .profileCommand(try container.decode(TerminalServiceProfileCommandRequest.self, forKey: key))
+        case .mobileCredential: self = .mobileCredential(try container.decode(TerminalServiceMobileCredentialRequest.self, forKey: key))
+        case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(TerminalServiceTerminalLinkResolveRequest.self, forKey: key))
+        case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(TerminalServiceTerminalLinkChunkRequest.self, forKey: key))
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .ping: try container.encode(TerminalServiceEmptyPayload(), forKey: .ping)
+        case .shutdownIfIdle: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdownIfIdle)
+        case .shutdown: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdown)
+        case .create(let payload): try container.encode(payload, forKey: .create)
+        case .prepareWorkspace(let payload): try container.encode(payload, forKey: .prepareWorkspace)
+        case .runWorkspaceCommand(let payload): try container.encode(payload, forKey: .runWorkspaceCommand)
+        case .terminate(let payload): try container.encode(payload, forKey: .terminate)
+        case .list: try container.encode(TerminalServiceEmptyPayload(), forKey: .list)
+        case .state(let payload): try container.encode(payload, forKey: .state)
+        case .subscribe(let payload): try container.encode(payload, forKey: .subscribe)
+        case .control(let payload): try container.encode(payload, forKey: .control)
+        case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
+        case .ackAgentSignals(let payload): try container.encode(payload, forKey: .ackAgentSignals)
+        case .profileCommand(let payload): try container.encode(payload, forKey: .profileCommand)
+        case .mobileCredential(let payload): try container.encode(payload, forKey: .mobileCredential)
+        case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
+        case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
+        }
+    }
+}
+
+public enum TerminalServiceMobileCredentialOperation: String, Codable, Sendable, Equatable {
+    case issue
+    case revoke
+    case list
+}
+
+public struct TerminalServiceMobileCredentialRequest: Codable, Sendable, Equatable {
+    public let operation: TerminalServiceMobileCredentialOperation
+    public let installationID: String?
+    public let deviceName: String?
+    public let platform: String?
+
+    public init(
+        operation: TerminalServiceMobileCredentialOperation, installationID: String? = nil, deviceName: String? = nil, platform: String? = nil
+    ) {
+        self.operation = operation
+        self.installationID = installationID
+        self.deviceName = deviceName
+        self.platform = platform
+    }
+}
+
+public struct TerminalServiceMobileCredential: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let installationID: String
+    public let deviceName: String?
+    public let platform: String?
+    public let scopes: [String]
+    public let createdAt: String
+    public let lastUsedAt: String?
+    public let revokedAt: String?
+
+    public init(
+        id: String, installationID: String, deviceName: String?, platform: String?, scopes: [String], createdAt: String, lastUsedAt: String?,
+        revokedAt: String?
+    ) {
+        self.id = id
+        self.installationID = installationID
+        self.deviceName = deviceName
+        self.platform = platform
+        self.scopes = scopes
+        self.createdAt = createdAt
+        self.lastUsedAt = lastUsedAt
+        self.revokedAt = revokedAt
+    }
+}
+
+public enum TerminalServiceProfileCommandOperation: String, Codable, Sendable, Equatable {
+    case projectList
+    case workspaceList
+    case workspaceCreate
+    case workspaceStart
+    case workspaceRestart
+    case agentSignal
+    case terminalList
+    case terminalSend
+    case terminalTail
+}
+
+public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable {
+    public let operation: TerminalServiceProfileCommandOperation
+    public let projectID: String?
+    public let includeArchived: Bool?
+    public let workspaceID: String?
+    public let branch: String?
+    public let title: String?
+    public let targetBranch: String?
+    public let existingBranch: Bool?
+    public let terminalSessionID: String?
+    public let agentEvent: String?
+    public let terminalText: String?
+    public let terminalBytes: Data?
+    public let appendNewline: Bool?
+    public let lineCount: Int?
+
+    public init(
+        operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
+        branch: String? = nil, title: String? = nil, targetBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil,
+        agentEvent: String? = nil, terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
+    ) {
+        self.operation = operation
+        self.projectID = projectID
+        self.includeArchived = includeArchived
+        self.workspaceID = workspaceID
+        self.branch = branch
+        self.title = title
+        self.targetBranch = targetBranch
+        self.existingBranch = existingBranch
+        self.terminalSessionID = terminalSessionID
+        self.agentEvent = agentEvent
+        self.terminalText = terminalText
+        self.terminalBytes = terminalBytes
+        self.appendNewline = appendNewline
+        self.lineCount = lineCount
+    }
+}
+
+public struct TerminalServiceProfileProjectSummary: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let dir: String
+    public let isGitRepo: Bool
+    public let defaultBranch: String?
+    public let isCollapsed: Bool
+
+    public init(id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool) {
+        self.id = id
+        self.name = name
+        self.dir = dir
+        self.isGitRepo = isGitRepo
+        self.defaultBranch = defaultBranch
+        self.isCollapsed = isCollapsed
+    }
+}
+
+public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let projectID: String
+    public let title: String
+    public let dir: String
+    public let runtimePath: String
+    public let dirname: String?
+    public let branch: String?
+    public let targetBranch: String?
+    public let isDefault: Bool
+    public let isArchived: Bool
+    public let isHidden: Bool
+    public let isRunning: Bool
+    public let lastLaunchedAt: String?
+    public let notes: String?
+
+    public init(
+        id: String, projectID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?, targetBranch: String?,
+        isDefault: Bool, isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+    ) {
+        self.id = id
+        self.projectID = projectID
+        self.title = title
+        self.dir = dir
+        self.runtimePath = runtimePath
+        self.dirname = dirname
+        self.branch = branch
+        self.targetBranch = targetBranch
+        self.isDefault = isDefault
+        self.isArchived = isArchived
+        self.isHidden = isHidden
+        self.isRunning = isRunning
+        self.lastLaunchedAt = lastLaunchedAt
+        self.notes = notes
+    }
+}
+
+public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatable {
+    public let message: String
+    public let projects: [TerminalServiceProfileProjectSummary]?
+    public let workspaces: [TerminalServiceProfileWorkspaceRecord]?
+    public let workspace: TerminalServiceProfileWorkspaceRecord?
+    public let terminalSessions: [TerminalServiceSessionSummary]?
+    public let terminalOutput: String?
+
+    public init(
+        message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
+        workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
+        terminalOutput: String? = nil
+    ) {
+        self.message = message
+        self.projects = projects
+        self.workspaces = workspaces
+        self.workspace = workspace
+        self.terminalSessions = terminalSessions
+        self.terminalOutput = terminalOutput
+    }
+}
+
+public enum TerminalServiceWorkspaceLocation: String, Codable, Sendable, Equatable {
+    case local
+    case remote
+}
+
+public struct TerminalServiceWorkspaceRuntimePortMapping: Codable, Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let port: Int
+
+    public init(id: String, name: String, port: Int) {
+        self.id = id
+        self.name = name
+        self.port = port
+    }
+}
+
+public struct TerminalServiceWorkspaceRuntimeManifest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let projectID: String
+    public let deviceID: String?
+    public let location: TerminalServiceWorkspaceLocation
+    public let localPath: String
+    public let remotePath: String?
+    public let branch: String?
+    public let targetBranch: String?
+    public let gitRemoteURL: String?
+    public let namedPorts: [TerminalServiceWorkspaceRuntimePortMapping]
+    public let processEnvironment: [String: String]
+    public let allowedFileRoots: [String]
+
+    public init(
+        workspaceID: String, projectID: String, deviceID: String?, location: TerminalServiceWorkspaceLocation, localPath: String, remotePath: String?,
+        branch: String?, targetBranch: String?, gitRemoteURL: String?, namedPorts: [TerminalServiceWorkspaceRuntimePortMapping],
+        processEnvironment: [String: String], allowedFileRoots: [String]
+    ) {
+        self.workspaceID = workspaceID
+        self.projectID = projectID
+        self.deviceID = deviceID
+        self.location = location
+        self.localPath = localPath
+        self.remotePath = remotePath
+        self.branch = branch
+        self.targetBranch = targetBranch
+        self.gitRemoteURL = gitRemoteURL
+        self.namedPorts = namedPorts
+        self.processEnvironment = processEnvironment
+        self.allowedFileRoots = allowedFileRoots
+    }
+}
+
+public struct TerminalServiceWorktreeRefreshRequest: Codable, Sendable, Equatable {
+    public let path: String
+    public let branch: String
+    public let hostName: String
+
+    public init(path: String, branch: String, hostName: String) {
+        self.path = path
+        self.branch = branch
+        self.hostName = hostName
+    }
+}
+
+public struct TerminalServiceWorkspaceCommandRequest: Codable, Sendable, Equatable {
+    public let command: String
+    public let workingDirectory: String
+    public let environment: [String: String]
+    public let logPath: String?
+
+    public init(command: String, workingDirectory: String, environment: [String: String] = [:], logPath: String? = nil) {
+        self.command = command
+        self.workingDirectory = workingDirectory
+        self.environment = environment
+        self.logPath = logPath
+    }
+}
+
+public struct TerminalServiceCommandResult: Codable, Sendable, Equatable {
+    public let exitCode: Int
+    public let logPath: String
+
+    public init(exitCode: Int, logPath: String) {
+        self.exitCode = exitCode
+        self.logPath = logPath
+    }
+}
+
+public struct TerminalServiceAgentSignalEvent: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let sessionID: String
+    public let workspaceID: String?
+    public let workspacePath: String?
+    public let type: String
+    public let provider: String
+    public let label: String?
+    public let terminalTrackingID: String?
+    public let terminalNativeID: String?
+    public let codexThreadID: String?
+    public let environmentKeys: [String]
+    public let createdAt: String
+
+    public init(
+        id: String, sessionID: String, workspaceID: String?, workspacePath: String?, type: String, provider: String = "spaces", label: String? = nil,
+        terminalTrackingID: String? = nil, terminalNativeID: String? = nil, codexThreadID: String? = nil, environmentKeys: [String] = [],
+        createdAt: String
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.workspaceID = workspaceID
+        self.workspacePath = workspacePath
+        self.type = type
+        self.provider = provider
+        self.label = label
+        self.terminalTrackingID = terminalTrackingID
+        self.terminalNativeID = terminalNativeID
+        self.codexThreadID = codexThreadID
+        self.environmentKeys = environmentKeys
+        self.createdAt = createdAt
+    }
+}
+
+public struct TerminalServiceTerminalLinkMetadata: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let source: String
+    public let originalLink: String
+    public let displayName: String
+    public let contentType: String?
+    public let mediaKind: String?
+    public let byteCount: Int64?
+    public let externalURL: String?
+
+    public init(
+        id: String, source: String, originalLink: String, displayName: String, contentType: String?, mediaKind: String?, byteCount: Int64?,
+        externalURL: String?
+    ) {
+        self.id = id
+        self.source = source
+        self.originalLink = originalLink
+        self.displayName = displayName
+        self.contentType = contentType
+        self.mediaKind = mediaKind
+        self.byteCount = byteCount
+        self.externalURL = externalURL
+    }
+}
+
+public struct TerminalServiceTerminalLinkChunk: Codable, Sendable, Equatable {
+    public let linkID: String
+    public let offset: Int64
+    public let byteCount: Int
+    public let isFinal: Bool
+    public let base64Data: String
+
+    public init(linkID: String, offset: Int64, byteCount: Int, isFinal: Bool, base64Data: String) {
+        self.linkID = linkID
+        self.offset = offset
+        self.byteCount = byteCount
+        self.isFinal = isFinal
+        self.base64Data = base64Data
     }
 }
 
@@ -24,10 +606,16 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
     public let childPID: Int32?
     public let controlSocketPath: String
     public let outputPath: String
+    public let launchConfiguration: TerminalSessionLaunchConfiguration?
+    public let runtimeState: TerminalSessionRuntimeState?
+    public let attachmentSnapshot: TerminalSessionAttachmentSnapshot?
+    public let hasFinalRender: Bool
 
     public init(
         id: String, title: String, workingDirectory: String, backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy,
-        state: TerminalSessionState, servicePID: Int32, childPID: Int32?, controlSocketPath: String, outputPath: String
+        state: TerminalSessionState, servicePID: Int32, childPID: Int32?, controlSocketPath: String, outputPath: String,
+        launchConfiguration: TerminalSessionLaunchConfiguration? = nil, runtimeState: TerminalSessionRuntimeState? = nil,
+        attachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil, hasFinalRender: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -39,25 +627,118 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
         self.childPID = childPID
         self.controlSocketPath = controlSocketPath
         self.outputPath = outputPath
+        self.launchConfiguration = launchConfiguration
+        self.runtimeState = runtimeState
+        self.attachmentSnapshot = attachmentSnapshot
+        self.hasFinalRender = hasFinalRender
+    }
+}
+
+public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
+    public let version: String
+    public let artifactVersion: String?
+    public let certificateFingerprint: String?
+    public let activeSessionCount: Int
+
+    public init(version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int) {
+        self.version = version
+        self.artifactVersion = artifactVersion
+        self.certificateFingerprint = certificateFingerprint
+        self.activeSessionCount = activeSessionCount
     }
 }
 
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case message
+        case session
+        case sessions
+        case servicePID
+        case commandResult
+        case sessionState
+        case controlResponse
+        case terminalLinkMetadata
+        case terminalLinkChunk
+        case agentSignals
+        case profile
+        case mobileCredentialToken
+        case mobileCredentials
+        case daemonStatus
+    }
+
     public let ok: Bool
     public let message: String
     public let session: TerminalServiceSessionSummary?
     public let sessions: [TerminalServiceSessionSummary]?
     public let servicePID: Int32?
+    public let commandResult: TerminalServiceCommandResult?
+    public let sessionState: GhosttyRemoteSessionStatePayload?
+    public let controlResponse: TerminalControlResponse?
+    public let terminalLinkMetadata: TerminalServiceTerminalLinkMetadata?
+    public let terminalLinkChunk: TerminalServiceTerminalLinkChunk?
+    public let agentSignals: [TerminalServiceAgentSignalEvent]?
+    public let profile: TerminalServiceProfileCommandResponse?
+    public let mobileCredentialToken: String?
+    public let mobileCredentials: [TerminalServiceMobileCredential]?
+    public let daemonStatus: TerminalServiceDaemonStatus?
+    let streamSocketPath: String?
 
     public init(
         ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
-        servicePID: Int32? = nil
+        servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
+        controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
+        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil,
+        profile: TerminalServiceProfileCommandResponse? = nil, mobileCredentialToken: String? = nil,
+        mobileCredentials: [TerminalServiceMobileCredential]? = nil, daemonStatus: TerminalServiceDaemonStatus? = nil, streamSocketPath: String? = nil
     ) {
         self.ok = ok
         self.message = message
         self.session = session
         self.sessions = sessions
         self.servicePID = servicePID
+        self.commandResult = commandResult
+        self.sessionState = sessionState
+        self.controlResponse = controlResponse
+        self.terminalLinkMetadata = terminalLinkMetadata
+        self.terminalLinkChunk = terminalLinkChunk
+        self.agentSignals = agentSignals
+        self.profile = profile
+        self.mobileCredentialToken = mobileCredentialToken
+        self.mobileCredentials = mobileCredentials
+        self.daemonStatus = daemonStatus
+        self.streamSocketPath = streamSocketPath
+    }
+
+    public init(
+        ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
+        servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
+        controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
+        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil
+    ) {
+        self.init(
+            ok: ok, message: message, session: session, sessions: sessions, servicePID: servicePID, commandResult: commandResult,
+            sessionState: sessionState, controlResponse: controlResponse, terminalLinkMetadata: terminalLinkMetadata,
+            terminalLinkChunk: terminalLinkChunk, agentSignals: agentSignals, profile: nil)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            ok: try container.decode(Bool.self, forKey: .ok), message: try container.decode(String.self, forKey: .message),
+            session: try container.decodeIfPresent(TerminalServiceSessionSummary.self, forKey: .session),
+            sessions: try container.decodeIfPresent([TerminalServiceSessionSummary].self, forKey: .sessions),
+            servicePID: try container.decodeIfPresent(Int32.self, forKey: .servicePID),
+            commandResult: try container.decodeIfPresent(TerminalServiceCommandResult.self, forKey: .commandResult),
+            sessionState: try container.decodeIfPresent(GhosttyRemoteSessionStatePayload.self, forKey: .sessionState),
+            controlResponse: try container.decodeIfPresent(TerminalControlResponse.self, forKey: .controlResponse),
+            terminalLinkMetadata: try container.decodeIfPresent(TerminalServiceTerminalLinkMetadata.self, forKey: .terminalLinkMetadata),
+            terminalLinkChunk: try container.decodeIfPresent(TerminalServiceTerminalLinkChunk.self, forKey: .terminalLinkChunk),
+            agentSignals: try container.decodeIfPresent([TerminalServiceAgentSignalEvent].self, forKey: .agentSignals),
+            profile: try container.decodeIfPresent(TerminalServiceProfileCommandResponse.self, forKey: .profile),
+            mobileCredentialToken: try container.decodeIfPresent(String.self, forKey: .mobileCredentialToken),
+            mobileCredentials: try container.decodeIfPresent([TerminalServiceMobileCredential].self, forKey: .mobileCredentials),
+            daemonStatus: try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus))
     }
 }
 
@@ -88,7 +769,7 @@ public final class TerminalServiceServer {
 
     public func start() throws {
         try removeSocketIfPresent()
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_UNIX, Self.streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 
         var yes: Int32 = 1
@@ -152,7 +833,7 @@ public final class TerminalServiceServer {
                 if let data = try? TerminalServiceCodec.encodeResponse(fallback) { try? Self.writeAll(data: data, to: clientFD) }
             }
 
-            shutdown(clientFD, SHUT_RDWR)
+            Self.shutdownSocket(clientFD)
             close(clientFD)
         }
     }
@@ -168,7 +849,7 @@ public final class TerminalServiceServer {
         let utf8Path = path.utf8CString
         guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
         withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
-            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
+            utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
         }
         return address
     }
@@ -185,7 +866,7 @@ public final class TerminalServiceServer {
         guard fcntl(fileDescriptor, F_SETFL, currentFlags & ~O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
-    private static func writeAll(data: Data, to fileDescriptor: Int32) throws {
+    fileprivate static func writeAll(data: Data, to fileDescriptor: Int32) throws {
         try data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else { return }
             var bytesRemaining = rawBuffer.count
@@ -199,7 +880,7 @@ public final class TerminalServiceServer {
         }
     }
 
-    private static func readAll(from fileDescriptor: Int32) throws -> Data {
+    fileprivate static func readAll(from fileDescriptor: Int32) throws -> Data {
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -210,11 +891,27 @@ public final class TerminalServiceServer {
         }
         return data
     }
+
+    private static func shutdownSocket(_ fileDescriptor: Int32) {
+        #if canImport(Darwin)
+            shutdown(fileDescriptor, SHUT_RDWR)
+        #else
+            shutdown(fileDescriptor, Int32(SHUT_RDWR))
+        #endif
+    }
+
+    private static var streamSocketType: Int32 {
+        #if canImport(Glibc)
+            Int32(SOCK_STREAM.rawValue)
+        #else
+            SOCK_STREAM
+        #endif
+    }
 }
 
 public enum TerminalServiceClient {
     public static func send(request: TerminalServiceRequest, socketPath: String, timeout: TimeInterval = 5) throws -> TerminalServiceResponse {
-        let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        let socketFD = socket(AF_UNIX, streamSocketType, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(socketFD) }
 
@@ -232,7 +929,25 @@ public enum TerminalServiceClient {
 
         let payload = try TerminalServiceCodec.encodeRequest(request)
         try writeAll(data: payload, to: socketFD)
-        shutdown(socketFD, SHUT_WR)
+        shutdownSocketWrite(socketFD)
+
+        let responseData = try readAll(from: socketFD)
+        return try TerminalServiceCodec.decodeResponse(responseData)
+    }
+
+    public static func send(request: TerminalServiceRequest, host: String, port: Int, authToken: String? = nil, timeout: TimeInterval = 15) throws
+        -> TerminalServiceResponse
+    {
+        let socketFD = try connectSocket(host: host, port: port)
+        defer { close(socketFD) }
+
+        var timeValue = timeval(timeout)
+        setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeValue, socklen_t(MemoryLayout<timeval>.size))
+
+        let payload = try TerminalServiceCodec.encodeRequest(request.withAuthToken(authToken ?? request.authToken))
+        try writeAll(data: payload, to: socketFD)
+        shutdownSocketWrite(socketFD)
 
         let responseData = try readAll(from: socketFD)
         return try TerminalServiceCodec.decodeResponse(responseData)
@@ -245,7 +960,7 @@ public enum TerminalServiceClient {
         let utf8Path = path.utf8CString
         guard utf8Path.count <= maxLength else { throw POSIXError(.ENAMETOOLONG) }
         withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
-            _ = utf8Path.withUnsafeBufferPointer { buffer in memcpy(pointer, buffer.baseAddress, buffer.count) }
+            utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
         }
         return address
     }
@@ -275,12 +990,202 @@ public enum TerminalServiceClient {
         }
         return data
     }
+
+    private static func connectSocket(host: String, port: Int) throws -> Int32 {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = streamSocketType
+
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, String(port), &hints, &result)
+        guard status == 0, let first = result else { throw POSIXError(.EHOSTUNREACH) }
+        defer { freeaddrinfo(first) }
+
+        var current: UnsafeMutablePointer<addrinfo>? = first
+        var lastErrno: Int32 = EIO
+        while let info = current {
+            let socketFD = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+            if socketFD >= 0 {
+                if connect(socketFD, info.pointee.ai_addr, info.pointee.ai_addrlen) == 0 { return socketFD }
+                lastErrno = errno
+                close(socketFD)
+            } else {
+                lastErrno = errno
+            }
+            current = info.pointee.ai_next
+        }
+        throw POSIXError(POSIXErrorCode(rawValue: lastErrno) ?? .EIO)
+    }
+
+    private static func shutdownSocketWrite(_ fileDescriptor: Int32) {
+        #if canImport(Darwin)
+            shutdown(fileDescriptor, SHUT_WR)
+        #else
+            shutdown(fileDescriptor, Int32(SHUT_WR))
+        #endif
+    }
+
+    private static var streamSocketType: Int32 {
+        #if canImport(Glibc)
+            Int32(SOCK_STREAM.rawValue)
+        #else
+            SOCK_STREAM
+        #endif
+    }
+}
+
+public final class TerminalServiceTCPServer: @unchecked Sendable {
+    private let host: String
+    private let port: Int
+    private let authToken: String?
+    private let queue: DispatchQueue
+    private let handleRequest: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
+    private var listenSocketFD: Int32 = -1
+    private var acceptSource: DispatchSourceRead?
+
+    public private(set) var listeningPort: Int = 0
+
+    public init(
+        host: String, port: Int, authToken: String? = nil, queue: DispatchQueue,
+        handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
+    ) {
+        self.host = host
+        self.port = port
+        self.authToken = authToken
+        self.queue = queue
+        self.handleRequest = handleRequest
+    }
+
+    public func start() throws {
+        let socketFD = socket(AF_INET, Self.streamSocketType, 0)
+        guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+
+        var yes: Int32 = 1
+        setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        #if canImport(Darwin)
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(UInt16(port).bigEndian)
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            close(socketFD)
+            throw POSIXError(.EADDRNOTAVAIL)
+        }
+
+        let bindResult = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                bind(socketFD, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+            close(socketFD)
+            throw POSIXError(code)
+        }
+
+        guard listen(socketFD, 16) == 0 else {
+            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+            close(socketFD)
+            throw POSIXError(code)
+        }
+        try setNonBlocking(socketFD)
+
+        listeningPort = try Self.resolveListeningPort(socketFD: socketFD)
+        listenSocketFD = socketFD
+        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
+        source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
+        source.setCancelHandler { [weak self] in
+            guard let self else { return }
+            if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
+        }
+        acceptSource = source
+        source.resume()
+    }
+
+    public func stop() {
+        acceptSource?.cancel()
+        acceptSource = nil
+    }
+
+    private func acceptReadyConnections() {
+        while true {
+            let clientFD = accept(listenSocketFD, nil, nil)
+            if clientFD < 0 {
+                if errno == EWOULDBLOCK || errno == EAGAIN { return }
+                return
+            }
+
+            do {
+                try setBlocking(clientFD)
+                let requestData = try TerminalServiceServer.readAll(from: clientFD)
+                let request = try TerminalServiceCodec.decodeRequest(requestData)
+                let response = try validateAndHandle(request: request)
+                let responseData = try TerminalServiceCodec.encodeResponse(response)
+                try TerminalServiceServer.writeAll(data: responseData, to: clientFD)
+            } catch {
+                let fallback = TerminalServiceResponse(ok: false, message: String(describing: error))
+                if let data = try? TerminalServiceCodec.encodeResponse(fallback) { try? TerminalServiceServer.writeAll(data: data, to: clientFD) }
+            }
+
+            Self.shutdownSocket(clientFD)
+            close(clientFD)
+        }
+    }
+
+    private func validateAndHandle(request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+        if let authToken, authToken != request.authToken { return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.") }
+        return try handleRequest(request)
+    }
+
+    private func setNonBlocking(_ fileDescriptor: Int32) throws {
+        let currentFlags = fcntl(fileDescriptor, F_GETFL)
+        guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard fcntl(fileDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    private func setBlocking(_ fileDescriptor: Int32) throws {
+        let currentFlags = fcntl(fileDescriptor, F_GETFL)
+        guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard fcntl(fileDescriptor, F_SETFL, currentFlags & ~O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    }
+
+    private static func resolveListeningPort(socketFD: Int32) throws -> Int {
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let result = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in getsockname(socketFD, sockaddrPointer, &length) }
+        }
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return Int(UInt16(bigEndian: address.sin_port))
+    }
+
+    private static func shutdownSocket(_ fileDescriptor: Int32) {
+        #if canImport(Darwin)
+            shutdown(fileDescriptor, SHUT_RDWR)
+        #else
+            shutdown(fileDescriptor, Int32(SHUT_RDWR))
+        #endif
+    }
+
+    private static var streamSocketType: Int32 {
+        #if canImport(Glibc)
+            Int32(SOCK_STREAM.rawValue)
+        #else
+            SOCK_STREAM
+        #endif
+    }
 }
 
 extension timeval {
     fileprivate init(_ seconds: TimeInterval) {
         let wholeSeconds = Int(seconds.rounded(.down))
-        let microseconds = Int32((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #if canImport(Glibc)
+            let microseconds = Int((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #else
+            let microseconds = Int32((seconds - TimeInterval(wholeSeconds)) * 1_000_000)
+        #endif
         self.init(tv_sec: wholeSeconds, tv_usec: microseconds)
     }
 }

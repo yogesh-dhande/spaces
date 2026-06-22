@@ -1,5 +1,10 @@
-import Darwin
 import Foundation
+
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
 
 public enum Shell {
     private struct LoginShellPathCacheKey: Hashable {
@@ -290,7 +295,7 @@ public enum Shell {
 
     private static func currentUserAccountInfo() -> (shellPath: String, homePath: String)? {
         let uid = getuid()
-        guard let requiredSize = sysconfBufferSize(_SC_GETPW_R_SIZE_MAX) else { return nil }
+        guard let requiredSize = sysconfBufferSize(Int32(_SC_GETPW_R_SIZE_MAX)) else { return nil }
         var buffer = [CChar](repeating: 0, count: requiredSize)
         var passwd = passwd()
         var result: UnsafeMutablePointer<passwd>?
@@ -360,45 +365,60 @@ public enum Shell {
     private static func spawnIsolatedProbeProcess(
         executablePath: String, arguments: [String], environment: [String: String], output: Pipe, error: Pipe
     ) -> ProbeProcess? {
-        var fileActions: posix_spawn_file_actions_t? = nil
-        guard posix_spawn_file_actions_init(&fileActions) == 0 else { return nil }
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        #if os(Linux)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executablePath)
+            process.arguments = arguments
+            process.environment = environment
+            process.standardOutput = output
+            process.standardError = error
+            do {
+                try process.run()
+                output.fileHandleForWriting.closeFile()
+                error.fileHandleForWriting.closeFile()
+                return ProbeProcess(pid: process.processIdentifier)
+            } catch { return nil }
+        #else
+            var fileActions: posix_spawn_file_actions_t? = nil
+            guard posix_spawn_file_actions_init(&fileActions) == 0 else { return nil }
+            defer { posix_spawn_file_actions_destroy(&fileActions) }
 
-        let outputFD = output.fileHandleForWriting.fileDescriptor
-        let errorFD = error.fileHandleForWriting.fileDescriptor
-        guard posix_spawn_file_actions_adddup2(&fileActions, outputFD, STDOUT_FILENO) == 0,
-            posix_spawn_file_actions_adddup2(&fileActions, errorFD, STDERR_FILENO) == 0,
-            posix_spawn_file_actions_addclose(&fileActions, outputFD) == 0, posix_spawn_file_actions_addclose(&fileActions, errorFD) == 0
-        else { return nil }
+            let outputFD = output.fileHandleForWriting.fileDescriptor
+            let errorFD = error.fileHandleForWriting.fileDescriptor
+            guard posix_spawn_file_actions_adddup2(&fileActions, outputFD, STDOUT_FILENO) == 0,
+                posix_spawn_file_actions_adddup2(&fileActions, errorFD, STDERR_FILENO) == 0,
+                posix_spawn_file_actions_addclose(&fileActions, outputFD) == 0, posix_spawn_file_actions_addclose(&fileActions, errorFD) == 0
+            else { return nil }
 
-        var attributes: posix_spawnattr_t? = nil
-        guard posix_spawnattr_init(&attributes) == 0 else { return nil }
-        defer { posix_spawnattr_destroy(&attributes) }
+            var attributes: posix_spawnattr_t? = nil
+            guard posix_spawnattr_init(&attributes) == 0 else { return nil }
+            defer { posix_spawnattr_destroy(&attributes) }
 
-        let processGroupID: pid_t = 0
-        let spawnFlags = Int16(POSIX_SPAWN_SETPGROUP)
-        guard posix_spawnattr_setpgroup(&attributes, processGroupID) == 0,
-            // With POSIX_SPAWN_SETPGROUP and a zero pgroup value, Darwin starts
-            // the child as the leader of its own process group before shell init
-            // runs. Any helper spawned immediately by shell startup inherits that
-            // isolated group and can be reaped with a single group signal later.
-            posix_spawnattr_setflags(&attributes, spawnFlags) == 0
-        else { return nil }
+            let processGroupID: pid_t = 0
+            let spawnFlags = Int16(POSIX_SPAWN_SETPGROUP)
+            guard posix_spawnattr_setpgroup(&attributes, processGroupID) == 0,
+                // With POSIX_SPAWN_SETPGROUP and a zero pgroup value, Darwin starts
+                // the child as the leader of its own process group before shell init
+                // runs. Any helper spawned immediately by shell startup inherits that
+                // isolated group and can be reaped with a single group signal later.
+                posix_spawnattr_setflags(&attributes, spawnFlags) == 0
+            else { return nil }
 
-        var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + arguments).map { strdup($0) }
-        argv.append(nil)
-        defer { for case let pointer? in argv { free(pointer) } }
+            var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + arguments).map { strdup($0) }
+            argv.append(nil)
+            defer { for case let pointer? in argv { free(pointer) } }
 
-        var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
-        envp.append(nil)
-        defer { for case let pointer? in envp { free(pointer) } }
+            var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
+            envp.append(nil)
+            defer { for case let pointer? in envp { free(pointer) } }
 
-        var pid: pid_t = 0
-        let spawnResult = posix_spawn(&pid, executablePath, &fileActions, &attributes, &argv, &envp)
-        output.fileHandleForWriting.closeFile()
-        error.fileHandleForWriting.closeFile()
-        guard spawnResult == 0, pid > 0 else { return nil }
-        return ProbeProcess(pid: pid)
+            var pid: pid_t = 0
+            let spawnResult = posix_spawn(&pid, executablePath, &fileActions, &attributes, &argv, &envp)
+            output.fileHandleForWriting.closeFile()
+            error.fileHandleForWriting.closeFile()
+            guard spawnResult == 0, pid > 0 else { return nil }
+            return ProbeProcess(pid: pid)
+        #endif
     }
 
     private static func waitForProcessExit(_ process: ProbeProcess, timeout: TimeInterval) -> Bool {
@@ -517,91 +537,118 @@ public enum Shell {
             throw NSError(domain: "spaces.shell", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty command"])
         }
         let environment = processEnvironment()
-        if cwd == nil, let executablePath = resolvedExecutablePath(for: executable, environment: environment) {
-            var stdoutPipe: [Int32] = [0, 0]
-            var stderrPipe: [Int32] = [0, 0]
-            guard pipe(&stdoutPipe) == 0 else {
-                let errnoValue = errno
-                throw NSError(
-                    domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+        #if os(Linux)
+            let process = Process()
+            let out = Pipe()
+            let err = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [executable] + Array(command.dropFirst())
+            process.environment = environment
+            process.standardOutput = out
+            process.standardError = err
+            if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
+            try process.run()
+            process.waitUntilExit()
+
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            if process.terminationStatus != 0 {
+                let errData = err.fileHandleForReading.readDataToEndOfFile()
+                let text = String(data: errData, encoding: .utf8) ?? ""
+                throw NSError(domain: "spaces.shell", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
             }
-            guard pipe(&stderrPipe) == 0 else {
-                let errnoValue = errno
-                close(stdoutPipe[0])
+
+            return String(data: data, encoding: .utf8) ?? ""
+        #else
+            if cwd == nil, let executablePath = resolvedExecutablePath(for: executable, environment: environment) {
+                var stdoutPipe: [Int32] = [0, 0]
+                var stderrPipe: [Int32] = [0, 0]
+                guard pipe(&stdoutPipe) == 0 else {
+                    let errnoValue = errno
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(errnoValue),
+                        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                }
+                guard pipe(&stderrPipe) == 0 else {
+                    let errnoValue = errno
+                    close(stdoutPipe[0])
+                    close(stdoutPipe[1])
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(errnoValue),
+                        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                }
+
+                var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + Array(command.dropFirst())).map { strdup($0) }
+                argv.append(nil)
+                defer { for case let pointer? in argv { free(pointer) } }
+
+                var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
+                envp.append(nil)
+                defer { for case let pointer? in envp { free(pointer) } }
+
+                var fileActions: posix_spawn_file_actions_t? = nil
+                posix_spawn_file_actions_init(&fileActions)
+                defer { posix_spawn_file_actions_destroy(&fileActions) }
+                posix_spawn_file_actions_adddup2(&fileActions, stdoutPipe[1], STDOUT_FILENO)
+                posix_spawn_file_actions_adddup2(&fileActions, stderrPipe[1], STDERR_FILENO)
+                posix_spawn_file_actions_addclose(&fileActions, stdoutPipe[0])
+                posix_spawn_file_actions_addclose(&fileActions, stderrPipe[0])
+                posix_spawn_file_actions_addclose(&fileActions, stdoutPipe[1])
+                posix_spawn_file_actions_addclose(&fileActions, stderrPipe[1])
+
+                var pid: pid_t = 0
+                let spawnResult = posix_spawn(&pid, executablePath, &fileActions, nil, &argv, &envp)
                 close(stdoutPipe[1])
-                throw NSError(
-                    domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                close(stderrPipe[1])
+                if spawnResult != 0 {
+                    close(stdoutPipe[0])
+                    close(stderrPipe[0])
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(spawnResult),
+                        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(spawnResult))])
+                }
+
+                let stdoutHandle = FileHandle(fileDescriptor: stdoutPipe[0], closeOnDealloc: true)
+                let stderrHandle = FileHandle(fileDescriptor: stderrPipe[0], closeOnDealloc: true)
+                let stdoutData = stdoutHandle.readDataToEndOfFile()
+                let stderrData = stderrHandle.readDataToEndOfFile()
+
+                var status: Int32 = 0
+                if waitpid(pid, &status, 0) == -1 {
+                    let errnoValue = errno
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain, code: Int(errnoValue),
+                        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
+                }
+
+                let terminationStatus = waitStatus(status)
+                if terminationStatus != 0 {
+                    let text = String(data: stderrData, encoding: .utf8) ?? ""
+                    throw NSError(domain: "spaces.shell", code: Int(terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
+                }
+                return String(data: stdoutData, encoding: .utf8) ?? ""
             }
 
-            var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + Array(command.dropFirst())).map { strdup($0) }
-            argv.append(nil)
-            defer { for case let pointer? in argv { free(pointer) } }
+            let process = Process()
+            let out = Pipe()
+            let err = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [executable] + Array(command.dropFirst())
+            process.environment = environment
+            process.standardOutput = out
+            process.standardError = err
+            if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
+            try process.run()
+            process.waitUntilExit()
 
-            var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
-            envp.append(nil)
-            defer { for case let pointer? in envp { free(pointer) } }
-
-            var fileActions: posix_spawn_file_actions_t? = nil
-            posix_spawn_file_actions_init(&fileActions)
-            defer { posix_spawn_file_actions_destroy(&fileActions) }
-            posix_spawn_file_actions_adddup2(&fileActions, stdoutPipe[1], STDOUT_FILENO)
-            posix_spawn_file_actions_adddup2(&fileActions, stderrPipe[1], STDERR_FILENO)
-            posix_spawn_file_actions_addclose(&fileActions, stdoutPipe[0])
-            posix_spawn_file_actions_addclose(&fileActions, stderrPipe[0])
-            posix_spawn_file_actions_addclose(&fileActions, stdoutPipe[1])
-            posix_spawn_file_actions_addclose(&fileActions, stderrPipe[1])
-
-            var pid: pid_t = 0
-            let spawnResult = posix_spawn(&pid, executablePath, &fileActions, nil, &argv, &envp)
-            close(stdoutPipe[1])
-            close(stderrPipe[1])
-            if spawnResult != 0 {
-                close(stdoutPipe[0])
-                close(stderrPipe[0])
-                throw NSError(
-                    domain: NSPOSIXErrorDomain, code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(spawnResult))])
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            if process.terminationStatus != 0 {
+                let errData = err.fileHandleForReading.readDataToEndOfFile()
+                let text = String(data: errData, encoding: .utf8) ?? ""
+                throw NSError(domain: "spaces.shell", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
             }
 
-            let stdoutHandle = FileHandle(fileDescriptor: stdoutPipe[0], closeOnDealloc: true)
-            let stderrHandle = FileHandle(fileDescriptor: stderrPipe[0], closeOnDealloc: true)
-            let stdoutData = stdoutHandle.readDataToEndOfFile()
-            let stderrData = stderrHandle.readDataToEndOfFile()
-
-            var status: Int32 = 0
-            if waitpid(pid, &status, 0) == -1 {
-                let errnoValue = errno
-                throw NSError(
-                    domain: NSPOSIXErrorDomain, code: Int(errnoValue), userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(errnoValue))])
-            }
-
-            let terminationStatus = waitStatus(status)
-            if terminationStatus != 0 {
-                let text = String(data: stderrData, encoding: .utf8) ?? ""
-                throw NSError(domain: "spaces.shell", code: Int(terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
-            }
-            return String(data: stdoutData, encoding: .utf8) ?? ""
-        }
-
-        let process = Process()
-        let out = Pipe()
-        let err = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [executable] + Array(command.dropFirst())
-        process.environment = environment
-        process.standardOutput = out
-        process.standardError = err
-        if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
-        try process.run()
-        process.waitUntilExit()
-
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        if process.terminationStatus != 0 {
-            let errData = err.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: errData, encoding: .utf8) ?? ""
-            throw NSError(domain: "spaces.shell", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
-        }
-
-        return String(data: data, encoding: .utf8) ?? ""
+            return String(data: data, encoding: .utf8) ?? ""
+        #endif
     }
 
     public static func currentProcessEnvironment() -> [String: String] { processEnvironment() }

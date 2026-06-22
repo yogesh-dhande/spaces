@@ -1,5 +1,10 @@
-import Darwin
 import Foundation
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 public enum SpacesProfileSource: String, Sendable, Codable, Equatable {
     case explicitDatabasePath = "explicit-db-path"

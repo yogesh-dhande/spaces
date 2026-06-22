@@ -48,6 +48,51 @@ private final class TerminalCloseCapture: @unchecked Sendable { var sessionIDs: 
 
 private final class TerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
+private final class RemoteStateCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let sessionID: String
+    private let workspaceID: String
+    private let workingDirectory: String
+    private var recordedRequests: [TerminalServiceRequest] = []
+
+    init(sessionID: String, workspaceID: String, workingDirectory: String) {
+        self.sessionID = sessionID
+        self.workspaceID = workspaceID
+        self.workingDirectory = workingDirectory
+    }
+
+    func client(target _: SpacesDaemonConnectionTarget, request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+        lock.lock()
+        recordedRequests.append(request)
+        lock.unlock()
+
+        guard case .state(let payload) = request.command, payload.sessionID == sessionID else {
+            return TerminalServiceResponse(ok: true, message: "ok")
+        }
+        let timestamp = "2026-06-11T00:00:00Z"
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 42, childPID: 4242, state: .running, updatedAt: timestamp, title: "shell-1",
+            workingDirectory: workingDirectory)
+        let client = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: timestamp)
+        let attachment = TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: timestamp)
+        return TerminalServiceResponse(
+            ok: true, message: "state",
+            sessionState: GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: timestamp, sessionStateRevision: 1,
+                sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]), title: "shell-1",
+                workingDirectory: workingDirectory, outputByteCount: 0))
+    }
+
+    func requests() -> [TerminalServiceRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRequests
+    }
+}
+
 private func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
     let digest = SHA256.hash(data: Data("\(namespace)\u{0}\(source)".utf8)).map { String(format: "%02x", $0) }.joined()
     let cleaned = preferredName.map { char -> String in
@@ -486,6 +531,9 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true).path
+        setenv(SpacesProfile.databasePathEnvironmentVariable, dbPath, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeDir, 1)
         let store = try SQLiteStore(path: dbPath)
         let openCapture = TerminalOpenCapture()
         let focusCapture = TerminalFocusCapture()
@@ -2431,6 +2479,57 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
     }
 
+    func testFocusNextWindowHidesAppUsesChromeURLFocusWhenScannedTabQueryFailsFromBuiltInTerminal() throws {
+        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let chromeFocusLog = root.appendingPathComponent("browser-cycle-scan-fail-url-focus.log")
+        let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-scan-fail-tab-index.log")
+        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-scan-fail-yabai.log")
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        _ = project
+
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-browser-scan-fail", workspaceID: workspace.id, app: "Google Chrome", title: "Docs",
+                targetURL: "http://localhost:3001/docs/", windowID: 302, role: "browser", orderIndex: 1, lastSeenAt: "now"))
+        let process = RunningProcessRecord(
+            id: "process-spaces-browser-cycle-scan-fail", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
+            terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-scan-fail",
+            terminalNativeID: "spaces-session-browser-cycle-scan-fail", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+            exitedAt: nil)
+        try store.upsert(runningProcess: process)
+        try store.upsert(
+            window: WindowRecord(
+                id: "window-terminal-scan-fail", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend",
+                detail: "npm run frontend", targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-scan-fail",
+                terminalNativeID: "spaces-session-browser-cycle-scan-fail", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+
+        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+            try withEnv(name: "MOCK_CHROME_SCAN_FAIL", value: "1") {
+                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
+                    try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: chromeTabIndexLog.path) {
+                        try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
+                            let hidesApp = try orchestrator.focusNextWindowHidesApp(
+                                workspaceID: workspace.id, requestID: "cycle-request-browser-focus-scan-fail",
+                                preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle-scan-fail")
+                            XCTAssertTrue(hidesApp)
+                        }
+                    }
+                }
+            }
+        }
+
+        let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
+        XCTAssertEqual(focusedURLs, ["http://localhost:3001/docs/"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: chromeTabIndexLog.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
+    }
+
     func testFocusNextWindowHidesAppNormalizesBrowserTargetURLFromBuiltInTerminal() throws {
         let store = try makeTemporaryStore()
         let root = try makeTempDirectory()
@@ -2746,7 +2845,7 @@ final class OrchestratorTests: XCTestCase {
     func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWithoutYabaiWindowIDWhileSessionIsLive() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, )
+        let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -2791,7 +2890,7 @@ final class OrchestratorTests: XCTestCase {
     func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowUntilHostDetachesStaleRemoteAttachment() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, )
+        let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -3360,6 +3459,12 @@ final class OrchestratorTests: XCTestCase {
         let openCapture = TerminalOpenCapture()
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
+        let killLog = root.appendingPathComponent("kill.log").path
+        let killMock = """
+            #!/bin/sh
+            printf '%s\\n' "$*" >> "$SPACES_TEST_KILL_LOG"
+            exit 0
+            """
         let orchestrator = WorkspaceOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
@@ -3383,7 +3488,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: nil, status: .running,
+                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: 999_999, status: .running,
                 logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
@@ -3392,13 +3497,16 @@ final class OrchestratorTests: XCTestCase {
                 lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
+            try withEnv(name: "SPACES_TEST_KILL_LOG", value: killLog) {
+                try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "kill": killMock]) {
+                    try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
+                }
             }
         }
 
         XCTAssertEqual(closeCapture.sessionIDs, ["old-spaces-session"])
         XCTAssertEqual(terminateCapture.sessionIDs, ["old-spaces-session"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: killLog))
         XCTAssertEqual(openCapture.modes, [.owner])
         XCTAssertEqual(openCapture.sessionIDs.count, 1)
         XCTAssertNotEqual(openCapture.sessionIDs.first, "old-spaces-session")
@@ -6098,19 +6206,43 @@ final class OrchestratorTests: XCTestCase {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
+        let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(
             store: store, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
             terminalFocusPulseController: terminalFocusPulseController,
             builtInTerminalWindowOpener: { sessionID, _ in
-                let paths = try! TerminalSessionPaths.forSession(id: sessionID)
-                try! paths.ensureDirectories()
-                FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-                try! TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
-                        updatedAt: "2026-05-15T18:00:00Z"), paths: paths)
-                try! "test output\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+                try! withSpacesProfileEnvironment(dbPath: dbPath) {
+                    let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                    try paths.ensureDirectories()
+                    FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try TerminalSessionPersistence.writeRuntimeState(
+                        .init(
+                            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
+                            updatedAt: "2026-05-15T18:00:00Z"), paths: paths)
+                    try "test output\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
+                }
+            },
+            builtInTerminalSessionLauncher: { configuration in
+                try withSpacesProfileEnvironment(dbPath: dbPath) {
+                    let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                    try paths.ensureDirectories()
+                    try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                    FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                    let runtimeState =
+                        (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
+                        ?? TerminalSessionRuntimeState(
+                            sessionID: configuration.sessionID, backend: configuration.backend,
+                            servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 4321, state: .running,
+                            updatedAt: "2026-05-15T18:00:00Z", title: configuration.title, workingDirectory: configuration.workingDirectory)
+                    try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+                    return TerminalServiceSessionSummary(
+                        id: configuration.sessionID, title: runtimeState.title ?? configuration.title,
+                        workingDirectory: runtimeState.workingDirectory ?? configuration.workingDirectory, backend: configuration.backend,
+                        lifetimePolicy: configuration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
+                        childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+                }
             }, currentDate: currentDate)
         if let editor { _ = try orchestrator.updateEditorPreference(editor) }
 
@@ -6152,6 +6284,10 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
+        if name == SpacesProfile.databasePathEnvironmentVariable {
+            try withSpacesProfileEnvironment(dbPath: value, run: run)
+            return
+        }
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
         defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
@@ -6308,6 +6444,10 @@ final class OrchestratorTests: XCTestCase {
           sleep_ms "${MOCK_CHROME_SCAN_DELAY_MS:-0}"
           if [[ -n "${MOCK_CHROME_SCAN_LOG_FILE:-}" ]]; then
             echo "scan" >> "$MOCK_CHROME_SCAN_LOG_FILE"
+          fi
+          if [[ "${MOCK_CHROME_SCAN_FAIL:-}" == "1" ]]; then
+            echo "scan failed" >&2
+            exit 1
           fi
           if [[ -n "${MOCK_CHROME_WINDOW_MATCHES:-}" ]]; then
             printf "%b" "$MOCK_CHROME_WINDOW_MATCHES"
@@ -8978,6 +9118,23 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(resolved[0].url, "http://localhost:3000")
         XCTAssertEqual(resolved[1].name, "API")
         XCTAssertEqual(resolved[1].url, "http://localhost:4000/v1")
+    }
+
+    // Tests passive resolvedWorkspaceBrowserSessions resolves device-local browser display without opening SSH forwards.
+    func testResolvedWorkspaceBrowserSessionsPassiveLocalDoesNotOpenForward() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/projects/app")
+        let workspace = WorkspaceRecord(
+            id: "workspace-a", projectID: project.id, title: "dev", dir: "/projects/app", runtimePath: "/projects/app", dirname: nil, branch: "main",
+            targetBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "App", url: "http://localhost:$PORT")])
+
+        let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+        XCTAssertEqual(resolved.map(\.url), ["http://localhost:3000"])
     }
 
     // Tests resolvedWorkspaceBrowserSessions deduplicates sessions that resolve to the same URL.

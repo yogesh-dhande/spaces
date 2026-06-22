@@ -37,7 +37,7 @@ final class DatabaseLocatorTests: XCTestCase {
 
     // Tests the public defaultPath() overload succeeds and returns a path ending in spaces.db.
     func testPublicDefaultPathReturnsValidPath() throws {
-        let path = try DatabaseLocator.defaultPath()
+        let path = try withEnvironmentValues([DatabaseLocator.databasePathEnvironmentVariable: nil]) { try DatabaseLocator.defaultPath() }
         XCTAssertTrue(path.hasSuffix("spaces.db"), "Expected path to end with spaces.db, got \(path)")
     }
 

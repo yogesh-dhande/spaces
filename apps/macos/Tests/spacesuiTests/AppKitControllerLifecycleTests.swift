@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import spacesterminalcore
+import workspacecore
 
 @testable import spacesui
 

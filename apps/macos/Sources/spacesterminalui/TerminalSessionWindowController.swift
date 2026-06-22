@@ -69,6 +69,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let searchQuery: String
     public let searchTotal: Int?
     public let searchSelected: Int?
+    public let attachmentMode: String
+    public let takeoverPending: Bool
+    public let takeoverButtonVisible: Bool
+    public let takeoverButtonEnabled: Bool
+    public let takeoverMessage: String
 }
 
 @MainActor public struct TerminalSessionRuntimeControls {
@@ -99,6 +104,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
     private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
+    private static let takeoverAttemptTimeout: TimeInterval = 10
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     private enum VisibleRenderer {
@@ -133,6 +139,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var rendererMode: TerminalRendererMode
     private var backend: TerminalSessionBackendKind
     private var preferredAttachmentMode: TerminalAttachmentMode
+    private var ownerAttachmentRequested: Bool
     private let titleLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
@@ -197,6 +204,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var refreshTask: Task<Void, Never>?
     private var takeoverTask: Task<Void, Never>?
+    private var takeoverTaskStartedAt: Date?
+    private var takeoverAttemptID: UUID?
     private var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
@@ -227,6 +236,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var pendingFocusObservationRoute: String?
     private var deferredInitialPresentationTask: Task<Void, Never>?
     private var isDeferringInitialOwnerPresentation = false
+    private var shouldActivateDeferredInitialOwnerPresentation = false
     private static let deferredInitialOwnerPresentationTimeout: TimeInterval = 5
 
     public convenience init(
@@ -275,6 +285,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         self.sessionID = sessionID
         self.paths = paths
         self.preferredAttachmentMode = preferredAttachmentMode
+        ownerAttachmentRequested = preferredAttachmentMode == .owner
         let resolvedLaunchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
         launchConfiguration = resolvedLaunchConfiguration
         let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .ghosttyEmbedded
@@ -411,6 +422,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private func startDeferredInitialOwnerPresentation(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
         deferredInitialPresentationTask?.cancel()
         isDeferringInitialOwnerPresentation = true
+        shouldActivateDeferredInitialOwnerPresentation = false
         updateRendererVisibility()
         let attachSurfaceStartedAt = Date()
         ensureGhosttyHostAttached(requestID: requestID, reason: "deferred_show_prepare", requestWindowFocus: false)
@@ -446,25 +458,37 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         }
     }
 
+    nonisolated static func shouldActivateDeferredInitialOwnerPresentation(appIsActive: Bool, requestID: String?) -> Bool {
+        appIsActive || requestID?.isEmpty == false
+    }
+
     private func completeDeferredInitialOwnerPresentation(window: NSWindow, startedAt: Date, requestID: String?, route: String?) {
         deferredInitialPresentationTask?.cancel()
         deferredInitialPresentationTask = nil
         isDeferringInitialOwnerPresentation = false
+        let shouldActivateWindow =
+            shouldActivateDeferredInitialOwnerPresentation
+            || Self.shouldActivateDeferredInitialOwnerPresentation(appIsActive: NSApp.isActive, requestID: requestID)
+        shouldActivateDeferredInitialOwnerPresentation = false
         let postRefreshStartedAt = Date()
         refreshNow()
         window.contentView?.layoutSubtreeIfNeeded()
         terminalContainer.layoutSubtreeIfNeeded()
         logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_before_present deferred=1")
         let presentStartedAt = Date()
-        presentWindow(window, forceFrontmost: true)
-        logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window visible=0 deferred=1")
-        syncGhosttyOwnerFocus(reason: "deferred_show_present", requestWindowFocus: true)
+        if shouldActivateWindow { presentWindow(window, forceFrontmost: true) } else { presentWindowWithoutActivating(window) }
+        logShowStage(
+            startedAt: presentStartedAt, requestID: requestID,
+            detail: "stage=present_window visible=0 deferred=1 activating=\(shouldActivateWindow ? 1 : 0)")
+        syncGhosttyOwnerFocus(reason: "deferred_show_present", requestWindowFocus: shouldActivateWindow)
         let startRefreshingStartedAt = Date()
         startRefreshing()
         logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh deferred=1")
         let firstResponderStartedAt = Date()
-        assignPreferredFirstResponder()
-        logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder deferred=1")
+        if shouldActivateWindow { assignPreferredFirstResponder() }
+        logShowStage(
+            startedAt: firstResponderStartedAt, requestID: requestID,
+            detail: "stage=assign_first_responder deferred=1 activating=\(shouldActivateWindow ? 1 : 0)")
         logFocusMetric("terminal_window_show", startedAt: startedAt, requestID: requestID, detail: "route=\(route ?? "show") deferred=1")
     }
 
@@ -472,6 +496,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         deferredInitialPresentationTask?.cancel()
         deferredInitialPresentationTask = nil
         isDeferringInitialOwnerPresentation = false
+        shouldActivateDeferredInitialOwnerPresentation = false
         let message =
             "The live terminal renderer did not become ready within \(Int(Self.deferredInitialOwnerPresentationTimeout)) seconds.\n\nThe terminal session may still be running, but Spaces could not attach the native renderer. Close this window and reopen the terminal to retry."
         shouldShowOwnerStateLabel = true
@@ -494,6 +519,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         beginPendingFocusObservation(startedAt: startedAt, requestID: requestID, route: route ?? "focus")
         if window.isMiniaturized { window.deminiaturize(nil) }
         refreshNow(allowGhosttyOwnerAttach: false)
+        if isDeferringInitialOwnerPresentation { shouldActivateDeferredInitialOwnerPresentation = true }
         presentWindow(window, forceFrontmost: true)
         if backend == .ghosttyEmbedded {
             let reusedSurface = hasAttachedGhosttyOwnerSurface()
@@ -517,6 +543,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public func requestOwnershipIfNeeded() {
         guard backend == .ghosttyEmbedded else { return }
+        ownerAttachmentRequested = true
         preferredAttachmentMode = .owner
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
         lastObservedRuntimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastObservedRuntimeState
@@ -531,6 +558,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             refreshNow(allowGhosttyOwnerAttach: false)
             return
         }
+        attachLocalClientIfNeeded(mode: .owner, force: true)
         ensureGhosttyHostAttached(reason: "request_owner_mode")
         refreshNow()
     }
@@ -550,6 +578,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         closesForSessionTermination = false
         didCloseWindow = true
         hasTestWindowPresentation = false
+        TerminalPerformance.logMetric(
+            "terminal_window_will_close", target: "session=\(sessionID)", elapsedMS: 0, success: true,
+            detail: "client=\(client.id) terminating=\(sessionIsTerminating ? 1 : 0)")
         persistCurrentWindowFrame(immediately: true)
         if backend == .ghosttyEmbedded {
             syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
@@ -752,6 +783,26 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         performOutputTextFinderAction(.hideFindInterface)
     }
 
+    public func performShortcutForTesting(action: String, text: String? = nil) {
+        switch action {
+        case "paste": paste(nil)
+        case "copy": copy(nil)
+        case "select-all": selectAll(nil)
+        case "find": find(nil)
+        case "find-next": findNext(nil)
+        case "find-previous": findPrevious(nil)
+        case "escape": hideFind(nil)
+        case "search":
+            guard let text else { return }
+            if visibleRenderer == .ghosttyOwner {
+                _ = performLiveTerminalBindingAction("search:\(text)")
+            } else {
+                performOutputTextFinderAction(.showFindInterface)
+            }
+        default: break
+        }
+    }
+
     private func performOutputTextFinderAction(_ action: NSTextFinder.Action) {
         let sender = NSMenuItem()
         sender.tag = action.rawValue
@@ -759,25 +810,31 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         outputView.performTextFinderAction(sender)
     }
 
-    public func takeOverOwnership() {
+    public func takeOverOwnership(now: Date = Date()) {
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
             updateInputStatus(message: "Session is not running.", isError: true)
             return
         }
-        guard takeoverTask == nil else { return }
-        let startedAt = Date()
+        if let takeoverTask {
+            guard let takeoverTaskStartedAt, now.timeIntervalSince(takeoverTaskStartedAt) >= Self.takeoverAttemptTimeout else { return }
+            takeoverTask.cancel()
+            self.takeoverTask = nil
+            self.takeoverTaskStartedAt = nil
+            takeoverAttemptID = nil
+        }
+        let startedAt = now
+        let attemptID = UUID()
         let clientID = client.id
         takeoverButton.isEnabled = false
+        takeoverTaskStartedAt = startedAt
+        takeoverAttemptID = attemptID
         takeoverTask = Task.detached(priority: .userInitiated) { [takeoverAction] in
             let controlStartedAt = Date()
             do {
                 let response = try takeoverAction(clientID)
                 await MainActor.run {
-                    defer {
-                        self.takeoverTask = nil
-                        self.takeoverButton.isEnabled =
-                            self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
-                    }
+                    guard self.takeoverAttemptID == attemptID else { return }
+                    defer { self.clearTakeoverAttempt(id: attemptID) }
                     guard response.ok else {
                         TerminalPerformance.logMetric(
                             "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
@@ -785,6 +842,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                         self.updateInputStatus(message: response.message, isError: true)
                         return
                     }
+                    self.ownerAttachmentRequested = true
                     self.preferredAttachmentMode = .owner
                     let attachStartedAt = Date()
                     self.ensureGhosttyHostAttached(reason: "takeover")
@@ -801,9 +859,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 }
             } catch {
                 await MainActor.run {
-                    self.takeoverTask = nil
-                    self.takeoverButton.isEnabled =
-                        self.preferredAttachmentMode != .owner && self.isInteractiveRuntimeState(self.lastObservedRuntimeState)
+                    guard self.takeoverAttemptID == attemptID else { return }
+                    self.clearTakeoverAttempt(id: attemptID)
                     TerminalPerformance.logMetric(
                         "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
@@ -811,6 +868,15 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 }
             }
         }
+    }
+
+    private func clearTakeoverAttempt(id: UUID) {
+        guard takeoverAttemptID == id else { return }
+        takeoverTask = nil
+        takeoverTaskStartedAt = nil
+        takeoverAttemptID = nil
+        let isCurrentOwner = lastObservedOwnerClientID == client.id
+        takeoverButton.isEnabled = !isCurrentOwner && isInteractiveRuntimeState(lastObservedRuntimeState)
     }
 
     private func buildUI() {
@@ -1163,8 +1229,17 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         Task { @MainActor [weak window] in
             await Task.yield()
             guard let window, window.isVisible, !window.isMiniaturized else { return }
+            NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         }
+    }
+
+    private func presentWindowWithoutActivating(_ window: NSWindow) {
+        if Self.isRunningUnderXCTest {
+            hasTestWindowPresentation = true
+            return
+        }
+        window.orderFront(nil)
     }
 
     private func startRefreshing() {
@@ -1213,14 +1288,16 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                     lastRequestedAttachmentMode = nil
                     lastObservedAttachmentMode = nil
                     if wasObservedAsAttachedOwner, preferredAttachmentMode == .owner, let currentOwnerClient, currentOwnerClient.id != client.id {
+                        ownerAttachmentRequested = false
                         preferredAttachmentMode = .viewer
                     }
                 }
                 let canAttachAsOwner = canAttachToRuntime && (currentOwnerClient == nil || currentOwnerClient?.id == client.id)
+                let wantsOwnerAttachment = ownerAttachmentRequested || preferredAttachmentMode == .owner
                 let attachmentModeToRequest: TerminalAttachmentMode?
                 if !canAttachToRuntime {
                     attachmentModeToRequest = nil
-                } else if preferredAttachmentMode == .owner {
+                } else if wantsOwnerAttachment {
                     if canAttachAsOwner {
                         attachmentModeToRequest = allowGhosttyOwnerAttach && activeAttachment?.mode != .owner ? .owner : nil
                     } else {
@@ -1236,7 +1313,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 }
             }
             let isOwner =
-                canAttachToRuntime && (currentOwnerClient?.id == client.id || (currentOwnerClient == nil && preferredAttachmentMode == .owner))
+                canAttachToRuntime
+                && (currentOwnerClient?.id == client.id
+                    || (currentOwnerClient == nil && (ownerAttachmentRequested || preferredAttachmentMode == .owner)))
             let currentTitle = currentWindowTitle(fallback: currentLaunchConfiguration.title, isOwner: isOwner)
             let currentWorkingDirectory = currentSummaryWorkingDirectory(fallback: currentLaunchConfiguration.workingDirectory)
             if let window {
@@ -1251,7 +1330,17 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             if backend == .ghosttyEmbedded {
                 let activeAttachment = attachmentSnapshot?.attachments.last(where: { $0.clientID == client.id && $0.detachedAt == nil })
                 if let activeAttachment {
-                    preferredAttachmentMode = activeAttachment.mode
+                    let canKeepOwnerRequest = canAttachToRuntime && (currentOwnerClient == nil || currentOwnerClient?.id == client.id)
+                    let lostOwnershipToAnotherClient =
+                        currentOwnerClient != nil && currentOwnerClient?.id != client.id
+                        && (lastObservedAttachmentMode == .owner || lastObservedOwnerClientID == client.id)
+                    let shouldPreserveOwnerRequest = ownerAttachmentRequested && activeAttachment.mode == .viewer && !lostOwnershipToAnotherClient
+                    if !shouldPreserveOwnerRequest {
+                        if currentOwnerClient != nil, currentOwnerClient?.id != client.id { ownerAttachmentRequested = false }
+                        preferredAttachmentMode = activeAttachment.mode
+                    } else if !canKeepOwnerRequest {
+                        preferredAttachmentMode = activeAttachment.mode
+                    }
                     if lastObservedAttachmentMode != activeAttachment.mode {
                         beginOwnershipTransition(activeAttachment.mode == .owner ? .owner : .viewer, reason: "attachment_mode_changed")
                         lastObservedAttachmentMode = activeAttachment.mode
@@ -1414,10 +1503,18 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         updateHeaderLayoutVisibility()
     }
 
-    private func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil) {
+    private func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil, force: Bool = false) {
         guard backend != .ghosttyEmbedded || canAttachToGhosttyRuntime(lastObservedRuntimeState) else { return }
-        let attachmentMode = mode ?? preferredAttachmentMode
-        guard !isClientAttached || lastRequestedAttachmentMode != attachmentMode else { return }
+        var attachmentMode = mode ?? (ownerAttachmentRequested ? .owner : preferredAttachmentMode)
+        if backend == .ghosttyEmbedded, attachmentMode == .owner, !force {
+            let currentOwnerClient = activeOwnerClient(snapshot: try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths))
+            if let currentOwnerClient, currentOwnerClient.id != client.id {
+                ownerAttachmentRequested = false
+                preferredAttachmentMode = .viewer
+                attachmentMode = .viewer
+            }
+        }
+        guard force || !isClientAttached || lastRequestedAttachmentMode != attachmentMode else { return }
         do {
             try attachClientAction(client, attachmentMode)
             isClientAttached = true
@@ -1565,7 +1662,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         interruptButton.isEnabled = usesInlineControls && isInteractive
         newlineButton.isEnabled = usesInlineControls && isInteractive
         takeoverButton.isHidden = isOwner || !isInteractive
-        takeoverButton.isEnabled = !isOwner && isInteractive
+        takeoverButton.isEnabled = !isOwner && isInteractive && takeoverTask == nil
         if !isInteractive {
             inputField.placeholderString = "Session is not running"
         } else {
@@ -2061,8 +2158,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue,
             state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
             surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
-            searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total, searchSelected: searchState.selected
-        )
+            searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total,
+            searchSelected: searchState.selected, attachmentMode: preferredAttachmentMode.rawValue, takeoverPending: takeoverTask != nil,
+            takeoverButtonVisible: !takeoverButton.isHidden, takeoverButtonEnabled: takeoverButton.isEnabled,
+            takeoverMessage: takeoverMessageLabel.stringValue)
     }
 
     var debugRenderedOutput: String { outputView.string }
@@ -2080,8 +2179,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var debugDidCloseWindow: Bool { didCloseWindow }
     func debugForceRefresh() { refreshNow() }
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
+    func debugAttachLocalClientIfNeeded() { attachLocalClientIfNeeded() }
     func debugFlushPendingWindowFramePersistence() async { await pendingWindowFramePersistTask?.value }
     public var clientID: String { client.id }
+    var debugTakeoverPending: Bool { takeoverTask != nil }
+    func debugSetTakeoverTaskStartedAt(_ date: Date?) { takeoverTaskStartedAt = date }
     var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
     var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
     var debugInlineInputEnabled: Bool { inputField.isEnabled }

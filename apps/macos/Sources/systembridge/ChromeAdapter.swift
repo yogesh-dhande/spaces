@@ -1,9 +1,11 @@
 import Foundation
 
 public final class ChromeAdapter {
+    private static let appleScriptTimeoutSeconds = 10
+
     public init() {}
 
-    public func isAvailable() -> Bool { (try? AppleScript.run("tell application \"Google Chrome\" to version")) != nil }
+    public func isAvailable() -> Bool { (try? runChromeScript("tell application \"Google Chrome\" to version")) != nil }
 
     public func openWindow(url: String, background: Bool = false) throws -> Int {
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
@@ -16,7 +18,7 @@ public final class ChromeAdapter {
               return id of newWindow
             end tell
             """
-        let output = try AppleScript.run(script)
+        let output = try runChromeScript(script)
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
     }
 
@@ -42,7 +44,7 @@ public final class ChromeAdapter {
             end tell
             return "0"
             """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         return output == "1"
     }
 
@@ -58,7 +60,7 @@ public final class ChromeAdapter {
               return "1"
             end tell
             """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         return output == "1"
     }
 
@@ -83,7 +85,7 @@ public final class ChromeAdapter {
             end tell
             return "0"
             """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         return output == "1"
     }
 
@@ -112,7 +114,7 @@ public final class ChromeAdapter {
             end tell
             return ""
             """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         guard let extractedWindowID = Int(output), extractedWindowID > 0 else { return nil }
         return extractedWindowID
     }
@@ -130,7 +132,7 @@ public final class ChromeAdapter {
               return u
             end tell
             """
-        let output = try AppleScript.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         return output.isEmpty ? nil : output
     }
 
@@ -161,7 +163,7 @@ public final class ChromeAdapter {
             end tell
             return output
             """
-        let output = try AppleScript.run(script)
+        let output = try runChromeScript(script)
         var parsed: [ChromeWindowMatch] = []
         var syntheticTabIndexByWindow: [Int: Int] = [:]
         for line in output.split(separator: "\n") {
@@ -178,4 +180,6 @@ public final class ChromeAdapter {
         }
         return parsed
     }
+
+    private func runChromeScript(_ script: String) throws -> String { try AppleScript.run(script, timeoutSeconds: Self.appleScriptTimeoutSeconds) }
 }

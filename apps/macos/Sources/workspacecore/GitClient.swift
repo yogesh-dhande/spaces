@@ -185,6 +185,55 @@ public final class GitClient {
         try runGitOrThrow(["-C", worktreePath, "branch", "-m", trimmedBranch])
     }
 
+    public func refreshWorktreeFastForwardOnly(path worktreePath: String, branch: String, hostName: String) throws -> RemoteWorktreeRefreshResult {
+        let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBranch.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace branch is required.") }
+        try blockIfDirtyWorktree(path: worktreePath, branch: trimmedBranch, hostName: hostName)
+        let beforeRevision = try revision(path: worktreePath, ref: "HEAD")
+        do {
+            switch try remoteBranchLookupStatus(path: worktreePath, branch: trimmedBranch) {
+            case .exists: break
+            case .missing:
+                throw RemoteWorktreeRefreshBlock(
+                    hostName: hostName, path: worktreePath, branch: trimmedBranch, reason: .missingBranch,
+                    detail: "origin/\(trimmedBranch) does not exist.")
+            }
+        } catch let block as RemoteWorktreeRefreshBlock { throw block } catch {
+            throw remoteRefreshBlock(hostName: hostName, path: worktreePath, branch: trimmedBranch, reason: .fetchFailed, error: error)
+        }
+        do { try fetchRemoteBranch(path: worktreePath, branch: trimmedBranch) } catch {
+            throw remoteRefreshBlock(hostName: hostName, path: worktreePath, branch: trimmedBranch, reason: .fetchFailed, error: error)
+        }
+
+        let remoteRef = "refs/remotes/origin/\(trimmedBranch)"
+        let currentBranch = try currentBranchName(path: worktreePath)
+        if currentBranch != trimmedBranch {
+            try blockIfUntrackedFilesWouldBeOverwritten(path: worktreePath, branch: trimmedBranch, hostName: hostName, targetRef: remoteRef)
+            try checkoutBranch(path: worktreePath, branch: trimmedBranch, hostName: hostName, remoteRef: remoteRef)
+        }
+
+        let remoteRevision = try revision(path: worktreePath, ref: remoteRef)
+        let currentRevision = try revision(path: worktreePath, ref: "HEAD")
+        if currentRevision == remoteRevision {
+            return RemoteWorktreeRefreshResult(
+                hostName: hostName, path: worktreePath, branch: trimmedBranch, beforeRevision: beforeRevision, afterRevision: currentRevision,
+                fastForwarded: beforeRevision != currentRevision)
+        }
+        guard try isAncestor(path: worktreePath, ancestor: "HEAD", descendant: remoteRef) else {
+            throw RemoteWorktreeRefreshBlock(
+                hostName: hostName, path: worktreePath, branch: trimmedBranch, reason: .divergentHistory,
+                detail: "HEAD is not an ancestor of origin/\(trimmedBranch).")
+        }
+        try blockIfUntrackedFilesWouldBeOverwritten(path: worktreePath, branch: trimmedBranch, hostName: hostName, targetRef: remoteRef)
+        do { try runGitOrThrow(["-C", worktreePath, "merge", "--ff-only", remoteRef]) } catch {
+            throw remoteRefreshBlock(hostName: hostName, path: worktreePath, branch: trimmedBranch, reason: .checkoutFailed, error: error)
+        }
+        let afterRevision = try revision(path: worktreePath, ref: "HEAD")
+        return RemoteWorktreeRefreshResult(
+            hostName: hostName, path: worktreePath, branch: trimmedBranch, beforeRevision: beforeRevision, afterRevision: afterRevision,
+            fastForwarded: beforeRevision != afterRevision)
+    }
+
     private func runGit(_ arguments: [String], timeout: TimeInterval? = nil) throws -> Int32 {
         let process = makeGitProcess(arguments)
         try process.run()
@@ -244,6 +293,70 @@ public final class GitClient {
 
     private func fetchRemoteBranch(path: String, branch: String) throws {
         try runGitOrThrow(["-C", path, "fetch", "origin", "refs/heads/\(branch):refs/remotes/origin/\(branch)"])
+    }
+
+    private func blockIfDirtyWorktree(path: String, branch: String, hostName: String) throws {
+        let status = try runGitAndCapture(["-C", path, "status", "--porcelain=v1", "--untracked-files=no"]).trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        guard status.isEmpty else {
+            throw RemoteWorktreeRefreshBlock(hostName: hostName, path: path, branch: branch, reason: .dirtyWorktree, detail: status)
+        }
+    }
+
+    private func blockIfUntrackedFilesWouldBeOverwritten(path: String, branch: String, hostName: String, targetRef: String) throws {
+        let changedPaths = Set(
+            try runGitAndCapture(["-C", path, "diff", "--name-only", "--diff-filter=ACDMRTUXB", "HEAD..\(targetRef)"]).split(separator: "\n").map {
+                String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { !$0.isEmpty })
+        guard !changedPaths.isEmpty else { return }
+        let untrackedPaths = Set(
+            try runGitAndCapture(["-C", path, "ls-files", "--others", "--exclude-standard"]).split(separator: "\n").map {
+                String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { !$0.isEmpty })
+        let conflicts = changedPaths.intersection(untrackedPaths).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        guard conflicts.isEmpty else {
+            throw RemoteWorktreeRefreshBlock(
+                hostName: hostName, path: path, branch: branch, reason: .untrackedOverwriteRisk,
+                detail: "Untracked files would be overwritten: \(conflicts.joined(separator: ", "))")
+        }
+    }
+
+    private func checkoutBranch(path: String, branch: String, hostName: String, remoteRef: String) throws {
+        let arguments =
+            branchExists(path: path, branch: branch)
+            ? ["-C", path, "checkout", branch] : ["-C", path, "checkout", "-b", branch, "--track", remoteRef]
+        do { try runGitOrThrow(arguments) } catch {
+            let reason =
+                gitErrorMessage(error).contains("untracked working tree files would be overwritten")
+                ? RemoteWorktreeRefreshBlockReason.untrackedOverwriteRisk : .checkoutFailed
+            throw remoteRefreshBlock(hostName: hostName, path: path, branch: branch, reason: reason, error: error)
+        }
+    }
+
+    private func currentBranchName(path: String) throws -> String {
+        try runGitAndCapture(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func revision(path: String, ref: String) throws -> String {
+        try runGitAndCapture(["-C", path, "rev-parse", "--verify", "\(ref)^{commit}"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isAncestor(path: String, ancestor: String, descendant: String) throws -> Bool {
+        let status = try runGit(["-C", path, "merge-base", "--is-ancestor", ancestor, descendant])
+        switch status {
+        case 0: return true
+        case 1: return false
+        default: throw WorkspaceError.gitCommandFailed(message: "merge-base exited with status \(status)")
+        }
+    }
+
+    private func remoteRefreshBlock(hostName: String, path: String, branch: String, reason: RemoteWorktreeRefreshBlockReason, error: any Error)
+        -> RemoteWorktreeRefreshBlock
+    { RemoteWorktreeRefreshBlock(hostName: hostName, path: path, branch: branch, reason: reason, detail: gitErrorMessage(error)) }
+
+    private func gitErrorMessage(_ error: any Error) -> String {
+        if case WorkspaceError.gitCommandFailed(let message) = error { return message }
+        return (error as? LocalizedError)?.errorDescription ?? String(describing: error)
     }
 
     private func remoteTrackingBranchExists(path: String, branch: String) -> Bool {

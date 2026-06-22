@@ -1,8 +1,13 @@
-import SQLite3
 import XCTest
 
 @testable import spacesdatabase
 @testable import workspacecore
+
+#if os(Linux)
+    import CSQLite3
+#else
+    import SQLite3
+#endif
 
 private final class SQLiteCommitThread: Thread {
     private let database: OpaquePointer
@@ -54,7 +59,11 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
+        XCTAssertFalse(workspaceColumns.contains("host_id"))
+        XCTAssertTrue(workspaceColumns.contains("runtime_path"))
+        XCTAssertFalse(workspaceColumns.contains("compute_host_override_id"))
         XCTAssertTrue(projectColumns.contains("is_collapsed"))
+        XCTAssertFalse(projectColumns.contains("default_compute_host_id"))
         XCTAssertFalse(workspaceProcessColumns.contains("execution_mode"))
         XCTAssertFalse(projectProcessColumns.contains("execution_mode"))
         XCTAssertTrue(runningProcessColumns.contains("template_id"))
@@ -106,142 +115,30 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
         XCTAssertFalse(agentSessionColumns.contains("yabai_window_id"))
         XCTAssertEqual(workspaceForeignKeys, 1)
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "compute_hosts"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "windows"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "agent_windows"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "terminal_targets"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "project_status_checks"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "workspace_status_checks"))
         XCTAssertFalse(try tableExists(dbURL: dbURL, table: "status_results"))
+        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "workspace_compute_bindings"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
-    func testVersionEightDatabaseDropsLegacyExternalTerminalStorage() throws {
+    func testOldSchemaVersionFailsClosed() throws {
         let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("v8-legacy-terminal-cleanup.db")
+        let dbURL = root.appendingPathComponent("old-schema.db")
         try runSQLiteExec(
             dbURL: dbURL,
             sql: """
-                CREATE TABLE running_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  template_id TEXT,
-                  template_name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  runtime_target_id TEXT,
-                  terminal_session_id TEXT,
-                  terminal_app TEXT,
-                  window_id INTEGER,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  terminal_container_id TEXT,
-                  iterm_tab_index INTEGER,
-                  tmux_window_id TEXT,
-                  pid INTEGER,
-                  status TEXT NOT NULL,
-                  log_path TEXT,
-                  last_output_at TEXT,
-                  started_at TEXT,
-                  exited_at TEXT
-                );
-                CREATE TABLE runtime_targets (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  type TEXT NOT NULL,
-                  name TEXT,
-                  detail TEXT,
-                  app TEXT NOT NULL,
-                  window_id INTEGER,
-                  native_id TEXT,
-                  provider TEXT,
-                  container_id TEXT,
-                  tracking_id TEXT,
-                  order_index INTEGER NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE agent_sessions (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  label TEXT,
-                  status TEXT NOT NULL DEFAULT 'idle',
-                  runtime_target_id TEXT,
-                  terminal_target_id TEXT,
-                  terminal_session_id TEXT,
-                  terminal_tracking_id TEXT,
-                  terminal_native_id TEXT,
-                  yabai_window_id INTEGER,
-                  session_key TEXT,
-                  claimed_launcher_id TEXT,
-                  claimed_launcher_name TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE terminal_targets (id TEXT PRIMARY KEY);
-                CREATE TABLE windows (id TEXT PRIMARY KEY);
-                CREATE TABLE agent_windows (id TEXT PRIMARY KEY);
                 CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO runtime_targets(
-                  id, workspace_id, type, name, detail, app, window_id, native_id, provider, container_id, tracking_id, order_index, created_at, updated_at
-                )
-                VALUES (
-                  'runtime-1', 'workspace-1', 'terminal', 'api', 'npm run api', 'Spaces', 44, 'native-1', 'spaces', 'container-1',
-                  'session-1', 10, '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z'
-                );
-                INSERT INTO running_processes(
-                  id, workspace_id, template_id, template_name, command, runtime_target_id, terminal_session_id, terminal_app, window_id,
-                  terminal_tracking_id, terminal_native_id, terminal_container_id, iterm_tab_index, tmux_window_id, status, started_at
-                )
-                VALUES (
-                  'process-1', 'workspace-1', 'template-1', 'api', 'npm run api', 'runtime-1', 'session-1', 'Spaces', 44,
-                  'session-1', 'native-1', 'container-1', 2, 'tmux-1', 'running', '2026-01-01T00:00:00Z'
-                );
-                INSERT INTO agent_sessions(
-                  id, workspace_id, provider, label, status, runtime_target_id, terminal_target_id, terminal_session_id, terminal_tracking_id,
-                  terminal_native_id, yabai_window_id, session_key, claimed_launcher_id, claimed_launcher_name, created_at, updated_at
-                )
-                VALUES (
-                  'agent-1', 'workspace-1', 'spaces', 'Codex', 'idle', 'runtime-1', 'terminal-target-1', 'session-1', 'session-1',
-                  'native-1', 44, 'thread-1', 'launcher-1', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z'
-                );
-                INSERT INTO migration_state(current_version) VALUES (8);
+                INSERT INTO migration_state(current_version) VALUES (0);
                 """)
 
-        _ = try SQLiteStore(path: dbURL.path)
-
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
-        let runningProcessColumns = try readTableColumns(dbURL: dbURL, table: "running_processes")
-        XCTAssertFalse(runningProcessColumns.contains("terminal_app"))
-        XCTAssertFalse(runningProcessColumns.contains("window_id"))
-        XCTAssertFalse(runningProcessColumns.contains("terminal_tracking_id"))
-        XCTAssertFalse(runningProcessColumns.contains("terminal_native_id"))
-        XCTAssertFalse(runningProcessColumns.contains("terminal_container_id"))
-        XCTAssertFalse(runningProcessColumns.contains("iterm_tab_index"))
-        XCTAssertFalse(runningProcessColumns.contains("tmux_window_id"))
-        let runtimeTargetColumns = try readTableColumns(dbURL: dbURL, table: "runtime_targets")
-        XCTAssertFalse(runtimeTargetColumns.contains("native_id"))
-        XCTAssertFalse(runtimeTargetColumns.contains("provider"))
-        XCTAssertFalse(runtimeTargetColumns.contains("container_id"))
-        let agentSessionColumns = try readTableColumns(dbURL: dbURL, table: "agent_sessions")
-        XCTAssertFalse(agentSessionColumns.contains("terminal_target_id"))
-        XCTAssertFalse(agentSessionColumns.contains("terminal_tracking_id"))
-        XCTAssertFalse(agentSessionColumns.contains("terminal_native_id"))
-        XCTAssertFalse(agentSessionColumns.contains("yabai_window_id"))
-        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "terminal_targets"))
-        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "windows"))
-        XCTAssertFalse(try tableExists(dbURL: dbURL, table: "agent_windows"))
-        XCTAssertEqual(
-            try readRows(
-                dbURL: dbURL,
-                sql: "SELECT id, workspace_id, template_id, template_name, runtime_target_id, terminal_session_id FROM running_processes"),
-            [["process-1", "workspace-1", "template-1", "api", "runtime-1", "session-1"]])
-        XCTAssertEqual(
-            try readRows(dbURL: dbURL, sql: "SELECT id, workspace_id, type, app, window_id, tracking_id FROM runtime_targets"),
-            [["runtime-1", "workspace-1", "terminal", "Spaces", "44", "session-1"]])
-        XCTAssertEqual(
-            try readRows(
-                dbURL: dbURL, sql: "SELECT id, workspace_id, provider, label, runtime_target_id, terminal_session_id, session_key FROM agent_sessions"
-            ), [["agent-1", "workspace-1", "spaces", "Codex", "runtime-1", "session-1", "thread-1"]])
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+            XCTAssertEqual(error.localizedDescription, "No migration path exists from schema version 0 to \(DatabaseSchema.currentVersion).")
+        }
     }
 
     // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.
@@ -256,234 +153,6 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
-    func testVersionOneDatabaseMigratesTerminalTablesWithoutDroppingProjects() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("v1-terminal-migration.db")
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE projects (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  dir TEXT NOT NULL UNIQUE,
-                  is_git INTEGER NOT NULL,
-                  default_branch TEXT,
-                  is_collapsed INTEGER NOT NULL DEFAULT 0,
-                  setup_script TEXT,
-                  stop_script TEXT
-                );
-                CREATE TABLE workspaces (
-                  id TEXT PRIMARY KEY,
-                  project_id TEXT NOT NULL,
-                  title TEXT NOT NULL,
-                  dir TEXT NOT NULL,
-                  dirname TEXT,
-                  branch TEXT,
-                  target_branch TEXT,
-                  is_default INTEGER NOT NULL,
-                  is_archived INTEGER NOT NULL,
-                  is_hidden INTEGER NOT NULL DEFAULT 0,
-                  is_running INTEGER NOT NULL,
-                  last_launched_at TEXT,
-                  notes TEXT
-                );
-                CREATE TABLE workspace_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  name TEXT,
-                  command TEXT NOT NULL,
-                  on_exit TEXT NOT NULL DEFAULT 'none',
-                  execution_mode TEXT NOT NULL DEFAULT 'direct',
-                  order_index INTEGER NOT NULL
-                );
-                CREATE TABLE running_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  template_name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  runtime_target_id TEXT,
-                  pid INTEGER,
-                  status TEXT NOT NULL,
-                  log_path TEXT,
-                  last_output_at TEXT,
-                  started_at TEXT,
-                  exited_at TEXT
-                );
-                CREATE TABLE project_agent_launchers (
-                  project_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  order_index INTEGER NOT NULL,
-                  PRIMARY KEY (project_id, order_index)
-                );
-                CREATE TABLE workspace_agent_launchers (
-                  workspace_id TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  order_index INTEGER NOT NULL,
-                  PRIMARY KEY (workspace_id, order_index)
-                );
-                CREATE TABLE agent_sessions (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  label TEXT,
-                  status TEXT NOT NULL DEFAULT 'idle',
-                  runtime_target_id TEXT,
-                  session_key TEXT,
-                  claimed_launcher_name TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO projects(id, name, dir, is_git, is_collapsed) VALUES ('project-1', 'Project', '/tmp/project', 1, 0);
-                INSERT INTO workspaces(id, project_id, title, dir, is_default, is_archived, is_running)
-                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 0, 0, 1);
-                INSERT INTO workspace_processes(id, workspace_id, name, command, order_index)
-                VALUES ('process-template-1', 'workspace-1', 'frontend', 'npm run dev', 0);
-                INSERT INTO running_processes(id, workspace_id, template_name, command, status)
-                VALUES ('process-runtime-1', 'workspace-1', 'frontend', 'npm run dev', 'running');
-                INSERT INTO project_agent_launchers(project_id, name, command, order_index)
-                VALUES ('project-1', 'Codex', 'codex', 0);
-                INSERT INTO workspace_agent_launchers(workspace_id, name, command, order_index)
-                VALUES ('workspace-1', 'Codex', 'codex', 0);
-                INSERT INTO agent_sessions(id, workspace_id, provider, label, status, claimed_launcher_name, created_at, updated_at)
-                VALUES ('agent-1', 'workspace-1', 'codex', 'Codex', 'idle', 'Codex', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-                INSERT INTO migration_state(current_version) VALUES (1);
-                """)
-
-        _ = try SQLiteStore(path: dbURL.path)
-
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
-        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_sessions"))
-        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_clients"))
-        XCTAssertTrue(try tableExists(dbURL: dbURL, table: "terminal_remote_session_states"))
-        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT name FROM projects WHERE id = 'project-1'"), "Project")
-        XCTAssertEqual(
-            try readSingleText(dbURL: dbURL, sql: "SELECT template_id FROM running_processes WHERE id = 'process-runtime-1'"), "process-template-1")
-        let workspaceAgentLauncherID = try readSingleText(
-            dbURL: dbURL, sql: "SELECT id FROM workspace_agent_launchers WHERE workspace_id = 'workspace-1' AND name = 'Codex'")
-        XCTAssertFalse(workspaceAgentLauncherID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        XCTAssertEqual(
-            try readSingleText(dbURL: dbURL, sql: "SELECT claimed_launcher_id FROM agent_sessions WHERE id = 'agent-1'"), workspaceAgentLauncherID)
-        XCTAssertFalse(
-            try readSingleText(dbURL: dbURL, sql: "SELECT id FROM project_agent_launchers WHERE project_id = 'project-1' AND name = 'Codex'")
-                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
-    }
-
-    func testVersionFiveDatabaseMigratesTerminalSessionOwnershipMetadata() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("v5-terminal-ownership-migration.db")
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE terminal_sessions (
-                  session_id TEXT PRIMARY KEY,
-                  root_directory TEXT NOT NULL UNIQUE,
-                  backend TEXT NOT NULL,
-                  lifetime_policy TEXT NOT NULL,
-                  title TEXT NOT NULL,
-                  working_directory TEXT NOT NULL,
-                  shell TEXT NOT NULL,
-                  command TEXT,
-                  created_at TEXT NOT NULL
-                );
-                CREATE TABLE running_processes (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  terminal_session_id TEXT,
-                  started_at TEXT,
-                  exited_at TEXT,
-                  last_output_at TEXT
-                );
-                CREATE TABLE agent_sessions (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  terminal_session_id TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE runtime_targets (
-                  id TEXT PRIMARY KEY,
-                  workspace_id TEXT NOT NULL,
-                  type TEXT NOT NULL,
-                  app TEXT NOT NULL,
-                  tracking_id TEXT,
-                  order_index INTEGER NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO terminal_sessions(session_id, root_directory, backend, lifetime_policy, title, working_directory, shell, created_at)
-                VALUES
-                  ('process-session', '/tmp/process-session', 'ghosttyEmbedded', 'persistent', 'process', '/tmp/process', '/bin/zsh', '2026-01-01T00:00:00Z'),
-                  ('agent-session', '/tmp/agent-session', 'ghosttyEmbedded', 'persistent', 'agent', '/tmp/agent', '/bin/zsh', '2026-01-01T00:00:00Z'),
-                  ('runtime-session', '/tmp/runtime-session', 'ghosttyEmbedded', 'persistent', 'runtime', '/tmp/runtime', '/bin/zsh', '2026-01-01T00:00:00Z'),
-                  ('unowned-session', '/tmp/unowned-session', 'ghosttyEmbedded', 'persistent', 'unowned', '/tmp/unowned', '/bin/zsh', '2026-01-01T00:00:00Z');
-                INSERT INTO running_processes(id, workspace_id, terminal_session_id, started_at)
-                VALUES ('process-1', 'workspace-process', 'process-session', '2026-01-01T00:00:02Z');
-                INSERT INTO agent_sessions(id, workspace_id, provider, terminal_session_id, created_at, updated_at)
-                VALUES ('agent-1', 'workspace-agent', 'spaces', 'agent-session', '2026-01-01T00:00:01Z', '2026-01-01T00:00:03Z');
-                INSERT INTO runtime_targets(id, workspace_id, type, app, tracking_id, order_index, updated_at)
-                VALUES
-                  ('target-process', 'workspace-wrong-process', 'terminal', 'Spaces', 'process-session', 0, '2026-01-01T00:00:04Z'),
-                  ('target-agent', 'workspace-wrong-agent', 'terminal', 'Spaces', 'agent-session', 1, '2026-01-01T00:00:04Z'),
-                  ('target-runtime', 'workspace-runtime', 'terminal', 'Spaces', 'runtime-session', 2, '2026-01-01T00:00:04Z');
-                INSERT INTO migration_state(current_version) VALUES (5);
-                """)
-
-        _ = try SQLiteStore(path: dbURL.path)
-
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
-        let terminalSessionColumns = try readTableColumns(dbURL: dbURL, table: "terminal_sessions")
-        XCTAssertTrue(terminalSessionColumns.contains("workspace_id"))
-        XCTAssertTrue(terminalSessionColumns.contains("kind"))
-        XCTAssertEqual(
-            try readRows(dbURL: dbURL, sql: "SELECT session_id, COALESCE(workspace_id, ''), kind FROM terminal_sessions ORDER BY session_id"),
-            [
-                ["agent-session", "workspace-agent", "agent"], ["process-session", "workspace-process", "process"],
-                ["runtime-session", "workspace-runtime", "shell"], ["unowned-session", "", "shell"],
-            ])
-    }
-
-    func testVersionSixDatabaseMigratesWorkspaceSetupResultMetadata() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("v6-setup-result-migration.db")
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE workspace_settings (
-                  workspace_id TEXT PRIMARY KEY,
-                  stop_script TEXT,
-                  setup_status TEXT NOT NULL DEFAULT 'succeeded',
-                  setup_error TEXT,
-                  setup_started_at TEXT,
-                  setup_finished_at TEXT
-                );
-                INSERT INTO workspace_settings(workspace_id, setup_status, setup_error, setup_started_at, setup_finished_at)
-                VALUES ('workspace-1', 'failed', 'old failure', '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z');
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO migration_state(current_version) VALUES (6);
-                """)
-
-        _ = try SQLiteStore(path: dbURL.path)
-
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
-        let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
-        XCTAssertTrue(workspaceSettingsColumns.contains("setup_exit_code"))
-        XCTAssertTrue(workspaceSettingsColumns.contains("setup_log_path"))
-        XCTAssertEqual(
-            try readRows(
-                dbURL: dbURL,
-                sql: """
-                    SELECT setup_status, setup_error, setup_started_at, setup_finished_at,
-                           COALESCE(setup_exit_code, ''), COALESCE(setup_log_path, '')
-                    FROM workspace_settings
-                    WHERE workspace_id = 'workspace-1'
-                    """), [["failed", "old failure", "2026-01-01T00:00:00Z", "2026-01-01T00:00:05Z", "", ""]])
-    }
-
     func testCurrentSchemaRejectsBlankPortNamesAtDatabaseLevel() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("port-name-constraints.db")
@@ -493,8 +162,8 @@ final class StoreTests: XCTestCase {
             dbURL: dbURL,
             sql: """
                 INSERT INTO projects(id, name, dir, is_git, is_collapsed) VALUES ('project-1', 'Project', '/tmp/project', 0, 0);
-                INSERT INTO workspaces(id, project_id, title, dir, is_default, is_archived, is_hidden, is_running)
-                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', 0, 0, 0, 0);
+                INSERT INTO workspaces(id, project_id, title, dir, runtime_path, is_default, is_archived, is_hidden, is_running)
+                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', '/tmp/project/feature', 0, 0, 0, 0);
                 """)
 
         XCTAssertThrowsError(
@@ -940,6 +609,31 @@ final class StoreTests: XCTestCase {
         let loaded = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
         let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
         try store.deleteWindow(id: runtimeTargetID)
+
+        XCTAssertEqual(try store.workspaceIDForTerminalSession(sessionID), workspace.id)
+    }
+
+    func testWorkspaceIDForTerminalSessionResolvesWorkspaceOwnedTerminalRow() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces-test.db")
+        let store = try SQLiteStore(path: dbURL.path)
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature-terminal", dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let sessionID = "workspace-owned-shell-session"
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                INSERT INTO terminal_sessions(
+                  session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, created_at
+                )
+                VALUES(
+                  '\(sessionID)', '/tmp/workspace-owned-shell-session', 'ghostty-embedded', 'persistent',
+                  '\(workspace.id)', 'shell', 'shell', '\(workspace.dir)', '/bin/zsh', '2026-06-11T00:00:00Z'
+                );
+                """)
 
         XCTAssertEqual(try store.workspaceIDForTerminalSession(sessionID), workspace.id)
     }
@@ -1464,7 +1158,7 @@ final class StoreTests: XCTestCase {
             isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let second = WorkspaceRecord(
             id: "ws-2", projectID: project.id, title: "feature-2", dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch,
-            isDefault: false, isArchived: true, isRunning: false, lastLaunchedAt: nil)
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: first)
 
         XCTAssertThrowsError(try store.upsert(workspace: second))

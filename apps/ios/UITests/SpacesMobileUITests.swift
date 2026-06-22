@@ -48,6 +48,7 @@ final class SpacesMobileUITests: XCTestCase {
             "host": "127.0.0.1",
             "port": 47_847,
             "authToken": "token",
+            "certificateFingerprint": "SHA256:test",
             "installationID": "installation",
             "attachToExistingApp": true,
         ]
@@ -66,23 +67,17 @@ final class SpacesMobileUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
-        let sessionRow = app.buttons["terminal.row.\(configuration.sessionID)"]
-        XCTAssertTrue(sessionRow.waitForExistence(timeout: 20), "Timed out waiting for session row \(configuration.sessionID)")
+        try returnToTerminalList(in: app)
         if configuration.proceedTakeOverPath != nil {
             waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 60)
         }
-        sessionRow.tap()
-
-        if !waitForOwnerState(in: app, configuration: configuration, timeout: 8),
-           let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8)
-        {
-            takeOverButton.tap()
-        }
-
-        guard waitForOwnerState(in: app, configuration: configuration, timeout: 45) else {
-            XCTFail("Timed out waiting for owner state")
-            return
-        }
+        try takeOverSessionFromList(
+            in: app,
+            configuration: configuration,
+            sessionID: configuration.sessionID,
+            timeout: 20,
+            context: "initial takeover"
+        )
 
         captureScreenshot(app, name: "post-takeover-immediate", filePath: configuration.immediateScreenshotPath)
         RunLoop.current.run(until: Date().addingTimeInterval(2))
@@ -148,7 +143,7 @@ final class SpacesMobileUITests: XCTestCase {
         if let proceedFinishPath = configuration.proceedFinishPath {
             waitForMarkerIfNeeded(proceedFinishPath, timeout: 30)
             for attemptIndex in 0..<configuration.manualRetakeoverAttempts {
-                guard let takeOverButton = waitForButton(
+                guard tapButton(
                     in: app,
                     identifier: "terminal.takeover",
                     fallbackLabel: "Take Over",
@@ -157,7 +152,6 @@ final class SpacesMobileUITests: XCTestCase {
                     XCTFail("Timed out waiting for Take Over button after Mac retakeover")
                     return
                 }
-                takeOverButton.tap()
                 guard waitForOwnerState(in: app, configuration: configuration, timeout: 45) else {
                     XCTFail("Timed out waiting for owner state after mobile retakeover attempt \(attemptIndex + 1)")
                     return
@@ -213,6 +207,7 @@ final class SpacesMobileUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
+        try returnToTerminalList(in: app)
         try takeOverSessionFromList(
             in: app,
             configuration: configuration,
@@ -266,7 +261,7 @@ final class SpacesMobileUITests: XCTestCase {
         let secondaryDetail = app.descendants(matching: .any)["terminal.detail.\(secondarySessionID)"]
         XCTAssertTrue(secondaryDetail.exists, "Secondary terminal detail disappeared after primary interrupt")
         XCTAssertFalse(app.staticTexts["This terminal session ended before a final render was available."].exists)
-        XCTAssertFalse(app.staticTexts["The mobile bridge request timed out."].exists)
+        XCTAssertFalse(app.staticTexts["The Device API request timed out."].exists)
         if !configuration.expectedSecondaryText.isEmpty {
             XCTAssertNotNil(
                 waitForRenderDump(configuration: configuration, timeout: 20) { dump in
@@ -311,37 +306,67 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func launchConfiguredApp(_ configuration: UITestConfiguration) -> XCUIApplication {
-        let app = if configuration.attachToExistingApp {
-            XCUIApplication(bundleIdentifier: configuration.bundleID)
-        } else {
-            XCUIApplication()
-        }
         if configuration.attachToExistingApp {
-            app.activate()
-            XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
-        } else {
-            app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
-            app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
-            app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
-            app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
-            app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
-            app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
-            if let secondarySessionID = configuration.secondarySessionID {
-                app.launchEnvironment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"] = secondarySessionID
+            let app = XCUIApplication(bundleIdentifier: configuration.bundleID)
+            if app.state != .notRunning {
+                app.activate()
+                XCTAssertTrue(waitForRunningApp(app, timeout: 20), "Timed out waiting for attached app \(configuration.bundleID) to become active")
+                return app
             }
-            if let renderDumpPath = configuration.renderDumpPath {
-                app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
-            }
-            if let eventLogPath = configuration.eventLogPath {
-                app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
-            }
-            app.launch()
         }
+
+        // The primary target launch path reliably carries launchEnvironment into
+        // cold starts; bundle-identifier launches can come up unconfigured.
+        let app = XCUIApplication()
+        applyConfiguredLaunchEnvironment(to: app, configuration: configuration)
+        app.launch()
         return app
+    }
+
+    private func applyConfiguredLaunchEnvironment(to app: XCUIApplication, configuration: UITestConfiguration) {
+        app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
+        app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
+        app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
+        app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
+        app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
+        app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
+        if let deviceSeedJSON = configuration.deviceSeedJSON {
+            app.launchEnvironment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"] = deviceSeedJSON
+        }
+        app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
+        if let secondarySessionID = configuration.secondarySessionID {
+            app.launchEnvironment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"] = secondarySessionID
+        }
+        if let renderDumpPath = configuration.renderDumpPath {
+            app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
+        }
+        if let eventLogPath = configuration.eventLogPath {
+            app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
+        }
     }
 
     private func waitForButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> XCUIElement? {
         waitForElement(primary: app.buttons[identifier], fallback: app.buttons[fallbackLabel], timeout: timeout)
+    }
+
+    private func tapButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let candidates = [
+                app.buttons[identifier],
+                app.descendants(matching: .any)[identifier],
+                app.buttons[fallbackLabel],
+                app.descendants(matching: .any)[fallbackLabel],
+            ]
+            for candidate in candidates where candidate.exists {
+                if candidate.isHittable {
+                    candidate.tap()
+                    return true
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        return false
     }
 
     private func focusTerminalSurface(in app: XCUIApplication) {
@@ -667,6 +692,23 @@ final class SpacesMobileUITests: XCTestCase {
         return app.buttons.matching(rowPredicate).firstMatch.exists
     }
 
+    private func revealTerminalRow(_ row: XCUIElement, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let scrollView = app.scrollViews.firstMatch
+        while Date() < deadline {
+            if row.exists, row.isEnabled, row.isHittable {
+                return true
+            }
+            if scrollView.exists {
+                scrollView.swipeUp()
+            } else {
+                app.swipeUp()
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        }
+        return row.exists && row.isEnabled && row.isHittable
+    }
+
     private func takeOverSessionFromList(
         in app: XCUIApplication,
         configuration: UITestConfiguration,
@@ -676,17 +718,30 @@ final class SpacesMobileUITests: XCTestCase {
     ) throws {
         let sessionRow = app.buttons["terminal.row.\(sessionID)"]
         XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
+        XCTAssertTrue(
+            revealTerminalRow(sessionRow, in: app, timeout: 8),
+            "Terminal row \(sessionID) was not ready for interaction during \(context)"
+        )
         sessionRow.tap()
 
         let sessionDetail = app.descendants(matching: .any)["terminal.detail.\(sessionID)"]
-        XCTAssertTrue(sessionDetail.waitForExistence(timeout: 8), "Terminal detail \(sessionID) did not appear during \(context)")
-        if waitForOwnerState(in: app, timeout: 4) == nil,
-           let takeOverButton = waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8)
-        {
-            takeOverButton.tap()
+        if !sessionDetail.waitForExistence(timeout: 8) {
+            captureScreenshot(
+                app,
+                name: "terminal-detail-missing-\(context)",
+                filePath: configuration.renderDumpPath.map { "\(($0 as NSString).deletingLastPathComponent)/terminal-detail-missing.png" }
+            )
+            XCTFail("Terminal detail \(sessionID) did not appear during \(context)")
+            return
+        }
+        if !waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 4) {
+            XCTAssertTrue(
+                tapButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8),
+                "Timed out waiting for Take Over button during \(context)"
+            )
         }
 
-        guard waitForOwnerState(in: app, timeout: 45) != nil else {
+        guard waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 45) else {
             XCTFail("Timed out waiting for owner state after taking over session \(sessionID) during \(context)")
             return
         }
@@ -1003,10 +1058,13 @@ private struct UITestConfiguration: Decodable {
 
     let sessionID: String
     let secondarySessionID: String?
+    let deviceID: String?
+    let deviceName: String?
     let host: String
     let port: Int
     let authToken: String
     let transportKey: String
+    let certificateFingerprint: String
     let installationID: String
     let renderDumpPath: String?
     let eventLogPath: String?
@@ -1047,13 +1105,44 @@ private struct UITestConfiguration: Decodable {
     let attachToExistingApp: Bool
     let bundleID: String
 
+    var deviceSeedJSON: String? {
+        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (1...65_535).contains(port),
+              !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !transportKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+
+        let payload: [String: Any] = [
+            "activeDeviceID": deviceID ?? "",
+            "devices": [
+                [
+                    "id": deviceID ?? "",
+                    "name": deviceName ?? "This Mac",
+                    "host": host,
+                    "port": port,
+                    "authToken": authToken,
+                    "transportKey": transportKey,
+                    "certificateFingerprint": certificateFingerprint,
+                ],
+            ],
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     private enum CodingKeys: String, CodingKey {
         case sessionID
         case secondarySessionID
+        case deviceID
+        case deviceName
         case host
         case port
         case authToken
         case transportKey
+        case certificateFingerprint
         case installationID
         case renderDumpPath
         case eventLogPath
@@ -1100,13 +1189,17 @@ private struct UITestConfiguration: Decodable {
         attachToExistingApp = try container.decodeIfPresent(Bool.self, forKey: .attachToExistingApp) ?? false
         sessionID = try container.decode(String.self, forKey: .sessionID)
         secondarySessionID = try container.decodeIfPresent(String.self, forKey: .secondarySessionID)
+        deviceID = try container.decodeIfPresent(String.self, forKey: .deviceID)
+        deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName)
         host = try container.decode(String.self, forKey: .host)
         port = try container.decode(Int.self, forKey: .port)
         authToken = try container.decode(String.self, forKey: .authToken)
         if attachToExistingApp {
             transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
+            certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint) ?? ""
         } else {
             transportKey = try container.decode(String.self, forKey: .transportKey)
+            certificateFingerprint = try container.decode(String.self, forKey: .certificateFingerprint)
         }
         installationID = try container.decode(String.self, forKey: .installationID)
         renderDumpPath = try container.decodeIfPresent(String.self, forKey: .renderDumpPath)

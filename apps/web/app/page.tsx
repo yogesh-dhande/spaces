@@ -13,9 +13,9 @@ type Feature = {
 
 const keyFeatures: Feature[] = [
   {
-    title: "Manager mode for coding agents",
+    title: "Track agents across workspaces",
     description:
-      "See all your coding agents in one Alerts view. Know instantly which ones are working, which ones are waiting on you, and which ones are done. Jump to any agent with a keyboard shortcut.",
+      "Every coding agent reports its state — working, waiting on you, or done — in one Alerts view. See at a glance which ones need input next, and jump to any of them with a keyboard shortcut.",
     span: "wide",
   },
   {
@@ -49,6 +49,12 @@ const keyFeatures: Feature[] = [
       "Coding agents can write context (what's pending, what broke, where they left off) into a per-workspace notes field, surfaced inline in the workspace detail pane.",
   },
   {
+    title: "Move between Mac and iPhone",
+    description:
+      "Pair the Spaces iOS app and your terminal sessions come with you. Pick up the same live session on your phone — watch a build, check a coding agent, or send a command — then step back to your Mac without losing your place.",
+    span: "wide",
+  },
+  {
     title: "Launch and teardown on demand",
     description:
       "Close a workspace and Spaces shuts down its processes and closes its windows. Come back tomorrow, open it, and everything restarts exactly as it was.",
@@ -78,14 +84,14 @@ const faqItems: FaqItem[] = [
         <li>macOS 14 Sonoma or later</li>
         <li>
           <a
-            href="https://github.com/koekeishiya/yabai"
+            href="https://github.com/asmvik/yabai"
             className="text-accent hover:underline"
           >
             yabai
           </a>{" "}
           — an open-source window manager used for window tracking and focus switching
         </li>
-        <li>Spaces ships its own built-in terminal, so workspaces do not depend on external terminal apps.</li>
+        <li>Spaces ships its own terminal, so workspaces do not depend on external terminal apps.</li>
       </ul>
     ),
   },
@@ -94,7 +100,7 @@ const faqItems: FaqItem[] = [
     answer: (
       <>
         <a
-          href="https://github.com/koekeishiya/yabai"
+          href="https://github.com/asmvik/yabai"
           className="text-accent hover:underline"
         >
           yabai
@@ -131,16 +137,21 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "I only work on one project at a time. How will Spaces help me?",
+    question: "I only work on one project at a time. Will Spaces help me?",
     answer: (
       <ul className="ml-4 list-disc space-y-1">
         <li>
-          Spaces is still helpful in managing windows, monitoring processes,
-          quickly spinning up or down projects
+          Yes. A workspace starts every process on its reserved ports in one
+          action, so spinning a project up or down takes no manual server
+          juggling or <code>.env</code> edits.
         </li>
         <li>
-          You can leave other projects open and running without them getting in
-          the way of the project you are focusing on.
+          Tear a workspace down when you&apos;re done and reopen it later exactly
+          as you left it — windows, processes, and all.
+        </li>
+        <li>
+          When you do branch off for a fix or experiment, it gets its own
+          isolated workspace without disturbing your main work.
         </li>
       </ul>
     ),
@@ -182,11 +193,27 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
+    question: "Is there a mobile app?",
+    answer: (
+      <>
+        Yes. The Spaces iOS app pairs with your Mac by scanning a QR code. From
+        your phone you can browse a workspace&apos;s live terminal sessions, watch
+        a coding agent&apos;s output, and relaunch the Mac app if it quits while
+        you&apos;re away. See the{" "}
+        <Link href="/docs/ios" className="text-accent hover:underline">
+          iOS companion
+        </Link>{" "}
+        docs.
+      </>
+    ),
+  },
+  {
     question: "Do you collect any data?",
     answer: (
       <>
-        No. Spaces is a native desktop app that runs entirely on your Mac. It does
-        not send any data back to Spaces or any third party.
+        No. Spaces runs entirely on your Mac and does not send your data to Spaces
+        or any third party. Pairing connects only to your own devices — your
+        iPhone or another machine you control.
       </>
     ),
   },

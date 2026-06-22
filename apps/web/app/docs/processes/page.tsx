@@ -20,7 +20,7 @@ export default function ProcessesDocsPage() {
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Spaces gives each process its own terminal window when the workspace launches.</li>
-          <li>• Process terminals are backed by the built-in Spaces terminal runtime, so if you close the window the process keeps running and Spaces can reopen the session view without restarting the work.</li>
+          <li>• Each process runs in a Spaces terminal, so if you close the window the process keeps running and Spaces can reopen the session view without restarting the work.</li>
         </ul>
       </article>
 
@@ -91,7 +91,7 @@ SPACES_WORKSPACE_DIR              # this workspace's directory`}</code>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Coding Agents</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Coding agents run as processes like any other, but they can also report their own lifecycle — started, waiting on you, done — through <code>spaces signal</code>. Alerts surfaces those states so you know which agent needs you next.
+          Coding agents run as processes like any other, but they can also report their own lifecycle — started, waiting on you, done — through <code>spaces agent signal</code>. Alerts surfaces those states so you know which agent needs you next.
         </p>
       </article>
     </DocsShell>

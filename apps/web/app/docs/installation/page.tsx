@@ -78,7 +78,7 @@ export default function InstallationDocsPage() {
           <li>• <strong>Google Chrome</strong> — required for browser sessions. Download from <a href="https://www.google.com/chrome/" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">google.com/chrome</a> or install with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask google-chrome</code>.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces includes its own built-in terminal runtime. On first launch, it walks you through anything that is missing in a guided setup flow.
+          Spaces includes its own terminal. On first launch, it walks you through anything that is missing in a guided setup flow.
         </p>
       </article>
 

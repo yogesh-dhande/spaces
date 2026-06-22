@@ -1,9 +1,10 @@
 import SwiftUI
-import spacesmobilecore
+import spacesdevicecore
+import spacesterminalcore
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selectedSession: SpacesMobileTerminalSessionSummary?
+    @State private var selectedSession: SelectedTerminalSessionRoute?
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var pendingAuthenticationMessage: String?
     @State private var terminalListRefreshGeneration = 0
@@ -19,32 +20,31 @@ struct ContentView: View {
                 .toolbar {
                     toolbarContent
                 }
-                .navigationDestination(isPresented: terminalRoutePresentationBinding) {
-                    if let selectedSession {
-                        TerminalDetailView(
-                            session: selectedSession,
-                            settings: model.settings,
-                            appModel: model,
-                            onAuthenticationRequired: { message in
-                                pendingAuthenticationMessage = message
-                                self.selectedSession = nil
-                            },
-                            onSessionChanged: { session in
-                                self.selectedSession = session
-                            }
-                        ) {
+                .navigationDestination(item: $selectedSession) { selectedSession in
+                    TerminalDetailView(
+                        session: selectedSession.session,
+                        settings: model.settings,
+                        appModel: model,
+                        onAuthenticationRequired: { message in
+                            pendingAuthenticationMessage = message
                             self.selectedSession = nil
+                        },
+                        onSessionChanged: { session in
+                            self.selectedSession = SelectedTerminalSessionRoute(session: session)
                         }
-                        .id(selectedSession.id)
-                    } else if let pendingTerminalLaunch {
-                        TerminalLaunchPendingView(launch: pendingTerminalLaunch, model: model) { session in
-                            if let session {
-                                selectedSession = session
-                            }
-                            self.pendingTerminalLaunch = nil
-                        } onBack: {
-                            self.pendingTerminalLaunch = nil
+                    ) {
+                        self.selectedSession = nil
+                    }
+                    .id(selectedSession.id)
+                }
+                .navigationDestination(item: $pendingTerminalLaunch) { pendingTerminalLaunch in
+                    TerminalLaunchPendingView(launch: pendingTerminalLaunch, model: model) { session in
+                        self.pendingTerminalLaunch = nil
+                        if let session {
+                            selectedSession = SelectedTerminalSessionRoute(session: session)
                         }
+                    } onBack: {
+                        self.pendingTerminalLaunch = nil
                     }
                 }
         }
@@ -52,11 +52,20 @@ struct ContentView: View {
             ConnectionSettingsView(
                 initialSettings: model.settings,
                 initialPairingLink: model.pendingPairingLink,
+                pairedDevices: model.pairedDevices,
+                activeDeviceID: model.activeDeviceID,
                 noticeMessage: model.connectionNotice,
                 onPairingLinkConsumed: { model.clearPendingPairingLink() },
-                onLaunchSpaces: { await model.launchSpacesAppIfNeeded() }
-            ) { settings in
-                model.applyConnectionSettings(settings)
+                onLaunchSpaces: { await model.launchSpacesAppIfNeeded() },
+                onSelectDevice: { deviceID in
+                    model.selectDevice(id: deviceID)
+                    Task { await model.refresh() }
+                },
+                onRemoveDevice: { deviceID in
+                    model.removeDevice(id: deviceID)
+                }
+            ) { settings, deviceName in
+                model.applyConnectionSettings(settings, deviceName: deviceName)
                 Task { await model.refresh() }
             }
         }
@@ -127,18 +136,6 @@ struct ContentView: View {
         )
     }
 
-    private var terminalRoutePresentationBinding: Binding<Bool> {
-        Binding(
-            get: { activeTerminalRouteID != nil },
-            set: { isPresented in
-                if !isPresented {
-                    selectedSession = nil
-                    pendingTerminalLaunch = nil
-                }
-            }
-        )
-    }
-
     private var activeTerminalRouteID: String? {
         selectedSession?.id ?? pendingTerminalLaunch?.id
     }
@@ -148,6 +145,7 @@ struct ContentView: View {
             scenePhase == .active ? "active" : "inactive",
             model.isShowingConnectionSettings ? "settings" : "home",
             activeTerminalRouteID ?? "list",
+            model.activeDeviceID ?? "no-device",
             "\(terminalListRefreshGeneration)",
         ].joined(separator: "|")
     }
@@ -158,9 +156,9 @@ struct ContentView: View {
                 ContentUnavailableView {
                     Label("Pair This Device", systemImage: "iphone.gen3.radiowaves.left.and.right")
                 } description: {
-                    Text(model.connectionNotice ?? "Open Connection and pair this device again.")
+                    Text(model.connectionNotice ?? "Open Devices and pair this device again.")
                 } actions: {
-                    Button("Open Connection") {
+                    Button("Open Devices") {
                         model.isShowingConnectionSettings = true
                     }
                 }
@@ -172,7 +170,7 @@ struct ContentView: View {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         homeControls
-                        if projectGroups.isEmpty {
+                        if projectGroups.isEmpty && model.terminalGroups.isEmpty {
                             ContentUnavailableView(
                                 "No Workspaces",
                                 systemImage: "rectangle.stack",
@@ -187,6 +185,9 @@ struct ContentView: View {
                                         workspaceCard(group)
                                     }
                                 }
+                            }
+                            ForEach(model.terminalGroups) { group in
+                                terminalGroupCard(group)
                             }
                         }
                     }
@@ -244,6 +245,53 @@ struct ContentView: View {
     }
 
     private var homeControls: some View {
+        VStack(spacing: 8) {
+            deviceSelectorRow
+            searchFilterRow
+        }
+    }
+
+    private var deviceSelectorRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "desktopcomputer.and.macbook")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+            if model.pairedDevices.count > 1 {
+                Menu {
+                    ForEach(model.pairedDevices) { device in
+                        Button {
+                            model.selectDevice(id: device.id)
+                            Task { await model.refresh() }
+                        } label: {
+                            Label(device.name, systemImage: device.id == model.activeDeviceID ? "checkmark" : "desktopcomputer")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(model.activeDeviceName ?? "Device")
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(model.activeDeviceName ?? "Device")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
+    }
+
+    private var searchFilterRow: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .semibold))
@@ -285,7 +333,7 @@ struct ContentView: View {
             Text("State")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.muted)
-            ForEach([SpacesMobileRunState.notStarted, .running, .exited], id: \.self) { state in
+            ForEach([SpacesDeviceRunState.notStarted, .running, .exited], id: \.self) { state in
                 Toggle(isOn: Binding(get: { model.visibleRunStates.contains(state) }, set: { _ in model.toggleRunStateFilter(state) })) {
                     Text(state.mobileLabel)
                 }
@@ -356,7 +404,7 @@ struct ContentView: View {
             Button {
                 model.isShowingConnectionSettings = true
             } label: {
-                Label("Connection", systemImage: "slider.horizontal.3")
+                Label("Devices", systemImage: "desktopcomputer.and.macbook")
             }
         }
     }
@@ -397,20 +445,106 @@ struct ContentView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
+                    Spacer(minLength: 0)
+                    if showsStateChip(for: row) {
+                        MetaChip(text: row.runState.mobileLabel)
+                    }
+                    runtimePrimaryIndicator(for: row)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(model.isMutating || (row.sessionID == nil && !row.canRun))
             .accessibilityIdentifier(rowIdentifier)
-            Spacer(minLength: 0)
-            if showsStateChip(for: row) {
-                MetaChip(text: row.runState.mobileLabel)
-            }
             runtimeActionButtons(for: row)
         }
         .padding(.init(top: 9, leading: 14, bottom: 9, trailing: 14))
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+
+    private func terminalGroupCard(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+        SectionCard {
+            terminalGroupHeader(group)
+            ForEach(Array(group.sessions.enumerated()), id: \.element.id) { index, session in
+                if index == 0 {
+                    RowDivider(inset: 0)
+                } else {
+                    RowDivider()
+                }
+                terminalSessionRow(session)
+            }
+        }
+    }
+
+    private func terminalGroupHeader(_ group: SpacesMobileTerminalWorkspaceGroup) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(group.projectName.uppercased())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
+                .tracking(0.4)
+            Text(group.workspaceTitle)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            Text(group.workspaceDirectory)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.mutedSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.init(top: 12, leading: 14, bottom: 12, trailing: 14))
+    }
+
+    private func terminalSessionRow(_ session: SpacesDeviceTerminalSessionSummary) -> some View {
+        Button {
+            selectedSession = SelectedTerminalSessionRoute(session: session)
+        } label: {
+            HStack(spacing: 10) {
+                StatusDot(kind: statusKind(for: session.state))
+                TypeIconTile(systemName: "terminal.fill")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Text(session.workingDirectory)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                if session.state != .running {
+                    MetaChip(text: session.state.rawValue.capitalized)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.mutedSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender))
+        .accessibilityIdentifier("terminal.row.\(session.id)")
+        .padding(.init(top: 9, leading: 14, bottom: 9, trailing: 14))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder private func runtimePrimaryIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        if row.sessionID != nil {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
+        } else if row.canRun {
+            Image(systemName: "play.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.mutedSecondary)
+        }
     }
 
     @ViewBuilder private func runtimeActionButtons(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
@@ -447,15 +581,6 @@ struct ContentView: View {
             .accessibilityLabel("Restart")
             .accessibilityIdentifier("runtime.action.restart.\(row.id)")
         }
-        if row.sessionID != nil {
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.mutedSecondary)
-        } else if row.canRun {
-            Image(systemName: "play.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.mutedSecondary)
-        }
     }
 
     private func showsRunActionButton(for row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
@@ -466,17 +591,24 @@ struct ContentView: View {
 
     private func activateRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
         if let session = model.terminalSession(for: row) {
-            selectedSession = session
+            selectedSession = SelectedTerminalSessionRoute(session: session)
         } else if row.canRun {
             pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .primary)
         }
     }
 
-    private func statusKind(for state: SpacesMobileRunState) -> StatusDot.Kind {
+    private func statusKind(for state: SpacesDeviceRunState) -> StatusDot.Kind {
         switch state {
         case .running: .running
         case .exited: .exited
         case .notStarted: .idle
+        }
+    }
+
+    private func statusKind(for state: TerminalSessionState) -> StatusDot.Kind {
+        switch state {
+        case .starting, .running: .running
+        case .exited, .failed: .exited
         }
     }
 
@@ -487,7 +619,21 @@ struct ContentView: View {
     }
 }
 
-private struct PendingTerminalLaunch: Identifiable, Sendable {
+private struct SelectedTerminalSessionRoute: Identifiable, Hashable {
+    let session: SpacesDeviceTerminalSessionSummary
+
+    var id: String { session.id }
+
+    static func == (lhs: SelectedTerminalSessionRoute, rhs: SelectedTerminalSessionRoute) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+private struct PendingTerminalLaunch: Identifiable, Sendable, Hashable {
     enum Action: Sendable {
         case primary
         case run
@@ -513,7 +659,7 @@ private struct PendingTerminalLaunch: Identifiable, Sendable {
         workspaceID = nil
     }
 
-    init(workspace: SpacesMobileWorkspaceSummary) {
+    init(workspace: SpacesDeviceWorkspaceSummary) {
         id = "workspace-terminal:\(workspace.id)"
         title = "Workspace Terminal"
         detail = workspace.dir
@@ -521,6 +667,14 @@ private struct PendingTerminalLaunch: Identifiable, Sendable {
         action = .workspaceTerminal
         row = nil
         workspaceID = workspace.id
+    }
+
+    static func == (lhs: PendingTerminalLaunch, rhs: PendingTerminalLaunch) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
 
@@ -550,7 +704,7 @@ private struct TerminalLaunchPendingView: View {
 
     let launch: PendingTerminalLaunch
     let model: SpacesMobileAppModel
-    let onSessionReady: @MainActor (SpacesMobileTerminalSessionSummary?) -> Void
+    let onSessionReady: @MainActor (SpacesDeviceTerminalSessionSummary?) -> Void
     let onBack: @MainActor () -> Void
 
     @State private var hasStarted = false
@@ -627,7 +781,7 @@ private struct TerminalLaunchPendingView: View {
         .frame(height: Self.chromeControlHeight)
     }
 
-    private func runLaunch() async -> SpacesMobileTerminalSessionSummary? {
+    private func runLaunch() async -> SpacesDeviceTerminalSessionSummary? {
         switch launch.action {
         case .primary:
             guard let row = launch.row else { return nil }
@@ -653,7 +807,7 @@ private struct WorkspaceCreateSheet: View {
     @State private var branch = ""
     @State private var name = ""
 
-    private var project: SpacesMobileProjectSummary? {
+    private var project: SpacesDeviceProjectSummary? {
         let projects = model.workspaceCreateOptions?.projects ?? model.overview?.projects ?? []
         return projects.first(where: { $0.id == projectID })
     }

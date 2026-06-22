@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import spacesterminalcore
 import systembridge
 import workspacecore
 
@@ -12,6 +13,9 @@ func makeTempDirectory() throws -> URL {
 func makeTemporaryStore() throws -> SQLiteStore {
     let dir = try makeTempDirectory()
     let dbURL = dir.appendingPathComponent("spaces-test.db")
+    let runtimeURL = dir.appendingPathComponent("runtime", isDirectory: true)
+    setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
+    setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
     return try SQLiteStore(path: dbURL.path)
 }
 
@@ -25,6 +29,14 @@ func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, titl
     WorkspaceRecord(
         id: id, projectID: projectID, title: title, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
         lastLaunchedAt: nil)
+}
+
+func makeSpacesDeviceRecord(id: String = UUID().uuidString, name: String = "Builder") -> SpacesDeviceRecord {
+    let hostSlug = name.lowercased().replacingOccurrences(of: " ", with: "-")
+    return SpacesDeviceRecord(
+        id: id, name: name, sshHost: "\(hostSlug).internal", sshUser: "spaces", sshPort: 22, workspaceRoot: "/srv/spaces",
+        daemonEndpoint: SpacesDaemonEndpoint(host: "\(hostSlug).lan", port: 8443, certificateFingerprint: "SHA256:abcdef"),
+        createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
 }
 
 final class MockTerminalFocusPulseController: TerminalFocusPulseControlling, @unchecked Sendable {

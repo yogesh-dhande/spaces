@@ -153,7 +153,9 @@ mkdir -p "$(dirname "$DB_PATH")"
 touch "$APP_LOG"
 
 cd "$REPO_ROOT"
-"$SETUP_GHOSTTYKIT"
+if [[ "${SPACES_E2E_SKIP_GHOSTTYKIT_SETUP:-0}" != "1" ]]; then
+  "$SETUP_GHOSTTYKIT"
+fi
 
 rm -rf "$PROJECT_DIR"
 mkdir -p "$PROJECT_DIR"

@@ -4,7 +4,7 @@
     import GhosttyKit
     import UIKit
     import XCTest
-    import spacesmobilecore
+    import spacesdevicecore
     import spacesterminalcore
     @testable import SpacesMobile
     @testable import spacesterminalmobileghostty
@@ -96,11 +96,12 @@
             settings.port = 12345
             settings.authToken = "token"
             settings.transportKey = "transport-key"
+            settings.certificateFingerprint = "SHA256:test"
             return settings
         }
 
-        private func session(state: TerminalSessionState = .running) -> SpacesMobileTerminalSessionSummary {
-            SpacesMobileTerminalSessionSummary(
+        private func session(state: TerminalSessionState = .running) -> SpacesDeviceTerminalSessionSummary {
+            SpacesDeviceTerminalSessionSummary(
                 id: "terminal-session",
                 title: "terminal",
                 workingDirectory: "/tmp/work",
@@ -126,7 +127,7 @@
 
         func testEndedSessionDoesNotOfferTakeOverWhenFinalRenderIsMissing() {
             let settings = settings()
-            let session = SpacesMobileTerminalSessionSummary(
+            let session = SpacesDeviceTerminalSessionSummary(
                 id: "ended-session",
                 title: "ended",
                 workingDirectory: "/tmp/work",
@@ -158,13 +159,10 @@
 
         func testOpenTerminalLinkOpensNonMediaExternalURL() async {
             let settings = settings()
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
-                XCTAssertEqual(request.command, "resolveTerminalLink")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                XCTAssertEqual(request.commandName, "resolveTerminalLink")
                 XCTAssertEqual(request.terminalLink, "https://example.com/docs")
-                return SpacesMobileBridgeResponse(
-                    ok: true,
-                    message: "ok",
-                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                         id: "external|https://example.com/docs",
                         source: .externalURL,
                         originalLink: "https://example.com/docs",
@@ -193,13 +191,10 @@
             let settings = settings()
             let spacedPath = "/Users/yogesh/Downloads/Screen Recording 2026-03-20 at 11.17.57 AM.mov"
             var resolvedLinks: [String] = []
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
-                XCTAssertEqual(request.command, "resolveTerminalLink")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                XCTAssertEqual(request.commandName, "resolveTerminalLink")
                 resolvedLinks.append(request.terminalLink ?? "")
-                return SpacesMobileBridgeResponse(
-                    ok: true,
-                    message: "ok",
-                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                         id: "external|https://example.com/docs",
                         source: .externalURL,
                         originalLink: spacedPath,
@@ -227,11 +222,8 @@
             let settings = settings()
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             defer { try? FileManager.default.removeItem(at: cacheRoot) }
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { _ in
-                SpacesMobileBridgeResponse(
-                    ok: true,
-                    message: "ok",
-                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                         id: "external|https://example.com/image.png",
                         source: .externalURL,
                         originalLink: "https://example.com/image.png",
@@ -273,11 +265,8 @@
                 try? FileManager.default.removeItem(at: downloadRoot)
             }
             let url = URL(string: "https://example.com/missing.png")!
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { _ in
-                SpacesMobileBridgeResponse(
-                    ok: true,
-                    message: "ok",
-                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                         id: "external|https://example.com/missing.png",
                         source: .externalURL,
                         originalLink: "https://example.com/missing.png",
@@ -303,7 +292,7 @@
                         httpVersion: nil,
                         headerFields: nil)
                     else {
-                        throw SpacesMobileBridgeClientError.requestFailed("Missing HTTP response.")
+                        throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
                     }
                     return try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response)
                 },
@@ -326,11 +315,8 @@
                 try? FileManager.default.removeItem(at: downloadRoot)
             }
             let url = URL(string: "https://example.com/login.png")!
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { _ in
-                SpacesMobileBridgeResponse(
-                    ok: true,
-                    message: "ok",
-                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                         id: "external|https://example.com/login.png",
                         source: .externalURL,
                         originalLink: "https://example.com/login.png",
@@ -356,7 +342,7 @@
                         httpVersion: nil,
                         headerFields: ["Content-Type": "text/html"])
                     else {
-                        throw SpacesMobileBridgeClientError.requestFailed("Missing HTTP response.")
+                        throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
                     }
                     return try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response)
                 },
@@ -395,12 +381,9 @@
             defer { try? FileManager.default.removeItem(at: cacheRoot) }
             let probe = ExternalDownloadProbe()
             let fastPayload = Data([0x02, 0x02, 0x02])
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 let link = request.terminalLink ?? ""
-                return SpacesMobileBridgeResponse(
-                    ok: true,
-                    message: "ok",
-                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                         id: "external|\(link)",
                         source: .externalURL,
                         originalLink: link,
@@ -457,12 +440,9 @@
             let slowDownloadedURL = downloadRoot.appendingPathComponent("slow-download.png")
             let fastDownloadedURL = downloadRoot.appendingPathComponent("fast-download.png")
             let fastPayload = Data([0x02, 0x02, 0x02])
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 let link = request.terminalLink ?? ""
-                return SpacesMobileBridgeResponse(
-                    ok: true,
-                    message: "ok",
-                    terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                         id: "external|\(link)",
                         source: .externalURL,
                         originalLink: link,
@@ -509,13 +489,10 @@
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             defer { try? FileManager.default.removeItem(at: cacheRoot) }
             let payload = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
-                switch request.command {
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
                 case "resolveTerminalLink":
-                    return SpacesMobileBridgeResponse(
-                        ok: true,
-                        message: "ok",
-                        terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+                    return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                             id: "link-1",
                             source: .localFile,
                             originalLink: "image.png",
@@ -528,17 +505,14 @@
                     let offset = Int(request.chunkOffset ?? 0)
                     let end = min(offset + 4, payload.count)
                     let chunk = payload[offset..<end]
-                    return SpacesMobileBridgeResponse(
-                        ok: true,
-                        message: "ok",
-                        terminalLinkChunk: SpacesMobileTerminalLinkChunk(
+                    return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
                             linkID: "link-1",
                             offset: Int64(offset),
                             byteCount: chunk.count,
                             isFinal: end >= payload.count,
                             base64Data: Data(chunk).base64EncodedString()))
                 default:
-                    return SpacesMobileBridgeResponse(ok: false, message: "unexpected command")
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
@@ -561,34 +535,28 @@
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             defer { try? FileManager.default.removeItem(at: cacheRoot) }
             let firstChunk = Data([0x89, 0x50, 0x4E, 0x47])
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
-                switch request.command {
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
                 case "resolveTerminalLink":
                     return Self.previewMetadata(id: "link-1", originalLink: "image.png", displayName: "image.png", byteCount: 8)
                 case "readTerminalLinkChunk":
                     let offset = request.chunkOffset ?? 0
                     if offset == 0 {
-                        return SpacesMobileBridgeResponse(
-                            ok: true,
-                            message: "ok",
-                            terminalLinkChunk: SpacesMobileTerminalLinkChunk(
+                        return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
                                 linkID: "link-1",
                                 offset: 0,
                                 byteCount: firstChunk.count,
                                 isFinal: false,
                                 base64Data: firstChunk.base64EncodedString()))
                     }
-                    return SpacesMobileBridgeResponse(
-                        ok: true,
-                        message: "ok",
-                        terminalLinkChunk: SpacesMobileTerminalLinkChunk(
+                    return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
                             linkID: "link-1",
                             offset: offset,
                             byteCount: 2,
                             isFinal: true,
                             base64Data: Data([0x01]).base64EncodedString()))
                 default:
-                    return SpacesMobileBridgeResponse(ok: false, message: "unexpected command")
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
@@ -613,17 +581,17 @@
             defer { try? FileManager.default.removeItem(at: cacheRoot) }
             let payload = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
             let attempts = LinkPreviewAttemptCounter()
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
-                switch request.command {
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
                 case "resolveTerminalLink":
                     if await attempts.next() == 1 {
                         return Self.previewMetadata(id: "link-1", originalLink: "image.png", displayName: "image.png", byteCount: payload.count)
                     }
-                    return SpacesMobileBridgeResponse(ok: false, message: "This file path is not available to mobile preview.")
+                    return SpacesDeviceAPIResponse(ok: false, message: "This file path is not available to mobile preview.")
                 case "readTerminalLinkChunk":
                     return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
                 default:
-                    return SpacesMobileBridgeResponse(ok: false, message: "unexpected command")
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
@@ -647,8 +615,8 @@
 
         func testOpenTerminalLinkRecordsFailedTransferState() async {
             let settings = settings()
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { _ in
-                SpacesMobileBridgeResponse(ok: false, message: "Only image and video files can be previewed on iOS.")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: false, message: "Only image and video files can be previewed on iOS.")
             }
             let model = TerminalViewerModel(
                 session: session(),
@@ -671,8 +639,8 @@
             let fastPayload = Data([2, 2, 2])
             let slowID = "slow-link"
             let fastID = "fast-link"
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
-                switch request.command {
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
                 case "resolveTerminalLink":
                     if request.terminalLink == "slow.png" {
                         await gate.markSlowStarted()
@@ -684,7 +652,7 @@
                     let payload = request.terminalLinkID == slowID ? slowPayload : fastPayload
                     return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
                 default:
-                    return SpacesMobileBridgeResponse(ok: false, message: "unexpected command")
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
@@ -721,8 +689,8 @@
             let secondID = "\(sharedPrefix)2"
             let firstPayload = Data([0x01, 0x02, 0x03])
             let secondPayload = Data([0x04, 0x05, 0x06])
-            let bridgeClient = SpacesMobileBridgeClient(settings: settings) { request in
-                switch request.command {
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
                 case "resolveTerminalLink":
                     if request.terminalLink == "first.png" {
                         return Self.previewMetadata(
@@ -734,7 +702,7 @@
                     let payload = request.terminalLinkID == firstID ? firstPayload : secondPayload
                     return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
                 default:
-                    return SpacesMobileBridgeResponse(ok: false, message: "unexpected command")
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
@@ -759,11 +727,8 @@
             originalLink: String,
             displayName: String,
             byteCount: Int
-        ) -> SpacesMobileBridgeResponse {
-            SpacesMobileBridgeResponse(
-                ok: true,
-                message: "ok",
-                terminalLinkMetadata: SpacesMobileTerminalLinkMetadata(
+        ) -> SpacesDeviceAPIResponse {
+            Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
                     id: id,
                     source: .localFile,
                     originalLink: originalLink,
@@ -774,18 +739,23 @@
                     externalURL: nil))
         }
 
-        private nonisolated static func previewChunk(id: String, payload: Data, offset: Int64) -> SpacesMobileBridgeResponse {
+        private nonisolated static func previewChunk(id: String, payload: Data, offset: Int64) -> SpacesDeviceAPIResponse {
             let offset = Int(offset)
             let chunk = payload[offset..<payload.count]
-            return SpacesMobileBridgeResponse(
-                ok: true,
-                message: "ok",
-                terminalLinkChunk: SpacesMobileTerminalLinkChunk(
+            return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
                     linkID: id,
                     offset: Int64(offset),
                     byteCount: chunk.count,
                     isFinal: true,
                     base64Data: Data(chunk).base64EncodedString()))
+        }
+
+        private nonisolated static func metadataResponse(_ metadata: SpacesDeviceTerminalLinkMetadata) -> SpacesDeviceAPIResponse {
+            SpacesDeviceAPIResponse(ok: true, message: "ok", result: .terminalLinkMetadata(metadata))
+        }
+
+        private nonisolated static func chunkResponse(_ chunk: SpacesDeviceTerminalLinkChunk) -> SpacesDeviceAPIResponse {
+            SpacesDeviceAPIResponse(ok: true, message: "ok", result: .terminalLinkChunk(chunk))
         }
     }
 
@@ -2145,12 +2115,14 @@
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewTinyScrollDeltasAccumulate() throws {
+        func testRemoteTerminalHostViewTinyScrollDeltasForwardWithoutLocalViewportMutation() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            var sentScrollCount = 0
+            hostView.onSendScroll = { _, _, _ in sentScrollCount += 1 }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -2176,18 +2148,22 @@
 
             let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
-            XCTAssertNotEqual(scrolledText, bottomText)
-            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
+            XCTAssertEqual(scrolledText, bottomText)
+            XCTAssertEqual(sentScrollCount, 20)
 
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewCanScrollBackThroughSnapshotScrollback() throws {
+        func testRemoteTerminalHostViewForwardsScrollbackWithoutLocalViewportMutation() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods in
+                sentScrolls.append((horizontal, vertical, scrollMods))
+            }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -2225,19 +2201,23 @@
 
             let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
-            XCTAssertNotEqual(scrolledText, bottomText)
-            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
-            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 000001"), scrolledText)
+            XCTAssertEqual(scrolledText, bottomText)
+            XCTAssertEqual(sentScrolls.last?.horizontal, 0)
+            XCTAssertEqual(sentScrolls.last?.vertical, 10_000)
 
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewPreservesSnapshotScrollbackAfterResizeChurn() throws {
+        func testRemoteTerminalHostViewDoesNotLocallyScrollAfterResizeChurn() throws {
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods in
+                sentScrolls.append((horizontal, vertical, scrollMods))
+            }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -2270,6 +2250,9 @@
             viewController.view.layoutIfNeeded()
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
+            let preScrollSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
+            let preScrollText = GhosttyTerminalSnapshotLayout.plainText(for: preScrollSnapshot)
+
             let didScroll = hostView.debugSendScrollForTesting(
                 horizontal: 0,
                 vertical: 10_000,
@@ -2281,8 +2264,9 @@
 
             let scrolledSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let scrolledText = GhosttyTerminalSnapshotLayout.plainText(for: scrolledSnapshot)
-            XCTAssertFalse(scrolledText.localizedStandardContains("SEQ 000219"), scrolledText)
-            XCTAssertTrue(scrolledText.localizedStandardContains("SEQ 000001"), scrolledText)
+            XCTAssertEqual(scrolledText, preScrollText)
+            XCTAssertEqual(sentScrolls.last?.horizontal, 0)
+            XCTAssertEqual(sentScrolls.last?.vertical, 10_000)
 
             window.isHidden = true
         }
@@ -2508,6 +2492,20 @@
             matches.append(contentsOf: descendants(of: subview, matching: type))
         }
         return matches
+    }
+
+    private extension SpacesDeviceAPIRequest {
+        var terminalLink: String? {
+            if case .resolveTerminalLink(let payload) = command { payload.terminalLink } else { nil }
+        }
+
+        var terminalLinkID: String? {
+            if case .readTerminalLinkChunk(let payload) = command { payload.terminalLinkID } else { nil }
+        }
+
+        var chunkOffset: Int64? {
+            if case .readTerminalLinkChunk(let payload) = command { payload.offset } else { nil }
+        }
     }
 
     private extension GhosttyRemoteTerminalHostView {

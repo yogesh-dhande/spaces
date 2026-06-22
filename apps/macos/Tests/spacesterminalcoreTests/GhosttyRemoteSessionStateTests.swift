@@ -50,6 +50,47 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertNil(merged.renderText)
     }
 
+    func testReducerDoesNotApplyPreservedFrameForMetadataOnlyUpdate() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let initial = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: "initial", emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha", outputByteCount: nil,
+            renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+
+        let initialReduction = reducer.reduce(incomingPayload: initial, previousPayload: nil)
+        XCTAssertEqual(initialReduction.frameToApply?.snapshot, initial.renderSnapshot)
+
+        let inputAck = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.input, emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: 5)
+
+        let inputReduction = reducer.reduce(incomingPayload: inputAck, previousPayload: initialReduction.storedPayload)
+
+        XCTAssertNil(inputReduction.frameToApply)
+        XCTAssertEqual(inputReduction.storedPayload.renderText, "alpha")
+        XCTAssertEqual(inputReduction.storedPayload.outputByteCount, 5)
+    }
+
+    func testReducerRequestsResyncForDeltaWithoutBaseline() throws {
+        let firstFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
+        let secondFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))
+        let delta = GhosttyRenderUpdateFactory.makeUpdate(target: secondFrame, baseline: GhosttyRenderUpdateBaseline(frame: firstFrame))
+        XCTAssertEqual(delta.kind, .delta)
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 2,
+            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
+        var reducer = TerminalRemoteStateReducer()
+
+        let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil, requestResyncOnApplyFailure: true)
+
+        XCTAssertNil(reduction.frameToApply)
+        XCTAssertNil(reduction.storedPayload.renderSnapshot)
+        XCTAssertEqual(reduction.dropReason, "missing_baseline")
+        XCTAssertTrue(reduction.didRequestResync)
+    }
+
     func testRenderFrameRoundTripsOwnerEpochAndGrid() throws {
         let snapshot = snapshot(text: "frame")
         let data = try GhosttyRenderFrame.encode(.init(sessionRevision: 12, ownerEpoch: 34, snapshot: snapshot))
@@ -91,6 +132,15 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(attributes["drop_reason"], "none")
         XCTAssertEqual(attributes["render_mode"], "ghostty-mirror")
         XCTAssertTrue(GhosttyRenderFrameMetrics.detailString(attributes).contains("frame_bytes=256"))
+    }
+
+    func testRenderFrameMetricAttributesMarkMissingRenderUpdateAsNone() {
+        let attributes = GhosttyRenderFrameMetrics.attributes(reason: "input", frame: nil, frameByteCount: nil, screenStateRevision: 7)
+
+        XCTAssertEqual(attributes["render_frame"], "0")
+        XCTAssertEqual(attributes["frame_kind"], "none")
+        XCTAssertEqual(attributes["frame_bytes"], "0")
+        XCTAssertEqual(attributes["screen_revision"], "7")
     }
 
     private func renderUpdateData(text: String, sessionRevision: UInt64, ownerEpoch: UInt64) throws -> Data {

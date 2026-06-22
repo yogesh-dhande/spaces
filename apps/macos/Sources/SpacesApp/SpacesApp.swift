@@ -4,6 +4,8 @@ import spacesui
 import workspacecore
 
 @main struct Spaces {
+    nonisolated(unsafe) private static var appDelegate: AppKitController?
+
     static func main() {
         let launchContext: SpacesAppLaunchContext
         do { launchContext = try SpacesLeaseCoordinator.prepareAppLaunchContext() } catch SpacesAppLaunchPreparationError.duplicateProfileOwner(
@@ -18,6 +20,7 @@ import workspacecore
 
         let app = NSApplication.shared
         let delegate = AppKitController(launchContext: launchContext)
+        appDelegate = delegate
         app.delegate = delegate
         app.setActivationPolicy(.regular)
         // Set app icon when running outside a proper .app bundle (dev builds).
@@ -29,5 +32,6 @@ import workspacecore
             app.applicationIconImage = icon
         }
         app.run()
+        appDelegate = nil
     }
 }

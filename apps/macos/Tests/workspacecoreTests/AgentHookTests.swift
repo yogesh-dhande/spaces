@@ -283,7 +283,9 @@ final class AgentHookTests: XCTestCase {
     }
 
     func testHandleAgentExitKeepsLiveAdHocSpacesSessionIdleWithoutPersistingSignalWindowID() throws {
-        let store = try makeTemporaryStore()
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let store = try SQLiteStore(path: dbPath)
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -291,13 +293,17 @@ final class AgentHookTests: XCTestCase {
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = UUID().uuidString
-        try writeLiveBuiltInTerminalSession(sessionID: sessionID, workspaceDirectory: workspace.dir)
+        try withSpacesProfileEnvironment(dbPath: dbPath) {
+            try writeLiveBuiltInTerminalSession(sessionID: sessionID, workspaceDirectory: workspace.dir)
+        }
 
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, terminalNativeID: sessionID,
             codexThreadID: "thread-1", yabaiWindowID: 101, status: .done)
 
-        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: sessionID, yabaiWindowID: 202)
+        let result = try withSpacesProfileEnvironment(dbPath: dbPath) {
+            try orchestrator.handleAgentExit(agent, terminalNativeID: sessionID, yabaiWindowID: 202)
+        }
 
         let record = try XCTUnwrap(result)
         XCTAssertEqual(record.status, .idle)
@@ -343,6 +349,35 @@ final class AgentHookTests: XCTestCase {
         XCTAssertNil(try store.windows(workspaceID: workspace.id).first?.windowID)
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+    }
+
+    func testRecordRemoteAgentSignalUpdatesConfiguredAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "remote-session",
+            terminalNativeID: "remote-session", status: .idle, claimedLauncherName: "Mock Agent")
+
+        let waitingApplied = try orchestrator.recordRemoteAgentSignal(
+            remoteSignalEvent(
+                id: "event-waiting", sessionID: "remote-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "waiting"))
+
+        XCTAssertTrue(waitingApplied)
+        var agent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.status, .waiting)
+        XCTAssertEqual(agent.label, "Mock Agent")
+        XCTAssertEqual(agent.terminalTrackingID, "remote-session")
+        XCTAssertEqual(agent.claimedLauncherName, "Mock Agent")
+
+        let doneApplied = try orchestrator.recordRemoteAgentSignal(
+            remoteSignalEvent(id: "event-done", sessionID: "remote-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "done"))
+
+        XCTAssertTrue(doneApplied)
+        agent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(agent.status, .done)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
     func testRefreshWorkspaceWindowsDeletesClosedSpacesAdHocAgentRow() throws {
@@ -412,7 +447,20 @@ final class AgentHookTests: XCTestCase {
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
     }
 
+    private func remoteSignalEvent(id: String, sessionID: String, workspaceID: String?, workspacePath: String?, type: String)
+        -> TerminalServiceAgentSignalEvent
+    {
+        TerminalServiceAgentSignalEvent(
+            id: id, sessionID: sessionID, workspaceID: workspaceID, workspacePath: workspacePath, type: type, provider: AgentProvider.spaces.rawValue,
+            label: "Mock Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID, codexThreadID: nil,
+            environmentKeys: ["SPACES_WORKSPACE_ID", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-05-08T00:00:00Z")
+    }
+
     private func withEnv(name: String, value: String, run: () throws -> Void) throws {
+        if name == SpacesProfile.databasePathEnvironmentVariable {
+            try withSpacesProfileEnvironment(dbPath: value, run: run)
+            return
+        }
         let original = ProcessInfo.processInfo.environment[name]
         setenv(name, value, 1)
         defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }

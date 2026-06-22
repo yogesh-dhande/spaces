@@ -1,6 +1,18 @@
-import Darwin
 import Foundation
 import spacesterminalcore
+
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
+#if os(Linux)
+    @_silgen_name("forkpty") private func spaces_forkpty(
+        _ amaster: UnsafeMutablePointer<Int32>?, _ name: UnsafeMutablePointer<CChar>?, _ termp: UnsafePointer<termios>?,
+        _ winp: UnsafePointer<winsize>?
+    ) -> Int32
+#endif
 
 final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private let launchConfiguration: TerminalSessionLaunchConfiguration
@@ -14,6 +26,10 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private var onSessionClosed: (@MainActor () -> Void)?
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
     private var closed = false
+    private static let inheritedEnvironmentKeysRemovedForExec: Set<String> = [
+        "INVOCATION_ID", "JOURNAL_STREAM", "LISTEN_FDS", "LISTEN_PID", "MAINPID", "NOTIFY_SOCKET", "SPACESD_AUTH_TOKEN", "SPACESD_LISTEN_HOST",
+        "SPACESD_LISTEN_PORT", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT", "WATCHDOG_PID", "WATCHDOG_USEC",
+    ]
 
     init(launchConfiguration: TerminalSessionLaunchConfiguration) {
         self.launchConfiguration = launchConfiguration
@@ -49,9 +65,12 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             for argument in arguments { if let argument { free(argument) } }
         }
 
-        let pid = forkpty(&master, nil, nil, &windowSize)
+        let pid = Self.forkPTY(master: &master, windowSize: &windowSize)
         guard pid >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if pid == 0 {
+            Self.resetSignalDispositionsForExec()
+            Self.scrubInheritedEnvironmentForExec()
+            Self.closeInheritedFileDescriptorsForExec()
             if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
             setenv("TERM", "xterm-256color", 1)
             setenv("COLORTERM", "truecolor", 1)
@@ -72,6 +91,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     func terminate() {
         let fd: Int32
         let pid: Int32?
+        var processGroupID: Int32?
         lock.lock()
         guard !closed else {
             lock.unlock()
@@ -86,12 +106,20 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.unlock()
 
         if let pid {
-            let processGroupID = getpgid(pid)
-            if processGroupID == pid { kill(-processGroupID, SIGHUP) }
-            kill(pid, SIGHUP)
+            let resolvedProcessGroupID = getpgid(pid)
+            processGroupID = resolvedProcessGroupID
+            let shouldSignalProcessGroup = Self.shouldSignalProcessGroup(
+                childPID: pid, processGroupID: resolvedProcessGroupID, currentProcessGroupID: getpgrp())
+            if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
+                Self.writeStandardError(
+                    "spaces: pty_terminate pid=\(pid) group=\(resolvedProcessGroupID) current_group=\(getpgrp()) signal_group=\(shouldSignalProcessGroup ? 1 : 0)\n"
+                )
+            }
+            Self.signalTerminatedPTYProcess(
+                childPID: pid, processGroupID: resolvedProcessGroupID, signal: SIGHUP, signalProcessGroup: shouldSignalProcessGroup)
         }
         if fd >= 0 { close(fd) }
-        if let pid { reapWhenTerminated(childPID: pid) }
+        if let pid, let processGroupID { reapWhenTerminated(childPID: pid, processGroupID: processGroupID) }
     }
 
     func sendRawBytes(_ data: Data) {
@@ -125,7 +153,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         var windowSize = winsize(
             ws_row: UInt16(resolvedRows), ws_col: UInt16(resolvedColumns), ws_xpixel: UInt16(clamping: pixelWidth),
             ws_ypixel: UInt16(clamping: pixelHeight))
-        return ioctl(fd, TIOCSWINSZ, &windowSize) == 0
+        return ioctl(fd, UInt(TIOCSWINSZ), &windowSize) == 0
     }
 
     func childPID() -> Int32? {
@@ -142,13 +170,22 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.unlock()
         guard fd >= 0 else { return nil }
         var foregroundProcessGroup: Int32 = 0
-        let foregroundProcessID = ioctl(fd, TIOCGPGRP, &foregroundProcessGroup) == 0 ? foregroundProcessGroup : nil
+        let foregroundProcessID = ioctl(fd, UInt(TIOCGPGRP), &foregroundProcessGroup) == 0 ? foregroundProcessGroup : nil
         return Self.resolvedForegroundPID(foregroundProcessGroup: foregroundProcessID, childPID: childPID)
     }
 
     static func resolvedForegroundPID(foregroundProcessGroup: Int32?, childPID: Int32?) -> Int32? {
         if let foregroundProcessID = liveProcessID(foregroundProcessGroup) { return foregroundProcessID }
         return liveProcessID(childPID)
+    }
+
+    static func shouldSignalProcessGroup(childPID: Int32, processGroupID: Int32, currentProcessGroupID: Int32) -> Bool {
+        processGroupID > 0 && processGroupID == childPID && processGroupID != currentProcessGroupID
+    }
+
+    static func shouldRemoveInheritedEnvironmentKey(_ key: String) -> Bool {
+        if key == "SPACESD_AUTH_TOKEN" || key.hasPrefix("SPACESD_AUTH_TOKEN_") { return true }
+        return inheritedEnvironmentKeysRemovedForExec.contains(key)
     }
 
     private static func liveProcessID(_ pid: Int32?) -> Int32? {
@@ -222,11 +259,39 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         while waitpid(childPID, &status, WNOHANG) == -1, errno == EINTR {}
     }
 
-    private func reapWhenTerminated(childPID: Int32) {
+    private func reapWhenTerminated(childPID: Int32, processGroupID: Int32) {
+        let shouldSignalProcessGroup = Self.shouldSignalProcessGroup(
+            childPID: childPID, processGroupID: processGroupID, currentProcessGroupID: getpgrp())
         Task.detached(priority: .utility) {
-            var status: Int32 = 0
-            while waitpid(childPID, &status, 0) == -1, errno == EINTR {}
+            if Self.waitForTerminatedChild(childPID, timeout: 0.5) { return }
+            Self.signalTerminatedPTYProcess(
+                childPID: childPID, processGroupID: processGroupID, signal: SIGTERM, signalProcessGroup: shouldSignalProcessGroup)
+            if Self.waitForTerminatedChild(childPID, timeout: 2.0) { return }
+            Self.signalTerminatedPTYProcess(
+                childPID: childPID, processGroupID: processGroupID, signal: SIGKILL, signalProcessGroup: shouldSignalProcessGroup)
+            _ = Self.waitForTerminatedChild(childPID, timeout: 2.0)
         }
+    }
+
+    private static func signalTerminatedPTYProcess(childPID: Int32, processGroupID: Int32, signal: Int32, signalProcessGroup: Bool) {
+        if signalProcessGroup { kill(-processGroupID, signal) }
+        kill(childPID, signal)
+    }
+
+    private static func waitForTerminatedChild(_ childPID: Int32, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            var status: Int32 = 0
+            let result = waitpid(childPID, &status, WNOHANG)
+            if result == childPID { return true }
+            if result == -1 {
+                if errno == EINTR { continue }
+                if errno == ECHILD { return true }
+                return false
+            }
+            usleep(50_000)
+        }
+        return false
     }
 
     static func readLoopOwnsDescriptor(currentFD: Int32, currentGeneration: UInt64, readFD: Int32, readGeneration: UInt64) -> Bool {
@@ -234,7 +299,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     }
 
     static func execCommand(for launchConfiguration: TerminalSessionLaunchConfiguration) -> (executable: String, arguments: [String]) {
-        let shell = launchConfiguration.shell.isEmpty ? "/bin/zsh" : launchConfiguration.shell
+        let shell = launchConfiguration.shell.isEmpty ? defaultShellPath() : launchConfiguration.shell
         let shellName = URL(fileURLWithPath: shell).lastPathComponent
         guard let command = launchConfiguration.command, !command.isEmpty else { return (shell, ["-\(shellName)"]) }
 
@@ -247,5 +312,51 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             resolvedCommand = command
         }
         return (shell, [shellName, "-l", "-c", resolvedCommand])
+    }
+
+    private static func forkPTY(master: inout Int32, windowSize: inout winsize) -> Int32 {
+        #if os(Linux)
+            return spaces_forkpty(&master, nil, nil, &windowSize)
+        #else
+            return forkpty(&master, nil, nil, &windowSize)
+        #endif
+    }
+
+    private static func closeInheritedFileDescriptorsForExec() {
+        let rawLimit = sysconf(Int32(_SC_OPEN_MAX))
+        let upperBound = rawLimit > 3 ? Int32(clamping: rawLimit) : 1024
+        guard upperBound > 3 else { return }
+        for fd in Int32(3)..<upperBound { _ = close(fd) }
+    }
+
+    private static func scrubInheritedEnvironmentForExec() {
+        var keysToRemove = inheritedEnvironmentKeysRemovedForExec
+        var cursor = environ
+        while let entry = cursor.pointee {
+            let line = String(cString: entry)
+            if let separator = line.firstIndex(of: "=") {
+                let key = String(line[..<separator])
+                if shouldRemoveInheritedEnvironmentKey(key) { keysToRemove.insert(key) }
+            }
+            cursor = cursor.advanced(by: 1)
+        }
+        for key in keysToRemove { unsetenv(key) }
+    }
+
+    private static func resetSignalDispositionsForExec() {
+        // Remote daemons may be launched by noninteractive shells or nohup, which can
+        // leave terminal signals ignored. PTY children need defaults so VINTR/VSUSP
+        // behave like a normal terminal without changing the daemon's handlers.
+        for signalNumber in [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU] { _ = signal(signalNumber, SIG_DFL) }
+    }
+
+    private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
+
+    private static func defaultShellPath() -> String {
+        #if os(Linux)
+            return "/bin/bash"
+        #else
+            return "/bin/zsh"
+        #endif
     }
 }

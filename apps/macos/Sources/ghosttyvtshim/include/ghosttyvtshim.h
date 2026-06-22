@@ -26,9 +26,16 @@ typedef struct {
     SpacesGhosttyVtSnapshotCell *cells;
 } SpacesGhosttyVtSnapshot;
 
+typedef struct {
+    uint64_t total;
+    uint64_t offset;
+    uint64_t len;
+} SpacesGhosttyVtScrollbar;
+
 SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
     uint16_t columns,
     uint16_t rows,
+    // Ghostty measures scrollback in bytes, not rows.
     size_t max_scrollback
 );
 
@@ -45,6 +52,18 @@ bool spaces_ghostty_vt_session_copy_snapshot(
     SpacesGhosttyVtSnapshot *out_snapshot
 );
 
+bool spaces_ghostty_vt_session_scroll_viewport(
+    SpacesGhosttyVtSession *session,
+    intptr_t delta_rows
+);
+
+bool spaces_ghostty_vt_session_scroll_viewport_with_info(
+    SpacesGhosttyVtSession *session,
+    intptr_t delta_rows,
+    SpacesGhosttyVtScrollbar *out_before,
+    SpacesGhosttyVtScrollbar *out_after
+);
+
 bool spaces_ghostty_vt_session_format_plain(
     SpacesGhosttyVtSession *session,
     char **out_ptr,
@@ -58,6 +77,7 @@ bool spaces_ghostty_vt_render_plain(
     size_t input_len,
     uint16_t columns,
     uint16_t rows,
+    // Ghostty measures scrollback in bytes, not rows.
     size_t max_scrollback,
     char **out_ptr,
     size_t *out_len

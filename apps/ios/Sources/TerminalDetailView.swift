@@ -1,7 +1,7 @@
 import QuickLook
 import SwiftUI
 import spacesterminalmobileghostty
-import spacesmobilecore
+import spacesdevicecore
 
 struct TerminalDetailView: View {
     private static let chromeControlHeight: CGFloat = 36
@@ -10,11 +10,11 @@ struct TerminalDetailView: View {
     /// (`Theme.bg` dark = 15,21,23) rather than a dynamic token.
     private static let surfaceBackground = Color(red: 15 / 255, green: 21 / 255, blue: 23 / 255)
 
-    let session: SpacesMobileTerminalSessionSummary
+    let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
     let appModel: SpacesMobileAppModel
     let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
-    let onSessionChanged: (SpacesMobileTerminalSessionSummary) -> Void
+    let onSessionChanged: (SpacesDeviceTerminalSessionSummary) -> Void
     let onBack: () -> Void
 
     @State private var hasMountedTerminalSurface = false
@@ -29,11 +29,11 @@ struct TerminalDetailView: View {
     }
 
     init(
-        session: SpacesMobileTerminalSessionSummary,
+        session: SpacesDeviceTerminalSessionSummary,
         settings: SpacesMobileConnectionSettings,
         appModel: SpacesMobileAppModel,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
-        onSessionChanged: @escaping (SpacesMobileTerminalSessionSummary) -> Void,
+        onSessionChanged: @escaping (SpacesDeviceTerminalSessionSummary) -> Void,
         onBack: @escaping () -> Void
     ) {
         self.session = session
@@ -120,6 +120,7 @@ struct TerminalDetailView: View {
             }
         }
         .background(Self.surfaceBackground.ignoresSafeArea())
+        .accessibilityIdentifier("terminal.detail.\(session.id)")
         .toolbar(.hidden, for: .navigationBar)
         .task { model.start() }
         .task(id: session.id) { await refreshRuntimeRowsWhileVisible() }
@@ -142,7 +143,6 @@ struct TerminalDetailView: View {
             TerminalLinkPreviewSheet(preview: preview)
         }
         .onDisappear { model.stop() }
-        .accessibilityIdentifier("terminal.detail.\(session.id)")
     }
 
     private var linkPreviewBannerOverlay: some View {
@@ -194,7 +194,6 @@ struct TerminalDetailView: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
-                .accessibilityIdentifier("terminal.title")
 
             Spacer(minLength: 0)
 
@@ -284,6 +283,7 @@ struct TerminalDetailView: View {
     }
 
     private func refreshRuntimeRowsWhileVisible() async {
+        guard session.daemonEndpoint == nil else { return }
         await appModel.refresh()
         while !Task.isCancelled {
             do { try await Task.sleep(for: .seconds(2)) } catch { return }
@@ -315,8 +315,11 @@ struct TerminalDetailView: View {
                 .frame(height: Self.chromeControlHeight)
                 .background(Capsule().fill(Theme.primaryButtonFill))
         }
+        .buttonStyle(.plain)
         .disabled(model.isBusy)
+        .accessibilityLabel("Take Over")
         .accessibilityIdentifier("terminal.takeover")
+        .accessibilityElement(children: .ignore)
     }
 
     /// Zero-visual-footprint accessibility marker that preserves the ownership
@@ -344,7 +347,6 @@ struct TerminalDetailView: View {
                 .foregroundStyle(.white.opacity(0.88))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
-                .accessibilityIdentifier("terminal.statusText")
             if model.showsTakeOverAction {
                 takeOverButton
                     .padding(.top, 4)
@@ -500,23 +502,34 @@ struct TerminalDetailView: View {
             if let data = try? Data(contentsOf: requestURL) {
                 if let request = try? JSONDecoder().decode(E2ECommandRequest.self, from: data) {
                     let requestDetail = request.detail
+                    if let key = request.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+                        await waitForE2EInputReadiness()
+                        await model.sendKey(key)
+                    } else if request.sendEnter ?? true, let text = request.text {
+                        await waitForE2EInputReadiness()
+                        await model.sendText(text, appendNewline: true)
+                    } else if let text = request.text {
+                        await waitForE2EInputReadiness()
+                        await model.sendText(text)
+                    }
                     writeE2EEventIfNeeded(
                         kind: "e2e_command_request_consumed",
                         detail: requestDetail
                     )
-                    if let key = request.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
-                        await model.sendKey(key)
-                    } else if request.sendEnter ?? true, let text = request.text {
-                        await model.sendText(text, appendNewline: true)
-                    } else if let text = request.text {
-                        await model.sendText(text)
-                    }
                 } else {
                     writeE2EEventIfNeeded(kind: "e2e_command_request_invalid", detail: requestURL.lastPathComponent)
                 }
                 try? FileManager.default.removeItem(at: requestURL)
             }
             try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
+    private func waitForE2EInputReadiness(timeout: Duration = .seconds(10)) async {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !Task.isCancelled, ContinuousClock.now < deadline {
+            if model.acceptsInput && model.isInputSurfaceReady { return }
+            try? await Task.sleep(for: .milliseconds(100))
         }
     }
 }

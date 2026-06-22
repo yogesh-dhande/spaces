@@ -15,6 +15,7 @@ struct AppVersionMetadataTests {
 
         #expect(AppVersion.short == metadata["CFBundleShortVersionString"] as? String)
         #expect(AppVersion.build == metadata["CFBundleVersion"] as? String)
+        #expect(AppVersion.remoteArtifactPublicKey == metadata["SpacesRemoteArtifactPublicEd25519Key"] as? String)
     }
 
     @Test func appBundleMetadataMatchesSourceMetadata() throws {

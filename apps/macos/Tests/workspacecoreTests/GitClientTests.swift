@@ -192,6 +192,99 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(featureHead, expectedHead)
     }
 
+    func testRefreshWorktreeFastForwardOnlyFetchesAndAdvancesBranch() throws {
+        let fixture = try makeRemoteFixture()
+        let worktree = fixture.root.appendingPathComponent("remote-feature-worktree", isDirectory: true)
+        try GitClient().createWorktree(path: fixture.clone.path, worktreePath: worktree.path, branch: "remote-feature")
+        let beforeRevision = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        try runGit(["checkout", "remote-feature"], cwd: fixture.source.path)
+        try "next".write(to: fixture.source.appendingPathComponent("NEXT.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "NEXT.md"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "next"], cwd: fixture.source.path)
+        try runGit(["push", fixture.remote.path, "remote-feature"], cwd: fixture.source.path)
+        let expectedRevision = try runGit(["rev-parse", "remote-feature"], cwd: fixture.source.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        let recordingGit = try makeRecordingGitWrapper(root: fixture.root)
+
+        let result = try GitClient(gitExecutable: recordingGit.executable.path).refreshWorktreeFastForwardOnly(
+            path: worktree.path, branch: "remote-feature", hostName: "Builder A")
+
+        let afterRevision = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(result.beforeRevision, beforeRevision)
+        XCTAssertEqual(result.afterRevision, expectedRevision)
+        XCTAssertEqual(afterRevision, expectedRevision)
+        XCTAssertTrue(result.fastForwarded)
+        let commands = try String(contentsOf: recordingGit.log, encoding: .utf8)
+        XCTAssertFalse(commands.contains(" reset"))
+        XCTAssertFalse(commands.contains(" stash"))
+        XCTAssertFalse(commands.contains(" clean"))
+        XCTAssertFalse(commands.contains("checkout -f"))
+        XCTAssertFalse(commands.contains("checkout --force"))
+    }
+
+    func testRefreshWorktreeFastForwardOnlyBlocksDirtyWorktree() throws {
+        let fixture = try makeRemoteFixture()
+        let worktree = fixture.root.appendingPathComponent("remote-feature-worktree", isDirectory: true)
+        try GitClient().createWorktree(path: fixture.clone.path, worktreePath: worktree.path, branch: "remote-feature")
+        try "dirty".write(to: worktree.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+        assertRefreshBlock(reason: .dirtyWorktree) {
+            _ = try GitClient().refreshWorktreeFastForwardOnly(path: worktree.path, branch: "remote-feature", hostName: "Builder A")
+        }
+    }
+
+    func testRefreshWorktreeFastForwardOnlyBlocksDivergentHistory() throws {
+        let fixture = try makeRemoteFixture()
+        let worktree = fixture.root.appendingPathComponent("remote-feature-worktree", isDirectory: true)
+        try GitClient().createWorktree(path: fixture.clone.path, worktreePath: worktree.path, branch: "remote-feature")
+        try "local".write(to: worktree.appendingPathComponent("LOCAL.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "LOCAL.md"], cwd: worktree.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "local"], cwd: worktree.path)
+        try runGit(["checkout", "remote-feature"], cwd: fixture.source.path)
+        try "remote".write(to: fixture.source.appendingPathComponent("REMOTE.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "REMOTE.md"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "remote"], cwd: fixture.source.path)
+        try runGit(["push", fixture.remote.path, "remote-feature"], cwd: fixture.source.path)
+
+        assertRefreshBlock(reason: .divergentHistory) {
+            _ = try GitClient().refreshWorktreeFastForwardOnly(path: worktree.path, branch: "remote-feature", hostName: "Builder A")
+        }
+    }
+
+    func testRefreshWorktreeFastForwardOnlyBlocksUntrackedOverwriteRisk() throws {
+        let fixture = try makeRemoteFixture()
+        let worktree = fixture.root.appendingPathComponent("remote-feature-worktree", isDirectory: true)
+        try GitClient().createWorktree(path: fixture.clone.path, worktreePath: worktree.path, branch: "remote-feature")
+        let conflictFile = worktree.appendingPathComponent("CONFLICT.md")
+        try "scratch".write(to: conflictFile, atomically: true, encoding: .utf8)
+        try runGit(["checkout", "remote-feature"], cwd: fixture.source.path)
+        try "remote".write(to: fixture.source.appendingPathComponent("CONFLICT.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "CONFLICT.md"], cwd: fixture.source.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "conflict"], cwd: fixture.source.path)
+        try runGit(["push", fixture.remote.path, "remote-feature"], cwd: fixture.source.path)
+
+        assertRefreshBlock(reason: .untrackedOverwriteRisk) {
+            _ = try GitClient().refreshWorktreeFastForwardOnly(path: worktree.path, branch: "remote-feature", hostName: "Builder A")
+        }
+        XCTAssertEqual(try String(contentsOf: conflictFile, encoding: .utf8), "scratch")
+    }
+
+    func testRefreshWorktreeFastForwardOnlyBlocksMissingBranch() throws {
+        let fixture = try makeRemoteFixture()
+
+        assertRefreshBlock(reason: .missingBranch) {
+            _ = try GitClient().refreshWorktreeFastForwardOnly(path: fixture.clone.path, branch: "missing-branch", hostName: "Builder A")
+        }
+    }
+
+    func testRefreshWorktreeFastForwardOnlyBlocksFetchFailure() throws {
+        let fixture = try makeRemoteFixture()
+        try runGit(["remote", "set-url", "origin", fixture.root.appendingPathComponent("missing.git").path], cwd: fixture.clone.path)
+
+        assertRefreshBlock(reason: .fetchFailed) {
+            _ = try GitClient().refreshWorktreeFastForwardOnly(path: fixture.clone.path, branch: "remote-feature", hostName: "Builder A")
+        }
+    }
+
     // Tests branch options include local and remote branches by arranging representative inputs and asserting the expected result.
     func testBranchOptionsIncludeLocalAndRemoteBranches() throws {
         let fixture = try makeRemoteFixture()
@@ -309,6 +402,44 @@ final class GitClientTests: XCTestCase {
         let clone = root.appendingPathComponent("clone", isDirectory: true)
         try runGit(["clone", remote.path, clone.path], cwd: root.path)
         return (root, source, remote, clone)
+    }
+
+    private func makeRecordingGitWrapper(root: URL) throws -> (executable: URL, log: URL) {
+        let log = root.appendingPathComponent("git-commands.log")
+        let wrapper = root.appendingPathComponent("record-git.sh")
+        let script = """
+            #!/bin/sh
+            printf '%s\\n' "$*" >> '\(shellSingleQuoteContent(log.path))'
+            previous=''
+            for arg in "$@"; do
+              case "$arg" in
+                reset|stash|clean) exit 97 ;;
+              esac
+              if [ "$previous" = "checkout" ] && { [ "$arg" = "-f" ] || [ "$arg" = "--force" ]; }; then
+                exit 97
+              fi
+              previous="$arg"
+            done
+            exec /usr/bin/env git "$@"
+            """
+        try script.write(to: wrapper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
+        return (wrapper, log)
+    }
+
+    private func shellSingleQuoteContent(_ value: String) -> String { value.replacingOccurrences(of: "'", with: "'\\''") }
+
+    private func assertRefreshBlock(
+        reason expectedReason: RemoteWorktreeRefreshBlockReason, _ run: () throws -> Void, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try run(), file: file, line: line) { error in
+            guard let block = error as? RemoteWorktreeRefreshBlock else {
+                XCTFail("Expected RemoteWorktreeRefreshBlock, got \(error)", file: file, line: line)
+                return
+            }
+            XCTAssertEqual(block.reason, expectedReason, file: file, line: line)
+            XCTAssertTrue(block.localizedDescription.contains("Builder A"), file: file, line: line)
+        }
     }
 
     @discardableResult private func runGit(_ arguments: [String], cwd: String) throws -> String {
