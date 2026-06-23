@@ -82,7 +82,7 @@ struct WorkspaceSummaryPayload: Encodable {
     let id: String
     let title: String
     let branch: String?
-    let targetBranch: String?
+    let baseBranch: String?
     let dir: String
     let isRunning: Bool
     let isArchived: Bool
@@ -96,7 +96,7 @@ extension WorkspaceSummaryPayload {
         id = value.id
         title = value.title
         branch = value.branch
-        targetBranch = value.targetBranch
+        baseBranch = value.baseBranch
         dir = value.dir
         isRunning = value.isRunning
         isArchived = value.isArchived
@@ -114,7 +114,7 @@ struct WorkspaceRecordPayload: Encodable {
     let runtimePath: String
     let dirname: String?
     let branch: String?
-    let targetBranch: String?
+    let baseBranch: String?
     let isDefault: Bool
     let isArchived: Bool
     let isHidden: Bool
@@ -132,7 +132,7 @@ extension WorkspaceRecordPayload {
         runtimePath = value.runtimePath
         dirname = value.dirname
         branch = value.branch
-        targetBranch = value.targetBranch
+        baseBranch = value.baseBranch
         isDefault = value.isDefault
         isArchived = value.isArchived
         isHidden = value.isHidden

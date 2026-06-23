@@ -676,7 +676,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(project: project)
         try store.upsert(
             workspace: WorkspaceRecord(
-                id: UUID().uuidString, projectID: project.id, title: "main", dir: workspaceDir, dirname: "main", branch: "main", targetBranch: "main",
+                id: UUID().uuidString, projectID: project.id, title: "main", dir: workspaceDir, dirname: "main", branch: "main", baseBranch: "main",
                 isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
 
         try orchestrator.rollbackFailedImportedProjectCreation(project: project, workspaceDirectory: workspaceDir)
@@ -713,7 +713,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             workspace: WorkspaceRecord(
                 id: UUID().uuidString, projectID: importedProject.id, title: "main", dir: importedWorkspaceDir, dirname: "main", branch: "main",
-                targetBranch: "main", isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+                baseBranch: "main", isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
 
         try orchestrator.rollbackFailedImportedProjectCreation(project: importedProject, workspaceDirectory: importedWorkspaceDir)
 
@@ -995,8 +995,8 @@ final class OrchestratorTests: XCTestCase {
         ) { error in XCTAssertTrue(error.localizedDescription.contains("cannot contain spaces")) }
     }
 
-    // Tests create workspace uses selected target branch as base for new branch by arranging representative inputs and asserting the expected result.
-    func testCreateWorkspaceUsesSelectedTargetBranchAsBaseForNewBranch() throws {
+    // Tests create workspace uses selected base branch as base for new branch by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceUsesSelectedBaseBranchAsBaseForNewBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-target-branch")
         try runGit(["checkout", "-b", "develop"], cwd: repo.path)
         try "target".write(to: repo.appendingPathComponent("TARGET.txt"), atomically: true, encoding: .utf8)
@@ -1011,14 +1011,14 @@ final class OrchestratorTests: XCTestCase {
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(
-            projectID: project.id, name: "feature-workspace", branch: "feature-branch", targetBranch: "develop")
+            projectID: project.id, name: "feature-workspace", branch: "feature-branch", baseBranch: "develop")
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir + "/TARGET.txt"))
-        XCTAssertEqual(workspace.targetBranch, "develop")
+        XCTAssertEqual(workspace.baseBranch, "develop")
     }
 
-    // Tests create workspace defaults target branch to project default when omitted by arranging representative inputs and asserting the expected result.
-    func testCreateWorkspaceDefaultsTargetBranchToProjectDefaultBranch() throws {
+    // Tests create workspace defaults base branch to project default when omitted by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceDefaultsBaseBranchToProjectDefaultBranch() throws {
         let repo = try makeTempGitRepo(name: "workspace-default-target")
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
@@ -1031,7 +1031,7 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(workspace.title, suggested)
         XCTAssertEqual(workspace.branch, suggested)
-        XCTAssertEqual(workspace.targetBranch, project.defaultBranch)
+        XCTAssertEqual(workspace.baseBranch, project.defaultBranch)
     }
 
     // Tests deferred workspace setup updates state and runs setup script when requested by arranging representative inputs and asserting the expected result.
@@ -1267,12 +1267,12 @@ final class OrchestratorTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
-        _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-branch", branch: "feature-branch", targetBranch: "develop")
+        _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-branch", branch: "feature-branch", baseBranch: "develop")
 
         let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
         let feature = try XCTUnwrap(workspaces.first(where: { $0.title == "feature-branch" }))
         XCTAssertEqual(feature.branch, "feature-branch")
-        XCTAssertEqual(feature.targetBranch, "develop")
+        XCTAssertEqual(feature.baseBranch, "develop")
     }
 
     // Tests create workspace for non-git projects revives archived workspaces by path.
@@ -7664,7 +7664,7 @@ final class OrchestratorTests: XCTestCase {
         var runningWorkspace = workspace
         runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: "/nonexistent/workspace-\(UUID().uuidString)",
-            dirname: workspace.dirname, branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault,
+            dirname: workspace.dirname, branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault,
             isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
@@ -7694,7 +7694,7 @@ final class OrchestratorTests: XCTestCase {
         // Mark workspace as running.
         let runningWorkspace = WorkspaceRecord(
             id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: projectDir.path, dirname: workspace.dirname,
-            branch: workspace.branch, targetBranch: workspace.targetBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
+            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
             isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
@@ -7945,7 +7945,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(candidate.path, orphanDir.path)
 
         let workspace = try orchestrator.createWorkspace(
-            projectID: project.id, name: "Feature", branch: "feature", targetBranch: "main", directoryName: "feature", runSetupScript: false,
+            projectID: project.id, name: "Feature", branch: "feature", baseBranch: "main", directoryName: "feature", runSetupScript: false,
             replaceExistingManagedDirectory: true)
 
         XCTAssertEqual(workspace.dir, orphanDir.path)
@@ -7976,7 +7976,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNil(try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "feature"))
         XCTAssertThrowsError(
             try orchestrator.createWorkspace(
-                projectID: project.id, name: "Feature", branch: "feature", targetBranch: "main", directoryName: "feature", runSetupScript: false,
+                projectID: project.id, name: "Feature", branch: "feature", baseBranch: "main", directoryName: "feature", runSetupScript: false,
                 replaceExistingManagedDirectory: true))
         XCTAssertTrue(FileManager.default.fileExists(atPath: outsideMarker.path))
     }
@@ -8002,7 +8002,7 @@ final class OrchestratorTests: XCTestCase {
         let candidate = try XCTUnwrap(try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "stale-feature"))
         XCTAssertEqual(candidate.path, orphanDir.path)
         let workspace = try orchestrator.createWorkspace(
-            projectID: project.id, name: "Stale Feature", branch: "stale-feature", targetBranch: "main", directoryName: "stale-feature",
+            projectID: project.id, name: "Stale Feature", branch: "stale-feature", baseBranch: "main", directoryName: "stale-feature",
             runSetupScript: false, allowExistingBranchReuse: true, replaceExistingManagedDirectory: true)
 
         XCTAssertEqual(workspace.dir, orphanDir.path)
@@ -8032,7 +8032,7 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(parseWorktreePaths(beforeWorktrees).contains(listedOrphanDir), beforeWorktrees)
 
         let workspace = try orchestrator.createWorkspace(
-            projectID: project.id, name: "Corrupt Feature", branch: "corrupt-feature", targetBranch: "main", directoryName: "corrupt-feature",
+            projectID: project.id, name: "Corrupt Feature", branch: "corrupt-feature", baseBranch: "main", directoryName: "corrupt-feature",
             runSetupScript: false, allowExistingBranchReuse: true, replaceExistingManagedDirectory: true)
 
         XCTAssertEqual(workspace.dir, orphanDir.path)
@@ -8081,11 +8081,11 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(
             workspace: WorkspaceRecord(
                 id: UUID().uuidString, projectID: project.id, title: "Owned", dir: ownedDir.path, dirname: "owned", branch: "owned",
-                targetBranch: "main", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+                baseBranch: "main", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil))
 
         XCTAssertThrowsError(
             try orchestrator.createWorkspace(
-                projectID: project.id, name: "Feature", branch: "feature", targetBranch: "main", directoryName: "owned", runSetupScript: false,
+                projectID: project.id, name: "Feature", branch: "feature", baseBranch: "main", directoryName: "owned", runSetupScript: false,
                 replaceExistingManagedDirectory: true))
         XCTAssertTrue(FileManager.default.fileExists(atPath: ownerMarker.path))
     }
@@ -8490,8 +8490,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertNotNil(updated?.exitedAt)
     }
 
-    // Tests createWorkspace throws when target branch cannot be resolved for a git project with no main/master by arranging representative inputs and asserting the expected result.
-    func testCreateWorkspaceThrowsWhenTargetBranchCannotBeResolved() throws {
+    // Tests createWorkspace throws when base branch cannot be resolved for a git project with no main/master by arranging representative inputs and asserting the expected result.
+    func testCreateWorkspaceThrowsWhenBaseBranchCannotBeResolved() throws {
         // Create a git repo with a non-standard initial branch (not main or master)
         let repo = try makeTempGitRepo(name: "no-main-or-master", initialBranch: "develop")
         let store = try makeTemporaryStore()
@@ -8500,7 +8500,7 @@ final class OrchestratorTests: XCTestCase {
         try store.upsert(project: projectRecord)
 
         let orchestrator = WorkspaceOrchestrator(store: store)
-        // Without targetBranch, resolveWorkspaceTargetBranch should check for main/master, find neither, and throw
+        // Without baseBranch, resolveWorkspaceBaseBranch should check for main/master, find neither, and throw
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: projectRecord.id, name: "feature", branch: "feature-branch")) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
@@ -9127,7 +9127,7 @@ final class OrchestratorTests: XCTestCase {
         let project = makeProjectRecord(dir: "/projects/app")
         let workspace = WorkspaceRecord(
             id: "workspace-a", projectID: project.id, title: "dev", dir: "/projects/app", runtimePath: "/projects/app", dirname: nil, branch: "main",
-            targetBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])

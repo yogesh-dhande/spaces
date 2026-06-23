@@ -325,7 +325,7 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
     public let workspaceID: String?
     public let branch: String?
     public let title: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let existingBranch: Bool?
     public let terminalSessionID: String?
     public let agentEvent: String?
@@ -336,7 +336,7 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
 
     public init(
         operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
-        branch: String? = nil, title: String? = nil, targetBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil,
+        branch: String? = nil, title: String? = nil, baseBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil,
         agentEvent: String? = nil, terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
     ) {
         self.operation = operation
@@ -345,7 +345,7 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
         self.workspaceID = workspaceID
         self.branch = branch
         self.title = title
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.existingBranch = existingBranch
         self.terminalSessionID = terminalSessionID
         self.agentEvent = agentEvent
@@ -382,7 +382,7 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let runtimePath: String
     public let dirname: String?
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let isDefault: Bool
     public let isArchived: Bool
     public let isHidden: Bool
@@ -391,7 +391,7 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let notes: String?
 
     public init(
-        id: String, projectID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?, targetBranch: String?,
+        id: String, projectID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?, baseBranch: String?,
         isDefault: Bool, isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
@@ -401,7 +401,7 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
         self.runtimePath = runtimePath
         self.dirname = dirname
         self.branch = branch
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.isDefault = isDefault
         self.isArchived = isArchived
         self.isHidden = isHidden
@@ -458,7 +458,7 @@ public struct TerminalServiceWorkspaceRuntimeManifest: Codable, Sendable, Equata
     public let localPath: String
     public let remotePath: String?
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let gitRemoteURL: String?
     public let namedPorts: [TerminalServiceWorkspaceRuntimePortMapping]
     public let processEnvironment: [String: String]
@@ -466,7 +466,7 @@ public struct TerminalServiceWorkspaceRuntimeManifest: Codable, Sendable, Equata
 
     public init(
         workspaceID: String, projectID: String, deviceID: String?, location: TerminalServiceWorkspaceLocation, localPath: String, remotePath: String?,
-        branch: String?, targetBranch: String?, gitRemoteURL: String?, namedPorts: [TerminalServiceWorkspaceRuntimePortMapping],
+        branch: String?, baseBranch: String?, gitRemoteURL: String?, namedPorts: [TerminalServiceWorkspaceRuntimePortMapping],
         processEnvironment: [String: String], allowedFileRoots: [String]
     ) {
         self.workspaceID = workspaceID
@@ -476,7 +476,7 @@ public struct TerminalServiceWorkspaceRuntimeManifest: Codable, Sendable, Equata
         self.localPath = localPath
         self.remotePath = remotePath
         self.branch = branch
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.gitRemoteURL = gitRemoteURL
         self.namedPorts = namedPorts
         self.processEnvironment = processEnvironment

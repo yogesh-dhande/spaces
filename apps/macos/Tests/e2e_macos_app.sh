@@ -2065,7 +2065,7 @@ create_workspace_via_gui() {
     --title "$WORKSPACE_TITLE" \
     --existing-branch \
     --branch "$WORKSPACE_BRANCH" \
-    --target-branch main \
+    --base-branch main \
     --notes "$WORKSPACE_NOTES" >"$TMP_ROOT/created-workspace.json"
   transition_pause "workspace creation"
 }
@@ -2077,7 +2077,7 @@ create_scout_branch_workspace() {
     --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
     --existing-branch \
     --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
-    --target-branch main \
+    --base-branch main \
     --notes "$SCOUT_BRANCH_WORKSPACE_NOTES" >"$TMP_ROOT/scout-branch-workspace.json"
   transition_pause "scout branch workspace creation"
 }

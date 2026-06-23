@@ -88,7 +88,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-visible", projectID: "project-1", projectName: "Project", title: "Visible", branch: "feature/visible",
-                    targetBranch: "main", dir: "/device/project-visible", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
+                    baseBranch: "main", dir: "/device/project-visible", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
                     notes: "Visible notes", sessionCount: 2,
                     processRows: [
                         SpacesDeviceWorkspaceProcessRow(
@@ -108,7 +108,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
                     ]),
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-hidden", projectID: "project-1", projectName: "Project", title: "Hidden", branch: "feature/hidden",
-                    targetBranch: "main", dir: "/device/project-hidden", isRunning: false, isArchived: false, isHidden: true, isDefault: false,
+                    baseBranch: "main", dir: "/device/project-hidden", isRunning: false, isArchived: false, isHidden: true, isDefault: false,
                     sessionCount: 0),
             ], sessions: [])
 
@@ -133,7 +133,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
             projects: [],
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
-                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", targetBranch: "main",
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", baseBranch: "main",
                     dir: "/device/project-feature", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
             ], sessions: [])
 
@@ -225,7 +225,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
 
     private func fullWorkspaceSummary(dir: String) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
-            id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", targetBranch: "main", dir: dir,
+            id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", baseBranch: "main", dir: dir,
             isRunning: true, isArchived: false, isHidden: false, isDefault: false, notes: "Workspace notes", sessionCount: 3,
             assignedPorts: [SpacesDeviceAssignedPort(name: "WEB", port: 3000)],
             setupState: SpacesDeviceWorkspaceSetupState(

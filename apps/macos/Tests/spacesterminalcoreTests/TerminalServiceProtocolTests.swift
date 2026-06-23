@@ -15,7 +15,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             shell: "/bin/zsh", command: "cat", createdAt: "2026-05-17T00:00:00Z")
         let manifest = TerminalServiceWorkspaceRuntimeManifest(
             workspaceID: "workspace-1", projectID: "project-1", deviceID: "host-1", location: .remote, localPath: "/local/work",
-            remotePath: "/srv/work", branch: "feature", targetBranch: "main", gitRemoteURL: "git@example.com:repo.git",
+            remotePath: "/srv/work", branch: "feature", baseBranch: "main", gitRemoteURL: "git@example.com:repo.git",
             namedPorts: [TerminalServiceWorkspaceRuntimePortMapping(id: "api", name: "API_PORT", port: 3000)],
             processEnvironment: ["SPACES_WORKSPACE_ID": "workspace-1"], allowedFileRoots: ["/srv/work"])
         let refresh = TerminalServiceWorktreeRefreshRequest(path: "/srv/work", branch: "feature", hostName: "Builder")
@@ -26,7 +26,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
             createdAt: "2026-06-11T00:00:00Z")
         let profileCommand = TerminalServiceProfileCommandRequest(
-            operation: .workspaceCreate, projectID: "project-1", branch: "feature", title: "Feature", targetBranch: "main", existingBranch: true,
+            operation: .workspaceCreate, projectID: "project-1", branch: "feature", title: "Feature", baseBranch: "main", existingBranch: true,
             terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true, lineCount: 40)
         let requests = [
             TerminalServiceRequest(command: .ping),
@@ -67,7 +67,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 message: "Created workspace.",
                 workspace: TerminalServiceProfileWorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", title: "Feature", dir: "/srv/work", runtimePath: "/srv/work", dirname: "feature",
-                    branch: "feature", targetBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false,
+                    branch: "feature", baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false,
                     lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
             mobileCredentials: [
                 TerminalServiceMobileCredential(

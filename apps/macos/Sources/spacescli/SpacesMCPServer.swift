@@ -28,7 +28,7 @@ final class SpacesMCPStdioServer {
                 name: "spaces_workspace_create", description: "Create a workspace on this device.",
                 properties: [
                     "project": stringSchema("Project ID."), "branch": stringSchema("Workspace branch."), "title": stringSchema("Workspace title."),
-                    "targetBranch": stringSchema("Target branch for new branch creation."),
+                    "baseBranch": stringSchema("Base branch for new branch creation."),
                     "existingBranch": boolSchema("Use an existing branch instead of creating a new branch."),
                 ], required: ["project", "branch"]),
             tool(
@@ -121,7 +121,7 @@ final class SpacesMCPStdioServer {
                 .init(
                     operation: .workspaceCreate, projectID: try requiredString(arguments["project"], field: "project"),
                     branch: try requiredString(arguments["branch"], field: "branch"), title: optionalString(arguments["title"]),
-                    targetBranch: optionalString(arguments["targetBranch"]), existingBranch: optionalBool(arguments["existingBranch"]) ?? false))
+                    baseBranch: optionalString(arguments["baseBranch"]), existingBranch: optionalBool(arguments["existingBranch"]) ?? false))
         case "spaces_workspace_start":
             return try TerminalService.sendProfileCommand(
                 .init(operation: .workspaceStart, workspaceID: try requiredString(arguments["workspace"], field: "workspace")))

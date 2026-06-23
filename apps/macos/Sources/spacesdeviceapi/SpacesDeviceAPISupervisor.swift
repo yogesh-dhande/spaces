@@ -106,16 +106,10 @@ import workspacecore
     }
 
     private func startDeviceAPIServer(host: String, port: Int, transportKey: String, certificateFingerprint: String) throws -> SpacesDeviceAPIServer {
-        #if os(macOS)
-            let appLauncher = SpacesAppLauncher()
-            let launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = { try appLauncher.launchIfNeeded() }
-        #else
-            let launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil
-        #endif
         let createdServer = SpacesDeviceAPIServer(
             host: host, port: port, transportKey: transportKey, certificateFingerprint: certificateFingerprint,
-            pairingStoreProtocol: try SpacesDevicePairingStore(), launchSpacesAppHandler: launchSpacesAppHandler,
-            builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+            pairingStoreProtocol: try SpacesDevicePairingStore(), builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
+            builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
         do {
             try createdServer.start()
             return createdServer

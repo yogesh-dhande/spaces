@@ -84,7 +84,7 @@ spaces pair --json`}</CodeBlock>
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
           <Flag name="--workspace <id>" description="Workspace ID for runtime commands." />
           <Flag name="--title <title>" description="Optional title for workspace creation." />
-          <Flag name="--target-branch <branch>" description="Optional target branch for new branch creation." />
+          <Flag name="--base-branch <branch>" description="Optional base branch for new branch creation." />
           <Flag name="--existing-branch" description="Use an existing branch instead of creating one." />
           <Flag name="--include-archived" description="Include archived workspaces in list output." />
         </ul>

@@ -90,7 +90,7 @@ public struct SpacesActiveDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let projectName: String
     public let title: String
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let dir: String
     public let isRunning: Bool
     public let isArchived: Bool
@@ -112,7 +112,7 @@ public struct SpacesActiveDeviceWorkspaceDetailViewModel: Equatable, Sendable {
         projectName = workspace.projectName
         title = workspace.title
         branch = workspace.branch
-        targetBranch = workspace.targetBranch
+        baseBranch = workspace.baseBranch
         dir = workspace.dir
         isRunning = workspace.isRunning
         isArchived = workspace.isArchived

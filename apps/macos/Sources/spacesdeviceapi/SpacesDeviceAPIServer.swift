@@ -690,7 +690,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let pairingCoordinator: SpacesDevicePairingCoordinator
     private let pairingStore: any SpacesDevicePairingStoreProtocol
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
-    private let launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
     private let queue: DispatchQueue
@@ -725,7 +724,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.certificateFingerprint = certificateFingerprint
         self.pairingCoordinator = pairingCoordinator
         self.onPairingSucceeded = onPairingSucceeded
-        launchSpacesAppHandler = nil
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
@@ -742,7 +740,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(),
         pairingStoreProtocol: any SpacesDevicePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
-        launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL
@@ -754,7 +751,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
         self.onPairingSucceeded = onPairingSucceeded
-        self.launchSpacesAppHandler = launchSpacesAppHandler
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         #if canImport(Network) && canImport(Security)
@@ -918,7 +914,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .overview:
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.", result: .overview(try loadOverview(clientApp: request.clientApp)))
-        case .launchSpacesApp: return try handleLaunchSpacesAppRequest()
         case .createProject(let payload): return try handleCreateProjectRequest(payload)
         case .deleteProject(let payload): return try handleDeleteProjectRequest(payload)
         case .importProject(let payload): return try handleImportProjectRequest(payload)
@@ -1006,14 +1001,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private static func normalizedClientID(_ value: String?) -> String? {
         guard let clientID = value?.trimmingCharacters(in: .whitespacesAndNewlines), !clientID.isEmpty else { return nil }
         return clientID
-    }
-
-    private func handleLaunchSpacesAppRequest() throws -> SpacesDeviceAPIResponse {
-        guard let launchSpacesAppHandler else {
-            return SpacesDeviceAPIResponse(ok: false, message: "launchSpacesApp is only available from the daemon-hosted Device API.")
-        }
-        let outcome = try launchSpacesAppHandler()
-        return SpacesDeviceAPIResponse(ok: true, message: outcome.message)
     }
 
     private func loadOverview(clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload {
@@ -1249,7 +1236,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let orchestrator = deviceOrchestrator(store: store)
         let project = try store.project(id: projectID)
         let workspace = try orchestrator.createWorkspace(
-            projectID: projectID, name: title, branch: normalizedString(request.branch), targetBranch: normalizedString(request.targetBranch),
+            projectID: projectID, name: title, branch: normalizedString(request.branch), baseBranch: normalizedString(request.baseBranch),
             directoryName: normalizedString(request.directoryName), runSetupScript: true, allowRemoteBranchLookup: true,
             allowExistingBranchReuse: request.allowExistingBranchReuse)
         if let notes = normalizedOptionalString(request.notes) { try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes) }

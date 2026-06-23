@@ -128,7 +128,8 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Inputs should use subtle borders and a clear focus state tied to the accent color.
 - Use inset surfaces for code-like or multiline content.
 - Keep save and cancel actions close to the fields they affect.
-- Utility panels, such as Devices, should use compact sections with label/value rows, icon-led primary actions, and dense saved-item rows; QR codes are shown as functional content rather than decorative artwork.
+- User settings are presented as a floating dialog window, not embedded in the main detail pane. The dialog uses a header bar (title plus a close control) above a two-panel body: a left navigation list of sections and a right panel that renders the selected section. The left list stays quiet, with a persistent highlight on the active section and a subtle hover state on the others.
+- Settings sections, such as Devices, should use compact sections with label/value rows, icon-led primary actions, and dense saved-item rows; QR codes are shown as functional content rather than decorative artwork.
 
 ## Inline Editing
 - Prefer inline editing when the item being edited is already visible in a list or section.

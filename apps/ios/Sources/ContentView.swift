@@ -56,7 +56,6 @@ struct ContentView: View {
                 activeDeviceID: model.activeDeviceID,
                 noticeMessage: model.connectionNotice,
                 onPairingLinkConsumed: { model.clearPendingPairingLink() },
-                onLaunchSpaces: { await model.launchSpacesAppIfNeeded() },
                 onSelectDevice: { deviceID in
                     model.selectDevice(id: deviceID)
                     Task { await model.refresh() }
@@ -163,14 +162,14 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if model.isLoading && model.overview == nil {
-                ProgressView("Loading workspaces...")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         homeControls
-                        if projectGroups.isEmpty && model.terminalGroups.isEmpty {
+                        if model.isLoading && model.overview == nil {
+                            ProgressView("Loading workspaces...")
+                                .frame(maxWidth: .infinity, minHeight: 360)
+                        } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
                             ContentUnavailableView(
                                 "No Workspaces",
                                 systemImage: "rectangle.stack",
@@ -852,7 +851,7 @@ private struct WorkspaceCreateSheet: View {
                                 projectID: projectID,
                                 title: isGitRepo ? trimmedBranch : trimmedName,
                                 branch: isGitRepo ? trimmedBranch : nil,
-                                targetBranch: isGitRepo ? project?.defaultBranch : nil,
+                                baseBranch: isGitRepo ? project?.defaultBranch : nil,
                                 directoryName: nil,
                                 allowExistingBranchReuse: false
                             )

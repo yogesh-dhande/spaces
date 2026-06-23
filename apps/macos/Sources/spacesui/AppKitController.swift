@@ -255,7 +255,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var isDismissingCommandPalette = false
     private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
     private var commandPaletteMainWindowVisibility: Bool?
-    private var mobileConnectionPanel: NSPanel?
+    private var selectedSettingsSection: SettingsSection = .general
+    private var settingsWindow: NSWindow?
+    private weak var settingsSectionContentContainer: NSView?
+    private var settingsSectionRowViews: [SettingsSection: SettingsSidebarRowView] = [:]
     private weak var activeDeviceSelectorContainer: NSView?
     private weak var activeDevicePopUpButton: NSPopUpButton?
     private var projectsSectionHeaderTopToDeviceSelector: NSLayoutConstraint?
@@ -1971,7 +1974,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let projectID: String
         let name: String
         let branch: String?
-        let targetBranch: String?
+        let baseBranch: String?
         let directoryName: String?
         let notes: String?
         let allowRemoteBranchLookup: Bool
@@ -2729,7 +2732,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
                 WorkspaceSummary(
-                    id: $0.id, title: $0.title, branch: $0.branch, targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning,
+                    id: $0.id, title: $0.title, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
                     isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
             }
         }
@@ -4482,10 +4485,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showAlertsDetail()
             return
         }
-        if showingSettings {
-            showSettingsDetail()
-            return
-        }
         if let selectedWorkspaceID {
             if let (project, workspace) = findWorkspace(id: selectedWorkspaceID) {
                 showWorkspaceDetail(project: project, workspace: workspace)
@@ -4865,19 +4864,235 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         try? payload.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func showSettingsDetail() {
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        clearInlineWorkspaceFieldRefs()
-        stopWorkspaceSetupDetailRefreshTimer()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
-        visibleDetailWorkspaceID = nil
-        showingSettings = true
-        showingAlerts = false
-        updateAlertsRowAppearance()
+    enum SettingsSection: String, CaseIterable {
+        case general
+        case shortcuts
+        case devices
+
+        var title: String {
+            switch self {
+            case .general: "General"
+            case .shortcuts: "Shortcuts"
+            case .devices: "Devices"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .general: "gearshape"
+            case .shortcuts: "keyboard"
+            case .devices: "desktopcomputer.and.macbook"
+            }
+        }
+    }
+
+    private func presentSettingsWindow() {
+        settingsSectionRowViews.removeAll()
+        let content = buildSettingsWindowContent()
+
+        let window: NSWindow
+        if let existing = settingsWindow {
+            window = existing
+        } else {
+            let created = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 760, height: 560), styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                backing: .buffered, defer: false)
+            created.titlebarAppearsTransparent = true
+            created.titleVisibility = .hidden
+            created.isMovableByWindowBackground = true
+            created.isReleasedWhenClosed = false
+            created.minSize = NSSize(width: 680, height: 460)
+            created.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            created.standardWindowButton(.zoomButton)?.isHidden = true
+            created.standardWindowButton(.closeButton)?.isHidden = true
+            created.delegate = self
+            created.center()
+            settingsWindow = created
+            window = created
+        }
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        renderSelectedSettingsSection()
+    }
+
+    private func buildSettingsWindowContent() -> NSView {
+        let root = NSView()
+        root.wantsLayer = true
+        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
+        let headerBar = buildSettingsWindowHeader()
+        let headerDivider = settingsHairlineDivider()
+
+        let sidebar = buildSettingsSidebar()
+        let bodyDivider = settingsHairlineDivider()
+        let rightContainer = NSView()
+        rightContainer.translatesAutoresizingMaskIntoConstraints = false
+        settingsSectionContentContainer = rightContainer
+
+        for view in [headerBar, headerDivider, sidebar, bodyDivider, rightContainer] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(view)
+        }
+
+        NSLayoutConstraint.activate([
+            headerBar.leadingAnchor.constraint(equalTo: root.leadingAnchor), headerBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            headerBar.topAnchor.constraint(equalTo: root.topAnchor), headerBar.heightAnchor.constraint(equalToConstant: 52),
+
+            headerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            headerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            headerDivider.topAnchor.constraint(equalTo: headerBar.bottomAnchor), headerDivider.heightAnchor.constraint(equalToConstant: 1),
+
+            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor), sidebar.topAnchor.constraint(equalTo: headerDivider.bottomAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor), sidebar.widthAnchor.constraint(equalToConstant: 200),
+
+            bodyDivider.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor), bodyDivider.widthAnchor.constraint(equalToConstant: 1),
+            bodyDivider.topAnchor.constraint(equalTo: headerDivider.bottomAnchor), bodyDivider.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+
+            rightContainer.leadingAnchor.constraint(equalTo: bodyDivider.trailingAnchor),
+            rightContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            rightContainer.topAnchor.constraint(equalTo: headerDivider.bottomAnchor),
+            rightContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+        ])
+        return root
+    }
+
+    private func buildSettingsWindowHeader() -> NSView {
+        let header = NSView()
+
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Settings")
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
+
+        let title = NSTextField(labelWithString: "Settings")
+        title.font = .systemFont(ofSize: 16, weight: .semibold)
+        title.textColor = .labelColor
+
+        let closeButton = iconButton(symbol: "xmark", tooltip: "Close settings", action: #selector(closeSettingsWindow))
+        closeButton.keyEquivalent = "\u{1b}"
+
+        let stack = NSStackView(views: [iconView, title, NSView(), closeButton])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        header.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: header.leadingAnchor), stack.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: header.topAnchor), stack.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        return header
+    }
+
+    private func settingsHairlineDivider() -> NSView {
+        let divider = NSView()
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).cgColor
+        return divider
+    }
+
+    @objc private func closeSettingsWindow() { settingsWindow?.performClose(nil) }
+
+    public func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === settingsWindow else { return }
+        showingSettings = false
+        settingsSectionContentContainer = nil
+        settingsSectionRowViews.removeAll()
+        pulseColorWell = nil
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
-        for view in detailContainer.subviews { view.removeFromSuperview() }
+    }
+
+    private func buildSettingsSidebar() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        for section in SettingsSection.allCases {
+            let row = buildSettingsSidebarRow(section)
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -16),
+        ])
+        return container
+    }
+
+    private func buildSettingsSidebarRow(_ section: SettingsSection) -> SettingsSidebarRowView {
+        let row = SettingsSidebarRowView()
+        row.identifier = NSUserInterfaceItemIdentifier(section.rawValue)
+        row.setAccessibilityIdentifier("settings-section-\(section.rawValue)")
+        row.selectedBackgroundColor = sidebarSelectedCardBackgroundColor()
+        row.isSelected = section == selectedSettingsSection
+
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.title)
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
+
+        let label = NSTextField(labelWithString: section.title)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .labelColor
+
+        let hstack = NSStackView(views: [iconView, label])
+        hstack.orientation = .horizontal
+        hstack.alignment = .centerY
+        hstack.spacing = 10
+        hstack.translatesAutoresizingMaskIntoConstraints = false
+
+        row.addSubview(hstack)
+        NSLayoutConstraint.activate([
+            hstack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
+            hstack.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor, constant: -10),
+            hstack.topAnchor.constraint(equalTo: row.topAnchor, constant: 7), hstack.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -7),
+        ])
+
+        let click = NSClickGestureRecognizer(target: self, action: #selector(settingsSectionRowClicked(_:)))
+        row.addGestureRecognizer(click)
+
+        settingsSectionRowViews[section] = row
+        return row
+    }
+
+    @objc private func settingsSectionRowClicked(_ sender: NSClickGestureRecognizer) {
+        guard let id = sender.view?.identifier?.rawValue, let section = SettingsSection(rawValue: id) else { return }
+        guard section != selectedSettingsSection else { return }
+        selectedSettingsSection = section
+        for (candidate, row) in settingsSectionRowViews { row.isSelected = candidate == section }
+        renderSelectedSettingsSection()
+    }
+
+    private func renderSelectedSettingsSection() {
+        activeShortcutCaptureSetting = nil
+        shortcutButtonsBySetting.removeAll()
+        switch selectedSettingsSection {
+        case .general: renderSettingsCards(generalSettingsCards())
+        case .shortcuts: renderSettingsCards(shortcutsSettingsCards())
+        case .devices: renderDeviceSettings(response: currentDeviceControlResponse())
+        }
+    }
+
+    private func renderSettingsCards(_ cards: [NSView]) {
+        guard let container = settingsSectionContentContainer else { return }
+        for view in container.subviews { view.removeFromSuperview() }
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -4885,21 +5100,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.spacing = 20
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // --- Header ---
-        let header = NSTextField(labelWithString: "Settings")
-        header.font = .systemFont(ofSize: 20, weight: .semibold)
-        let pageSubtitle = NSTextField(labelWithString: "App preferences")
-        pageSubtitle.font = .systemFont(ofSize: 12)
-        pageSubtitle.textColor = .secondaryLabelColor
-        let headerStack = NSStackView()
-        headerStack.orientation = .vertical
-        headerStack.alignment = .leading
-        headerStack.spacing = 2
-        headerStack.addArrangedSubview(header)
-        headerStack.addArrangedSubview(pageSubtitle)
-        stack.addArrangedSubview(headerStack)
+        for card in cards {
+            stack.addArrangedSubview(card)
+            constrainFormFieldToFillWidth(card, in: stack)
+        }
 
-        // --- Editor & terminal section ---
+        showScrollableDetailStack(stack, in: container)
+    }
+
+    private func generalSettingsCards() -> [NSView] {
         let options = installedEditorOptions()
         let currentEditor: EditorPreference? = {
             guard let editor = configCache?.editor, editor != .none else { return nil }
@@ -4939,10 +5148,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             editorContentViews.append(note)
         }
         let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
-        stack.addArrangedSubview(editorCard)
-        constrainFormFieldToFillWidth(editorCard, in: stack)
 
-        // --- Window focus pulse section ---
         let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(windowPulseEnabledChanged(_:)))
         pulseEnabledCheckbox.state = ((try? orchestrator.windowFocusPulseEnabled()) ?? SettingsKey.defaultWindowFocusPulseEnabled) ? .on : .off
 
@@ -4973,19 +5179,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     name: "Enable focus pulse", hint: "Tints the border so the focused window is obvious", control: pulseEnabledCheckbox),
                 settingsSettingRow(name: "Pulse color", hint: "Default \(SettingsKey.defaultWindowFocusPulseColor)", control: colorControlRow),
             ])
-        stack.addArrangedSubview(pulseCard)
-        constrainFormFieldToFillWidth(pulseCard, in: stack)
 
-        // --- Keyboard shortcuts section ---
+        return [editorCard, pulseCard]
+    }
+
+    private func shortcutsSettingsCards() -> [NSView] {
         let shortcutContainer = buildShortcutRowsContainer()
         let shortcutCard = formSectionCard(
             icon: "keyboard", title: "Keyboard shortcuts",
             subtitle: "Click record on a row to capture a new chord. Leader-based shortcuts inherit the leader modifier.",
             contentViews: [shortcutContainer])
-        stack.addArrangedSubview(shortcutCard)
-        constrainFormFieldToFillWidth(shortcutCard, in: stack)
-
-        showScrollableDetailStack(stack)
+        return [shortcutCard]
     }
 
     private func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
@@ -5672,15 +5876,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let nameField = NSTextField(string: "")
         nameField.placeholderString = "workspace title"
         nameField.setAccessibilityIdentifier("add-workspace-title")
-        let targetBranchField = NSComboBox()
-        targetBranchField.usesDataSource = false
-        targetBranchField.completes = true
-        targetBranchField.numberOfVisibleItems = 10
-        targetBranchField.setAccessibilityIdentifier("add-workspace-target-branch")
-        let targetBranches = project.isGitRepo ? [defaultWorkspaceTargetBranchFast(project: project)].compactMap { $0 } : []
-        targetBranchField.addItems(withObjectValues: targetBranches)
-        if let defaultTargetBranch = defaultWorkspaceTargetBranch(project: project, branches: targetBranches) {
-            targetBranchField.stringValue = defaultTargetBranch
+        let baseBranchField = NSComboBox()
+        baseBranchField.usesDataSource = false
+        baseBranchField.completes = true
+        baseBranchField.numberOfVisibleItems = 10
+        baseBranchField.setAccessibilityIdentifier("add-workspace-base-branch")
+        let baseBranches = project.isGitRepo ? [defaultWorkspaceBaseBranchFast(project: project)].compactMap { $0 } : []
+        baseBranchField.addItems(withObjectValues: baseBranches)
+        if let defaultBaseBranch = defaultWorkspaceBaseBranch(project: project, branches: baseBranches) {
+            baseBranchField.stringValue = defaultBaseBranch
         }
         let existingBranchField = NSComboBox()
         existingBranchField.usesDataSource = false
@@ -5691,7 +5895,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         existingBranchField.target = self
         existingBranchField.action = #selector(addWorkspaceBranchFieldChanged(_:))
         existingBranchField.delegate = self
-        existingBranchField.addItems(withObjectValues: targetBranches)
+        existingBranchField.addItems(withObjectValues: baseBranches)
         let newBranchField = NSTextField(string: "")
         newBranchField.placeholderString = "new branch name"
         newBranchField.setAccessibilityIdentifier("add-workspace-new-branch")
@@ -5752,7 +5956,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             customStack.alignment = .leading
             customStack.spacing = 10
             customStack.isHidden = true
-            let targetRow = labeledInputRow(label: "Target branch", input: targetBranchField)
+            let targetRow = labeledInputRow(label: "Base branch", input: baseBranchField)
             let titleRow = labeledInputRow(label: "Workspace title", input: nameField)
             let dirRow = labeledInputRow(label: "Directory", input: directoryNameField)
             let notesRow = labeledInputRow(label: "Notes", input: notesField)
@@ -5817,7 +6021,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         createButton.tag = storeAddWorkspaceFields(
             projectID: project.id, isGitRepo: project.isGitRepo, branchModeSegmented: project.isGitRepo ? branchModeSegmented : nil,
             existingBranchField: project.isGitRepo ? existingBranchField : nil, newBranchField: project.isGitRepo ? newBranchField : nil,
-            targetBranchField: project.isGitRepo ? targetBranchField : nil, nameField: nameField,
+            baseBranchField: project.isGitRepo ? baseBranchField : nil, nameField: nameField,
             directoryNameField: project.isGitRepo ? directoryNameField : nil, notesField: notesField, autoNameState: autoNameState,
             progressiveInputViews: [], createButton: createButton, customizeStack: customizeStack, customizeButton: customizeButton)
         activeAddWorkspaceFormTag = createButton.tag
@@ -5836,20 +6040,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showNoActiveDeviceSelectedError()
             return
         }
-        Task { @MainActor [weak self, weak targetBranchField, weak existingBranchField] in
+        Task { @MainActor [weak self, weak baseBranchField, weak existingBranchField] in
             guard let self else { return }
             let result = await Self.activeDeviceWorkspaceCreateOptions(projectID: project.id, device: activeDevice).map(\.branchOptions)
             guard activeAddWorkspaceFormTag == formTag else { return }
-            guard let targetBranchField else { return }
+            guard let baseBranchField else { return }
             guard case .success(let options) = result else { return }
             autoNameState?.branchOptions = options
-            let currentValue = targetBranchField.stringValue
-            targetBranchField.removeAllItems()
-            targetBranchField.addItems(withObjectValues: options)
+            let currentValue = baseBranchField.stringValue
+            baseBranchField.removeAllItems()
+            baseBranchField.addItems(withObjectValues: options)
             if !currentValue.isEmpty {
-                targetBranchField.stringValue = currentValue
-            } else if let defaultBranch = defaultWorkspaceTargetBranch(project: project, branches: options) {
-                targetBranchField.stringValue = defaultBranch
+                baseBranchField.stringValue = currentValue
+            } else if let defaultBranch = defaultWorkspaceBaseBranch(project: project, branches: options) {
+                baseBranchField.stringValue = defaultBranch
             }
             if let existingBranchField {
                 let existingValue = existingBranchField.stringValue
@@ -7787,7 +7991,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return row
     }
 
-    private func showScrollableDetailStack(_ stack: NSStackView) {
+    private func showScrollableDetailStack(_ stack: NSStackView, in host: NSView? = nil) {
+        let container = host ?? detailContainer
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
@@ -7802,11 +8007,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scroll.documentView = contentView
         contentView.addSubview(stack)
 
-        detailContainer.addSubview(scroll)
+        container.addSubview(scroll)
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: detailContainer.topAnchor), scroll.bottomAnchor.constraint(equalTo: detailContainer.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: container.topAnchor), scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             contentView.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
@@ -7914,14 +8118,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeAddWorkspaceFields(
         projectID: String, isGitRepo: Bool, branchModeSegmented: NSSegmentedControl?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
-        targetBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?, notesField: NSTextField?,
+        baseBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?, notesField: NSTextField?,
         autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView], createButton: NSButton, customizeStack: NSView?,
         customizeButton: NSButton?
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
             projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
-            newBranchField: newBranchField, targetBranchField: targetBranchField, nameField: nameField, directoryNameField: directoryNameField,
+            newBranchField: newBranchField, baseBranchField: baseBranchField, nameField: nameField, directoryNameField: directoryNameField,
             notesField: notesField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton,
             customizeStack: customizeStack, customizeButton: customizeButton)
         branchModeSegmented?.tag = id
@@ -7933,17 +8137,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func showMobileConnection() {
         devicePanelStatusMessage = nil
-        presentMobileConnectionPanelOrShowError { try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() }
-    }
-
-    private func presentMobileConnectionPanelOrShowError(_ loadResponse: () throws -> SpacesDeviceAPIControlResponse) {
-        do { presentMobileConnectionPanel(try loadResponse()) } catch {
-            if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) {
-                presentMobileConnectionPanel(unavailableResponse)
-            } else {
-                showError(error)
-            }
-        }
+        openSettings(section: .devices)
     }
 
     private func mobileConnectionUnavailableResponse(for error: Error) -> SpacesDeviceAPIControlResponse? {
@@ -7953,31 +8147,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             message: "Device API control is unavailable for this profile. Relaunch Spaces without the disabled Device API environment override.")
     }
 
-    private func presentMobileConnectionPanel(_ response: SpacesDeviceAPIControlResponse) {
-        let pairingWindow = visibleDevicePairingWindow(for: response)
-        let panel: NSPanel
-        if let existing = mobileConnectionPanel {
-            panel = existing
-        } else {
-            let created = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 540, height: 680), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered,
-                defer: false)
-            created.title = "Devices"
-            created.isReleasedWhenClosed = false
-            created.minSize = NSSize(width: 500, height: 520)
-            created.center()
-            mobileConnectionPanel = created
-            panel = created
+    private func currentDeviceControlResponse() -> SpacesDeviceAPIControlResponse {
+        do { return try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() } catch {
+            if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) { return unavailableResponse }
+            return SpacesDeviceAPIControlResponse(ok: false, message: error.localizedDescription)
         }
-        panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func refreshVisibleMobileConnectionPanel(_ response: SpacesDeviceAPIControlResponse) {
-        guard let panel = mobileConnectionPanel, panel.isVisible else { return }
-        let pairingWindow = visibleDevicePairingWindow(for: response)
-        panel.contentView = buildMobileConnectionPanelContent(response: response, pairingWindow: pairingWindow)
+    /// Switches the open settings dialog to the Devices section and renders it with the given response.
+    /// Opens the settings dialog on the Devices section when it is not already showing.
+    private func showDeviceSettings(_ response: SpacesDeviceAPIControlResponse) {
+        if settingsWindow?.isVisible == true, settingsSectionContentContainer != nil {
+            selectedSettingsSection = .devices
+            for (section, row) in settingsSectionRowViews { row.isSelected = section == .devices }
+            renderDeviceSettings(response: response)
+        } else {
+            openSettings(section: .devices)
+        }
+    }
+
+    private func refreshVisibleDeviceSettings(_ response: SpacesDeviceAPIControlResponse) {
+        guard settingsWindow?.isVisible == true, selectedSettingsSection == .devices, settingsSectionContentContainer != nil else { return }
+        renderDeviceSettings(response: response)
+    }
+
+    private func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) {
+        activeShortcutCaptureSetting = nil
+        shortcutButtonsBySetting.removeAll()
+        renderSettingsCards(deviceSettingsCards(response: response))
     }
 
     private func visibleDevicePairingWindow(for response: SpacesDeviceAPIControlResponse) -> SpacesDevicePairingWindowSnapshot? {
@@ -7985,83 +8182,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
-    private func buildMobileConnectionPanelContent(response: SpacesDeviceAPIControlResponse, pairingWindow: SpacesDevicePairingWindowSnapshot?)
-        -> NSView
-    {
-        let root = NSView()
-        root.translatesAutoresizingMaskIntoConstraints = false
-        root.wantsLayer = true
-        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = content
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.distribution = .fill
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(stack)
-
-        let title = NSTextField(labelWithString: "Devices")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
-        title.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-        stack.addArrangedSubview(title)
+    private func deviceSettingsCards(response: SpacesDeviceAPIControlResponse) -> [NSView] {
+        var cards: [NSView] = []
+        let pairingWindow = visibleDevicePairingWindow(for: response)
 
         if let status = devicePanelStatusMessage {
             let statusLabel = helpTextLabel(status.message)
             statusLabel.textColor = status.isError ? .systemRed : .secondaryLabelColor
-            stack.addArrangedSubview(statusLabel)
-            constrainFormFieldToFillWidth(statusLabel, in: stack)
+            cards.append(statusLabel)
         }
 
         if let displayWindow = visibleClientDevicePairingWindow(response: response, pairingWindow: pairingWindow) {
-            let qrSection = clientDevicePairingQRCodeSection(displayWindow)
-            stack.addArrangedSubview(qrSection)
-            constrainFormFieldToFillWidth(qrSection, in: stack)
+            cards.append(clientDevicePairingQRCodeSection(displayWindow))
         }
 
-        let devicesSection = connectedDevicesSection(response: response)
-        stack.addArrangedSubview(devicesSection)
-        constrainFormFieldToFillWidth(devicesSection, in: stack)
-
-        let remotePairingSection = remoteDevicePairingSection()
-        stack.addArrangedSubview(remotePairingSection)
-        constrainFormFieldToFillWidth(remotePairingSection, in: stack)
-
-        // Flexible trailing spacer absorbs any extra vertical space so the sections
-        // keep their natural height instead of one card stretching to fill the panel.
-        let bottomSpacer = NSView()
-        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
-        bottomSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
-        bottomSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        stack.addArrangedSubview(bottomSpacer)
-        constrainFormFieldToFillWidth(bottomSpacer, in: stack)
-
-        root.addSubview(scroll)
-        let contentBottomFollowsStack = content.bottomAnchor.constraint(equalTo: stack.bottomAnchor, constant: 24)
-        contentBottomFollowsStack.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: root.topAnchor), scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            content.bottomAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.bottomAnchor),
-            content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -24), contentBottomFollowsStack,
-        ])
-        return root
+        cards.append(connectedDevicesSection(response: response))
+        cards.append(remoteDevicePairingSection())
+        return cards
     }
 
     private func visibleClientDevicePairingWindow(response: SpacesDeviceAPIControlResponse, pairingWindow: SpacesDevicePairingWindowSnapshot?)
@@ -8322,10 +8459,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     linkString: window.linkString, expiresAt: window.expiresAt)
             }
             devicePanelStatusMessage = nil
-            presentMobileConnectionPanel(response)
+            showDeviceSettings(response)
         } catch {
             if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) {
-                presentMobileConnectionPanel(unavailableResponse)
+                showDeviceSettings(unavailableResponse)
             } else {
                 showError(error)
             }
@@ -8340,7 +8477,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         guard let device = macPairedDevices().first(where: { $0.id == deviceID }) else { return }
         devicePanelStatusMessage = (message: "Opening pairing window on \(device.name)...", isError: false)
-        refreshMobileConnectionPanelAfterClientDeviceChange()
+        refreshVisibleDeviceSettingsAfterClientDeviceChange()
         Task { [weak self] in
             do {
                 let appVersion = AppVersion.short
@@ -8353,10 +8490,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self?.currentDevicePairingWindow = ClientDevicePairingWindow(
                     deviceID: device.id, deviceName: result.name, linkString: result.linkString, expiresAt: expiresAt)
                 self?.devicePanelStatusMessage = nil
-                self?.refreshMobileConnectionPanelAfterClientDeviceChange()
+                self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
             } catch {
                 self?.devicePanelStatusMessage = (message: error.localizedDescription, isError: true)
-                self?.refreshMobileConnectionPanelAfterClientDeviceChange()
+                self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
             }
         }
     }
@@ -8383,7 +8520,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshActiveDeviceSelector()
-                self?.refreshMobileConnectionPanelAfterClientDeviceChange()
+                self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self?.requestSidebarReload()
             } catch { self?.setRemoteDevicePairingStatus(error.localizedDescription, isError: true) }
         }
@@ -8397,7 +8534,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
             try SpacesDeviceCredentialStore.deleteTransportKey(deviceID: deviceID)
             refreshActiveDeviceSelector()
-            refreshMobileConnectionPanelAfterClientDeviceChange()
+            refreshVisibleDeviceSettingsAfterClientDeviceChange()
             requestSidebarReload()
         } catch { showError(error) }
     }
@@ -8409,8 +8546,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         label.isHidden = message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func refreshMobileConnectionPanelAfterClientDeviceChange() {
-        do { refreshVisibleMobileConnectionPanel(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
+    private func refreshVisibleDeviceSettingsAfterClientDeviceChange() {
+        do { refreshVisibleDeviceSettings(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
     }
 
     private func macPairedDevices() -> [SpacesPairedDeviceRecord] {
@@ -8453,22 +8590,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return image
     }
 
-    @objc private func showSettings() {
-        if projectHasUnsavedChanges {
-            let response = unsavedChangesPrompt()
-            if response == .alertFirstButtonReturn {
-                if !saveCurrentDetail() { return }
-            } else if response == .alertThirdButtonReturn {
-                return
-            } else {
-                projectHasUnsavedChanges = false
-            }
-        }
-        outlineView.deselectAll(nil)
-        selectedProjectID = nil
-        selectedWorkspaceID = nil
-        lastSelectedRow = -1
-        showSettingsDetail()
+    @objc private func showSettings() { openSettings(section: .general) }
+
+    /// Opens user settings as a floating dialog on the given section. The dialog floats over the
+    /// main window, so the current sidebar selection and detail pane are left untouched.
+    private func openSettings(section: SettingsSection) {
+        selectedSettingsSection = section
+        showingSettings = true
+        presentSettingsWindow()
     }
 
     private func copyToPasteboard(_ value: String) {
@@ -9065,14 +9194,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return await entry.task.value
     }
 
-    private func defaultWorkspaceTargetBranch(project: ProjectSummary, branches: [String]) -> String? {
+    private func defaultWorkspaceBaseBranch(project: ProjectSummary, branches: [String]) -> String? {
         if let configured = project.defaultBranch, !configured.isEmpty { return configured }
         if branches.contains("main") { return "main" }
         if branches.contains("master") { return "master" }
         return branches.first
     }
 
-    private func defaultWorkspaceTargetBranchFast(project: ProjectSummary) -> String? {
+    private func defaultWorkspaceBaseBranchFast(project: ProjectSummary) -> String? {
         if let configured = project.defaultBranch, !configured.isEmpty { return configured }
         return "main"
     }
@@ -9171,7 +9300,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do {
             let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace title is required.") }
-            let targetBranch = refs.targetBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseBranch = refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = currentAddWorkspaceBranchValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
             let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedDirectoryName: String?
@@ -9180,8 +9309,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let resolvedNotes: String?
             if let notes, notes.isEmpty { resolvedNotes = nil } else { resolvedNotes = notes }
             if refs.isGitRepo, branch.isEmpty { throw WorkspaceError.invalidArgument(message: "Branch name is required for git projects.") }
-            if refs.isGitRepo, targetBranch == nil || targetBranch?.isEmpty == true {
-                throw WorkspaceError.invalidArgument(message: "Target branch is required for git projects.")
+            if refs.isGitRepo, baseBranch == nil || baseBranch?.isEmpty == true {
+                throw WorkspaceError.invalidArgument(message: "Base branch is required for git projects.")
             }
             if refs.isGitRepo, addWorkspaceBranchMode(refs: refs) == .create, refs.autoNameState?.branchOptions.contains(branch) == true {
                 throw WorkspaceError.invalidArgument(
@@ -9189,7 +9318,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }
             if let device = activeDeviceForDaemonStateMutation() {
                 let input = WorkspaceCreateInput(
-                    projectID: refs.projectID, name: name, branch: branch, targetBranch: targetBranch, directoryName: resolvedDirectoryName,
+                    projectID: refs.projectID, name: name, branch: branch, baseBranch: baseBranch, directoryName: resolvedDirectoryName,
                     notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing,
                     replaceExistingManagedDirectory: false)
                 let originalTitle = sender.title
@@ -9205,7 +9334,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     let result = await Self.activeDeviceMutation(device: device) { device in
                         try SpacesActiveDeviceClient.createWorkspace(
-                            projectID: input.projectID, title: input.name, branch: input.branch, targetBranch: input.targetBranch,
+                            projectID: input.projectID, title: input.name, branch: input.branch, baseBranch: input.baseBranch,
                             directoryName: input.directoryName, notes: input.notes, allowExistingBranchReuse: input.allowExistingBranchReuse,
                             device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                     }
@@ -11156,8 +11285,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
                 ?? WorkspaceSummary(
-                    id: "", title: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false
-                )
+                    id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
         if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item {
@@ -11166,7 +11294,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 (index >= 0 && index < hidden.count ? hidden[index] : nil) ?? (
                     projects[0],
                     WorkspaceSummary(
-                        id: "", title: "", branch: nil, targetBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: true,
+                        id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: true,
                         isDefault: false)
                 )
             return outlineItemRef(for: .workspace(entry.0, entry.1))

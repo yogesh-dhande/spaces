@@ -12,7 +12,7 @@ struct AddWorkspaceFieldRefs {
     let branchModeSegmented: NSSegmentedControl?
     let existingBranchField: NSComboBox?
     let newBranchField: NSTextField?
-    let targetBranchField: NSComboBox?
+    let baseBranchField: NSComboBox?
     let nameField: NSTextField
     let directoryNameField: NSTextField?
     let notesField: NSTextField?

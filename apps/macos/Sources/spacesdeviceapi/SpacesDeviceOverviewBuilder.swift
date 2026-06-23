@@ -75,7 +75,7 @@ struct SpacesDeviceOverviewBuilder {
             let runtimeRows = runtimeRows(for: descriptor, availableSessionIDs: availableSessionIDs, sessionsByID: sessionEntriesByID)
             return SpacesDeviceWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
-                title: descriptor.workspace.title, branch: descriptor.workspace.branch, targetBranch: descriptor.workspace.targetBranch,
+                title: descriptor.workspace.title, branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch,
                 dir: descriptor.workspace.dir, isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived,
                 isHidden: descriptor.workspace.isHidden, isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
                 sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,

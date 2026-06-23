@@ -144,8 +144,8 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.path))
     }
 
-    // Tests create worktree for new branch uses target branch head by arranging representative inputs and asserting the expected result.
-    func testCreateWorktreeForNewBranchUsesTargetBranchHead() throws {
+    // Tests create worktree for new branch uses base branch head by arranging representative inputs and asserting the expected result.
+    func testCreateWorktreeForNewBranchUsesBaseBranchHead() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
@@ -159,14 +159,14 @@ final class GitClientTests: XCTestCase {
 
         let worktree = root.appendingPathComponent("feature-worktree", isDirectory: true)
         let client = GitClient()
-        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature", targetBranch: "develop")
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature", baseBranch: "develop")
 
         let featureHead = try runGit(["rev-parse", "HEAD"], cwd: worktree.path).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(featureHead, expectedHead)
     }
 
-    // Tests create worktree for new branch uses remote target branch without local tracking ref by arranging representative inputs and asserting the expected result.
-    func testCreateWorktreeForNewBranchUsesRemoteTargetBranchWithoutLocalTrackingRef() throws {
+    // Tests create worktree for new branch uses remote base branch without local tracking ref by arranging representative inputs and asserting the expected result.
+    func testCreateWorktreeForNewBranchUsesRemoteBaseBranchWithoutLocalTrackingRef() throws {
         let fixture = try makeRemoteFixture()
         try runGit(["checkout", "-b", "new-remote-target"], cwd: fixture.source.path)
         try "target".write(to: fixture.source.appending(path: "NEW_REMOTE_TARGET.md"), atomically: true, encoding: .utf8)
@@ -182,7 +182,7 @@ final class GitClientTests: XCTestCase {
 
         let worktree = fixture.root.appendingPathComponent("remote-target-worktree", isDirectory: true)
         try GitClient().createWorktree(
-            path: fixture.clone.path, worktreePath: worktree.path, branch: "new-feature-from-remote-target", targetBranch: "new-remote-target")
+            path: fixture.clone.path, worktreePath: worktree.path, branch: "new-feature-from-remote-target", baseBranch: "new-remote-target")
 
         let trackedAfter = try runGit(
             ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/new-remote-target"], cwd: fixture.clone.path
@@ -359,8 +359,8 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(client.remoteBranchExists(path: fixture.clone.path, branch: "remote-feature"))
     }
 
-    // Tests createWorktree throws when target branch does not exist locally or remotely by arranging representative inputs and asserting the expected result.
-    func testCreateWorktreeThrowsWhenTargetBranchNotFound() throws {
+    // Tests createWorktree throws when base branch does not exist locally or remotely by arranging representative inputs and asserting the expected result.
+    func testCreateWorktreeThrowsWhenBaseBranchNotFound() throws {
         let root = try makeTempDirectory()
         let repo = root.appendingPathComponent("repo", isDirectory: true)
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
@@ -371,8 +371,7 @@ final class GitClientTests: XCTestCase {
         // "nonexistent-branch" does not exist locally or remotely.
         XCTAssertThrowsError(
             try client.createWorktree(
-                path: repo.path, worktreePath: worktree.path, branch: "new-feature", targetBranch: "nonexistent-branch",
-                allowRemoteBranchLookup: false)
+                path: repo.path, worktreePath: worktree.path, branch: "new-feature", baseBranch: "nonexistent-branch", allowRemoteBranchLookup: false)
         ) { error in guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") } }
     }
 

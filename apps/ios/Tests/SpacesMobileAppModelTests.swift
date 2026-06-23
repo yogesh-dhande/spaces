@@ -11,40 +11,6 @@
         func snapshot() -> [SpacesDeviceAPIRequest] { requests }
     }
 
-    private actor AsyncGate {
-        private var didStart = false
-        private var didRelease = false
-        private var startContinuations: [CheckedContinuation<Void, Never>] = []
-        private var releaseContinuation: CheckedContinuation<Void, Never>?
-
-        func markStarted() {
-            didStart = true
-            let continuations = startContinuations
-            startContinuations.removeAll()
-            continuations.forEach { $0.resume() }
-        }
-
-        func waitUntilStarted() async {
-            if didStart { return }
-            await withCheckedContinuation { continuation in
-                startContinuations.append(continuation)
-            }
-        }
-
-        func waitUntilReleased() async {
-            if didRelease { return }
-            await withCheckedContinuation { continuation in
-                releaseContinuation = continuation
-            }
-        }
-
-        func release() {
-            didRelease = true
-            releaseContinuation?.resume()
-            releaseContinuation = nil
-        }
-    }
-
     @MainActor
     final class SpacesMobileAppModelTests: XCTestCase {
         func testWorkspaceGroupsFilterByTypeStateAndSearch() {
@@ -286,77 +252,6 @@
             XCTAssertFalse(model.isMutating)
         }
 
-        func testClientLaunchSpacesAppSendsAuthenticatedCommandAndClientIdentity() async throws {
-            let recorder = SpacesMobileRequestRecorder()
-            var settings = SpacesMobileConnectionSettings()
-            settings.authToken = "auth-token"
-            settings.transportKey = "transport-key"
-            settings.certificateFingerprint = "SHA256:test"
-            settings.installationID = "INSTALLATION-LAUNCH"
-            let client = SpacesDeviceAPIClient(settings: settings) { request in
-                await recorder.append(request)
-                return SpacesDeviceAPIResponse(ok: true, message: "Launched Spaces on Mac.")
-            }
-
-            try await client.launchSpacesApp()
-
-            let request = await recorder.snapshot().first
-            XCTAssertEqual(request?.commandName, "launchSpacesApp")
-            XCTAssertEqual(request?.authToken, "auth-token")
-            XCTAssertEqual(request?.clientApp?.installationID, "INSTALLATION-LAUNCH")
-            XCTAssertEqual(request?.clientApp?.platform, "ios")
-            XCTAssertFalse(request?.clientApp?.deviceName.isEmpty ?? true)
-        }
-
-        func testModelLaunchSpacesAppTogglesStateAndKeepsOverview() async {
-            let recorder = SpacesMobileRequestRecorder()
-            let gate = AsyncGate()
-            var settings = SpacesMobileConnectionSettings()
-            settings.authToken = "auth-token"
-            settings.transportKey = "transport-key"
-            settings.certificateFingerprint = "SHA256:test"
-            let client = SpacesDeviceAPIClient(settings: settings) { request in
-                await recorder.append(request)
-                await gate.markStarted()
-                await gate.waitUntilReleased()
-                return SpacesDeviceAPIResponse(ok: true, message: "Launched Spaces on Mac.")
-            }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-            let overview = makeOverview(sessions: [makeSession(id: "session-api")])
-            model.overview = overview
-
-            let task = Task { await model.launchSpacesAppIfNeeded() }
-            await gate.waitUntilStarted()
-
-            XCTAssertTrue(model.isLaunchingSpacesApp)
-            XCTAssertEqual(model.overview, overview)
-
-            await gate.release()
-            await task.value
-
-            let requests = await recorder.snapshot()
-            XCTAssertEqual(requests.map(\.commandName), ["launchSpacesApp"])
-            XCTAssertFalse(model.isLaunchingSpacesApp)
-            XCTAssertEqual(model.overview, overview)
-            XCTAssertNil(model.errorMessage)
-        }
-
-        func testModelLaunchSpacesAppSurfacesErrors() async {
-            var settings = SpacesMobileConnectionSettings()
-            settings.authToken = "auth-token"
-            settings.transportKey = "transport-key"
-            settings.certificateFingerprint = "SHA256:test"
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                SpacesDeviceAPIResponse(ok: false, message: "Unable to find SpacesApp.")
-            }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-
-            await model.launchSpacesAppIfNeeded()
-
-            XCTAssertFalse(model.isLaunchingSpacesApp)
-            XCTAssertEqual(model.errorMessage, "Unable to find SpacesApp.")
-        }
-
         private func makeOverview(
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
@@ -380,13 +275,13 @@
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, title: "Feature", branch: "feature",
-                targetBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
+                baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
                 sessionCount: 1,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
                 terminalRows: [])
             let docs = SpacesDeviceWorkspaceSummary(
-                id: "workspace-docs", projectID: project.id, projectName: project.name, title: "Docs", branch: "docs", targetBranch: "main",
+                id: "workspace-docs", projectID: project.id, projectName: project.name, title: "Docs", branch: "docs", baseBranch: "main",
                 dir: "/repo/docs", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
                 processRows: [],
                 codingAgentRows: [],

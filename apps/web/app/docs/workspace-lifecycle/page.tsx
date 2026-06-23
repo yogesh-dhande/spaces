@@ -25,7 +25,7 @@ export default function WorkspaceLifecycleDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Create</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          On create, Spaces copies the project&apos;s templates into the workspace, reserves its named ports, and runs the setup script. Git projects also get a branch worktree. If you named a branch that doesn&apos;t exist yet, Spaces creates it from the target branch.
+          On create, Spaces copies the project&apos;s templates into the workspace, reserves its named ports, and runs the setup script. Git projects also get a branch worktree. If you named a branch that doesn&apos;t exist yet, Spaces creates it from the base branch.
         </p>
       </article>
 

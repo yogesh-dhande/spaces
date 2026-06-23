@@ -37,7 +37,7 @@ public struct SpacesActiveDeviceWorkspaceRow: Equatable, Sendable {
     public let projectName: String
     public let title: String
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let dir: String
     public let isRunning: Bool
     public let isArchived: Bool
@@ -46,7 +46,7 @@ public struct SpacesActiveDeviceWorkspaceRow: Equatable, Sendable {
     public let notes: String?
 
     public init(
-        id: String, projectID: String, projectName: String, title: String, branch: String?, targetBranch: String?, dir: String, isRunning: Bool,
+        id: String, projectID: String, projectName: String, title: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool,
         isArchived: Bool, isHidden: Bool, isDefault: Bool, notes: String?
     ) {
         self.id = id
@@ -54,7 +54,7 @@ public struct SpacesActiveDeviceWorkspaceRow: Equatable, Sendable {
         self.projectName = projectName
         self.title = title
         self.branch = branch
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.dir = dir
         self.isRunning = isRunning
         self.isArchived = isArchived
@@ -107,8 +107,8 @@ public struct SpacesActiveDeviceOverviewViewModel: Equatable, Sendable {
             projects = grouped.values.compactMap { workspaces in
                 guard let first = workspaces.first else { return nil }
                 return SpacesActiveDeviceProjectRow(
-                    id: first.projectID, name: first.projectName, dir: "", isGitRepo: first.branch != nil || first.targetBranch != nil,
-                    defaultBranch: first.targetBranch)
+                    id: first.projectID, name: first.projectName, dir: "", isGitRepo: first.branch != nil || first.baseBranch != nil,
+                    defaultBranch: first.baseBranch)
             }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         } else {
             projects = overview.projects.map {
@@ -120,9 +120,8 @@ public struct SpacesActiveDeviceOverviewViewModel: Equatable, Sendable {
         workspacesByProject = Dictionary(
             grouping: overview.workspaces.map {
                 SpacesActiveDeviceWorkspaceRow(
-                    id: $0.id, projectID: $0.projectID, projectName: $0.projectName, title: $0.title, branch: $0.branch,
-                    targetBranch: $0.targetBranch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isHidden: $0.isHidden,
-                    isDefault: $0.isDefault, notes: $0.notes)
+                    id: $0.id, projectID: $0.projectID, projectName: $0.projectName, title: $0.title, branch: $0.branch, baseBranch: $0.baseBranch,
+                    dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
             }, by: \.projectID
         ).mapValues { rows in rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending } }
 

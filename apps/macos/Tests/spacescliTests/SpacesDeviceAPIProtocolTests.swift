@@ -27,7 +27,6 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
     func testMutatingRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
         let requests = [
-            SpacesDeviceAPIRequest(command: .launchSpacesApp, authToken: "SECRET"),
             SpacesDeviceAPIRequest(command: .openWorkspaceTerminal(.init(workspaceID: "workspace-1")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(command: .stopWorkspaceTerminal(.init(workspaceID: "workspace-1", sessionID: "session-1")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
@@ -71,7 +70,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             SpacesDeviceAPIRequest(
                 command: .createWorkspace(
                     .init(
-                        projectID: "project-1", title: "Feature", branch: "feature", targetBranch: "main", directoryName: "feature-dir",
+                        projectID: "project-1", title: "Feature", branch: "feature", baseBranch: "main", directoryName: "feature-dir",
                         allowExistingBranchReuse: true)), authToken: "SECRET"),
             SpacesDeviceAPIRequest(command: .runWorkspaceSetup(.init(workspaceID: "workspace-1")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
@@ -139,7 +138,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
-                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, targetBranch: nil, dir: "/repo",
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, baseBranch: nil, dir: "/repo",
                     isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, processRows: [processRow],
                     codingAgentRows: [agentRow], terminalRows: [terminalRow])
             ], sessions: [session])
@@ -236,7 +235,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
-                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, targetBranch: nil, dir: "/repo",
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, baseBranch: nil, dir: "/repo",
                     isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, terminalRows: [row])
             ], sessions: [])
 

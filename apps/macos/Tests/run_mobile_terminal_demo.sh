@@ -65,7 +65,6 @@ ipad_udid=""
 iphone_udid=""
 app_log=""
 device_api_log=""
-app_recovery_state_path=""
 ipad_screenshot=""
 iphone_screenshot=""
 ios_app_path=""
@@ -86,7 +85,6 @@ terminal_service_pid=""
 performance_log_path=""
 ghostty_demo_xdg_config_home=""
 demo_home=""
-app_recovery_wait_logged=0
 
 run_demo_env() {
   local -a env_args=(
@@ -240,6 +238,13 @@ validate_profile_mode() {
       exit 1
       ;;
   esac
+}
+
+require_remote_demo_config() {
+  if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" && -z "$remote_ssh_host" ]]; then
+    echo "Remote mobile demo requires SPACES_E2E_REMOTE_SSH_HOST. Set remote E2E config in .env or the environment." >&2
+    exit 1
+  fi
 }
 
 shell_quote() {
@@ -578,57 +583,9 @@ wait_for_spaces_app_ready() {
   exit 1
 }
 
-read_recovered_app_pid() {
-  [[ -n "$app_recovery_state_path" && -f "$app_recovery_state_path" ]] || return 1
-  python3 - "$app_recovery_state_path" <<'PY'
-import json
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-try:
-    payload = json.loads(path.read_text())
-except Exception:
-    raise SystemExit(1)
-pid = payload.get("newAppPID")
-if not isinstance(pid, int) or pid <= 0:
-    raise SystemExit(1)
-print(pid)
-PY
-}
-
 process_command() {
   local pid="$1"
   ps -p "$pid" -o command= 2>/dev/null || true
-}
-
-continue_after_app_recovery_if_needed() {
-  [[ -n "$app_recovery_state_path" && -f "$app_recovery_state_path" ]] || return 1
-
-  local recovered_pid
-  if ! recovered_pid="$(read_recovered_app_pid)"; then
-    if [[ "$app_recovery_wait_logged" != "1" ]]; then
-      echo "SpacesApp exited during app recovery. Waiting for recovered app owner." >&2
-      app_recovery_wait_logged=1
-    fi
-    return 0
-  fi
-
-  local command
-  command="$(process_command "$recovered_pid")"
-  if [[ -z "$command" || "$command" != *"SpacesApp"* ]]; then
-    if [[ "$app_recovery_wait_logged" != "1" ]]; then
-      echo "SpacesApp recovery marker has no live SpacesApp replacement yet. Waiting." >&2
-      app_recovery_wait_logged=1
-    fi
-    return 0
-  fi
-
-  app_pid="$recovered_pid"
-  app_recovery_wait_logged=0
-  rm -f "$app_recovery_state_path" >/dev/null 2>&1 || true
-  echo "SpacesApp recovered with pid $app_pid. Continuing demo." >&2
-  return 0
 }
 
 wait_for_device_api_port() {
@@ -717,8 +674,8 @@ pair_remote_demo_device() {
     return
   fi
   if [[ -z "$remote_ssh_host" ]]; then
-    echo "Skipping remote demo device pairing because SPACES_E2E_REMOTE_SSH_HOST is not set." >&2
-    return
+    echo "Remote mobile demo requires SPACES_E2E_REMOTE_SSH_HOST. Set remote E2E config in .env or the environment." >&2
+    exit 1
   fi
 
   local -a args=(pair-remote-device --ssh-host "$remote_ssh_host")
@@ -885,15 +842,13 @@ PY
 
 wait_for_session_owner() {
   local owner_session_id="$1"
-  python3 - "$spaces_db_path" "$spaces_runtime_dir" "$owner_session_id" <<'PY'
-import os
+  python3 - "$spaces_db_path" "$owner_session_id" <<'PY'
 import sqlite3
 import sys
 import time
 
 db_path = sys.argv[1]
-root_directory = os.path.normpath(os.path.join(sys.argv[2], "terminal", "sessions", sys.argv[3]))
-session_id = sys.argv[3]
+session_id = sys.argv[2]
 deadline = time.time() + 30
 last_snapshot = ""
 while time.time() < deadline:
@@ -902,10 +857,10 @@ while time.time() < deadline:
             """
             SELECT client_id, mode, COALESCE(detached_at, '')
             FROM terminal_attachments
-            WHERE root_directory = ?
+            WHERE session_id = ?
             ORDER BY attached_at, id
             """,
-            (root_directory,),
+            (session_id,),
         ).fetchall()
     last_snapshot = repr(rows)
     if any(mode == "owner" and not detached_at for _, mode, detached_at in rows):
@@ -1346,6 +1301,7 @@ EOF
 require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 validate_profile_mode
+require_remote_demo_config
 build_macos_debug_products
 require_executable "$spaces_app" "SpacesApp"
 require_executable "$spaces_cli" "spaces CLI"
@@ -1358,7 +1314,6 @@ local_project_dir="$project_dir"
 secondary_project_dir="$temp_root/scout-errors"
 app_log="$temp_root/app.log"
 device_api_log="$temp_root/device-api.log"
-app_recovery_state_path="$temp_root/app-recovery-state.json"
 performance_log_path="$temp_root/mobile-terminal-performance.jsonl"
 ipad_screenshot="$temp_root/ipad.png"
 iphone_screenshot="$temp_root/iphone.png"
@@ -1549,10 +1504,6 @@ echo "  spaces_demo_tail_ipad_stderr"
 
 while true; do
   if ! ps -p "$app_pid" >/dev/null 2>&1; then
-    if continue_after_app_recovery_if_needed; then
-      sleep 1
-      continue
-    fi
     echo "SpacesApp exited. Cleaning up demo." >&2
     exit 0
   fi

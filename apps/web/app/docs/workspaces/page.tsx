@@ -28,7 +28,7 @@ export default function WorkspacesDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>Title</strong> &mdash; the display name in the sidebar.</li>
           <li>• <strong>Branch</strong> &mdash; pick an existing branch or enter a name to create a new one.</li>
-          <li>• <strong>Target branch</strong> &mdash; the base for a new branch. Defaults to the project&apos;s default, falling back to <code>main</code> or <code>master</code>.</li>
+          <li>• <strong>Base branch</strong> &mdash; the base for a new branch. Defaults to the project&apos;s default, falling back to <code>main</code> or <code>master</code>.</li>
           <li>• <strong>Directory name</strong> &mdash; the folder name for the worktree. Auto-generated, editable later.</li>
           <li>• <strong>Notes</strong> &mdash; optional context you can edit any time or ask a coding agent to keep in sync with the work.</li>
         </ul>

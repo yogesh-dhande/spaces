@@ -460,7 +460,7 @@ def run(args: argparse.Namespace) -> dict:
                 "projectID": project_id,
                 "title": workspace_title,
                 "branch": workspace_branch,
-                "targetBranch": None,
+                "baseBranch": None,
                 "directoryName": workspace_branch,
                 "allowExistingBranchReuse": False,
             },

@@ -138,7 +138,7 @@ public struct WorkspaceRuntimeManifest: Codable, Sendable, Equatable {
     public let localPath: String
     public let remotePath: String?
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let gitRemoteURL: String?
     public let namedPorts: [WorkspaceRuntimePortMapping]
     public let processEnvironment: [String: String]
@@ -146,7 +146,7 @@ public struct WorkspaceRuntimeManifest: Codable, Sendable, Equatable {
 
     public init(
         workspaceID: String, projectID: String, deviceID: String?, location: Location, localPath: String, remotePath: String?, branch: String?,
-        targetBranch: String?, gitRemoteURL: String? = nil, namedPorts: [WorkspaceRuntimePortMapping], processEnvironment: [String: String],
+        baseBranch: String?, gitRemoteURL: String? = nil, namedPorts: [WorkspaceRuntimePortMapping], processEnvironment: [String: String],
         allowedFileRoots: [String]
     ) {
         self.workspaceID = workspaceID
@@ -156,7 +156,7 @@ public struct WorkspaceRuntimeManifest: Codable, Sendable, Equatable {
         self.localPath = localPath
         self.remotePath = remotePath
         self.branch = branch
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.gitRemoteURL = gitRemoteURL
         self.namedPorts = namedPorts
         self.processEnvironment = processEnvironment
@@ -214,7 +214,7 @@ public enum SpacesDevicePlanner {
 
         return WorkspaceRuntimeManifest(
             workspaceID: workspace.id, projectID: project.id, deviceID: SpacesDeviceRecord.localDeviceID, location: location,
-            localPath: workspace.runtimePath, remotePath: nil, branch: workspace.branch, targetBranch: workspace.targetBranch, gitRemoteURL: nil,
+            localPath: workspace.runtimePath, remotePath: nil, branch: workspace.branch, baseBranch: workspace.baseBranch, gitRemoteURL: nil,
             namedPorts: namedPorts, processEnvironment: environment, allowedFileRoots: [workingPath])
     }
 

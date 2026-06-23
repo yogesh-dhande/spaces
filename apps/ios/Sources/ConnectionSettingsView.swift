@@ -6,17 +6,16 @@ struct ConnectionSettingsView: View {
 
     @State private var settings: SpacesMobileConnectionSettings
     @State private var pendingPairingLink: SpacesDevicePairingLink?
+    @State private var devicePendingRemoval: SpacesMobilePairedDeviceRecord?
     @State private var isConfirmingPairing = false
     @State private var isShowingScanner = false
     @State private var isPairing = false
-    @State private var isLaunchingSpaces = false
     @State private var errorMessage: String?
     private let initialPairingLink: SpacesDevicePairingLink?
     let pairedDevices: [SpacesMobilePairedDeviceRecord]
     let activeDeviceID: String?
     let noticeMessage: String?
     let onPairingLinkConsumed: () -> Void
-    let onLaunchSpaces: (() async -> Void)?
     let onSelectDevice: (String) -> Void
     let onRemoveDevice: (String) -> Void
     let onSave: (SpacesMobileConnectionSettings, String) -> Void
@@ -28,7 +27,6 @@ struct ConnectionSettingsView: View {
         activeDeviceID: String? = nil,
         noticeMessage: String? = nil,
         onPairingLinkConsumed: @escaping () -> Void = {},
-        onLaunchSpaces: (() async -> Void)? = nil,
         onSelectDevice: @escaping (String) -> Void = { _ in },
         onRemoveDevice: @escaping (String) -> Void = { _ in },
         onSave: @escaping (SpacesMobileConnectionSettings, String) -> Void
@@ -39,7 +37,6 @@ struct ConnectionSettingsView: View {
         self.activeDeviceID = activeDeviceID
         self.noticeMessage = noticeMessage
         self.onPairingLinkConsumed = onPairingLinkConsumed
-        self.onLaunchSpaces = onLaunchSpaces
         self.onSelectDevice = onSelectDevice
         self.onRemoveDevice = onRemoveDevice
         self.onSave = onSave
@@ -48,11 +45,8 @@ struct ConnectionSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Connected Devices") {
-                    if pairedDevices.isEmpty {
-                        Text("No devices are paired.")
-                            .foregroundStyle(.secondary)
-                    } else {
+                if !pairedDevices.isEmpty {
+                    Section("Connected Devices") {
                         ForEach(pairedDevices) { device in
                             HStack(spacing: 10) {
                                 Button {
@@ -73,7 +67,7 @@ struct ConnectionSettingsView: View {
                                 }
                                 Spacer(minLength: 0)
                                 Button(role: .destructive) {
-                                    onRemoveDevice(device.id)
+                                    devicePendingRemoval = device
                                 } label: {
                                     Image(systemName: "trash")
                                 }
@@ -101,26 +95,6 @@ struct ConnectionSettingsView: View {
                     }
                     .disabled(isPairing)
 
-                    if settings.isPaired, let onLaunchSpaces {
-                        Button {
-                            Task {
-                                isLaunchingSpaces = true
-                                await onLaunchSpaces()
-                                isLaunchingSpaces = false
-                            }
-                        } label: {
-                            if isLaunchingSpaces {
-                                HStack(spacing: 10) {
-                                    ProgressView().controlSize(.small)
-                                    Text("Launching…")
-                                }
-                            } else {
-                                Label("Launch Spaces on Mac", systemImage: "macwindow")
-                            }
-                        }
-                        .disabled(isLaunchingSpaces)
-                    }
-
                     if let noticeMessage {
                         Text(noticeMessage)
                             .font(.footnote)
@@ -131,10 +105,6 @@ struct ConnectionSettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.red)
                     }
-                } header: {
-                    Text("Add Device")
-                } footer: {
-                    Text("Scan a QR code from a Mac or Linux device running spacesd.")
                 }
             }
             .navigationTitle("Devices")
@@ -158,6 +128,18 @@ struct ConnectionSettingsView: View {
                     Text("\(pendingPairingLink.host):\(pendingPairingLink.port)")
                 }
             }
+            .confirmationDialog(
+                devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?",
+                isPresented: removalConfirmationBinding,
+                titleVisibility: .visible,
+                presenting: devicePendingRemoval
+            ) { device in
+                Button("Remove Device", role: .destructive) {
+                    onRemoveDevice(device.id)
+                    devicePendingRemoval = nil
+                }
+                Button("Cancel", role: .cancel) { devicePendingRemoval = nil }
+            }
             .fullScreenCover(isPresented: $isShowingScanner) {
                 QRCodeScannerView { payload in
                     handleScannedPayload(payload)
@@ -170,6 +152,13 @@ struct ConnectionSettingsView: View {
                 applyIncomingPairingLink(newValue)
             }
         }
+    }
+
+    private var removalConfirmationBinding: Binding<Bool> {
+        Binding(
+            get: { devicePendingRemoval != nil },
+            set: { if !$0 { devicePendingRemoval = nil } }
+        )
     }
 
     @MainActor private func applyIncomingPairingLink(_ pairingLink: SpacesDevicePairingLink?) {

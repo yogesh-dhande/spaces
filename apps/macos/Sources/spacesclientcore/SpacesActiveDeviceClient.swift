@@ -166,7 +166,7 @@ public enum SpacesActiveDeviceClient {
     }
 
     public static func createWorkspace(
-        projectID: String, title: String, branch: String?, targetBranch: String?, directoryName: String?, notes: String? = nil,
+        projectID: String, title: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil,
         allowExistingBranchReuse: Bool = false, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
@@ -174,7 +174,7 @@ public enum SpacesActiveDeviceClient {
             .init(
                 command: .createWorkspace(
                     .init(
-                        projectID: projectID, title: title, branch: branch, targetBranch: targetBranch, directoryName: directoryName, notes: notes,
+                        projectID: projectID, title: title, branch: branch, baseBranch: baseBranch, directoryName: directoryName, notes: notes,
                         allowExistingBranchReuse: allowExistingBranchReuse))), device: device, clientApp: clientApp, profile: profile)
     }
 
@@ -383,8 +383,8 @@ public enum SpacesActiveDeviceClient {
             .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess,
             .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
-        case .pair, .ping, .overview, .launchSpacesApp, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
-            .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
+        case .pair, .ping, .overview, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .state,
+            .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
             defaultRequestTimeoutSeconds
         }
     }

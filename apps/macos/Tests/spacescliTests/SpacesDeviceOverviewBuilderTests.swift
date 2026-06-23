@@ -148,7 +148,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             agentLaunchers: [AgentLauncher(id: "project-codex-agent", name: "Codex", command: "codex")])
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: "feature", branch: "feature",
-            targetBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil,
+            baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil,
             notes: "Use this payload for local and remote detail views.")
         let settings = WorkspaceSettings(
             stopScript: "make stop-workspace", ports: [PortDefinition(id: "workspace-api-port", name: "API")],
