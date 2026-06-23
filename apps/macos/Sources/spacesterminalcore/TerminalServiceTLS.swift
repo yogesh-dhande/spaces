@@ -42,12 +42,10 @@ public enum TerminalServiceTLSFingerprint {
     public struct TerminalServiceTLSIdentity: @unchecked Sendable {
         public let identity: SecIdentity
         public let certificateFingerprint: String
-        private let keychain: SecKeychain?
 
-        public init(identity: SecIdentity, certificateFingerprint: String, keychain: SecKeychain? = nil) {
+        public init(identity: SecIdentity, certificateFingerprint: String) {
             self.identity = identity
             self.certificateFingerprint = certificateFingerprint
-            self.keychain = keychain
         }
     }
 
@@ -58,114 +56,91 @@ public enum TerminalServiceTLSFingerprint {
         }
 
         public static func loadOrCreate(root: URL, fileManager: FileManager = .default) throws -> TerminalServiceTLSIdentity {
-            try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-            let p12URL = root.appendingPathComponent("identity.p12", isDirectory: false)
-            let passphraseURL = root.appendingPathComponent("identity.passphrase", isDirectory: false)
-            let keychain = try serviceKeychain(root: root, fileManager: fileManager)
+            try fileManager.createDirectory(
+                at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+            chmod(root.path, S_IRWXU)
+            let keyURL = root.appendingPathComponent("identity.key.der", isDirectory: false)
+            let certificateURL = root.appendingPathComponent("identity.certificate.der", isDirectory: false)
+            try removeObsoleteIdentityFiles(root: root, fileManager: fileManager)
 
-            if fileManager.fileExists(atPath: p12URL.path), fileManager.fileExists(atPath: passphraseURL.path) {
-                return try importIdentity(p12URL: p12URL, passphraseURL: passphraseURL, keychain: keychain)
+            if fileManager.fileExists(atPath: keyURL.path), fileManager.fileExists(atPath: certificateURL.path) {
+                do { return try loadIdentity(keyURL: keyURL, certificateURL: certificateURL) } catch {
+                    try removeCurrentIdentity(keyURL: keyURL, certificateURL: certificateURL, fileManager: fileManager)
+                }
             }
 
-            try generateIdentity(root: root, p12URL: p12URL, passphraseURL: passphraseURL, fileManager: fileManager)
-            return try importIdentity(p12URL: p12URL, passphraseURL: passphraseURL, keychain: keychain)
+            try generateIdentity(root: root, keyURL: keyURL, certificateURL: certificateURL, fileManager: fileManager)
+            return try loadIdentity(keyURL: keyURL, certificateURL: certificateURL)
         }
 
         public static func rootDirectory(fileManager: FileManager = .default) throws -> URL {
             try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager).appendingPathComponent("daemon-tls", isDirectory: true)
         }
 
-        private static func importIdentity(p12URL: URL, passphraseURL: URL, keychain: SecKeychain) throws -> TerminalServiceTLSIdentity {
-            let p12Data = try Data(contentsOf: p12URL)
-            let passphrase = try String(contentsOf: passphraseURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-            var importedItems: CFArray?
-            let options = [kSecImportExportPassphrase as String: passphrase, kSecImportExportKeychain as String: keychain] as CFDictionary
-            let status = SecPKCS12Import(p12Data as CFData, options, &importedItems)
-            guard status == errSecSuccess, let items = importedItems as? [[String: Any]],
-                let importedIdentity = items.first?[kSecImportItemIdentity as String]
-            else { throw TerminalServiceTLSError.identityImportFailed(status) }
-            let identity = importedIdentity as! SecIdentity
+        private static func loadIdentity(keyURL: URL, certificateURL: URL) throws -> TerminalServiceTLSIdentity {
+            let keyData = try Data(contentsOf: keyURL)
+            let certificateData = try Data(contentsOf: certificateURL)
+            guard let certificate = SecCertificateCreateWithData(nil, certificateData as CFData) else {
+                throw TerminalServiceTLSError.identityLoadFailed("The spacesd TLS certificate file is invalid.")
+            }
 
-            var certificate: SecCertificate?
-            let certificateStatus = SecIdentityCopyCertificate(identity, &certificate)
-            guard certificateStatus == errSecSuccess, let certificate else {
-                throw TerminalServiceTLSError.certificateExportFailed(certificateStatus)
+            var keyError: Unmanaged<CFError>?
+            let keyAttributes =
+                [
+                    kSecAttrKeyType as String: kSecAttrKeyTypeRSA, kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+                    kSecAttrIsPermanent as String: false,
+                ] as CFDictionary
+            guard let privateKey = SecKeyCreateWithData(keyData as CFData, keyAttributes, &keyError) else {
+                let details = keyError?.takeRetainedValue().localizedDescription ?? "Unknown Security framework error."
+                throw TerminalServiceTLSError.identityLoadFailed("The spacesd TLS private key file is invalid: \(details)")
+            }
+            guard let identity = SecIdentityCreate(nil, certificate, privateKey) else {
+                throw TerminalServiceTLSError.identityLoadFailed("The spacesd TLS private key does not match its certificate.")
             }
             return TerminalServiceTLSIdentity(
-                identity: identity, certificateFingerprint: TerminalServiceTLSFingerprint.fingerprint(certificate: certificate), keychain: keychain)
+                identity: identity, certificateFingerprint: TerminalServiceTLSFingerprint.fingerprint(certificate: certificate))
         }
 
-        private static func serviceKeychain(root: URL, fileManager: FileManager) throws -> SecKeychain {
-            // SecPKCS12Import accepts a SecKeychain import target; using our own keychain avoids login-keychain UI in daemon contexts.
-            let keychainURL = root.appendingPathComponent("identity.keychain-db", isDirectory: false)
-            let passphraseURL = root.appendingPathComponent("identity.keychain.passphrase", isDirectory: false)
-
-            if fileManager.fileExists(atPath: keychainURL.path), fileManager.fileExists(atPath: passphraseURL.path) {
-                let passphrase = try String(contentsOf: passphraseURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-                if let keychain = try openServiceKeychain(url: keychainURL, passphrase: passphrase) { return keychain }
-                try? fileManager.removeItem(at: keychainURL)
-                try? fileManager.removeItem(at: passphraseURL)
-            }
-
-            let passphrase = randomPassphrase()
-            var keychain: SecKeychain?
-            let status = passphrase.withCString { passphrasePointer in
-                SecKeychainCreate(keychainURL.path, UInt32(strlen(passphrasePointer)), passphrasePointer, false, nil, &keychain)
-            }
-            guard status == errSecSuccess, let keychain else { throw TerminalServiceTLSError.identityImportFailed(status) }
-            try passphrase.write(to: passphraseURL, atomically: true, encoding: .utf8)
-            chmod(keychainURL.path, S_IRUSR | S_IWUSR)
-            chmod(passphraseURL.path, S_IRUSR | S_IWUSR)
-            return keychain
-        }
-
-        private static func openServiceKeychain(url: URL, passphrase: String) throws -> SecKeychain? {
-            var keychain: SecKeychain?
-            let openStatus = SecKeychainOpen(url.path, &keychain)
-            guard openStatus == errSecSuccess, let keychain else { return nil }
-            let unlockStatus = passphrase.withCString { passphrasePointer in
-                SecKeychainUnlock(keychain, UInt32(strlen(passphrasePointer)), passphrasePointer, true)
-            }
-            guard unlockStatus == errSecSuccess else {
-                if unlockStatus == errSecNoSuchKeychain { return nil }
-                throw TerminalServiceTLSError.identityImportFailed(unlockStatus)
-            }
-            return keychain
-        }
-
-        private static func generateIdentity(root: URL, p12URL: URL, passphraseURL: URL, fileManager: FileManager) throws {
+        private static func generateIdentity(root: URL, keyURL: URL, certificateURL: URL, fileManager: FileManager) throws {
             let temporaryRoot = root.appendingPathComponent("generate-\(UUID().uuidString)", isDirectory: true)
-            try fileManager.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+            try fileManager.createDirectory(
+                at: temporaryRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+            chmod(temporaryRoot.path, S_IRWXU)
             defer { try? fileManager.removeItem(at: temporaryRoot) }
 
-            let keyURL = temporaryRoot.appendingPathComponent("key.pem", isDirectory: false)
-            let certificateURL = temporaryRoot.appendingPathComponent("certificate.pem", isDirectory: false)
-            let generatedP12URL = temporaryRoot.appendingPathComponent("identity.p12", isDirectory: false)
-            let passphrase = randomPassphrase()
+            let keyPEMURL = temporaryRoot.appendingPathComponent("key.pem", isDirectory: false)
+            let certificatePEMURL = temporaryRoot.appendingPathComponent("certificate.pem", isDirectory: false)
+            let generatedKeyURL = temporaryRoot.appendingPathComponent("identity.key.der", isDirectory: false)
+            let generatedCertificateURL = temporaryRoot.appendingPathComponent("identity.certificate.der", isDirectory: false)
 
             try runOpenSSL([
-                "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "825", "-nodes", "-subj", "/CN=spacesd", "-keyout", keyURL.path, "-out",
-                certificateURL.path,
+                "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "825", "-nodes", "-subj", "/CN=spacesd", "-keyout", keyPEMURL.path, "-out",
+                certificatePEMURL.path,
             ])
-            try runOpenSSL([
-                "pkcs12", "-export", "-out", generatedP12URL.path, "-inkey", keyURL.path, "-in", certificateURL.path, "-passout",
-                "pass:\(passphrase)",
-            ])
+            chmod(keyPEMURL.path, S_IRUSR | S_IWUSR)
+            chmod(certificatePEMURL.path, S_IRUSR | S_IWUSR)
+            try runOpenSSL(["rsa", "-in", keyPEMURL.path, "-outform", "der", "-out", generatedKeyURL.path])
+            try runOpenSSL(["x509", "-in", certificatePEMURL.path, "-outform", "der", "-out", generatedCertificateURL.path])
+            chmod(generatedKeyURL.path, S_IRUSR | S_IWUSR)
+            chmod(generatedCertificateURL.path, S_IRUSR | S_IWUSR)
 
-            if fileManager.fileExists(atPath: p12URL.path) { try fileManager.removeItem(at: p12URL) }
-            if fileManager.fileExists(atPath: passphraseURL.path) { try fileManager.removeItem(at: passphraseURL) }
-            try fileManager.moveItem(at: generatedP12URL, to: p12URL)
-            try passphrase.write(to: passphraseURL, atomically: true, encoding: .utf8)
-            chmod(p12URL.path, S_IRUSR | S_IWUSR)
-            chmod(passphraseURL.path, S_IRUSR | S_IWUSR)
+            try removeCurrentIdentity(keyURL: keyURL, certificateURL: certificateURL, fileManager: fileManager)
+            try fileManager.moveItem(at: generatedKeyURL, to: keyURL)
+            try fileManager.moveItem(at: generatedCertificateURL, to: certificateURL)
+            chmod(keyURL.path, S_IRUSR | S_IWUSR)
+            chmod(certificateURL.path, S_IRUSR | S_IWUSR)
         }
 
-        private static func randomPassphrase() -> String {
-            var bytes = [UInt8](repeating: 0, count: 32)
-            let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-            let data = status == errSecSuccess ? Data(bytes) : Data((UUID().uuidString + UUID().uuidString).utf8.prefix(32))
-            return data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(
-                of: "=", with: "")
+        private static func removeCurrentIdentity(keyURL: URL, certificateURL: URL, fileManager: FileManager) throws {
+            if fileManager.fileExists(atPath: keyURL.path) { try fileManager.removeItem(at: keyURL) }
+            if fileManager.fileExists(atPath: certificateURL.path) { try fileManager.removeItem(at: certificateURL) }
+        }
+
+        private static func removeObsoleteIdentityFiles(root: URL, fileManager: FileManager) throws {
+            for filename in ["identity.p12", "identity.passphrase", "identity.keychain-db", "identity.keychain.passphrase"] {
+                let url = root.appendingPathComponent(filename, isDirectory: false)
+                if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
+            }
         }
 
         private static func runOpenSSL(_ arguments: [String]) throws {
@@ -332,8 +307,8 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
     case missingCertificateFingerprint
     case peerCertificateUnavailable
     case certificatePinMismatch(expected: String, actual: String)
+    case identityLoadFailed(String)
     case identityImportFailed(OSStatus)
-    case certificateExportFailed(OSStatus)
     case opensslFailed(String)
     case requestTimedOut
     case connectionFailed(String)
@@ -345,8 +320,8 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         case .peerCertificateUnavailable: "Remote spacesd did not present a certificate."
         case .certificatePinMismatch(let expected, let actual):
             "Remote spacesd certificate fingerprint mismatch. Expected \(expected), got \(actual)."
+        case .identityLoadFailed(let message): "Failed to load the spacesd TLS identity. \(message)"
         case .identityImportFailed(let status): "Failed to import the spacesd TLS identity. Security status: \(status)."
-        case .certificateExportFailed(let status): "Failed to read the spacesd TLS certificate. Security status: \(status)."
         case .opensslFailed(let message): "Failed to generate the spacesd TLS certificate: \(message)"
         case .requestTimedOut: "Timed out waiting for remote spacesd."
         case .connectionFailed(let message): "Remote spacesd TLS connection failed: \(message)"
