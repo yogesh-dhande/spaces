@@ -261,13 +261,24 @@ import workspacecore
                 appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: true))
         #expect(
             AppKitController.preferredWorkspaceIDForGlobalNavigation(
-                focusedWindowWorkspaceID: "primary", focusedTerminalSessionWorkspaceID: "secondary", activeWorkspaceID: "secondary") == "primary")
+                focusedTerminalSessionWorkspaceID: "terminal", focusedWindowWorkspaceID: "focused", rememberedTerminalSessionWorkspaceID: nil,
+                activeWorkspaceID: "active")
+                == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "terminal", source: "focused_terminal_session"))
         #expect(
             AppKitController.preferredWorkspaceIDForGlobalNavigation(
-                focusedWindowWorkspaceID: nil, focusedTerminalSessionWorkspaceID: "terminal", activeWorkspaceID: "active") == "terminal")
+                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "focused", rememberedTerminalSessionWorkspaceID: "remembered",
+                activeWorkspaceID: "active") == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "focused", source: "focused_window")
+        )
         #expect(
             AppKitController.preferredWorkspaceIDForGlobalNavigation(
-                focusedWindowWorkspaceID: nil, focusedTerminalSessionWorkspaceID: nil, activeWorkspaceID: "active") == "active")
+                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, rememberedTerminalSessionWorkspaceID: "remembered",
+                activeWorkspaceID: "active")
+                == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "remembered", source: "remembered_terminal_session"))
+        #expect(
+            AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, rememberedTerminalSessionWorkspaceID: nil,
+                activeWorkspaceID: "active")
+                == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "active", source: "active_workspace"))
     }
 
     @Test func commandPaletteSessionUsesCapturedMainWindowVisibilityForHotkeyState() {

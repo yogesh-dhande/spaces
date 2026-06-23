@@ -171,6 +171,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let mainWindowWasVisible: Bool
     }
 
+    struct GlobalNavigationWorkspaceResolution: Equatable, Sendable {
+        let workspaceID: String?
+        let source: String
+    }
+
     private struct PreparedGitProjectDiscardEntry {
         let id: UUID
         let task: Task<Result<Void, Error>, Never>
@@ -340,6 +345,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var appToggleReturnApplicationProcessID: pid_t?
     private var commandPaletteReturnTerminalSessionID: String?
     private var commandPaletteReturnApplicationProcessID: pid_t?
+    private var terminalRuntimeControlDescriptorsBySessionID: [String: TerminalRuntimeControlDescriptor] = [:]
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -1132,7 +1138,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
                         self?.removeTerminalSessionWindowController(
                             sessionID: sessionID, clientID: clientID, sessionIsTerminating: sessionIsTerminating)
-                    }, runtimeControlsProvider: { [weak self] sessionID in self?.terminalRuntimeControls(forSessionID: sessionID) },
+                    },
+                    runtimeControlsProvider: { [weak self] sessionID in
+                        self?.terminalRuntimeControls(forSessionID: sessionID, cause: "controller_refresh")
+                    },
                     sessionHostProvider: { launchConfiguration, paths in
                         Self.terminalSessionHost(
                             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: remoteRoute?.requestSender,
@@ -1142,7 +1151,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 controller = created
                 reusedExistingWindow = false
             }
-            controller.setRuntimeControls(terminalRuntimeControls(forSessionID: sessionID))
             controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
             if mode == .owner { controller.requestOwnershipIfNeeded() }
             logPerfMetric(
@@ -1413,10 +1421,53 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return (controller, "existing_window")
     }
 
-    private func terminalRuntimeControls(forSessionID sessionID: String) -> TerminalSessionRuntimeControls? {
-        guard let descriptor = terminalRuntimeControlDescriptor(forSessionID: sessionID),
-            descriptor.canRun || descriptor.canStop || descriptor.canRestart
-        else { return nil }
+    private func terminalRuntimeControls(forSessionID sessionID: String, cause: String = "provider", requestID: String? = nil)
+        -> TerminalSessionRuntimeControls?
+    {
+        let startedAt = Date()
+        let workspaceLookupStartedAt = Date()
+        guard let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID) else {
+            let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID) != nil
+            logTerminalRuntimeControlsRefresh(
+                sessionID: sessionID, startedAt: startedAt, cause: cause, requestID: requestID,
+                workspaceLookupMS: windowShortcutElapsedMS(since: workspaceLookupStartedAt), settingsMS: 0, processesMS: 0, agentsMS: 0, windowsMS: 0,
+                runtimeStateMS: 0, descriptorBuildMS: 0, descriptorChanged: descriptorChanged, success: false)
+            return nil
+        }
+        let workspaceLookupMS = windowShortcutElapsedMS(since: workspaceLookupStartedAt)
+
+        let settingsStartedAt = Date()
+        let settings = try? orchestrator.workspaceSettings(workspaceID: workspaceID)
+        let settingsMS = windowShortcutElapsedMS(since: settingsStartedAt)
+        let processesStartedAt = Date()
+        let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []
+        let processesMS = windowShortcutElapsedMS(since: processesStartedAt)
+        let agentsStartedAt = Date()
+        let agentWindows = (try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? []
+        let agentsMS = windowShortcutElapsedMS(since: agentsStartedAt)
+        let windowsStartedAt = Date()
+        let trackedWindows = (try? orchestrator.windows(workspaceID: workspaceID)) ?? []
+        let windowsMS = windowShortcutElapsedMS(since: windowsStartedAt)
+        let runtimeStateStartedAt = Date()
+        let isSessionRunning = Self.terminalSessionIsRunning(sessionID: sessionID)
+        let runtimeStateMS = windowShortcutElapsedMS(since: runtimeStateStartedAt)
+        let descriptorBuildStartedAt = Date()
+        let descriptor = Self.terminalRuntimeControlDescriptor(
+            sessionID: sessionID, workspaceID: workspaceID, settings: settings, runningProcesses: runningProcesses, agentWindows: agentWindows,
+            trackedWindows: trackedWindows, isSessionRunning: isSessionRunning)
+        let descriptorBuildMS = windowShortcutElapsedMS(since: descriptorBuildStartedAt)
+        let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID[sessionID] != descriptor
+        if let descriptor {
+            terminalRuntimeControlDescriptorsBySessionID[sessionID] = descriptor
+        } else {
+            terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID)
+        }
+        logTerminalRuntimeControlsRefresh(
+            sessionID: sessionID, startedAt: startedAt, cause: cause, requestID: requestID, workspaceLookupMS: workspaceLookupMS,
+            settingsMS: settingsMS, processesMS: processesMS, agentsMS: agentsMS, windowsMS: windowsMS, runtimeStateMS: runtimeStateMS,
+            descriptorBuildMS: descriptorBuildMS, descriptorChanged: descriptorChanged, success: descriptor != nil)
+
+        guard let descriptor, descriptor.canRun || descriptor.canStop || descriptor.canRestart else { return nil }
         let runAction: (@MainActor @Sendable () -> Void)?
         if descriptor.canRun {
             runAction = { @MainActor @Sendable [weak self, descriptor] in
@@ -1449,14 +1500,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             onStop: stopAction, onRestart: restartAction)
     }
 
-    private func terminalRuntimeControlDescriptor(forSessionID sessionID: String) -> TerminalRuntimeControlDescriptor? {
-        guard let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID) else { return nil }
-        return Self.terminalRuntimeControlDescriptor(
-            sessionID: sessionID, workspaceID: workspaceID, settings: try? orchestrator.workspaceSettings(workspaceID: workspaceID),
-            runningProcesses: (try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? [],
-            agentWindows: (try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? [],
-            trackedWindows: (try? orchestrator.windows(workspaceID: workspaceID)) ?? [],
-            isSessionRunning: Self.terminalSessionIsRunning(sessionID: sessionID))
+    private func logTerminalRuntimeControlsRefresh(
+        sessionID: String, startedAt: Date, cause: String, requestID: String?, workspaceLookupMS: Int, settingsMS: Int, processesMS: Int,
+        agentsMS: Int, windowsMS: Int, runtimeStateMS: Int, descriptorBuildMS: Int, descriptorChanged: Bool, success: Bool
+    ) {
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        logPerfMetric(
+            "terminal_runtime_controls_refresh", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+            success: success,
+            detail:
+                "cause=\(cause) workspace_lookup_ms=\(workspaceLookupMS) settings_ms=\(settingsMS) processes_ms=\(processesMS) agents_ms=\(agentsMS) windows_ms=\(windowsMS) runtime_state_ms=\(runtimeStateMS) descriptor_build_ms=\(descriptorBuildMS) descriptor_changed=\(descriptorChanged ? 1 : 0)\(requestDetail)"
+        )
+    }
+
+    private func refreshTerminalRuntimeControls(sessionID: String, cause: String, requestID: String? = nil) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else { return }
+        controller.setRuntimeControls(terminalRuntimeControls(forSessionID: sessionID, cause: cause, requestID: requestID))
     }
 
     static func terminalRuntimeControlDescriptor(
@@ -1648,6 +1708,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
                     elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "kind=\(descriptor.kind)")
                 applyActiveDeviceMutationResponse(response, selectedWorkspaceID: descriptor.workspaceID)
+                refreshTerminalRuntimeControls(sessionID: descriptor.sessionID, cause: metric)
             case .failure(let error):
                 logPerfMetric(
                     metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
@@ -1690,6 +1751,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             "terminal_window_controller_remove", target: "session=\(sessionID)", elapsedMS: 0, success: true,
             detail: "client=\(clientID) terminating=\(sessionIsTerminating ? 1 : 0)")
         terminalSessionWindowControllers.removeValue(forKey: sessionID)
+        terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID)
         guard !sessionIsTerminating else { return }
         stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID)
     }
@@ -10454,8 +10516,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     nonisolated static func shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: Bool) -> Bool { appIsActive }
 
     nonisolated static func preferredWorkspaceIDForGlobalNavigation(
-        focusedWindowWorkspaceID: String?, focusedTerminalSessionWorkspaceID: String?, activeWorkspaceID: String?
-    ) -> String? { focusedWindowWorkspaceID ?? focusedTerminalSessionWorkspaceID ?? activeWorkspaceID }
+        focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?, rememberedTerminalSessionWorkspaceID: String?,
+        activeWorkspaceID: String?
+    ) -> GlobalNavigationWorkspaceResolution {
+        if let focusedTerminalSessionWorkspaceID {
+            return GlobalNavigationWorkspaceResolution(workspaceID: focusedTerminalSessionWorkspaceID, source: "focused_terminal_session")
+        }
+        if let focusedWindowWorkspaceID {
+            return GlobalNavigationWorkspaceResolution(workspaceID: focusedWindowWorkspaceID, source: "focused_window")
+        }
+        if let rememberedTerminalSessionWorkspaceID {
+            return GlobalNavigationWorkspaceResolution(workspaceID: rememberedTerminalSessionWorkspaceID, source: "remembered_terminal_session")
+        }
+        if let activeWorkspaceID { return GlobalNavigationWorkspaceResolution(workspaceID: activeWorkspaceID, source: "active_workspace") }
+        return GlobalNavigationWorkspaceResolution(workspaceID: nil, source: "none")
+    }
 
     nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsFocused: Bool) -> Bool {
         !appIsHidden && mainWindowIsFocused
@@ -10548,9 +10623,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func focusGlobalWindowNavigation(direction: Int) {
-        guard let workspaceID = globalWindowNavigationWorkspaceID() else { return }
         let requestID = UUID().uuidString
         let startedAt = Date()
+        guard let workspaceID = globalWindowNavigationWorkspaceID(requestID: requestID) else {
+            logPerfMetric(
+                "global_window_navigation", target: "workspace=nil", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail: "direction=\(direction > 0 ? "next" : "previous") reason=no_workspace request_id=\(requestID)")
+            return
+        }
         do {
             let hidesApp: Bool
             let preferredFocusedBuiltInTerminalSessionID = activeBuiltInTerminalSessionID()
@@ -10681,26 +10761,82 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func globalWindowNavigationWorkspaceID() -> String? {
-        let focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
-        let focusedTerminalSessionWorkspaceID: String?
-        if focusedWindowWorkspaceID == nil, let terminalSessionID = activeBuiltInTerminalSessionID() {
-            focusedTerminalSessionWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
-        } else {
-            focusedTerminalSessionWorkspaceID = nil
+    private func globalWindowNavigationWorkspaceID(requestID: String? = nil) -> String? {
+        let startedAt = Date()
+        let activeTerminalSessionStartedAt = Date()
+        let focusedTerminalSessionID = focusedBuiltInTerminalSessionIDForGlobalNavigation()
+        let activeTerminalSessionMS = windowShortcutElapsedMS(since: activeTerminalSessionStartedAt)
+
+        var focusedTerminalSessionWorkspaceID: String?
+        var focusedWindowWorkspaceID: String?
+        var rememberedTerminalSessionWorkspaceID: String?
+        var activeWorkspaceID: String?
+        var terminalWorkspaceMS = 0
+        var focusedWindowWorkspaceMS = 0
+        var activeWorkspaceMS = 0
+        var terminalWorkspaceSource = "skipped"
+        var terminalWorkspaceStatus = "skipped"
+        var focusedWindowWorkspaceStatus = "skipped"
+        var activeWorkspaceStatus = "skipped"
+
+        if let focusedTerminalSessionID {
+            let lookupStartedAt = Date()
+            focusedTerminalSessionWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(focusedTerminalSessionID)
+            terminalWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
+            terminalWorkspaceSource = "focused"
+            terminalWorkspaceStatus = focusedTerminalSessionWorkspaceID == nil ? "miss" : "hit"
         }
-        let activeWorkspaceID = try? orchestrator.activeWorkspaceID()
-        return Self.preferredWorkspaceIDForGlobalNavigation(
-            focusedWindowWorkspaceID: focusedWindowWorkspaceID, focusedTerminalSessionWorkspaceID: focusedTerminalSessionWorkspaceID,
-            activeWorkspaceID: activeWorkspaceID)
+
+        if focusedTerminalSessionWorkspaceID == nil {
+            let lookupStartedAt = Date()
+            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+            focusedWindowWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
+            focusedWindowWorkspaceStatus = focusedWindowWorkspaceID == nil ? "miss" : "hit"
+        }
+
+        if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil,
+            let rememberedSessionID = rememberedBuiltInTerminalSessionIDForGlobalNavigation()
+        {
+            let lookupStartedAt = Date()
+            rememberedTerminalSessionWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(rememberedSessionID)
+            terminalWorkspaceMS += windowShortcutElapsedMS(since: lookupStartedAt)
+            terminalWorkspaceSource = terminalWorkspaceSource == "skipped" ? "remembered" : "\(terminalWorkspaceSource)+remembered"
+            terminalWorkspaceStatus = rememberedTerminalSessionWorkspaceID == nil ? "miss" : "hit"
+        }
+
+        if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil, rememberedTerminalSessionWorkspaceID == nil {
+            let lookupStartedAt = Date()
+            activeWorkspaceID = try? orchestrator.activeWorkspaceID()
+            activeWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
+            activeWorkspaceStatus = activeWorkspaceID == nil ? "miss" : "hit"
+        }
+
+        let resolution = Self.preferredWorkspaceIDForGlobalNavigation(
+            focusedTerminalSessionWorkspaceID: focusedTerminalSessionWorkspaceID, focusedWindowWorkspaceID: focusedWindowWorkspaceID,
+            rememberedTerminalSessionWorkspaceID: rememberedTerminalSessionWorkspaceID, activeWorkspaceID: activeWorkspaceID)
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        let detail =
+            "selected_source=\(resolution.source) active_terminal_session=\(focusedTerminalSessionID == nil ? "miss" : "hit") active_terminal_session_ms=\(activeTerminalSessionMS) terminal_workspace=\(terminalWorkspaceStatus) terminal_workspace_source=\(terminalWorkspaceSource) terminal_workspace_ms=\(terminalWorkspaceMS) focused_window_workspace=\(focusedWindowWorkspaceStatus) focused_window_workspace_ms=\(focusedWindowWorkspaceMS) active_workspace=\(activeWorkspaceStatus) active_workspace_ms=\(activeWorkspaceMS)\(requestDetail)"
+        logPerfMetric(
+            "global_window_navigation_workspace_resolution", target: "workspace=\(resolution.workspaceID ?? "nil")",
+            elapsedMS: windowShortcutElapsedMS(since: startedAt), success: resolution.workspaceID != nil, detail: detail)
+        return resolution.workspaceID
     }
 
     private func activeBuiltInTerminalSessionID() -> String? {
+        focusedBuiltInTerminalSessionIDForGlobalNavigation() ?? rememberedBuiltInTerminalSessionIDForGlobalNavigation()
+    }
+
+    private func focusedBuiltInTerminalSessionIDForGlobalNavigation() -> String? {
         if Self.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: NSApp.isActive) {
             for window in [NSApp.keyWindow, NSApp.mainWindow].compactMap({ $0 }) {
                 if let sessionID = (window.windowController as? TerminalSessionWindowController)?.terminalSessionID { return sessionID }
             }
         }
+        return nil
+    }
+
+    private func rememberedBuiltInTerminalSessionIDForGlobalNavigation() -> String? {
         guard
             Self.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
                 appIsActive: NSApp.isActive, mainWindowIsFocused: window?.isKeyWindow == true,

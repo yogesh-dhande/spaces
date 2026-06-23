@@ -44,6 +44,7 @@ RECORDER_OUTPUT_START_TIMEOUT_SECONDS="${RECORDER_OUTPUT_START_TIMEOUT_SECONDS:-
 RECORDER_STOP_TIMEOUT_SECONDS="${RECORDER_STOP_TIMEOUT_SECONDS:-10}"
 SURFACE_POLL_INTERVAL_SECONDS="${SURFACE_POLL_INTERVAL_SECONDS:-0.05}"
 REAL_SYSTEM_PROFILE_REPETITIONS="${REAL_SYSTEM_PROFILE_REPETITIONS:-5}"
+REAL_SYSTEM_PROFILE_WARMUPS="${REAL_SYSTEM_PROFILE_WARMUPS:-5}"
 PROFILE_ARTIFACT_DIR="${PROFILE_ARTIFACT_DIR:-$MACOS_DIR/.artifacts/real-system-profiles}"
 PROFILE_HISTORY_CSV="${PROFILE_HISTORY_CSV:-$PROFILE_ARTIFACT_DIR/metrics-history.csv}"
 PROFILE_REPORT_HTML="${PROFILE_REPORT_HTML:-$PROFILE_ARTIFACT_DIR/report.html}"
@@ -92,6 +93,7 @@ MEASURED_CYCLE_TARGET=""
 SETUP_FIXTURES_ONLY=0
 PRESERVE_FIXTURES_ON_EXIT=0
 ONLY_WINDOW_CYCLE_PROFILE=0
+PROFILE_RECORD_METRICS=1
 APP_PORT_NAME="APP_PORT"
 API_PORT_NAME="API_PORT"
 PRIMARY_DOCS_URL=""
@@ -3290,6 +3292,9 @@ send_cycle_hotkey_with_ack() {
 }
 
 record_metric_sample() {
+  if [[ "$PROFILE_RECORD_METRICS" != "1" ]]; then
+    return 0
+  fi
   local name="$1"
   local value_ms="$2"
   local terminal_host="${3:-unknown}"
@@ -5066,12 +5071,24 @@ PY
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-adhoc.log open "$adhoc_name" "$workspace_dir"
     transition_pause "$host seed ad hoc terminal focus for cycling"
     wait_for_spaces_front_window_title "$adhoc_name"
-    run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
-    activate_google_chrome
-    focus_yabai_window_if_present "$docs_window_id"
-  else
-    run_spaces_logged /tmp/spaces-e2e-cycle-seed.log open docs "$workspace_dir"
   fi
+    local cycle_profile_iterations=1
+    local cycle_profile_warmups=0
+    local cycle_profile_iteration
+    local cycle_profile_recording_before="$PROFILE_RECORD_METRICS"
+    if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
+      cycle_profile_iterations="$REAL_SYSTEM_PROFILE_REPETITIONS"
+      cycle_profile_warmups="$REAL_SYSTEM_PROFILE_WARMUPS"
+    fi
+    for (( cycle_profile_iteration = 1; cycle_profile_iteration <= cycle_profile_warmups + cycle_profile_iterations; cycle_profile_iteration++ )); do
+      if (( cycle_profile_iteration <= cycle_profile_warmups )); then
+        PROFILE_RECORD_METRICS=0
+      else
+        PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
+      fi
+      run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
+      activate_google_chrome
+      focus_yabai_window_if_present "$docs_window_id"
   transition_pause "$host seed docs focus for cycling"
   browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
   wait_for_condition "chrome_front_url" "$browser_docs_url"
@@ -5190,6 +5207,8 @@ PY
       terminal:${adhoc_name}) ;;
       *) fail "agent to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
     esac
+    done
+    PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
   if is_spaces_terminal_target "$host"; then
     assert_spaces_cpu_not_above "spaces_app.cpu_after_window_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
   fi

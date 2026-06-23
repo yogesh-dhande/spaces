@@ -220,6 +220,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var lastObservedRuntimeState: TerminalSessionRuntimeState?
     private var shouldShowOwnerStateLabel = true
     private var runtimeControls: TerminalSessionRuntimeControls?
+    private var runtimeControlsDirty = true
     private var inputStatusIsError = false
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
@@ -348,7 +349,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         window.terminalCommandKeyEquivalentHandler = { [weak self] event in self?.handleTerminalWindowCommandKeyEquivalent(event) ?? false }
         startObservingApplicationActivation()
         buildUI()
-        refreshRuntimeControls()
+        refreshRuntimeControlsIfNeeded(force: true)
         if performInitialRefresh { refreshNow() }
     }
 
@@ -476,7 +477,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         terminalContainer.layoutSubtreeIfNeeded()
         logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_before_present deferred=1")
         let presentStartedAt = Date()
-        if shouldActivateWindow { presentWindow(window, forceFrontmost: true) } else { presentWindowWithoutActivating(window) }
+        if shouldActivateWindow {
+            presentWindow(window, forceFrontmost: true, isDeferredOwnerPresentation: true)
+        } else {
+            presentWindowWithoutActivating(window)
+        }
         logShowStage(
             startedAt: presentStartedAt, requestID: requestID,
             detail: "stage=present_window visible=0 deferred=1 activating=\(shouldActivateWindow ? 1 : 0)")
@@ -505,7 +510,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         updateInputStatus(message: "Live terminal renderer failed to become ready.", isError: true)
         updateRendererVisibility()
         let presentStartedAt = Date()
-        presentWindow(window, forceFrontmost: true)
+        presentWindow(window, forceFrontmost: true, isDeferredOwnerPresentation: true)
         logShowStage(startedAt: presentStartedAt, requestID: requestID, detail: "stage=present_window_error deferred=1")
         assignPreferredFirstResponder()
         logFocusMetric(
@@ -570,8 +575,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public func setRuntimeControls(_ controls: TerminalSessionRuntimeControls?) {
         runtimeControls = controls
+        runtimeControlsDirty = false
         updateRuntimeToolbar()
     }
+
+    public func markRuntimeControlsDirty() { runtimeControlsDirty = true }
 
     public func windowWillClose(_ notification: Notification) {
         let sessionIsTerminating = closesForSessionTermination
@@ -1216,7 +1224,14 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         return window.isVisible
     }
 
-    private func presentWindow(_ window: NSWindow, forceFrontmost: Bool = false) {
+    nonisolated static func shouldRetryWindowActivation(
+        forceFrontmost: Bool, appWasActive: Bool, windowIsKeyAfterInitialActivation: Bool, isDeferredOwnerPresentation: Bool, takeoverPending: Bool
+    ) -> Bool {
+        guard forceFrontmost || !appWasActive else { return false }
+        return isDeferredOwnerPresentation || takeoverPending || !windowIsKeyAfterInitialActivation
+    }
+
+    private func presentWindow(_ window: NSWindow, forceFrontmost: Bool = false, isDeferredOwnerPresentation: Bool = false) {
         if Self.isRunningUnderXCTest {
             hasTestWindowPresentation = true
             return
@@ -1224,7 +1239,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         let appWasActive = NSApp.isActive
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        guard forceFrontmost || !appWasActive else { return }
+        guard
+            Self.shouldRetryWindowActivation(
+                forceFrontmost: forceFrontmost, appWasActive: appWasActive, windowIsKeyAfterInitialActivation: window.isKeyWindow,
+                isDeferredOwnerPresentation: isDeferredOwnerPresentation, takeoverPending: takeoverTask != nil)
+        else { return }
         window.orderFrontRegardless()
         Task { @MainActor [weak window] in
             await Task.yield()
@@ -1255,7 +1274,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
         do {
-            refreshRuntimeControls()
+            refreshRuntimeControlsIfNeeded()
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
             if let launchConfiguration {
                 currentLaunchConfiguration = launchConfiguration
@@ -1424,7 +1443,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     @objc private func stopRuntimeFromToolbar() { runtimeControls?.onStop?() }
     @objc private func restartRuntimeFromToolbar() { runtimeControls?.onRestart?() }
 
-    private func refreshRuntimeControls() {
+    private func refreshRuntimeControlsIfNeeded(force: Bool = false) {
+        guard force || runtimeControlsDirty else { return }
+        runtimeControlsDirty = false
         guard let runtimeControlsProvider else {
             updateRuntimeToolbar()
             return
@@ -1562,6 +1583,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let changedSessionID = notification.userInfo?["sessionID"] as? String
             MainActor.assumeIsolated {
                 guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                self.markRuntimeControlsDirty()
                 self.refreshNow()
             }
         }
@@ -1571,6 +1593,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let changedSessionID = notification.userInfo?["sessionID"] as? String
             MainActor.assumeIsolated {
                 guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                self.markRuntimeControlsDirty()
                 self.refreshNow()
             }
         }

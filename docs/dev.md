@@ -525,7 +525,7 @@ Primary coverage:
 - forward/back workspace window cycling
 - multi-workspace focus and cycling isolation
 
-The suite emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows covered by the standalone focus-profiling workflow. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary path for focus profiling during development.
+The suite emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows covered by the standalone focus-profiling workflow. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary path for focus profiling during development. The `app window-cycle` scenario runs the existing window-cycle profile path; set `REAL_SYSTEM_PROFILE_WARMUPS=5 REAL_SYSTEM_PROFILE_REPETITIONS=30` to collect steady-state cycle samples after warmup without changing the normal full-suite pass.
 
 Repeated real-system profiling also covers:
 - main window visibility toggles from inactive and active app states
@@ -533,7 +533,7 @@ Repeated real-system profiling also covers:
 - built-in `Spaces terminal -> main window -> tracked process terminal` focus loops
 - built-in `Spaces terminal -> command palette -> tracked process terminal` focus loops
 
-When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch.
+When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric rows include average, p50, p95, min, max, and raw samples. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch. The E2E artifact report also preserves the app profile `perf.log` with raw `spaces: perf metric=...` lines and request IDs for stage-level joins.
 
 The manual suite depends on a small set of debug-log lines from the app and CLI helpers. Treat these as test contracts when changing debug logging:
 - `spaces: perf metric=...`
