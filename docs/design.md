@@ -131,7 +131,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - User settings are presented as a floating dialog window, not embedded in the main detail pane. The dialog uses a header bar (title plus a close control) above a two-panel body: a left navigation list of sections and a right panel that renders the selected section. The left list stays quiet, with a persistent highlight on the active section and a subtle hover state on the others.
 - Settings sections, such as Devices, should use compact sections with label/value rows, icon-led primary actions, and dense saved-item rows; QR codes are shown as functional content rather than decorative artwork.
 - Copyable configuration, such as the MCP client snippets, is shown in a read-only selectable monospaced block the user selects to copy, with a segmented control to switch between variants rather than stacking one block per variant.
-- New Project and New Workspace are also presented as floating dialog windows that reuse the settings window chrome: a header bar with an icon, title, and close control above a single scrollable form body. Dismiss with the close control, Cancel, or `Esc`.
+- New Project, New Workspace, and Project Settings are also presented as floating dialog windows that reuse the settings window chrome: a header bar with an icon, title, and close control above a single scrollable form body. Dismiss with the close control, Cancel, or `Esc`. Opening Project Settings does not change the sidebar selection or highlight the project row.
 - Choose a project folder with a path text field plus directory autocomplete rather than a native file picker. The field accepts `~` and absolute paths, surfaces directory suggestions from the active device as the user types, and validates the path on commit so the same control works for local and remote devices.
 
 ## Inline Editing
@@ -143,6 +143,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Inline editing forms use a labeled-field layout: right-aligned muted semibold labels (11pt, min-width `70`) paired with full-width inputs, vertical spacing `6`, edge insets `top: 10, left: 14, bottom: 10, right: 14`. Keep a predictable `Tab` key-view loop across the fields and action buttons. Save stays disabled until required fields are non-empty.
 - Multiline or code-like content (e.g., stop script) uses an `NSTextView` inside a `ColoredBackgroundView` with `Theme.surface2` fill and corner radius `8`, at a fixed height of `88pt`.
 - The collapsed/editing swap is animated with `NSAnimationContext` at `0.12s` duration.
+- For single-value labels such as a workspace title or a connected-device name, rename in place: a right-click context menu (long-press on iOS) offers Rename, which swaps the label for a text field seeded with the current value. Return commits, Esc reverts, and there are no separate Save/Cancel buttons. A title may also enter this state on double-click.
 - Example: the current workspace list editors expand a row into a compact edit form instead of opening a separate editor.
 
 ## Navigation
@@ -150,7 +151,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Selection should be obvious without becoming loud.
 - Secondary actions in navigation should remain visually subordinate until hover or selection makes them relevant.
 - Navigation rows should prioritize quick scanning over descriptive prose.
-- Example: the current sidebar uses compact project rows and two-line workspace rows with muted secondary metadata.
+- Example: the current sidebar uses compact single-line project and workspace rows, reserving secondary metadata such as the git branch for the detail views.
 
 ## Command Palettes
 - Command palettes should feel fast, compact, and keyboard-first.

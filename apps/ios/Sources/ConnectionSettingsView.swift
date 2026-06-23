@@ -7,6 +7,9 @@ struct ConnectionSettingsView: View {
     @State private var settings: SpacesMobileConnectionSettings
     @State private var pendingPairingLink: SpacesDevicePairingLink?
     @State private var devicePendingRemoval: SpacesMobilePairedDeviceRecord?
+    @State private var renamingDeviceID: String?
+    @State private var renameText: String = ""
+    @FocusState private var isRenameFieldFocused: Bool
     @State private var isConfirmingPairing = false
     @State private var isShowingScanner = false
     @State private var isPairing = false
@@ -18,6 +21,7 @@ struct ConnectionSettingsView: View {
     let onPairingLinkConsumed: () -> Void
     let onSelectDevice: (String) -> Void
     let onRemoveDevice: (String) -> Void
+    let onRenameDevice: (String, String) -> Void
     let onSave: (SpacesMobileConnectionSettings, String) -> Void
 
     init(
@@ -29,6 +33,7 @@ struct ConnectionSettingsView: View {
         onPairingLinkConsumed: @escaping () -> Void = {},
         onSelectDevice: @escaping (String) -> Void = { _ in },
         onRemoveDevice: @escaping (String) -> Void = { _ in },
+        onRenameDevice: @escaping (String, String) -> Void = { _, _ in },
         onSave: @escaping (SpacesMobileConnectionSettings, String) -> Void
     ) {
         _settings = State(initialValue: initialSettings)
@@ -39,6 +44,7 @@ struct ConnectionSettingsView: View {
         self.onPairingLinkConsumed = onPairingLinkConsumed
         self.onSelectDevice = onSelectDevice
         self.onRemoveDevice = onRemoveDevice
+        self.onRenameDevice = onRenameDevice
         self.onSave = onSave
     }
 
@@ -48,31 +54,7 @@ struct ConnectionSettingsView: View {
                 if !pairedDevices.isEmpty {
                     Section("Connected Devices") {
                         ForEach(pairedDevices) { device in
-                            HStack(spacing: 10) {
-                                Button {
-                                    settings.host = device.host
-                                    settings.port = device.port
-                                    settings.certificateFingerprint = device.certificateFingerprint
-                                    onSelectDevice(device.id)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(device.name)
-                                            .foregroundStyle(.primary)
-                                        Text("\(device.host):\(device.port)")
-                                            .font(.caption.monospaced())
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                    }
-                                }
-                                Spacer(minLength: 0)
-                                Button(role: .destructive) {
-                                    devicePendingRemoval = device
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                            }
+                            deviceRow(device)
                         }
                     }
                 }
@@ -151,6 +133,64 @@ struct ConnectionSettingsView: View {
             .onChange(of: initialPairingLink) { _, newValue in
                 applyIncomingPairingLink(newValue)
             }
+        }
+    }
+
+    @ViewBuilder private func deviceRow(_ device: SpacesMobilePairedDeviceRecord) -> some View {
+        if renamingDeviceID == device.id {
+            TextField("Device name", text: $renameText)
+                .focused($isRenameFieldFocused)
+                .submitLabel(.done)
+                .onSubmit { commitRename(for: device) }
+                .onAppear { isRenameFieldFocused = true }
+                .onDisappear { commitRename(for: device) }
+        } else {
+            HStack(spacing: 10) {
+                Button {
+                    settings.host = device.host
+                    settings.port = device.port
+                    settings.certificateFingerprint = device.certificateFingerprint
+                    onSelectDevice(device.id)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(device.name)
+                            .foregroundStyle(.primary)
+                        Text("\(device.host):\(device.port)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 0)
+                Button(role: .destructive) {
+                    devicePendingRemoval = device
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+            }
+            .contextMenu {
+                Button {
+                    beginRename(for: device)
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+            }
+        }
+    }
+
+    @MainActor private func beginRename(for device: SpacesMobilePairedDeviceRecord) {
+        renameText = device.name
+        renamingDeviceID = device.id
+    }
+
+    @MainActor private func commitRename(for device: SpacesMobilePairedDeviceRecord) {
+        guard renamingDeviceID == device.id else { return }
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        renamingDeviceID = nil
+        if !trimmed.isEmpty, trimmed != device.name {
+            onRenameDevice(device.id, trimmed)
         }
     }
 

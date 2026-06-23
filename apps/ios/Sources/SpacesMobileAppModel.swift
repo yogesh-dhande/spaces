@@ -522,7 +522,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let previousCommandChannel = commandChannel
         let deviceState =
             settings.isPaired
-            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? "Spaces \(settings.trimmedHost)")
+            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? settings.trimmedHost)
             : SpacesMobileDeviceStore.load(fallbackSettings: settings)
         self.settings = deviceState.settings
         pairedDevices = deviceState.devices
@@ -566,6 +566,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         workspaceCreateOptions = nil
         connectionNotice = nil
         Task { await previousCommandChannel.close() }
+    }
+
+    func renameDevice(id: String, name: String) {
+        let deviceState = SpacesMobileDeviceStore.rename(deviceID: id, name: name, fallbackSettings: settings)
+        pairedDevices = deviceState.devices
     }
 
     func dismissError() { errorMessage = nil }

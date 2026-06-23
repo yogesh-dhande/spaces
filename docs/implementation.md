@@ -636,7 +636,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 1. Stop tracked processes.
 2. Run the workspace stop script when appropriate.
 3. Close tracked dedicated windows safely.
-4. Clear runtime state.
+4. Clear runtime state. A plain stop waits briefly for built-in terminal sessions to confirm exit so the workspace keeps consistent runtime state; archive skips that wait because it force-removes the worktree regardless of session state, which keeps archiving fast.
 5. Release ports.
 6. Archive git worktrees when the action requires it.
 7. When the user opted in during archive confirmation, attempt remote-branch deletion first and local-branch deletion second, then surface any skipped or failed branch cleanup as a post-archive notice instead of rolling back the archive.

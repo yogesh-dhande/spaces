@@ -1311,7 +1311,7 @@ public final class WorkspaceOrchestrator {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) { try stopWorkspaceUnlocked(workspaceID: workspaceID) }
     }
 
-    private func stopWorkspaceUnlocked(workspaceID: String) throws -> WorkspaceStopOutcome {
+    private func stopWorkspaceUnlocked(workspaceID: String, waitForTerminalExit: Bool = true) throws -> WorkspaceStopOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try indexedWorkspaceWindows(workspaceID: workspace.id)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
@@ -1370,7 +1370,7 @@ public final class WorkspaceOrchestrator {
             }
             if let id = window.windowID { _ = try? yabai.closeWindow(id: id) }
         }
-        waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs)
+        if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         try store.deleteAgentWindows(workspaceID: workspace.id)
@@ -1434,7 +1434,7 @@ public final class WorkspaceOrchestrator {
     private func archiveWorkspaceUnlocked(workspaceID: String, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) throws -> WorkspaceArchiveOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be archived.") }
-        _ = try stopWorkspaceUnlocked(workspaceID: workspaceID)
+        _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, waitForTerminalExit: false)
         try store.deleteAgentWindows(workspaceID: workspaceID)
         if project.isGitRepo, workspace.deviceID == SpacesDeviceRecord.localDeviceID {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }

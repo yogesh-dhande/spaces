@@ -31,12 +31,6 @@
 - Fork PR checks build missing Ghostty artifacts locally without publishing reusable releases.
 - Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.
 
-## Verification Rules
-- Consider adding or expanding tests before finalizing code changes.
-- When a commit is planned, rely on the pre-commit hook to run the normal verification path; do not run `scripts/verify.sh` separately first.
-- When finalizing code changes without committing, run `scripts/verify.sh` for the normal macOS verification pass so lint, build, and coverage run sequentially.
-- When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
-
 ## Documentation Rules
 - Keep docs concise and non-overlapping.
 - Treat `README.md`, `docs/dev.md`, `docs/spec.md`, `docs/implementation.md`, and `docs/design.md` as current-state references, not changelogs; avoid temporal wording like "now", "no longer", "previously", "new", or "changed" when describing the intended steady state.

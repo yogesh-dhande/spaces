@@ -62,6 +62,9 @@ struct ContentView: View {
                 },
                 onRemoveDevice: { deviceID in
                     model.removeDevice(id: deviceID)
+                },
+                onRenameDevice: { deviceID, name in
+                    model.renameDevice(id: deviceID, name: name)
                 }
             ) { settings, deviceName in
                 model.applyConnectionSettings(settings, deviceName: deviceName)

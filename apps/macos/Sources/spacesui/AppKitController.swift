@@ -101,8 +101,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let editorContainer: NSView
         let textField: NSTextField?
         let textView: NSTextView?
-        let saveButton: NSButton
-        let cancelButton: NSButton
+        let saveButton: NSButton?
+        let cancelButton: NSButton?
         var originalValue: String
         var isEditing: Bool
     }
@@ -201,8 +201,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var dismissedAlertsAttentionItemIDs: Set<String> = []
     private var visibleDetailWorkspaceID: String?
 
-    private var selectedProjectID: String?
-    private var selectedWorkspaceID: String?
+    private var selectedProjectID: String? { didSet { updateOperationProgressOverlayVisibility() } }
+    private var selectedWorkspaceID: String? { didSet { updateOperationProgressOverlayVisibility() } }
     private var lastSelectedRow: Int = -1
     private var suppressOutlineSelectionChanges = false
     private var projectHasUnsavedChanges = false
@@ -262,6 +262,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var settingsWindow: NSWindow?
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
+    private var projectSettingsWindow: NSWindow?
+    private var projectSettingsProjectID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
     private weak var settingsSectionContentContainer: NSView?
     private var settingsSectionRowViews: [SettingsSection: SettingsSidebarRowView] = [:]
@@ -275,6 +277,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private weak var remoteDevicePairingStatusLabel: NSTextField?
     private var currentDevicePairingWindow: ClientDevicePairingWindow?
     private var devicePanelStatusMessage: (message: String, isError: Bool)?
+    private var renamingClientDeviceID: String?
+    private weak var renamingClientDeviceField: NSTextField?
     private var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
@@ -330,6 +334,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var operationProgressOverlay: NSVisualEffectView?
     private var operationProgressOverlayTitleLabel: NSTextField?
     private var operationProgressOverlayDetailLabel: NSTextField?
+    private var operationProgressContext: OperationProgressContext?
     private var windowIssueToastOverlay: NSView?
     private var windowIssueToastTitleLabel: NSTextField?
     private var windowIssueToastDetailLabel: NSTextField?
@@ -1958,6 +1963,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func canPreserveDetailPaneAfterSidebarReload() -> Bool {
         if activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil { return true }
+        if projectSettingsProjectID != nil { return true }
         if showingAlerts || showingSettings { return true }
         if let selectedWorkspaceID { return findWorkspace(id: selectedWorkspaceID) != nil }
         if let selectedProjectID { return projects.contains(where: { $0.id == selectedProjectID }) }
@@ -4504,10 +4510,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return
             }
         }
-        if let selectedProjectID, let project = projects.first(where: { $0.id == selectedProjectID }) {
-            showProjectDetail(project: project)
-            return
-        }
         showAlertsDetail()
     }
 
@@ -4636,7 +4638,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ])
     }
 
-    private func showOperationProgressOverlay(message: String, detail: String) {
+    private enum OperationProgressContext: Equatable {
+        case workspace(String)
+        case project(String)
+        case global
+    }
+
+    private func showOperationProgressOverlay(message: String, detail: String, context: OperationProgressContext) {
         guard let contentView = window?.contentView else { return }
         let overlay: NSVisualEffectView
         let titleLabel: NSTextField
@@ -4712,10 +4720,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         titleLabel.stringValue = message
         detailLabel.stringValue = detail
-        overlay.isHidden = false
+        operationProgressContext = context
+        updateOperationProgressOverlayVisibility()
     }
 
-    private func hideOperationProgressOverlay() { operationProgressOverlay?.isHidden = true }
+    private func hideOperationProgressOverlay() {
+        operationProgressContext = nil
+        operationProgressOverlay?.isHidden = true
+    }
+
+    private func updateOperationProgressOverlayVisibility() {
+        guard let overlay = operationProgressOverlay else { return }
+        guard let context = operationProgressContext else {
+            overlay.isHidden = true
+            return
+        }
+        let isRelevant: Bool
+        switch context {
+        case .workspace(let id): isRelevant = selectedWorkspaceID == id
+        case .project(let id): isRelevant = selectedProjectID == id
+        case .global: isRelevant = true
+        }
+        overlay.isHidden = !isRelevant
+    }
 
     private func showWindowIssueToast(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         guard let contentView = window?.contentView else { return }
@@ -5020,6 +5047,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             clearActiveAddWorkspaceFormState()
             return
         }
+        if closingWindow === projectSettingsWindow {
+            if let projectSettingsProjectID { ProjectFieldCache.shared.cache[projectSettingsProjectID.hashValue] = nil }
+            projectSettingsProjectID = nil
+            projectHasUnsavedChanges = false
+            return
+        }
         guard closingWindow === settingsWindow else { return }
         showingSettings = false
         settingsSectionContentContainer = nil
@@ -5238,8 +5271,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let hint = helpTextLabel(selectedMCPClient.configHint)
         mcpConfigHintLabel = hint
 
-        let setupCard = formSectionCard(
-            icon: "puzzlepiece.extension", title: "MCP Client Setup", contentViews: [pickerRow, hint, configScroll])
+        let setupCard = formSectionCard(icon: "puzzlepiece.extension", title: "MCP Client Setup", contentViews: [pickerRow, hint, configScroll])
 
         return [setupCard]
     }
@@ -5385,17 +5417,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return container
     }
 
-    private func showProjectDetail(project: ProjectSummary) {
+    private func showProjectSettingsDialog(project: ProjectSummary) {
         clearActiveAddFormStateAndCloseWindows()
-        stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
-        showingSettings = false
-        showingAlerts = false
-        updateAlertsRowAppearance()
-        activeShortcutCaptureSetting = nil
-        for view in detailContainer.subviews { view.removeFromSuperview() }
-        detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        projectHasUnsavedChanges = false
 
         let fullProject = (try? orchestrator.project(id: project.id))
         let projectSettings:
@@ -5419,19 +5443,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // --- Header ---
-        let headerTitle = NSTextField(labelWithString: project.name)
-        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-        headerTitle.lineBreakMode = .byTruncatingTail
-        headerTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
-        headerRow.addArrangedSubview(headerTitle)
-
+        // --- Directory subtitle (the project name is shown in the dialog header) ---
         let dirField = NSTextField(string: project.dir)
         dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         dirField.textColor = .tertiaryLabelColor
@@ -5441,19 +5453,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirField.drawsBackground = false
         dirField.isBordered = false
         dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let headerAndActionsRow = NSStackView()
-        headerAndActionsRow.orientation = .vertical
-        headerAndActionsRow.alignment = .leading
-        headerAndActionsRow.spacing = 4
-        headerAndActionsRow.addArrangedSubview(headerRow)
-        headerAndActionsRow.addArrangedSubview(dirField)
-        headerAndActionsRow.setCustomSpacing(2, after: headerRow)
-
-        stack.addArrangedSubview(headerAndActionsRow)
-        constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
-        constrainFormFieldToFillWidth(dirField, in: headerAndActionsRow)
-        constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
+        stack.addArrangedSubview(dirField)
+        constrainFormFieldToFillWidth(dirField, in: stack)
 
         // --- Fields ---
         let setupScriptSection = SetupScriptSection(
@@ -5539,7 +5540,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
-        showScrollableDetailStack(stack)
+        presentProjectSettingsWindow(hosting: stack, project: project)
 
         let fieldsTag = storeProjectFields(
             projectID: project.id, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
@@ -5553,6 +5554,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
     }
+
+    private func presentProjectSettingsWindow(hosting stack: NSStackView, project: ProjectSummary) {
+        projectSettingsProjectID = project.id
+        let header = buildFormWindowHeader(symbol: "gearshape", title: project.name, closeAction: #selector(closeProjectSettingsWindow))
+        projectSettingsWindow = presentFormWindow(existing: projectSettingsWindow, header: header, hosting: stack)
+    }
+
+    @objc private func closeProjectSettingsWindow() { projectSettingsWindow?.performClose(nil) }
 
     private func formSectionCard(
         icon: String?, title: String, subtitle: String = "", iconColor: NSColor? = nil, trailingView: NSView? = nil, contentViews: [NSView]
@@ -6222,19 +6231,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let workspaceTitleSlot = Self.makeInlineEditorSlot(label: workspaceTitleLabel, editor: workspaceTitleField)
 
-        let titleSaveButton = NSButton(title: "Save (↩)", target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
-        titleSaveButton.controlSize = .small
-        titleSaveButton.bezelStyle = .rounded
-        titleSaveButton.isHidden = true
-        titleSaveButton.setAccessibilityIdentifier("workspace-detail-title-save")
-        titleSaveButton.toolTip = "Save title edit (↩)."
-
-        let titleCancelButton = NSButton(title: "Cancel (Esc)", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
-        titleCancelButton.controlSize = .small
-        titleCancelButton.bezelStyle = .rounded
-        titleCancelButton.isHidden = true
-        titleCancelButton.setAccessibilityIdentifier("workspace-detail-title-cancel")
-        titleCancelButton.toolTip = "Cancel title edit (Esc)."
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
@@ -6242,25 +6238,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.addArrangedSubview(statusDot)
         headerRow.addArrangedSubview(workspaceTitleSlot)
         headerRow.addArrangedSubview(runtimeWarningIcon)
-        headerRow.addArrangedSubview(titleSaveButton)
-        headerRow.addArrangedSubview(titleCancelButton)
         headerRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let tag = UUID().uuidString.hashValue
         let refs = InlineWorkspaceDetailFieldRefs(
             workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, editorContainer: workspaceTitleField,
-            textField: workspaceTitleField, textView: nil, saveButton: titleSaveButton, cancelButton: titleCancelButton,
-            originalValue: workspace.title, isEditing: false)
+            textField: workspaceTitleField, textView: nil, saveButton: nil, cancelButton: nil, originalValue: workspace.title, isEditing: false)
         inlineWorkspaceFieldRefsByTag[tag] = refs
         inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
         inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
-        titleSaveButton.tag = tag
-        titleCancelButton.tag = tag
+        workspaceTitleField.toolTip = "Press Return to save, Esc to cancel."
 
         let titleDoubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
         titleDoubleClick.numberOfClicksRequired = 2
         workspaceTitleLabel.addGestureRecognizer(titleDoubleClick)
-        workspaceTitleLabel.toolTip = "Double-click to edit title."
+        workspaceTitleLabel.toolTip = "Double-click or right-click to rename."
+
+        let titleMenu = NSMenu()
+        let titleRenameItem = NSMenuItem(title: "Rename", action: #selector(beginWorkspaceTitleRename(_:)), keyEquivalent: "")
+        titleRenameItem.target = self
+        titleRenameItem.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
+        titleRenameItem.tag = tag
+        titleMenu.addItem(titleRenameItem)
+        workspaceTitleLabel.menu = titleMenu
 
         // --- Directory subtitle ---
         let dirField = NSTextField(string: workspace.dir)
@@ -6273,6 +6273,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         dirField.isBordered = false
         dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         dirField.setAccessibilityIdentifier("workspace-detail-dir")
+
+        // --- Branch (read-only) ---
+        let branchValue = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let inlineBranchRow: NSView? =
+            branchValue.isEmpty
+            ? nil
+            : makeInlineWorkspaceMetadataEditRow(
+                workspaceID: workspace.id, field: .branch, icon: "arrow.triangle.branch", labelText: "Branch", value: branchValue, placeholder: "",
+                isEditable: false)
 
         // --- Inline editable metadata ---
         let inlineNotesRow = makeInlineWorkspaceMetadataEditRow(
@@ -6369,6 +6378,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let stopScriptSection = workspaceStopScriptSection(workspace: workspace, config: sectionConfig)
 
         stack.addArrangedSubview(headerAndActionsRow)
+        if let inlineBranchRow { stack.addArrangedSubview(inlineBranchRow) }
         stack.addArrangedSubview(inlineNotesRow)
         for section in Self.orderedWorkspaceDetailSections(
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
@@ -6381,6 +6391,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if let agentLaunchersSection { stack.setCustomSpacing(20, after: agentLaunchersSection) }
         if let portsSection { stack.setCustomSpacing(20, after: portsSection) }
         stack.setCustomSpacing(20, after: headerAndActionsRow)
+        if let inlineBranchRow {
+            stack.setCustomSpacing(8, after: headerAndActionsRow)
+            stack.setCustomSpacing(20, after: inlineBranchRow)
+            constrainFormFieldToFillWidth(inlineBranchRow, in: stack)
+        }
         stack.setCustomSpacing(20, after: inlineNotesRow)
         constrainFormFieldToFillWidth(inlineNotesRow, in: stack)
         constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
@@ -7093,6 +7108,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func closeVisibleAddFormWindows() {
         if addProjectWindow?.isVisible == true { addProjectWindow?.close() }
         if addWorkspaceWindow?.isVisible == true { addWorkspaceWindow?.close() }
+        if projectSettingsWindow?.isVisible == true { projectSettingsWindow?.close() }
     }
 
     private func isView(_ view: NSView?, descendantOf ancestor: NSView) -> Bool {
@@ -7119,8 +7135,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let hitView = contentView.hitTest(point)
             for tag in activeTags {
                 guard let refs = self.inlineWorkspaceFieldRefsByTag[tag] else { continue }
-                if self.isView(hitView, descendantOf: refs.editorContainer) || self.isView(hitView, descendantOf: refs.saveButton)
-                    || self.isView(hitView, descendantOf: refs.cancelButton)
+                if self.isView(hitView, descendantOf: refs.editorContainer)
+                    || (refs.saveButton.map { self.isView(hitView, descendantOf: $0) } ?? false)
+                    || (refs.cancelButton.map { self.isView(hitView, descendantOf: $0) } ?? false)
                 {
                     return event
                 }
@@ -7330,13 +7347,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func updateInlineWorkspaceMetadataButtons(tag: Int) {
         guard let refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
-        refs.saveButton.isHidden = !refs.isEditing
-        refs.cancelButton.isHidden = !refs.isEditing
+        refs.saveButton?.isHidden = !refs.isEditing
+        refs.cancelButton?.isHidden = !refs.isEditing
     }
 
     @objc private func beginInlineWorkspaceMetadataEdit(_ sender: NSClickGestureRecognizer) {
         guard let valueLabel = sender.view as? NSTextField else { return }
         guard let tag = inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] else { return }
+        beginInlineWorkspaceMetadataEdit(tag: tag)
+    }
+
+    @objc private func beginWorkspaceTitleRename(_ sender: NSMenuItem) { beginInlineWorkspaceMetadataEdit(tag: sender.tag) }
+
+    private func beginInlineWorkspaceMetadataEdit(tag: Int) {
         if let refs = inlineWorkspaceFieldRefsByTag[tag], refs.field == .branch, isProtectedBranchName(refs.originalValue) { return }
         for activeTag in activeInlineWorkspaceEditTags() where activeTag != tag { cancelInlineWorkspaceMetadataEdit(tag: activeTag) }
         guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
@@ -7361,8 +7384,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.valueLabel.isHidden = false
         setInlineWorkspaceEditorHidden(true, refs: refs)
         refs.isEditing = false
-        refs.saveButton.isHidden = true
-        refs.cancelButton.isHidden = true
+        refs.saveButton?.isHidden = true
+        refs.cancelButton?.isHidden = true
         inlineWorkspaceFieldRefsByTag[tag] = refs
         if activeInlineWorkspaceEditTags().isEmpty { teardownInlineWorkspaceOutsideClickMonitor() }
     }
@@ -8339,23 +8362,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func connectedDeviceRow(_ device: ClientConnectedDevice) -> NSView {
-        let title = NSTextField(labelWithString: device.name)
-        title.font = .systemFont(ofSize: 12, weight: .medium)
-        title.textColor = .labelColor
-        title.lineBreakMode = .byTruncatingTail
-
         let detail = NSTextField(labelWithString: clientDeviceDetailText(device))
         detail.font = .systemFont(ofSize: 10.5)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingMiddle
 
-        let textStack = NSStackView(views: [title, detail])
+        let nameView: NSView
+        if !device.isLocal, renamingClientDeviceID == device.id {
+            let editor = NSTextField(string: device.name)
+            editor.font = .systemFont(ofSize: 12, weight: .medium)
+            editor.delegate = self
+            editor.identifier = NSUserInterfaceItemIdentifier(device.id)
+            editor.toolTip = "Press Return to save, Esc to cancel."
+            editor.setAccessibilityIdentifier("connected-device-rename-input")
+            renamingClientDeviceField = editor
+            Task { @MainActor [weak editor] in
+                guard let editor else { return }
+                editor.window?.makeFirstResponder(editor)
+                editor.selectText(nil)
+            }
+            nameView = editor
+        } else {
+            let title = NSTextField(labelWithString: device.name)
+            title.font = .systemFont(ofSize: 12, weight: .medium)
+            title.textColor = .labelColor
+            title.lineBreakMode = .byTruncatingTail
+            nameView = title
+        }
+
+        let textStack = NSStackView(views: [nameView, detail])
         textStack.orientation = .vertical
         textStack.alignment = .leading
         textStack.spacing = 2
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let pairButton = iconButton(
+        let pairButton = sidebarRowIconButton(
             symbol: "iphone.radiowaves.left.and.right", tooltip: "Pair iPhone or iPad with \(device.name)",
             action: #selector(pairIOSWithConnectedDevice(_:)))
         pairButton.identifier = NSUserInterfaceItemIdentifier(device.id)
@@ -8370,9 +8411,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         row.addArrangedSubview(NSView())
         row.addArrangedSubview(pairButton)
         if !device.isLocal {
-            let removeButton = iconButton(symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(removeMacPairedDevice(_:)))
+            let removeButton = sidebarRowIconButton(
+                symbol: "xmark.circle", tooltip: "Remove this device", action: #selector(removeMacPairedDevice(_:)))
             removeButton.identifier = NSUserInterfaceItemIdentifier(device.id)
             row.addArrangedSubview(removeButton)
+
+            let menu = NSMenu()
+            let renameItem = NSMenuItem(title: "Rename", action: #selector(beginClientDeviceRename(_:)), keyEquivalent: "")
+            renameItem.target = self
+            renameItem.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
+            renameItem.identifier = NSUserInterfaceItemIdentifier(device.id)
+            menu.addItem(renameItem)
+            row.menu = menu
         }
         return row
     }
@@ -8625,6 +8675,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func removeMacPairedDevice(_ sender: NSButton) {
         guard let deviceID = sender.identifier?.rawValue else { return }
+        let deviceName = macPairedDevices().first(where: { $0.id == deviceID })?.name ?? "this device"
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Remove \(deviceName)?"
+        alert.informativeText = "Spaces will disconnect from this device and forget its pairing. You can pair it again later."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
             let database = try SpacesClientDatabase()
             try database.deletePairedDevice(id: deviceID)
@@ -8633,6 +8691,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             refreshActiveDeviceSelector()
             refreshVisibleDeviceSettingsAfterClientDeviceChange()
             requestSidebarReload()
+        } catch { showError(error) }
+    }
+
+    @objc private func beginClientDeviceRename(_ sender: NSMenuItem) {
+        guard let deviceID = sender.identifier?.rawValue else { return }
+        renamingClientDeviceID = deviceID
+        refreshVisibleDeviceSettingsAfterClientDeviceChange()
+    }
+
+    private func cancelClientDeviceRename() {
+        guard renamingClientDeviceID != nil else { return }
+        renamingClientDeviceID = nil
+        renamingClientDeviceField = nil
+        refreshVisibleDeviceSettingsAfterClientDeviceChange()
+    }
+
+    private func commitClientDeviceRename(deviceID: String, newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        renamingClientDeviceID = nil
+        renamingClientDeviceField = nil
+        do {
+            let database = try SpacesClientDatabase()
+            if !trimmed.isEmpty, var record = try database.pairedDevices().first(where: { $0.id == deviceID }), record.name != trimmed {
+                record.name = trimmed
+                record.updatedAt = ISO8601DateFormatter().string(from: Date())
+                try database.upsert(device: record)
+                refreshActiveDeviceSelector()
+                requestSidebarReload()
+            }
+            refreshVisibleDeviceSettingsAfterClientDeviceChange()
         } catch { showError(error) }
     }
 
@@ -8831,7 +8919,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if let device = activeDeviceForDaemonStateMutation() {
                 let response = try SpacesActiveDeviceClient.exportProjectSpacesYAML(
                     projectID: refs.projectID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                applyActiveDeviceMutationResponse(response, selectedProjectID: refs.projectID)
+                applyActiveDeviceMutationResponse(response)
                 showInfoMessage(title: "Exported spaces.yaml", message: response.message)
                 return
             }
@@ -8856,7 +8944,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 refs.exportButton.isHidden = false
                 refs.discardImportedConfigButton.isHidden = true
                 projectHasUnsavedChanges = false
-                applyActiveDeviceMutationResponse(response, selectedProjectID: refs.projectID)
+                applyActiveDeviceMutationResponse(response)
                 return
             }
             showNoActiveDeviceSelectedError()
@@ -8949,7 +9037,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard response == .alertFirstButtonReturn else { return }
 
         sender.isEnabled = false
-        showOperationProgressOverlay(message: "Deleting project...", detail: "Removing the project and its managed workspaces.")
+        showOperationProgressOverlay(
+            message: "Deleting project...", detail: "Removing the project and its managed workspaces.", context: .project(projectID))
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
             defer {
@@ -8966,6 +9055,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     projectHasUnsavedChanges = false
                     selectedProjectID = nil
                     selectedWorkspaceID = nil
+                    closeProjectSettingsWindow()
                     applyActiveDeviceMutationResponse(response)
                 case .failure(let error): showError(error)
                 }
@@ -9004,7 +9094,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let originalTitle = sender.title
                 sender.isEnabled = false
                 sender.title = "Creating..."
-                showOperationProgressOverlay(message: "Creating project...", detail: "Creating the project on \(activeDeviceName).")
+                showOperationProgressOverlay(message: "Creating project...", detail: "Creating the project on \(activeDeviceName).", context: .global)
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
                     defer {
@@ -9180,7 +9270,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let originalTitle = refs.prepareButton.title
         refs.prepareButton.title = "Cloning..."
         updateAddProjectProgressiveDisclosure(refs)
-        showOperationProgressOverlay(message: "Cloning project...", detail: "Cloning repository and checking the default workspace for spaces.yaml.")
+        showOperationProgressOverlay(
+            message: "Cloning project...", detail: "Cloning repository and checking the default workspace for spaces.yaml.", context: .global)
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
@@ -9437,7 +9528,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let originalTitle = sender.title
                 sender.isEnabled = false
                 sender.title = "Creating..."
-                showOperationProgressOverlay(message: "Creating workspace...", detail: "Creating the workspace on \(activeDeviceName).")
+                showOperationProgressOverlay(
+                    message: "Creating workspace...", detail: "Creating the workspace on \(activeDeviceName).", context: .project(refs.projectID))
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
                     defer {
@@ -9536,6 +9628,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 dismissCommandPalette()
                 return true
             }
+        }
+        if textField === renamingClientDeviceField {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                commitClientDeviceRename(deviceID: textField.identifier?.rawValue ?? "", newName: textField.stringValue)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                cancelClientDeviceRename()
+                return true
+            }
+            return false
         }
         guard let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] else { return false }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
@@ -9727,7 +9830,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let button = sender as? NSButton
         let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
         if !didOptimisticallyArchive { button?.isEnabled = false }
-        showOperationProgressOverlay(message: "Archiving workspace...", detail: "Stopping runtime state and cleaning up workspace files.")
+        showOperationProgressOverlay(
+            message: "Archiving workspace...", detail: "Stopping runtime state and cleaning up workspace files.", context: .workspace(id))
         Task { @MainActor [weak self, weak button] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
@@ -10986,7 +11090,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .codingAgent, .window: return
         }
 
-        showOperationProgressOverlay(message: progressTitle, detail: progressDetail)
+        showOperationProgressOverlay(message: progressTitle, detail: progressDetail, context: .workspace(context.workspaceID))
         let result = await Self.recoverMissingTrackedWindowSnapshot(context)
         hideOperationProgressOverlay()
         switch result {
@@ -11644,13 +11748,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         contentStack.addArrangedSubview(titleRow)
 
-        if let branchRow = Self.makeSidebarWorkspaceBranchRow(
-            branch: workspace.branch ?? "", textColor: sidebarMetadataTextColor(isSelected: isSelected),
-            accessibilityID: "sidebar-workspace-branch-\(workspace.id)")
-        {
-            contentStack.addArrangedSubview(branchRow)
-        }
-
         if workspace.isHidden {
             if !project.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let projectRow = sidebarMetadataRow(symbol: "folder", text: project.name, isSelected: isSelected, leadingIndent: 20)
@@ -11674,44 +11771,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ])
 
         return cell
-    }
-
-    /// Builds the branch subtitle row shown under a sidebar workspace title.
-    /// Returns `nil` when the branch is missing or whitespace-only so callers can
-    /// skip appending a row rather than rendering an empty line.
-    static func makeSidebarWorkspaceBranchRow(branch: String, textColor: NSColor, accessibilityID: String) -> NSStackView? {
-        let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 4
-        row.translatesAutoresizingMaskIntoConstraints = false
-
-        let indent = NSView()
-        indent.translatesAutoresizingMaskIntoConstraints = false
-        indent.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        indent.setContentHuggingPriority(.required, for: .horizontal)
-
-        let branchIcon = NSImageView()
-        branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
-        branchIcon.contentTintColor = textColor
-        branchIcon.translatesAutoresizingMaskIntoConstraints = false
-        branchIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-        branchIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
-
-        let label = NSTextField(labelWithString: trimmed)
-        label.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
-        label.textColor = textColor
-        label.lineBreakMode = .byTruncatingTail
-        label.toolTip = trimmed
-        label.setAccessibilityIdentifier(accessibilityID)
-
-        row.addArrangedSubview(indent)
-        row.addArrangedSubview(branchIcon)
-        row.addArrangedSubview(label)
-        return row
     }
 
     private func sidebarMetadataRow(
@@ -11764,7 +11823,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch ref.item {
         case .project(let project): return selectedProjectID == project.id && selectedWorkspaceID == nil ? 32 : 30
         case .hiddenWorkspaces: return 28
-        case .workspace(_, let workspace): return workspace.isHidden ? 58 : 44
+        case .workspace(_, let workspace): return workspace.isHidden ? 40 : 32
         }
     }
 
@@ -11837,27 +11896,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
-        if projectHasUnsavedChanges {
-            let response = unsavedChangesPrompt()
-            if response == .alertFirstButtonReturn {
-                if !saveCurrentDetail() {
-                    outlineView.selectRowIndexes(IndexSet(integer: lastSelectedRow), byExtendingSelection: false)
-                    return
-                }
-            } else if response == .alertThirdButtonReturn {
-                outlineView.selectRowIndexes(IndexSet(integer: lastSelectedRow), byExtendingSelection: false)
-                return
-            } else {
-                projectHasUnsavedChanges = false
-            }
-        }
         lastSelectedRow = row
         switch item {
-        case .project(let project):
-            selectedProjectID = project.id
-            selectedWorkspaceID = nil
-            showingSettings = false
-            showProjectDetail(project: project)
+        case .project: return
         case .hiddenWorkspaces: return
         case .workspace(let project, let workspace):
             selectedProjectID = project.id
@@ -11924,15 +11965,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if isCollapsed { outlineView.collapseItem(item) } else { outlineView.expandItem(item) }
         if isCollapsed, let selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID), project.id == projectID {
             self.selectedWorkspaceID = nil
-            self.selectedProjectID = projectID
-            lastSelectedRow = row
+            self.selectedProjectID = nil
+            lastSelectedRow = -1
             suppressOutlineSelectionChanges = true
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            outlineView.deselectAll(nil)
             suppressOutlineSelectionChanges = false
-            if let refreshedProject = projects.first(where: { $0.id == projectID }) { showProjectDetail(project: refreshedProject) }
+            refreshSelection()
             refreshSidebarSelectionRows(
-                previousProjectID: previousProjectID, currentProjectID: selectedProjectID, previousWorkspaceID: previousWorkspaceID,
-                currentWorkspaceID: selectedWorkspaceID)
+                previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         }
         outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
     }
@@ -11972,30 +12012,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     @objc private func showProjectSettings(_ sender: NSButton) {
         guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
-        let previousProjectID = selectedProjectID
-        let previousWorkspaceID = selectedWorkspaceID
-        if projectHasUnsavedChanges {
-            let response = unsavedChangesPrompt()
-            if response == .alertFirstButtonReturn {
-                if !saveCurrentDetail() { return }
-            } else if response == .alertThirdButtonReturn {
-                return
-            } else {
-                projectHasUnsavedChanges = false
-            }
-        }
-
-        suppressOutlineSelectionChanges = true
-        outlineView.deselectAll(nil)
-        suppressOutlineSelectionChanges = false
-        lastSelectedRow = -1
-        selectedProjectID = project.id
-        selectedWorkspaceID = nil
-        showingSettings = false
-        showProjectDetail(project: project)
-        refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID, currentProjectID: selectedProjectID, previousWorkspaceID: previousWorkspaceID,
-            currentWorkspaceID: selectedWorkspaceID)
+        showProjectSettingsDialog(project: project)
     }
 
     public func splitViewDidResizeSubviews(_ notification: Notification) {}
@@ -12036,8 +12053,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         browserSessionsSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
         agentLaunchersSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
     }
-
-    private func saveCurrentDetail() -> Bool { saveCurrentProject() }
 
     private func applySplitViewWidth() {
         guard let splitView else { return }
@@ -12101,23 +12116,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<tableView.numberOfRows), columnIndexes: IndexSet(integer: 0))
     }
 
-    private func saveCurrentProject() -> Bool {
-        commitEditing()
-        guard let selectedProjectID else { return true }
-        let tag = selectedProjectID.hashValue
-        guard let refs = ProjectFieldCache.shared.cache[tag] else { return true }
-        guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return false }
-        do {
-            try persistProjectFields(refs)
-            projectHasUnsavedChanges = false
-            reloadData()
-            return true
-        } catch {
-            showError(error)
-            return false
-        }
-    }
-
     private func persistProjectFields(_ refs: ProjectFieldRefs) throws {
         if let device = activeDeviceForDaemonStateMutation() {
             let response = try SpacesActiveDeviceClient.updateProjectConfig(
@@ -12126,20 +12124,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
             refs.discardImportedConfigButton.isHidden = true
-            applyActiveDeviceMutationResponse(response, selectedProjectID: refs.projectID)
+            applyActiveDeviceMutationResponse(response)
             return
         }
         throw Self.noActiveDeviceSelectedError()
-    }
-
-    private func unsavedChangesPrompt() -> NSApplication.ModalResponse {
-        let alert = NSAlert()
-        alert.messageText = "Unsaved Changes"
-        alert.informativeText = "You have unsaved changes. Save before leaving?"
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Discard")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal()
     }
 
     private func commitEditing() {
