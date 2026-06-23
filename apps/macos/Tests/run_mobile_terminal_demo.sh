@@ -26,6 +26,9 @@ device_api_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
 remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+remote_demo_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
+remote_demo_device_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 remote_pairing_json=""
 remote_pairing_window_json=""
 pairing_link=""
@@ -687,6 +690,7 @@ pair_remote_demo_device() {
   fi
 
   remote_pairing_json="$temp_root/remote-device-pairing.json"
+  prepare_remote_demo_daemon
   echo "Pairing Mac client with remote spacesd at $remote_ssh_host..."
   if ! run_demo_env \
     HOME="$demo_home" \
@@ -722,6 +726,82 @@ remote_ssh_destination() {
   else
     printf '%s' "$remote_ssh_host"
   fi
+}
+
+remote_ssh_args() {
+  printf '%s\n' -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes
+  if [[ -n "$remote_ssh_port" ]]; then
+    printf '%s\n' -p "$remote_ssh_port"
+  fi
+}
+
+remote_ssh() {
+  local -a args=()
+  while IFS= read -r arg; do args+=("$arg"); done < <(remote_ssh_args)
+  ssh "${args[@]}" "$(remote_ssh_destination)" "$@"
+}
+
+remote_expand_path() {
+  local quoted
+  quoted="$(shell_quote "$1")"
+  remote_ssh "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted"
+}
+
+wait_for_remote_demo_daemon() {
+  local quoted_port
+  quoted_port="$(shell_quote "$remote_demo_daemon_port")"
+  remote_ssh "python3 - $quoted_port" <<'PY'
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+deadline = time.time() + 60
+last_error = None
+while time.time() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            raise SystemExit(0)
+    except OSError as exc:
+        last_error = exc
+        time.sleep(0.5)
+raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
+PY
+  remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null
+}
+
+prepare_remote_demo_daemon() {
+  [[ "$remote_demo_daemon_port" =~ ^[0-9]+$ ]] || {
+    echo "SPACES_E2E_REMOTE_DAEMON_PORT must be numeric, got: $remote_demo_daemon_port" >&2
+    exit 1
+  }
+  command -v ssh >/dev/null 2>&1 || {
+    echo "ssh is required to prepare the remote demo daemon." >&2
+    exit 1
+  }
+
+  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
+  echo "Preparing remote demo spacesd at $remote_ssh_host..."
+  SPACES_E2E_REMOTE_DAEMON_PORT="$remote_demo_daemon_port" \
+    SPACES_E2E_REMOTE_WORKSPACE_ROOT="$remote_demo_workspace_root" \
+    SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_device_root" \
+    SPACES_E2E_REMOTE_DEVICE_ROOT="$remote_demo_device_root" \
+    "$repo_root/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
+
+  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+  eval "$artifact_assignments"
+  artifact_url="${artifact_url:-}"
+  [[ "$artifact_url" == file://* ]] || {
+    echo "Remote demo artifact URL must be file://, got: $artifact_url" >&2
+    exit 1
+  }
+
+  archive_path="${artifact_url#file://}"
+  install_root="$(remote_expand_path "$remote_demo_device_root/install")"
+  quoted_archive="$(shell_quote "$archive_path")"
+  quoted_install="$(shell_quote "$install_root")"
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_demo_daemon_port $quoted_install/install.sh" >/dev/null
+  wait_for_remote_demo_daemon
 }
 
 start_remote_device_forward() {
