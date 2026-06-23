@@ -1237,7 +1237,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let deadline = Date().addingTimeInterval(1)
         while Date() < deadline {
             controller.debugForceRefresh()
-            if attempts.count >= 2 && controller.attachmentMode == .owner { break }
+            if attempts.count >= 2 && controller.attachmentMode == .owner && !controller.debugTakeoverPending { break }
             try? await Task.sleep(for: .milliseconds(25))
         }
 

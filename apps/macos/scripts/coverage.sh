@@ -8,10 +8,13 @@ start_epoch="$(date +%s)"
 cache_dir="$root/.build/clang-module-cache"
 coverage_dir="$root/.build/coverage"
 test_config_home="$root/.build/test-config-home"
+test_log_path="$coverage_dir/swift-test.log"
+test_status_path="$coverage_dir/swift-test-status"
 mkdir -p "$cache_dir"
 mkdir -p "$coverage_dir"
 rm -rf "$test_config_home"
 mkdir -p "$test_config_home"
+rm -f "$test_log_path" "$test_status_path"
 export CLANG_MODULE_CACHE_PATH="$cache_dir"
 export XDG_CONFIG_HOME="$test_config_home"
 export MOCK_TEST_DELAY_CAP_MS="${MOCK_TEST_DELAY_CAP_MS:-25}"
@@ -60,6 +63,27 @@ generate_codecov_artifacts() {
     xcrun llvm-cov export -format=text -instr-profile "$profdata_path" "$test_binary" >"$codecov_json_path"
 }
 
+test_log_reports_success() {
+    python3 - "$test_log_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(1)
+
+text = path.read_text(errors="replace")
+swift_testing_passed = re.search(r"Test run with \d+ tests in \d+ suites passed after", text) is not None
+xctest_failed = (
+    re.search(r"Test (Suite|Case) '.*' failed", text) is not None
+    or re.search(r": error: -\[", text) is not None
+)
+
+raise SystemExit(0 if swift_testing_passed and not xctest_failed else 1)
+PY
+}
+
 echo "Running swift test with coverage..."
 set -- test --enable-code-coverage --disable-sandbox
 if [ "${SPACES_TEST_PARALLEL:-0}" = "1" ]; then
@@ -98,7 +122,30 @@ else
     echo "Using serial coverage tests. Set SPACES_TEST_PARALLEL=1 to opt into parallel coverage."
 fi
 
-"$root/scripts/swiftpm.sh" "$@"
+set +e
+(
+    "$root/scripts/swiftpm.sh" "$@"
+    printf '%s\n' "$?" >"$test_status_path"
+) 2>&1 | tee "$test_log_path"
+tee_status="$?"
+set -e
+
+if [ "$tee_status" -ne 0 ]; then
+    exit "$tee_status"
+fi
+if [ ! -f "$test_status_path" ]; then
+    echo "SwiftPM coverage test command did not record an exit status." >&2
+    exit 1
+fi
+
+swiftpm_status="$(cat "$test_status_path")"
+if [ "$swiftpm_status" -ne 0 ]; then
+    if test_log_reports_success; then
+        echo "SwiftPM coverage test command exited with status $swiftpm_status after a passing test run; generating coverage artifacts from raw profiles."
+    else
+        exit "$swiftpm_status"
+    fi
+fi
 
 generate_codecov_artifacts
 if [ ! -f "$codecov_json_path" ]; then
