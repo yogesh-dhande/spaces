@@ -293,7 +293,36 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let first = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
         let second = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
 
+        XCTAssertEqual(try posixPermissions(at: root), 0o700)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.key.der").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.certificate.der").path))
+        XCTAssertEqual(try posixPermissions(at: root.appendingPathComponent("identity.key.der")), 0o600)
+        XCTAssertEqual(try posixPermissions(at: root.appendingPathComponent("identity.certificate.der")), 0o600)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.p12").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.passphrase").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.keychain-db").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.keychain.passphrase").path))
         XCTAssertEqual(second.certificateFingerprint, first.certificateFingerprint)
+    }
+
+    func testTLSIdentityStoreRemovesObsoleteIdentityFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for filename in ["identity.p12", "identity.passphrase", "identity.keychain-db", "identity.keychain.passphrase"] {
+            try Data("obsolete".utf8).write(to: root.appendingPathComponent(filename))
+        }
+
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+
+        XCTAssertFalse(identity.certificateFingerprint.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.key.der").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.certificate.der").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.p12").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.passphrase").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.keychain-db").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.keychain.passphrase").path))
     }
 
     func testPinnedTLSClientRejectsCertificateMismatch() throws {
@@ -403,6 +432,14 @@ final class TerminalServiceProtocolTests: XCTestCase {
             guard semaphore.wait(timeout: .now() + 5) == .success else { throw TerminalServiceTLSError.requestTimedOut }
             return try result.value.get()
         }
+    }
+
+    private func posixPermissions(at url: URL) throws -> Int {
+        guard let value = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber else {
+            XCTFail("Missing POSIX permissions for \(url.path)")
+            return -1
+        }
+        return value.intValue & 0o777
     }
 
     private final class LockedCounter: @unchecked Sendable {
