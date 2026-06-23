@@ -7,7 +7,6 @@ import workspacecore
     let cloneSourceSection: NSStackView
     let dirField: NSTextField
     let repoURLField: NSTextField
-    let browseButton: NSButton
     let prepareButton: NSButton
     let progressiveInputViews: [NSView]
     let createButton: NSButton
@@ -21,10 +20,13 @@ import workspacecore
     var preparedGitURL: String?
     var preparedGitProject: WorkspaceOrchestrator.PreparedGitProjectImport?
     var gitPreparationID: UUID?
+    var directorySuggestionTask: Task<Void, Never>?
+    var directoryPreviewTask: Task<Void, Never>?
+    var directoryCompletions: [String] = []
 
     init(
         sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
-        repoURLField: NSTextField, browseButton: NSButton, prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton,
+        repoURLField: NSTextField, prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton,
         setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
         browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
     ) {
@@ -33,7 +35,6 @@ import workspacecore
         self.cloneSourceSection = cloneSourceSection
         self.dirField = dirField
         self.repoURLField = repoURLField
-        self.browseButton = browseButton
         self.prepareButton = prepareButton
         self.progressiveInputViews = progressiveInputViews
         self.createButton = createButton

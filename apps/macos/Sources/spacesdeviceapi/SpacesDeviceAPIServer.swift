@@ -918,6 +918,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .deleteProject(let payload): return try handleDeleteProjectRequest(payload)
         case .importProject(let payload): return try handleImportProjectRequest(payload)
         case .exportProject(let payload): return try handleExportProjectRequest(payload)
+        case .previewProject(let payload): return try handlePreviewProjectRequest(payload)
+        case .listDirectories(let payload): return try handleListDirectoriesRequest(payload)
         case .workspaceCreateOptions(let payload): return try handleWorkspaceCreateOptionsRequest(payload)
         case .createWorkspace(let payload): return try handleCreateWorkspaceRequest(payload)
         case .launchWorkspace(let payload): return try handleLaunchWorkspaceRequest(payload)
@@ -1180,6 +1182,56 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             ok: true, message: "Loaded workspace create options.",
             result: .workspaceCreateOptions(
                 SpacesDeviceWorkspaceCreateOptions(projects: projects, selectedProjectID: selectedProjectID, branchOptions: branchOptions)))
+    }
+
+    private func handlePreviewProjectRequest(_ request: SpacesDeviceProjectPreviewRequest) throws -> SpacesDeviceAPIResponse {
+        guard let dir = normalizedString(request.dir) else { return SpacesDeviceAPIResponse(ok: false, message: "Provide a project directory.") }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let project = try deviceOrchestrator(store: store).previewProject(dir: dir)
+        let preview = SpacesDeviceProjectPreview(
+            name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
+            config: SpacesDeviceOverviewBuilder.projectConfig(from: project))
+        return SpacesDeviceAPIResponse(ok: true, message: "Loaded project preview.", result: .projectPreview(preview))
+    }
+
+    private func handleListDirectoriesRequest(_ request: SpacesDeviceDirectoryListRequest) throws -> SpacesDeviceAPIResponse {
+        let paths = Self.directorySuggestions(forPartialPath: request.path)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Loaded directory suggestions.", result: .directorySuggestions(SpacesDeviceDirectorySuggestions(paths: paths)))
+    }
+
+    static func directorySuggestions(forPartialPath partial: String, limit: Int = 20) -> [String] {
+        let trimmed = partial.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return [] }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        let usesTilde = trimmed == "~" || trimmed.hasPrefix("~/")
+        let home = NSHomeDirectory()
+        let parentDir: String
+        let prefix: String
+        if trimmed.hasSuffix("/") {
+            parentDir = expanded
+            prefix = ""
+        } else {
+            parentDir = (expanded as NSString).deletingLastPathComponent
+            prefix = (expanded as NSString).lastPathComponent
+        }
+        let listDir = parentDir.isEmpty ? "/" : parentDir
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: listDir) else { return [] }
+        let matches = entries.filter { name in
+            guard !name.hasPrefix(".") || prefix.hasPrefix(".") else { return false }
+            guard prefix.isEmpty || name.localizedCaseInsensitiveCompare(prefix) == .orderedSame || name.lowercased().hasPrefix(prefix.lowercased())
+            else { return false }
+            var isDirectory: ObjCBool = false
+            let full = (listDir as NSString).appendingPathComponent(name)
+            return fileManager.fileExists(atPath: full, isDirectory: &isDirectory) && isDirectory.boolValue
+        }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        return matches.prefix(limit).map { name in
+            let full = (listDir as NSString).appendingPathComponent(name)
+            if usesTilde, full == home { return "~" }
+            if usesTilde, full.hasPrefix(home + "/") { return "~" + full.dropFirst(home.count) }
+            return full
+        }
     }
 
     private func handleCreateProjectRequest(_ request: SpacesDeviceProjectCreateRequest) throws -> SpacesDeviceAPIResponse {

@@ -257,6 +257,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var commandPaletteMainWindowVisibility: Bool?
     private var selectedSettingsSection: SettingsSection = .general
     private var settingsWindow: NSWindow?
+    private var addProjectWindow: NSWindow?
+    private var addWorkspaceWindow: NSWindow?
+    private var pathCompletionFieldEditor: PathCompletionTextView?
     private weak var settingsSectionContentContainer: NSView?
     private var settingsSectionRowViews: [SettingsSection: SettingsSidebarRowView] = [:]
     private weak var activeDeviceSelectorContainer: NSView?
@@ -2297,14 +2300,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated private static func previewProjectSourceSnapshot(directoryPath: String) async -> Result<ProjectRecord, Error> {
+    nonisolated private static func activeDeviceProjectPreview(dir: String, device: SpacesPairedDeviceRecord) async -> Result<
+        SpacesDeviceProjectPreview, Error
+    > {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                return .success(try orchestrator.previewProject(dir: directoryPath))
+                return .success(
+                    try SpacesActiveDeviceClient.previewProject(
+                        dir: dir, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
             } catch { return .failure(error) }
+        }.value
+    }
+
+    nonisolated private static func activeDeviceDirectorySuggestions(path: String, device: SpacesPairedDeviceRecord) async -> [String] {
+        await Task.detached(priority: .userInitiated) {
+            (try? SpacesActiveDeviceClient.listDirectories(
+                path: path, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))) ?? []
         }.value
     }
 
@@ -3993,11 +4004,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAlertsDetail() {
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        clearInlineWorkspaceFieldRefs()
+        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
         showingAlerts = true
@@ -4347,7 +4355,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false) {
         logStartupProfile("apply_snapshot_start")
-        let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
+        let activeDeviceDidChange = activeDeviceID != snapshot.activeDeviceID
+        if activeDeviceDidChange { clearActiveAddFormStateAndCloseWindows() }
+        let shouldPreserveDetailPane = preserveDetailPane && !activeDeviceDidChange && canPreserveDetailPaneAfterSidebarReload()
         pendingWorktreeDiscoveryReload = false
         invalidateCommandPaletteCache()
         configCache = snapshot.config
@@ -4561,11 +4571,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showPlaceholder(message: String = "Select a project or workspace.") {
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        clearInlineWorkspaceFieldRefs()
+        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
         showingAlerts = false
@@ -4584,11 +4591,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        clearInlineWorkspaceFieldRefs()
+        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
         showingAlerts = false
@@ -5000,7 +5004,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func closeSettingsWindow() { settingsWindow?.performClose(nil) }
 
     public func windowWillClose(_ notification: Notification) {
-        guard (notification.object as? NSWindow) === settingsWindow else { return }
+        let closingWindow = notification.object as? NSWindow
+        if closingWindow === addProjectWindow {
+            clearActiveAddProjectFormState()
+            return
+        }
+        if closingWindow === addWorkspaceWindow {
+            clearInlineWorkspaceFieldRefs()
+            clearActiveAddWorkspaceFormState()
+            return
+        }
+        guard closingWindow === settingsWindow else { return }
         showingSettings = false
         settingsSectionContentContainer = nil
         settingsSectionRowViews.removeAll()
@@ -5325,11 +5339,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showProjectDetail(project: ProjectSummary) {
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        clearInlineWorkspaceFieldRefs()
+        clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
         visibleDetailWorkspaceID = nil
         showingSettings = false
         showingAlerts = false
@@ -5643,17 +5654,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showAddProjectForm() {
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        clearInlineWorkspaceFieldRefs()
-        stopWorkspaceSetupDetailRefreshTimer()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
-        showingSettings = false
-        showingAlerts = false
-        clearSidebarSelectionForTransientDetail()
-        for view in detailContainer.subviews { view.removeFromSuperview() }
-        detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        clearActiveAddProjectFormState()
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -5662,53 +5663,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // --- Header ---
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let headerIcon = NSImageView()
-        if let img = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Project") {
-            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor]).applying(
-                NSImage.SymbolConfiguration(pointSize: 22, weight: .medium))
-            headerIcon.image = img.withSymbolConfiguration(config)
-        }
-        headerIcon.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([headerIcon.widthAnchor.constraint(equalToConstant: 28), headerIcon.heightAnchor.constraint(equalToConstant: 28)])
-
-        let headerTitle = NSTextField(labelWithString: "New Project")
-        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 10
-        headerRow.addArrangedSubview(headerIcon)
-        headerRow.addArrangedSubview(headerTitle)
-
-        let headerSubtitle = NSTextField(labelWithString: "Configure your workspace, processes, and lifecycle scripts.")
-        headerSubtitle.font = .systemFont(ofSize: 12)
-        headerSubtitle.textColor = .secondaryLabelColor
-
-        stack.addArrangedSubview(headerRow)
-        stack.addArrangedSubview(headerSubtitle)
-
         // --- Fields ---
         let sourceSegmented = NSSegmentedControl(
             labels: ["Pick folder", "Clone repo"], trackingMode: .selectOne, target: self, action: #selector(projectSourceChanged(_:)))
-        sourceSegmented.selectedSegment = activeDeviceIsRemote ? 1 : 0
-        if activeDeviceIsRemote { sourceSegmented.setEnabled(false, forSegment: 0) }
+        sourceSegmented.selectedSegment = 0
         sourceSegmented.setAccessibilityIdentifier("add-project-source-mode")
 
-        let dirField = NSTextField(labelWithString: "")
-        dirField.toolTip = nil
-        dirField.textColor = .secondaryLabelColor
-        dirField.lineBreakMode = .byTruncatingMiddle
-        dirField.isHidden = true
-        let browseButton = NSButton(title: "Choose a project directory", target: self, action: #selector(browseProjectDir(_:)))
-        browseButton.bezelStyle = .texturedRounded
-        browseButton.controlSize = .regular
-        browseButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Choose directory")
-        browseButton.imagePosition = .imageLeading
-        browseButton.toolTip = "Choose directory"
+        let dirField = NSTextField(string: "")
+        dirField.placeholderString = "~/projects/my-app"
+        dirField.delegate = self
+        dirField.setAccessibilityIdentifier("add-project-directory-path")
         let repoURLField = NSTextField(string: "")
         repoURLField.placeholderString = "https://github.com/org/repo.git"
         repoURLField.delegate = self
@@ -5732,15 +5696,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         localSourceSection.spacing = 8
         localSourceSection.detachesHiddenViews = true
 
-        browseButton.translatesAutoresizingMaskIntoConstraints = false
-        browseButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        browseButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        NSLayoutConstraint.activate([browseButton.heightAnchor.constraint(equalToConstant: 28)])
-
         dirField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        localSourceSection.addArrangedSubview(browseButton)
         localSourceSection.addArrangedSubview(dirField)
 
         let cloneSourceSection = NSStackView()
@@ -5814,63 +5772,135 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(stopScriptSection.view, in: stack)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
-        showScrollableDetailStack(stack)
+        presentAddProjectWindow(hosting: stack)
 
         createButton.tag = storeAddProjectFields(
             sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
             repoURLField: repoURLField, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            browseButton: browseButton, prepareButton: prepareButton,
+            prepareButton: prepareButton,
             progressiveInputViews: [
                 setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
                 stopScriptSection.view,
             ], createButton: createButton)
         activeAddProjectFormTag = createButton.tag
         if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
+        addProjectWindow?.makeFirstResponder(dirField)
     }
 
+    private func presentAddProjectWindow(hosting stack: NSStackView) {
+        let header = buildFormWindowHeader(symbol: "square.and.pencil", title: "New Project", closeAction: #selector(closeAddProjectWindow))
+        addProjectWindow = presentFormWindow(existing: addProjectWindow, header: header, hosting: stack)
+    }
+
+    @objc private func closeAddProjectWindow() { addProjectWindow?.performClose(nil) }
+
+    public func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        guard sender === addProjectWindow, let field = client as? NSTextField, addProjectRefs(forDirectoryField: field) != nil else { return nil }
+        let editor = pathCompletionFieldEditor ?? PathCompletionTextView()
+        editor.isFieldEditor = true
+        pathCompletionFieldEditor = editor
+        return editor
+    }
+
+    private func presentFormWindow(existing: NSWindow?, header: NSView, hosting stack: NSStackView) -> NSWindow {
+        let root = NSView()
+        root.wantsLayer = true
+        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
+        let headerDivider = settingsHairlineDivider()
+        let body = NSView()
+
+        for view in [header, headerDivider, body] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor), header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            header.topAnchor.constraint(equalTo: root.topAnchor), header.heightAnchor.constraint(equalToConstant: 52),
+
+            headerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            headerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor), headerDivider.topAnchor.constraint(equalTo: header.bottomAnchor),
+            headerDivider.heightAnchor.constraint(equalToConstant: 1),
+
+            body.leadingAnchor.constraint(equalTo: root.leadingAnchor), body.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            body.topAnchor.constraint(equalTo: headerDivider.bottomAnchor), body.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+        ])
+        showScrollableDetailStack(stack, in: body)
+
+        let window: NSWindow
+        if let existing {
+            window = existing
+        } else {
+            let created = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 640), styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                backing: .buffered, defer: false)
+            created.titlebarAppearsTransparent = true
+            created.titleVisibility = .hidden
+            created.isMovableByWindowBackground = true
+            created.isReleasedWhenClosed = false
+            created.minSize = NSSize(width: 520, height: 480)
+            created.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            created.standardWindowButton(.zoomButton)?.isHidden = true
+            created.standardWindowButton(.closeButton)?.isHidden = true
+            created.delegate = self
+            created.center()
+            window = created
+        }
+        window.contentView = root
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        return window
+    }
+
+    private func buildFormWindowHeader(symbol: String, title: String, closeAction: Selector) -> NSView {
+        let header = NSView()
+
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        titleLabel.textColor = .labelColor
+
+        let closeButton = iconButton(symbol: "xmark", tooltip: "Close", action: closeAction)
+        closeButton.keyEquivalent = "\u{1b}"
+
+        let stack = NSStackView(views: [iconView, titleLabel, NSView(), closeButton])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 14)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        header.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: header.leadingAnchor), stack.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: header.topAnchor), stack.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        return header
+    }
+
+    private func presentAddWorkspaceWindow(hosting stack: NSStackView) {
+        let header = buildFormWindowHeader(
+            symbol: "plus.rectangle.on.folder", title: "New Workspace", closeAction: #selector(closeAddWorkspaceWindow))
+        addWorkspaceWindow = presentFormWindow(existing: addWorkspaceWindow, header: header, hosting: stack)
+    }
+
+    @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
+
     private func showAddWorkspaceForm(project: ProjectSummary) {
-        discardActiveAddProjectPreparedSourceIfNeeded()
         clearInlineWorkspaceFieldRefs()
-        stopWorkspaceSetupDetailRefreshTimer()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
-        showingSettings = false
-        showingAlerts = false
-        clearSidebarSelectionForTransientDetail()
-        for view in detailContainer.subviews { view.removeFromSuperview() }
-        detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        clearActiveAddWorkspaceFormState()
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false
-
-        // --- Header ---
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let headerIcon = NSImageView()
-        if let img = NSImage(systemSymbolName: "plus.rectangle.on.folder", accessibilityDescription: "New Workspace") {
-            let config = NSImage.SymbolConfiguration(paletteColors: [accentColor]).applying(
-                NSImage.SymbolConfiguration(pointSize: 22, weight: .medium))
-            headerIcon.image = img.withSymbolConfiguration(config)
-        }
-        headerIcon.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([headerIcon.widthAnchor.constraint(equalToConstant: 28), headerIcon.heightAnchor.constraint(equalToConstant: 28)])
-
-        let headerTitle = NSTextField(labelWithString: "New Workspace")
-        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 10
-        headerRow.addArrangedSubview(headerIcon)
-        headerRow.addArrangedSubview(headerTitle)
-
-        stack.addArrangedSubview(headerRow)
 
         // --- Fields ---
         let nameField = NSTextField(string: "")
@@ -6004,7 +6034,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let createButton = actionButton(
             title: "Create", symbol: nil, tooltip: "Create workspace", action: #selector(createWorkspace(_:)), primary: true)
         createButton.setAccessibilityIdentifier("add-workspace-create")
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(closeAddWorkspaceWindow), primary: false)
         cancelButton.setAccessibilityIdentifier("add-workspace-cancel")
         Theme.applySecondaryStyle(to: cancelButton)
 
@@ -6016,7 +6046,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         stack.addArrangedSubview(buttonRow)
         constrainFormFieldToFillWidth(buttonRow, in: stack)
 
-        showScrollableDetailStack(stack)
+        presentAddWorkspaceWindow(hosting: stack)
 
         createButton.tag = storeAddWorkspaceFields(
             projectID: project.id, isGitRepo: project.isGitRepo, branchModeSegmented: project.isGitRepo ? branchModeSegmented : nil,
@@ -6029,10 +6059,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             updateAddWorkspaceBranchInputUI(refs: refs)
             updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: currentAddWorkspaceBranchValue(refs))
         }
-        Task { @MainActor [weak self, weak newBranchField] in
+        Task { @MainActor [weak self, weak newBranchField, weak nameField] in
             await Task.yield()
             guard let self else { return }
-            if project.isGitRepo { self.window.makeFirstResponder(newBranchField) } else { self.window.makeFirstResponder(nameField) }
+            self.addWorkspaceWindow?.makeFirstResponder(project.isGitRepo ? newBranchField : nameField)
         }
         guard project.isGitRepo else { return }
         let formTag = createButton.tag
@@ -6068,10 +6098,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func prepareWorkspaceDetailContainer(workspaceID: String) {
-        clearInlineWorkspaceFieldRefs()
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        activeAddWorkspaceFormTag = nil
-        activeAddProjectFormTag = nil
+        clearActiveAddFormStateAndCloseWindows()
         visibleDetailWorkspaceID = workspaceID
         showingSettings = false
         showingAlerts = false
@@ -6996,6 +7023,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         inlineWorkspaceFieldRefsByTag.removeAll()
         inlineWorkspaceFieldTagByObjectID.removeAll()
         inlineWorkspaceLabelTagByObjectID.removeAll()
+    }
+
+    private func clearActiveAddProjectFormState() {
+        discardActiveAddProjectPreparedSourceIfNeeded()
+        if let activeAddProjectFormTag { AddProjectFieldCache.shared.cache[activeAddProjectFormTag] = nil }
+        activeAddProjectFormTag = nil
+    }
+
+    private func clearActiveAddWorkspaceFormState() {
+        if let activeAddWorkspaceFormTag { AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag] = nil }
+        activeAddWorkspaceFormTag = nil
+    }
+
+    private func clearActiveAddFormStateAndCloseWindows() {
+        clearActiveAddProjectFormState()
+        clearInlineWorkspaceFieldRefs()
+        clearActiveAddWorkspaceFormState()
+        closeVisibleAddFormWindows()
+    }
+
+    private func closeVisibleAddFormWindows() {
+        if addProjectWindow?.isVisible == true { addProjectWindow?.close() }
+        if addWorkspaceWindow?.isVisible == true { addWorkspaceWindow?.close() }
     }
 
     private func isView(_ view: NSView?, descendantOf ancestor: NSView) -> Bool {
@@ -8102,16 +8152,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
-        browseButton: NSButton, prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
+        prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
             sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, browseButton: browseButton, prepareButton: prepareButton, progressiveInputViews: progressiveInputViews,
-            createButton: createButton, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+            repoURLField: repoURLField, prepareButton: prepareButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
+            setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
         sourceSegmented.tag = id
-        browseButton.tag = id
         prepareButton.tag = id
         return id
     }
@@ -8260,7 +8309,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let pairButton = iconButton(
-            symbol: "qrcode", tooltip: "Pair iPhone or iPad with \(device.name)", action: #selector(pairIOSWithConnectedDevice(_:)))
+            symbol: "iphone.radiowaves.left.and.right", tooltip: "Pair iPhone or iPad with \(device.name)",
+            action: #selector(pairIOSWithConnectedDevice(_:)))
         pairButton.identifier = NSUserInterfaceItemIdentifier(device.id)
         pairButton.isEnabled = device.isAvailable
 
@@ -8890,13 +8940,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     projectDir = nil
                     gitURL = repoURL
                 } else {
-                    guard !activeDeviceIsRemote else {
-                        throw WorkspaceError.invalidArgument(message: "Remote project creation requires a Git repository URL.")
-                    }
-                    let dir = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let dir = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !dir.isEmpty else { return }
                     guard refs.preparedLocalDirectoryPath == dir else {
-                        throw WorkspaceError.invalidArgument(message: "Choose the project directory before creating the project.")
+                        throw WorkspaceError.invalidArgument(message: "Enter the project directory before creating the project.")
                     }
                     projectDir = dir
                     gitURL = nil
@@ -8929,8 +8976,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     switch result {
                     case .success(let response):
-                        activeAddProjectFormTag = nil
-                        activeAddWorkspaceFormTag = nil
+                        clearActiveAddFormStateAndCloseWindows()
                         selectedProjectID = response.projectID
                         selectedWorkspaceID = response.workspaceID
                         applyActiveDeviceMutationResponse(response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
@@ -8947,24 +8993,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         if refs.sourceSegmented.selectedSegment == 0 { discardPreparedAddProjectGitSourceIfNeeded(refs) }
         updateAddProjectSourceUI(refs)
-    }
-
-    @objc private func browseProjectDir(_ sender: NSButton) {
-        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.begin { result in
-            if result == .OK, let url = panel.url {
-                refs.dirField.stringValue = url.path
-                refs.dirField.toolTip = url.path
-                refs.dirField.textColor = .labelColor
-                refs.dirField.isHidden = false
-                refs.browseButton.title = url.lastPathComponent
-                self.prepareAddProjectLocalSource(refs, directoryPath: url.path)
-            }
-        }
     }
 
     @objc private func prepareProjectSource(_ sender: NSButton) {
@@ -8998,7 +9026,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             if activeDeviceForDaemonStateMutation() != nil { return !repoURL.isEmpty && refs.gitPreparationID == nil }
             return refs.gitPreparationID == nil && refs.preparedGitProject != nil && refs.preparedGitURL == repoURL
         }
-        let directoryPath = refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return !directoryPath.isEmpty && refs.preparedLocalDirectoryPath == directoryPath
     }
 
@@ -9020,39 +9048,67 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         activeAddProjectFormTag == refs.createButton.tag && AddProjectFieldCache.shared.cache[refs.createButton.tag] === refs
     }
 
-    private func prepareAddProjectLocalSource(_ refs: AddProjectFieldRefs, directoryPath: String) {
-        refs.preparedLocalDirectoryPath = nil
-        hydrateAddProjectSettings(refs, from: ProjectRecord(id: "", name: "", dir: directoryPath, isGitRepo: false, defaultBranch: nil))
-        updateAddProjectSourceUI(refs)
-        let originalTitle = refs.browseButton.title
-        let selectedDirectoryName = URL(fileURLWithPath: directoryPath, isDirectory: true).lastPathComponent
-        refs.browseButton.isEnabled = false
-        refs.browseButton.title = "Loading..."
-        showOperationProgressOverlay(message: "Loading project settings...", detail: "Checking the selected folder for spaces.yaml.")
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                refs.browseButton.isEnabled = true
-                refs.browseButton.title = selectedDirectoryName.isEmpty ? originalTitle : selectedDirectoryName
-                hideOperationProgressOverlay()
-            }
-            let result = await Self.previewProjectSourceSnapshot(directoryPath: directoryPath)
-            guard
+    private func addProjectRefs(forDirectoryField field: NSControl) -> AddProjectFieldRefs? {
+        AddProjectFieldCache.shared.cache.values.first { $0.dirField === field }
+    }
+
+    private func scheduleAddProjectDirectorySuggestions(_ refs: AddProjectFieldRefs) {
+        refs.directorySuggestionTask?.cancel()
+        let query = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, let device = activeDeviceForDaemonStateMutation() else {
+            refs.directoryCompletions = []
+            return
+        }
+        refs.directorySuggestionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self else { return }
+            let suggestions = await Self.activeDeviceDirectorySuggestions(path: query, device: device)
+            guard !Task.isCancelled, isActiveAddProjectForm(refs), refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) == query
+            else { return }
+            let completions = suggestions.map { ($0 as NSString).lastPathComponent }
+            refs.directoryCompletions = completions
+            // Suppress re-popping the dropdown when the only match is the leaf already typed.
+            let typedLeaf = (query as NSString).lastPathComponent
+            let exactSingleMatch = completions.count == 1 && completions[0].localizedCaseInsensitiveCompare(typedLeaf) == .orderedSame
+            guard !completions.isEmpty, !exactSingleMatch, let editor = refs.dirField.currentEditor() else { return }
+            editor.complete(nil)
+        }
+    }
+
+    public func control(
+        _ control: NSControl, textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange,
+        indexOfSelectedItem index: UnsafeMutablePointer<Int>
+    ) -> [String] {
+        guard let refs = addProjectRefs(forDirectoryField: control) else { return words }
+        index.pointee = -1
+        return refs.directoryCompletions
+    }
+
+    /// Validates the typed directory on the active device and loads its `spaces.yaml` settings,
+    /// debounced so it runs as the user types or picks a suggestion. Runs silently: a path that is
+    /// not yet a valid project directory simply leaves Create disabled rather than surfacing an error.
+    private func scheduleAddProjectDirectoryPreview(_ refs: AddProjectFieldRefs) {
+        refs.directoryPreviewTask?.cancel()
+        let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !directoryPath.isEmpty, refs.preparedLocalDirectoryPath != directoryPath else { return }
+        guard let device = activeDeviceForDaemonStateMutation() else { return }
+        refs.directoryPreviewTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, let self else { return }
+            let result = await Self.activeDeviceProjectPreview(dir: directoryPath, device: device)
+            guard !Task.isCancelled,
                 Self.localProjectPreviewResultMatchesActiveRequest(
                     isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
-                    currentDirectoryPath: refs.dirField.toolTip?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+                    currentDirectoryPath: refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
                     requestedDirectoryPath: directoryPath)
             else { return }
             switch result {
-            case .success(let project):
+            case .success(let preview):
                 refs.preparedLocalDirectoryPath = directoryPath
-                hydrateAddProjectSettings(refs, from: project)
-                updateAddProjectSourceUI(refs)
-            case .failure(let error):
-                refs.preparedLocalDirectoryPath = nil
-                updateAddProjectSourceUI(refs)
-                showError(error)
+                hydrateAddProjectSettings(refs, from: preview.config)
+            case .failure: refs.preparedLocalDirectoryPath = nil
             }
+            updateAddProjectSourceUI(refs)
         }
     }
 
@@ -9141,6 +9197,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.processesSection.replace(processes: project.processes)
         refs.browserSessionsSection.replace(sessions: project.browserSessions)
         refs.agentLaunchersSection.replace(launchers: project.agentLaunchers)
+    }
+
+    private func hydrateAddProjectSettings(_ refs: AddProjectFieldRefs, from config: SpacesDeviceProjectConfig) {
+        let settings = Self.localProjectSettings(from: config)
+        refs.setupScriptSection.replace(value: settings.setupScript ?? "")
+        refs.stopScriptSection.replace(value: settings.stopScript ?? "")
+        refs.portsSection.replace(ports: settings.ports)
+        refs.processesSection.replace(processes: settings.processes)
+        refs.browserSessionsSection.replace(sessions: settings.browserSessions)
+        refs.agentLaunchersSection.replace(launchers: settings.agentLaunchers)
     }
 
     private func discardPreparedAddProjectGitSourceIfNeeded(_ refs: AddProjectFieldRefs) {
@@ -9340,8 +9406,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     }
                     switch result {
                     case .success(let response):
-                        activeAddWorkspaceFormTag = nil
-                        activeAddProjectFormTag = nil
+                        clearActiveAddFormStateAndCloseWindows()
                         selectedProjectID = refs.projectID
                         selectedWorkspaceID = response.workspaceID
                         lastSelectedRow = -1
@@ -9365,6 +9430,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for refs in AddProjectFieldCache.shared.cache.values {
             guard refs.repoURLField === changedField else { continue }
             updateAddProjectSourceUI(refs)
+            return
+        }
+        if let refs = addProjectRefs(forDirectoryField: changedField) {
+            updateAddProjectSourceUI(refs)
+            scheduleAddProjectDirectorySuggestions(refs)
+            scheduleAddProjectDirectoryPreview(refs)
             return
         }
         if let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(changedField)] {
@@ -9431,10 +9502,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return false
     }
 
-    @objc private func cancelProjectForm() {
-        discardActiveAddProjectPreparedSourceIfNeeded()
-        refreshSelection()
-    }
+    @objc private func cancelProjectForm() { closeAddProjectWindow() }
 
     @objc private func launchWorkspace(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
@@ -10122,9 +10190,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func handleFormCancelShortcut(event: NSEvent) -> Bool {
         guard event.keyCode == UInt16(kVK_Escape) else { return false }
-        guard activeAddWorkspaceFormTag != nil || activeAddProjectFormTag != nil else { return false }
-        cancelProjectForm()
-        return true
+        if addWorkspaceWindow?.isVisible == true {
+            closeAddWorkspaceWindow()
+            return true
+        }
+        if addProjectWindow?.isVisible == true {
+            closeAddProjectWindow()
+            return true
+        }
+        return false
     }
 
     private func handleAlertsShortcut(event: NSEvent) -> Bool {

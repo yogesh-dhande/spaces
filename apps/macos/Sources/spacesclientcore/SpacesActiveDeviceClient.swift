@@ -135,6 +135,21 @@ public enum SpacesActiveDeviceClient {
         return options
     }
 
+    public static func previewProject(
+        dir: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceProjectPreview {
+        let response = try request(.init(command: .previewProject(.init(dir: dir))), device: device, clientApp: clientApp, profile: profile)
+        guard let preview = response.projectPreview else { throw SpacesActiveDeviceClientError.requestRejected(response.message) }
+        return preview
+    }
+
+    public static func listDirectories(
+        path: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [String] {
+        let response = try request(.init(command: .listDirectories(.init(path: path))), device: device, clientApp: clientApp, profile: profile)
+        return response.directorySuggestions?.paths ?? []
+    }
+
     public static func createProject(
         projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -383,8 +398,8 @@ public enum SpacesActiveDeviceClient {
             .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess,
             .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
-        case .pair, .ping, .overview, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .state,
-            .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
+        case .pair, .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
+            .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
             defaultRequestTimeoutSeconds
         }
     }

@@ -288,8 +288,8 @@ import Foundation
             terminalAccessoryView.buttonWidthsForTesting(width: width, userInterfaceIdiom: userInterfaceIdiom)
         }
 
-        func accessoryToolbarJoystickDirectionForTesting(point: CGPoint, bounds: CGRect) -> String? {
-            DirectionalPadButton.direction(for: point, in: bounds)
+        func accessoryToolbarJoystickDirectionForTesting(translationX: CGFloat, translationY: CGFloat) -> String? {
+            DirectionalPadButton.direction(forTranslationX: translationX, y: translationY)
         }
 
         func accessoryToolbarJoystickAcceptsReleaseForTesting(point: CGPoint, bounds: CGRect) -> Bool {
@@ -299,6 +299,14 @@ import Foundation
         func accessoryToolbarJoystickAcceptsActivationForTesting(point: CGPoint, bounds: CGRect) -> Bool {
             DirectionalPadButton.acceptsActivation(at: point, in: bounds)
         }
+
+        func accessoryToolbarBeginJoystickTrackingForTesting(at point: CGPoint, bounds: CGRect, initialDelay: Duration, interval: Duration) {
+            terminalAccessoryView.beginJoystickTrackingForTesting(at: point, bounds: bounds, initialDelay: initialDelay, interval: interval)
+        }
+
+        func accessoryToolbarMoveJoystickTrackingForTesting(to point: CGPoint) { terminalAccessoryView.moveJoystickTrackingForTesting(to: point) }
+
+        func accessoryToolbarEndJoystickTrackingForTesting() { terminalAccessoryView.endJoystickTrackingForTesting() }
 
         public override init(frame: CGRect) {
             super.init(frame: frame)
@@ -1191,10 +1199,10 @@ import Foundation
                 addModifierButton(.command)
                 addModifierButton(.option)
 
-                configureButton(joystickButton, imageName: "arrow.up.and.down.and.arrow.left.and.right")
+                configureButton(joystickButton, imageName: "dpad")
                 joystickButton.accessibilityIdentifier = "terminal.accessory.arrow-joystick"
                 joystickButton.accessibilityLabel = "Arrow key joystick"
-                joystickButton.accessibilityHint = "Tap or drag toward an edge to send an arrow key."
+                joystickButton.accessibilityHint = "Slide toward a direction to send an arrow key; hold the slide to repeat."
                 joystickButton.onDirection = { [weak self] direction in self?.onKey(direction) }
                 joystickButton.accessibilityCustomActions = [
                     UIAccessibilityCustomAction(name: "Up arrow") { [weak self] _ in
@@ -1327,6 +1335,17 @@ import Foundation
                 return AccessoryToolbarButtonWidths(scrollable: buttonWidths(in: contentStackView), pinned: buttonWidths(in: pinnedStackView))
             }
 
+            func beginJoystickTrackingForTesting(at point: CGPoint, bounds: CGRect, initialDelay: Duration, interval: Duration) {
+                joystickButton.repeatInitialDelay = initialDelay
+                joystickButton.repeatInterval = interval
+                joystickButton.bounds = CGRect(origin: .zero, size: bounds.size)
+                joystickButton.beginTrackingForTesting(at: point)
+            }
+
+            func moveJoystickTrackingForTesting(to point: CGPoint) { joystickButton.continueTrackingForTesting(at: point) }
+
+            func endJoystickTrackingForTesting() { joystickButton.endTrackingForTesting() }
+
             private func prepareLayoutForTesting(width: CGFloat, userInterfaceIdiom: UIUserInterfaceIdiom) {
                 applyMetrics(for: userInterfaceIdiom)
                 frame = CGRect(x: 0, y: 0, width: width, height: Self.toolbarHeight)
@@ -1343,31 +1362,104 @@ import Foundation
             private static let activationHorizontalMargin: CGFloat = 8
             private static let activationVerticalMargin: CGFloat = 12
             private static let releaseMargin: CGFloat = 100
-            private static let centerDeadZone: CGFloat = 4
+            // How far the finger must slide from where it landed before a direction
+            // registers. The control is a relative thumbstick: the touch-down point is the
+            // neutral origin, so the swipe direction—not where the press started—decides the
+            // arrow key. A stationary tap stays neutral and sends nothing.
+            private static let directionActivationDistance: CGFloat = 16
 
             var onDirection: ((String) -> Void)?
+
+            // Hold-to-repeat cadence, mirroring keyboard key repeat: the first key fires when
+            // the swipe crosses the activation distance, then the active direction repeats
+            // after an initial delay. Settable so tests can drive the repeat without
+            // real-time waits.
+            var repeatInitialDelay: Duration = .milliseconds(400)
+            var repeatInterval: Duration = .milliseconds(100)
+
+            private var activeDirection: String?
+            private var repeatTask: Task<Void, Never>?
+            private var trackingOrigin: CGPoint?
 
             override func point(inside point: CGPoint, with event: UIEvent?) -> Bool { Self.acceptsActivation(at: point, in: bounds) }
 
             override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
                 isHighlighted = true
+                trackingOrigin = touch.location(in: self)
                 return true
             }
 
             override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-                isHighlighted = Self.acceptsRelease(at: touch.location(in: self), in: bounds)
+                updateTracking(at: touch.location(in: self))
                 return true
             }
 
             override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
-                defer { isHighlighted = false }
-                guard let touch else { return }
-                let point = touch.location(in: self)
-                guard Self.acceptsRelease(at: point, in: bounds), let direction = Self.direction(for: point, in: bounds) else { return }
-                onDirection?(direction)
+                isHighlighted = false
+                stopRepeating()
+                trackingOrigin = nil
             }
 
-            override func cancelTracking(with event: UIEvent?) { isHighlighted = false }
+            override func cancelTracking(with event: UIEvent?) {
+                isHighlighted = false
+                stopRepeating()
+                trackingOrigin = nil
+            }
+
+            // Updates the held direction from how far the finger has slid since touch-down.
+            // Pauses while the touch sits within the neutral zone or strays outside the
+            // release area; resumes against the original origin when it slides back in.
+            private func updateTracking(at point: CGPoint) {
+                guard Self.acceptsRelease(at: point, in: bounds), let origin = trackingOrigin else {
+                    isHighlighted = false
+                    setActiveDirection(nil)
+                    return
+                }
+                isHighlighted = true
+                setActiveDirection(Self.direction(forTranslationX: point.x - origin.x, y: point.y - origin.y))
+            }
+
+            // Sets the direction being held, firing it immediately and (re)starting the
+            // repeat loop. Passing nil, or releasing, stops the repeat. The fire is
+            // synchronous, so a quick flick sends exactly one key before the initial delay.
+            private func setActiveDirection(_ direction: String?) {
+                guard direction != activeDirection else { return }
+                activeDirection = direction
+                repeatTask?.cancel()
+                guard let direction else {
+                    repeatTask = nil
+                    return
+                }
+                onDirection?(direction)
+                repeatTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    try? await Task.sleep(for: self.repeatInitialDelay)
+                    while !Task.isCancelled {
+                        guard let direction = self.activeDirection else { return }
+                        self.onDirection?(direction)
+                        try? await Task.sleep(for: self.repeatInterval)
+                    }
+                }
+            }
+
+            private func stopRepeating() {
+                repeatTask?.cancel()
+                repeatTask = nil
+                activeDirection = nil
+            }
+
+            func beginTrackingForTesting(at point: CGPoint) {
+                isHighlighted = true
+                trackingOrigin = point
+            }
+
+            func continueTrackingForTesting(at point: CGPoint) { updateTracking(at: point) }
+
+            func endTrackingForTesting() {
+                isHighlighted = false
+                stopRepeating()
+                trackingOrigin = nil
+            }
 
             static func acceptsActivation(at point: CGPoint, in bounds: CGRect) -> Bool {
                 bounds.insetBy(dx: -activationHorizontalMargin, dy: -activationVerticalMargin).contains(point)
@@ -1377,10 +1469,8 @@ import Foundation
                 bounds.insetBy(dx: -releaseMargin, dy: -releaseMargin).contains(point)
             }
 
-            static func direction(for point: CGPoint, in bounds: CGRect) -> String? {
-                let dx = point.x - bounds.midX
-                let dy = point.y - bounds.midY
-                guard abs(dx) > centerDeadZone || abs(dy) > centerDeadZone else { return nil }
+            static func direction(forTranslationX dx: CGFloat, y dy: CGFloat) -> String? {
+                guard abs(dx) > directionActivationDistance || abs(dy) > directionActivationDistance else { return nil }
                 if abs(dx) > abs(dy) { return dx < 0 ? "left" : "right" }
                 return dy < 0 ? "up" : "down"
             }

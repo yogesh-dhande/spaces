@@ -156,7 +156,7 @@ struct SpacesDeviceOverviewBuilder {
         }
     }
 
-    private static func projectConfig(from project: ProjectRecord) -> SpacesDeviceProjectConfig {
+    static func projectConfig(from project: ProjectRecord) -> SpacesDeviceProjectConfig {
         SpacesDeviceProjectConfig(
             setupScript: project.setupScript, stopScript: project.stopScript, ports: project.ports.map(devicePort),
             processes: project.processes.map(deviceProcess), browserSessions: project.browserSessions.map(deviceBrowserSession),

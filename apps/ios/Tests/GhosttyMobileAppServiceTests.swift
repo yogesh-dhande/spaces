@@ -1218,6 +1218,78 @@
             XCTAssertNil(hostView.inputAccessoryView)
         }
 
+        func testRemoteTerminalJoystickSwipeDirectionIgnoresStartLocation() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.setAcceptsTerminalInput(true)
+            let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
+
+            // Start near the right edge, then slide left: the swipe direction wins and only
+            // "left" fires. The starting location never dispatches a key on its own.
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 44, y: 18), bounds: bounds, initialDelay: .seconds(10), interval: .seconds(10))
+            hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 10, y: 18))
+            hostView.accessoryToolbarEndJoystickTrackingForTesting()
+
+            XCTAssertEqual(sentKeys, ["left"])
+        }
+
+        func testRemoteTerminalJoystickStationaryTapSendsNothing() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.setAcceptsTerminalInput(true)
+            let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
+
+            // A press and release without sliding past the activation distance stays neutral.
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 30, y: 18), bounds: bounds, initialDelay: .milliseconds(50), interval: .milliseconds(10))
+            hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 34, y: 18))
+            hostView.accessoryToolbarEndJoystickTrackingForTesting()
+
+            XCTAssertEqual(sentKeys, [])
+        }
+
+        func testRemoteTerminalJoystickHoldRepeatsSwipedDirection() async throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.setAcceptsTerminalInput(true)
+            let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
+
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 23, y: 18), bounds: bounds, initialDelay: .milliseconds(5), interval: .milliseconds(5))
+            hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 0, y: 18))
+
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while sentKeys.count < 4, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            hostView.accessoryToolbarEndJoystickTrackingForTesting()
+            let countAtRelease = sentKeys.count
+
+            XCTAssertGreaterThanOrEqual(countAtRelease, 4, "holding a swipe should emit the first key plus repeats")
+            XCTAssertTrue(sentKeys.allSatisfy { $0 == "left" })
+
+            // Releasing stops further repeats.
+            try await Task.sleep(for: .milliseconds(40))
+            XCTAssertEqual(sentKeys.count, countAtRelease)
+        }
+
+        func testRemoteTerminalJoystickChangingSwipeSwitchesDirection() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.setAcceptsTerminalInput(true)
+            let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
+
+            // Long delays keep repeats from firing, isolating the per-direction key.
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 23, y: 18), bounds: bounds, initialDelay: .seconds(10), interval: .seconds(10))
+            hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 46, y: 18))
+            hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 0, y: 18))
+            hostView.accessoryToolbarEndJoystickTrackingForTesting()
+
+            XCTAssertEqual(sentKeys, ["right", "left"])
+        }
+
         func testRemoteTerminalAccessoryModifiersApplyToInput() throws {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var sentKeys: [String] = []
@@ -1257,8 +1329,8 @@
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
-            func direction(x: CGFloat, y: CGFloat) -> String? {
-                hostView.accessoryToolbarJoystickDirectionForTesting(point: CGPoint(x: x, y: y), bounds: bounds)
+            func direction(dx: CGFloat, dy: CGFloat) -> String? {
+                hostView.accessoryToolbarJoystickDirectionForTesting(translationX: dx, translationY: dy)
             }
             func acceptsRelease(x: CGFloat, y: CGFloat) -> Bool {
                 hostView.accessoryToolbarJoystickAcceptsReleaseForTesting(point: CGPoint(x: x, y: y), bounds: bounds)
@@ -1267,12 +1339,13 @@
                 hostView.accessoryToolbarJoystickAcceptsActivationForTesting(point: CGPoint(x: x, y: y), bounds: bounds)
             }
 
-            XCTAssertNil(direction(x: bounds.midX, y: bounds.midY))
-            XCTAssertNil(direction(x: bounds.midX + 4, y: bounds.midY))
-            XCTAssertEqual(direction(x: bounds.midX + 5, y: bounds.midY), "right")
-            XCTAssertEqual(direction(x: bounds.midX - 5, y: bounds.midY), "left")
-            XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY - 5), "up")
-            XCTAssertEqual(direction(x: bounds.midX, y: bounds.midY + 5), "down")
+            // Direction comes from how far the finger slid since touch-down, not absolute position.
+            XCTAssertNil(direction(dx: 0, dy: 0))
+            XCTAssertNil(direction(dx: 16, dy: 0))
+            XCTAssertEqual(direction(dx: 17, dy: 0), "right")
+            XCTAssertEqual(direction(dx: -17, dy: 0), "left")
+            XCTAssertEqual(direction(dx: 0, dy: -17), "up")
+            XCTAssertEqual(direction(dx: 0, dy: 17), "down")
             XCTAssertTrue(acceptsActivation(x: bounds.minX - 7, y: bounds.midY))
             XCTAssertFalse(acceptsActivation(x: bounds.minX - 9, y: bounds.midY))
             XCTAssertTrue(acceptsActivation(x: bounds.midX, y: bounds.minY - 11))
