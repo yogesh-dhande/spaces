@@ -256,6 +256,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
     private var commandPaletteMainWindowVisibility: Bool?
     private var selectedSettingsSection: SettingsSection = .general
+    private var selectedMCPClient: MCPClient = .claudeCode
+    private weak var mcpConfigTextView: NSTextView?
+    private weak var mcpConfigHintLabel: NSTextField?
     private var settingsWindow: NSWindow?
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
@@ -4872,12 +4875,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case general
         case shortcuts
         case devices
+        case mcp
 
         var title: String {
             switch self {
             case .general: "General"
             case .shortcuts: "Shortcuts"
             case .devices: "Devices"
+            case .mcp: "MCP"
             }
         }
 
@@ -4886,6 +4891,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             case .general: "gearshape"
             case .shortcuts: "keyboard"
             case .devices: "desktopcomputer.and.macbook"
+            case .mcp: "puzzlepiece.extension"
             }
         }
     }
@@ -5101,6 +5107,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .general: renderSettingsCards(generalSettingsCards())
         case .shortcuts: renderSettingsCards(shortcutsSettingsCards())
         case .devices: renderDeviceSettings(response: currentDeviceControlResponse())
+        case .mcp: renderSettingsCards(mcpSettingsCards())
         }
     }
 
@@ -5204,6 +5211,46 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             subtitle: "Click record on a row to capture a new chord. Leader-based shortcuts inherit the leader modifier.",
             contentViews: [shortcutContainer])
         return [shortcutCard]
+    }
+
+    private func mcpSettingsCards() -> [NSView] {
+        let clients = MCPClient.allCases
+        let picker = NSSegmentedControl(
+            labels: clients.map(\.title), trackingMode: .selectOne, target: self, action: #selector(mcpClientSegmentChanged(_:)))
+        picker.selectedSegment = clients.firstIndex(of: selectedMCPClient) ?? 0
+        picker.setContentHuggingPriority(.required, for: .horizontal)
+        picker.setAccessibilityIdentifier("settings-mcp-client-picker")
+        let pickerRow = NSStackView(views: [picker, NSView()])
+        pickerRow.orientation = .horizontal
+        pickerRow.alignment = .centerY
+
+        let cliPath = MCPClientConfiguration.resolvedCLIPath()
+        let textView = NSTextView()
+        textView.isRichText = false
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.string = selectedMCPClient.configSnippet(cliPath: cliPath)
+        textView.setAccessibilityIdentifier("settings-mcp-config")
+        mcpConfigTextView = textView
+        let configScroll = scrollableTextView(textView, height: 90)
+
+        let hint = helpTextLabel(selectedMCPClient.configHint)
+        mcpConfigHintLabel = hint
+
+        let setupCard = formSectionCard(
+            icon: "puzzlepiece.extension", title: "MCP Client Setup", contentViews: [pickerRow, hint, configScroll])
+
+        return [setupCard]
+    }
+
+    @objc private func mcpClientSegmentChanged(_ sender: NSSegmentedControl) {
+        let clients = MCPClient.allCases
+        guard clients.indices.contains(sender.selectedSegment) else { return }
+        selectedMCPClient = clients[sender.selectedSegment]
+        let cliPath = MCPClientConfiguration.resolvedCLIPath()
+        mcpConfigTextView?.string = selectedMCPClient.configSnippet(cliPath: cliPath)
+        mcpConfigHintLabel?.stringValue = selectedMCPClient.configHint
     }
 
     private func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {

@@ -83,6 +83,12 @@ export const docsPageLinks: DocsPageLink[] = [
       "Use the spaces CLI for same-machine workspace actions, pairing links, Spaces terminal session commands, owner-seeking terminal windows, and ownership takeover.",
   },
   {
+    href: "/docs/mcp",
+    title: "Model Context Protocol",
+    summary:
+      "Connect an MCP client such as Claude Code or Codex to the spaces mcp server so it can list and drive your projects, workspaces, and Spaces terminals.",
+  },
+  {
     href: "/docs/ios",
     title: "iOS Companion",
     summary:
@@ -149,5 +155,6 @@ export const docsPublishingOrder = [
   "Troubleshooting",
   "Cookbook Guides",
   "CLI Reference",
+  "Model Context Protocol",
   "iOS Companion",
 ];
