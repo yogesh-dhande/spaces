@@ -73,7 +73,7 @@ final class SpacesClientDatabaseTests: XCTestCase {
             ).path)
     }
 
-    func testActiveDeviceSelectionIsScopedToCurrentProfile() throws {
+    func testPairedDevicesAreScopedToCurrentProfile() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let profileA = root.appendingPathComponent("profile-a", isDirectory: true)
         let profileB = root.appendingPathComponent("profile-b", isDirectory: true)
@@ -98,8 +98,7 @@ final class SpacesClientDatabaseTests: XCTestCase {
         let databaseA = try SpacesClientDatabase()
         let record = device(id: "profile-a-device")
         try databaseA.upsert(device: record)
-        try databaseA.setActiveDeviceID(record.id)
-        XCTAssertEqual(try databaseA.activeDeviceID(), record.id)
+        XCTAssertEqual(try databaseA.pairedDevices().map(\.id), [record.id])
 
         setenv("SPACES_DB_PATH", profileB.appendingPathComponent("spaces.db").path, 1)
         setenv("SPACES_RUNTIME_DIR", profileB.appendingPathComponent("runtime").path, 1)
@@ -108,24 +107,21 @@ final class SpacesClientDatabaseTests: XCTestCase {
         let databaseB = try SpacesClientDatabase()
 
         XCTAssertNotEqual(profileADatabasePath, profileBDatabasePath)
-        XCTAssertNil(try databaseB.activeDeviceID())
         XCTAssertTrue(try databaseB.pairedDevices().isEmpty)
     }
 
-    func testPairedDeviceMetadataAndActiveSelectionPersistWithoutToken() throws {
+    func testPairedDeviceMetadataPersistsWithoutToken() throws {
         try withTemporaryProfile { root in
             let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)
             let database = try SpacesClientDatabase(path: databaseURL.path)
             let record = device(id: "device-1")
 
             try database.upsert(device: record)
-            try database.setActiveDeviceID(record.id)
             try SpacesDeviceCredentialStore.saveToken("SECRET-TOKEN", deviceID: record.id)
             defer { try? SpacesDeviceCredentialStore.deleteToken(deviceID: record.id) }
 
             let reopened = try SpacesClientDatabase(path: databaseURL.path)
             XCTAssertEqual(try reopened.pairedDevice(id: record.id), record)
-            XCTAssertEqual(try reopened.activeDeviceID(), record.id)
             XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: record.id), "SECRET-TOKEN")
 
             let databaseBytes = try Data(contentsOf: databaseURL)

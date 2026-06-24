@@ -132,7 +132,7 @@ The current macOS redesign in `apps/macos/Sources/gui` and `design-mocks/workspa
 - Settings sections, such as Devices, should use compact sections with label/value rows, icon-led primary actions, and dense saved-item rows; QR codes are shown as functional content rather than decorative artwork.
 - Copyable configuration, such as the MCP client snippets, is shown in a read-only selectable monospaced block the user selects to copy, with a segmented control to switch between variants rather than stacking one block per variant.
 - New Project, New Workspace, and Project Settings are also presented as floating dialog windows that reuse the settings window chrome: a header bar with an icon, title, and close control above a single scrollable form body. Dismiss with the close control, Cancel, or `Esc`. Opening Project Settings does not change the sidebar selection or highlight the project row.
-- Choose a project folder with a path text field plus directory autocomplete rather than a native file picker. The field accepts `~` and absolute paths, surfaces directory suggestions from the active device as the user types, and validates the path on commit so the same control works for local and remote devices.
+- Choose a project folder with a path text field plus directory autocomplete rather than a native file picker. The field accepts `~` and absolute paths, surfaces directory suggestions from the selected device as the user types, and validates the path on commit so the same control works for local and remote devices.
 
 ## Inline Editing
 - Prefer inline editing when the item being edited is already visible in a list or section.

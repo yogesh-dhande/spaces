@@ -4,41 +4,41 @@ import spacesdevicecore
 
 @testable import spacesclientcore
 
-final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
-    func testActiveDeviceClientUsesLongerTimeoutForLongRunningMutations() {
-        XCTAssertEqual(SpacesActiveDeviceClient.requestTimeoutSeconds(for: .overview), SpacesActiveDeviceClient.defaultRequestTimeoutSeconds)
+final class SpacesDeviceOverviewViewModelTests: XCTestCase {
+    func testDeviceClientUsesLongerTimeoutForLongRunningMutations() {
+        XCTAssertEqual(SpacesDeviceClient.requestTimeoutSeconds(for: .overview), SpacesDeviceClient.defaultRequestTimeoutSeconds)
         XCTAssertEqual(
-            SpacesActiveDeviceClient.requestTimeoutSeconds(for: .workspaceCreateOptions(.init(projectID: "project-1"))),
-            SpacesActiveDeviceClient.defaultRequestTimeoutSeconds)
+            SpacesDeviceClient.requestTimeoutSeconds(for: .workspaceCreateOptions(.init(projectID: "project-1"))),
+            SpacesDeviceClient.defaultRequestTimeoutSeconds)
         XCTAssertEqual(
-            SpacesActiveDeviceClient.requestTimeoutSeconds(for: .restartWorkspace(.init(workspaceID: "workspace-1"))),
-            SpacesActiveDeviceClient.longRunningMutationTimeoutSeconds)
+            SpacesDeviceClient.requestTimeoutSeconds(for: .restartWorkspace(.init(workspaceID: "workspace-1"))),
+            SpacesDeviceClient.longRunningMutationTimeoutSeconds)
         XCTAssertEqual(
-            SpacesActiveDeviceClient.requestTimeoutSeconds(
+            SpacesDeviceClient.requestTimeoutSeconds(
                 for: .restartWorkspaceProcess(.init(workspaceID: "workspace-1", processID: nil, processKey: "web", processTemplateID: nil))),
-            SpacesActiveDeviceClient.longRunningMutationTimeoutSeconds)
+            SpacesDeviceClient.longRunningMutationTimeoutSeconds)
         XCTAssertEqual(
-            SpacesActiveDeviceClient.requestTimeoutSeconds(
+            SpacesDeviceClient.requestTimeoutSeconds(
                 for: .restartCodingAgent(.init(workspaceID: "workspace-1", agentID: nil, agentName: "Codex", agentLauncherID: nil))),
-            SpacesActiveDeviceClient.longRunningMutationTimeoutSeconds)
+            SpacesDeviceClient.longRunningMutationTimeoutSeconds)
     }
 
     func testOverviewRefreshesLocalBootstrapAfterTransientConnectionFailure() throws {
         try withClientSecretDirectory { root in
             let database = try SpacesClientDatabase(path: root.appendingPathComponent("Client/spaces-client.db").path)
-            let clientApp = SpacesActiveDeviceClient.macOSClientApp(installationID: "client-test", deviceName: "Test Mac")
-            let probe = ActiveDeviceOverviewRetryProbe()
-            let bootstrap: SpacesActiveDeviceClient.LocalBootstrapProvider = { _ in
+            let clientApp = SpacesDeviceClient.macOSClientApp(installationID: "client-test", deviceName: "Test Mac")
+            let probe = DeviceOverviewRetryProbe()
+            let bootstrap: SpacesDeviceClient.LocalBootstrapProvider = { _ in
                 probe.bootstrapCount += 1
                 return Self.localBootstrapResponse(port: probe.bootstrapCount == 1 ? 11_111 : 22_222)
             }
-            let requestProvider: SpacesActiveDeviceClient.DeviceRequestProvider = { _, device, _, _ in
+            let requestProvider: SpacesDeviceClient.DeviceRequestProvider = { _, device, _, _ in
                 probe.requestedPorts.append(device.port)
                 guard probe.requestedPorts.count > 1 else { throw POSIXError(.ECONNREFUSED) }
                 return Self.emptyOverviewResponse()
             }
 
-            let overview = try SpacesActiveDeviceClient.overview(
+            let overview = try SpacesDeviceClient.localOverview(
                 database: database, clientApp: clientApp, bootstrap: bootstrap, requestProvider: requestProvider)
 
             XCTAssertEqual(probe.bootstrapCount, 2)
@@ -49,37 +49,12 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
         }
     }
 
-    func testOverviewDoesNotRefreshRemoteDeviceAfterConnectionFailure() throws {
-        try withClientSecretDirectory { root in
-            let database = try SpacesClientDatabase(path: root.appendingPathComponent("Client/spaces-client.db").path)
-            try database.upsert(device: Self.remoteDevice())
-            try database.setActiveDeviceID("remote-test")
-            let clientApp = SpacesActiveDeviceClient.macOSClientApp(installationID: "client-test", deviceName: "Test Mac")
-            let probe = ActiveDeviceOverviewRetryProbe()
-            let bootstrap: SpacesActiveDeviceClient.LocalBootstrapProvider = { _ in
-                probe.bootstrapCount += 1
-                return Self.localBootstrapResponse(port: 22_222)
-            }
-            let requestProvider: SpacesActiveDeviceClient.DeviceRequestProvider = { _, device, _, _ in
-                probe.requestedPorts.append(device.port)
-                throw POSIXError(.ECONNREFUSED)
-            }
-
-            XCTAssertThrowsError(
-                try SpacesActiveDeviceClient.overview(
-                    database: database, clientApp: clientApp, bootstrap: bootstrap, requestProvider: requestProvider)
-            ) { error in XCTAssertEqual((error as? POSIXError)?.code, .ECONNREFUSED) }
-            XCTAssertEqual(probe.bootstrapCount, 0)
-            XCTAssertEqual(probe.requestedPorts, [7_443])
-        }
-    }
-
     func testProjectActionsDoNotDependOnDeviceLocation() {
-        XCTAssertEqual(SpacesActiveDeviceProjectActions(isGitRepo: true), .init(isGitRepo: true))
-        XCTAssertTrue(SpacesActiveDeviceProjectActions(isGitRepo: true).showsSettings)
-        XCTAssertTrue(SpacesActiveDeviceProjectActions(isGitRepo: true).showsAddWorkspace)
-        XCTAssertTrue(SpacesActiveDeviceProjectActions(isGitRepo: false).showsSettings)
-        XCTAssertFalse(SpacesActiveDeviceProjectActions(isGitRepo: false).showsAddWorkspace)
+        XCTAssertEqual(SpacesDeviceProjectActions(isGitRepo: true), .init(isGitRepo: true))
+        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: true).showsSettings)
+        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: true).showsAddWorkspace)
+        XCTAssertTrue(SpacesDeviceProjectActions(isGitRepo: false).showsSettings)
+        XCTAssertFalse(SpacesDeviceProjectActions(isGitRepo: false).showsAddWorkspace)
     }
 
     func testOverviewViewModelPreservesWorkspaceRowsAndRuntimeIndicators() {
@@ -112,7 +87,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
                     sessionCount: 0),
             ], sessions: [])
 
-        let model = SpacesActiveDeviceOverviewViewModel(overview: overview)
+        let model = SpacesDeviceOverviewViewModel(overview: overview)
 
         XCTAssertEqual(model.projects.map(\.id), ["project-1"])
         XCTAssertEqual(model.projects.first?.actions.showsSettings, true)
@@ -137,7 +112,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
                     dir: "/device/project-feature", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
             ], sessions: [])
 
-        let model = SpacesActiveDeviceOverviewViewModel(overview: overview)
+        let model = SpacesDeviceOverviewViewModel(overview: overview)
 
         XCTAssertEqual(model.projects.map(\.id), ["project-1"])
         XCTAssertEqual(model.projects.first?.isGitRepo, true)
@@ -153,7 +128,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
                 browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
                 agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]))
 
-        let model = SpacesActiveDeviceProjectSettingsViewModel(project: project)
+        let model = SpacesDeviceProjectSettingsViewModel(project: project)
 
         XCTAssertEqual(model.id, "project-1")
         XCTAssertEqual(model.config.setupScript, "make setup")
@@ -169,7 +144,7 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
     func testWorkspaceDetailViewModelPreservesFullVisibleSurface() {
         let workspace = fullWorkspaceSummary(dir: "/device/project-feature")
 
-        let model = SpacesActiveDeviceWorkspaceDetailViewModel(workspace: workspace)
+        let model = SpacesDeviceWorkspaceDetailViewModel(workspace: workspace)
 
         XCTAssertEqual(model.id, "workspace-1")
         XCTAssertEqual(model.notes, "Workspace notes")
@@ -209,8 +184,8 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
     }
 
     func testWorkspaceDetailVisibleActionsDoNotDependOnDeviceLocation() {
-        let local = SpacesActiveDeviceWorkspaceDetailViewModel(workspace: fullWorkspaceSummary(dir: "/Users/me/project-feature"))
-        let remote = SpacesActiveDeviceWorkspaceDetailViewModel(workspace: fullWorkspaceSummary(dir: "/home/me/project-feature"))
+        let local = SpacesDeviceWorkspaceDetailViewModel(workspace: fullWorkspaceSummary(dir: "/Users/me/project-feature"))
+        let remote = SpacesDeviceWorkspaceDetailViewModel(workspace: fullWorkspaceSummary(dir: "/home/me/project-feature"))
 
         XCTAssertEqual(local.actions, remote.actions)
         XCTAssertEqual(local.surface, remote.surface)
@@ -285,15 +260,9 @@ final class SpacesActiveDeviceOverviewViewModelTests: XCTestCase {
     private static func emptyOverviewResponse() -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [])))
     }
-
-    private static func remoteDevice() -> SpacesPairedDeviceRecord {
-        SpacesPairedDeviceRecord(
-            id: "remote-test", name: "Remote", platform: "linux", host: "192.0.2.10", port: 7_443, certificateFingerprint: "remote-fingerprint",
-            createdAt: "2026-06-21T00:00:00Z", updatedAt: "2026-06-21T00:00:00Z", lastSelectedAt: "2026-06-21T00:00:00Z")
-    }
 }
 
-private final class ActiveDeviceOverviewRetryProbe: @unchecked Sendable {
+private final class DeviceOverviewRetryProbe: @unchecked Sendable {
     var bootstrapCount = 0
     var requestedPorts: [Int] = []
 }

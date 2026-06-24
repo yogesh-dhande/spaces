@@ -1,14 +1,14 @@
 import Foundation
 import spacesdevicecore
 
-public struct SpacesActiveDeviceProjectSettingsViewModel: Equatable, Sendable {
+public struct SpacesDeviceProjectSettingsViewModel: Equatable, Sendable {
     public let id: String
     public let name: String
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
     public let config: SpacesDeviceProjectConfig
-    public let actions: SpacesActiveDeviceProjectActions
+    public let actions: SpacesDeviceProjectActions
 
     public init(project: SpacesDeviceProjectSummary) {
         id = project.id
@@ -17,17 +17,17 @@ public struct SpacesActiveDeviceProjectSettingsViewModel: Equatable, Sendable {
         isGitRepo = project.isGitRepo
         defaultBranch = project.defaultBranch
         config = project.config
-        actions = SpacesActiveDeviceProjectActions(isGitRepo: project.isGitRepo)
+        actions = SpacesDeviceProjectActions(isGitRepo: project.isGitRepo)
     }
 }
 
-public enum SpacesActiveDeviceWorkspaceLifecycleCommand: String, Equatable, Sendable {
+public enum SpacesDeviceWorkspaceLifecycleCommand: String, Equatable, Sendable {
     case launch
     case restart
 }
 
-public struct SpacesActiveDeviceWorkspaceDetailActions: Equatable, Sendable {
-    public let launchOrRestart: SpacesActiveDeviceWorkspaceLifecycleCommand
+public struct SpacesDeviceWorkspaceDetailActions: Equatable, Sendable {
+    public let launchOrRestart: SpacesDeviceWorkspaceLifecycleCommand
     public let showsStop: Bool
     public let showsOverflow: Bool
     public let showsOpenTerminal: Bool
@@ -46,7 +46,7 @@ public struct SpacesActiveDeviceWorkspaceDetailActions: Equatable, Sendable {
     }
 }
 
-public struct SpacesActiveDeviceWorkspaceDetailSurface: Equatable, Sendable {
+public struct SpacesDeviceWorkspaceDetailSurface: Equatable, Sendable {
     public let showsNotes: Bool
     public let showsPorts: Bool
     public let showsProcesses: Bool
@@ -84,7 +84,7 @@ public struct SpacesActiveDeviceWorkspaceDetailSurface: Equatable, Sendable {
     }
 }
 
-public struct SpacesActiveDeviceWorkspaceDetailViewModel: Equatable, Sendable {
+public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let id: String
     public let projectID: String
     public let projectName: String
@@ -103,8 +103,8 @@ public struct SpacesActiveDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let processRows: [SpacesDeviceWorkspaceProcessRow]
     public let codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
-    public let actions: SpacesActiveDeviceWorkspaceDetailActions
-    public let surface: SpacesActiveDeviceWorkspaceDetailSurface
+    public let actions: SpacesDeviceWorkspaceDetailActions
+    public let surface: SpacesDeviceWorkspaceDetailSurface
 
     public init(workspace: SpacesDeviceWorkspaceSummary) {
         id = workspace.id
@@ -125,7 +125,7 @@ public struct SpacesActiveDeviceWorkspaceDetailViewModel: Equatable, Sendable {
         processRows = workspace.processRows
         codingAgentRows = workspace.codingAgentRows
         terminalRows = workspace.terminalRows
-        actions = SpacesActiveDeviceWorkspaceDetailActions(isRunning: workspace.isRunning)
-        surface = SpacesActiveDeviceWorkspaceDetailSurface(workspace: workspace)
+        actions = SpacesDeviceWorkspaceDetailActions(isRunning: workspace.isRunning)
+        surface = SpacesDeviceWorkspaceDetailSurface(workspace: workspace)
     }
 }

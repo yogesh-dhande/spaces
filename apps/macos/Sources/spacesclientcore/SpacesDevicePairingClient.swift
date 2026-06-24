@@ -155,7 +155,6 @@ public enum SpacesDevicePairingClient {
                     id: deviceID, name: metadata.name, platform: "remote", host: deviceAPIHost, port: metadata.port,
                     certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort,
                     createdAt: now, updatedAt: now, lastSelectedAt: now))
-            try database.setActiveDeviceID(deviceID)
             try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
             try SpacesDeviceCredentialStore.saveTransportKey(metadata.transportKey, deviceID: deviceID, profile: request.profile)
             return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)

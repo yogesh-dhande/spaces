@@ -92,7 +92,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - On launch, Spaces blocks only on the cheap prerequisite checks needed for its default runtime path: yabai installed.
 - Installed builds should default to one shared profile rooted at `~/.spaces/`, while repo-local development builds should default to one profile per git worktree under `~/.spaces-dev/profiles/spaces/`.
 - `SPACES_DB_PATH` should override the default database path for the current process, and `SPACES_RUNTIME_DIR` should override the default runtime root for that same resolved profile.
-- Mac client paired-device metadata and active-device selection should follow the resolved profile root, so separate profiles do not share the selected remote device.
+- Mac client paired-device metadata should follow the resolved profile root, so separate profiles do not share paired remote devices.
 - Startup prerequisite checks may enrich command lookup from the user's login-shell PATH, but that lookup must stay bounded and fall back automatically to the inherited PATH plus standard package-manager locations so shell startup files cannot stall app launch indefinitely.
 - When command lookup is enriched from the login-shell PATH, the app's inherited `PATH` remains authoritative. Login-shell entries should only fill gaps that are missing from the launch environment, and built-in package-manager fallbacks should remain last.
 - During first-run setup, Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
@@ -108,7 +108,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 ## Projects
 - Users can add a project from a directory path or a git URL.
 - The New Project form opens in its own dialog window with the same header and chrome as the Settings window, dismissed with the close button, Cancel, or `Esc`.
-- The folder source is a path text field with directory autocomplete, not a native file picker, so projects can be created by path on the local Mac or on a selected remote device. As the user types, suggestions come from the active device's filesystem; on commit the active device validates the path and loads any `spaces.yaml` before the project is saved.
+- The folder source is a path text field with directory autocomplete, not a native file picker, so projects can be created by path on the local Mac or on a selected remote device. As the user types, suggestions come from the selected device's filesystem; on commit the selected device validates the path and loads any `spaces.yaml` before the project is saved.
 - Git imports should create an app-managed clone and default workspace.
 - Non-git projects should create one default workspace for the project directory.
 - Project creation and deletion should show progress without freezing the UI.

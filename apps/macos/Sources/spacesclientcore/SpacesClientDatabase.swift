@@ -179,32 +179,7 @@ public final class SpacesClientDatabase {
     }
 
     public func deletePairedDevice(id: String) throws {
-        try withImmediateTransaction {
-            try execute(sql: "DELETE FROM paired_devices WHERE id = ?", bindings: [id])
-            if try activeDeviceID() == id { try setActiveDeviceID(nil) }
-        }
-    }
-
-    public func activeDeviceID() throws -> String? {
-        guard let row = try queryRow(sql: "SELECT value FROM client_settings WHERE key = 'active_device_id'"), let value = row.first else {
-            return nil
-        }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    public func setActiveDeviceID(_ id: String?) throws {
-        let trimmed = id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmed.isEmpty {
-            try execute(sql: "DELETE FROM client_settings WHERE key = 'active_device_id'")
-        } else {
-            try execute(
-                sql: """
-                    INSERT INTO client_settings(key, value)
-                    VALUES ('active_device_id', ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """, bindings: [trimmed])
-        }
+        try withImmediateTransaction { try execute(sql: "DELETE FROM paired_devices WHERE id = ?", bindings: [id]) }
     }
 
     public func backupURLs() throws -> [URL] { try backupManager.existingBackups() }
@@ -423,11 +398,6 @@ public final class SpacesClientDatabase {
               last_selected_at TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS client_settings (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
             );
@@ -435,7 +405,6 @@ public final class SpacesClientDatabase {
 
     private static let dropSchemaSQL = """
             DROP TABLE IF EXISTS paired_devices;
-            DROP TABLE IF EXISTS client_settings;
             DROP TABLE IF EXISTS migration_state;
         """
 }

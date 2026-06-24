@@ -874,13 +874,6 @@ with sqlite3.connect(db_path) as db:
 PY
 }
 
-select_local_demo_device() {
-  if [[ -z "$spaces_client_db_path" || ! -f "$spaces_client_db_path" ]]; then
-    return
-  fi
-  sqlite3 "$spaces_client_db_path" "DELETE FROM client_settings WHERE key = 'active_device_id';"
-}
-
 open_remote_device_pairing_window() {
   [[ -n "$remote_device_id" ]] || return 1
 
@@ -1461,7 +1454,6 @@ fi
 
 require_path "$ios_app_path" "SpacesMobile.app"
 pair_remote_demo_device
-select_local_demo_device
 open_simulator_app
 boot_device "$ipad_udid"
 boot_device "$iphone_udid"

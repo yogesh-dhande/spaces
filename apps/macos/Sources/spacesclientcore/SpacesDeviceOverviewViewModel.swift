@@ -1,7 +1,7 @@
 import Foundation
 import spacesdevicecore
 
-public struct SpacesActiveDeviceProjectActions: Equatable, Sendable {
+public struct SpacesDeviceProjectActions: Equatable, Sendable {
     public let showsSettings: Bool
     public let showsAddWorkspace: Bool
 
@@ -11,14 +11,14 @@ public struct SpacesActiveDeviceProjectActions: Equatable, Sendable {
     }
 }
 
-public struct SpacesActiveDeviceProjectRow: Equatable, Sendable {
+public struct SpacesDeviceProjectRow: Equatable, Sendable {
     public let id: String
     public let name: String
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
     public let isCollapsed: Bool
-    public let actions: SpacesActiveDeviceProjectActions
+    public let actions: SpacesDeviceProjectActions
 
     public init(id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool = false) {
         self.id = id
@@ -27,11 +27,11 @@ public struct SpacesActiveDeviceProjectRow: Equatable, Sendable {
         self.isGitRepo = isGitRepo
         self.defaultBranch = defaultBranch
         self.isCollapsed = isCollapsed
-        self.actions = SpacesActiveDeviceProjectActions(isGitRepo: isGitRepo)
+        self.actions = SpacesDeviceProjectActions(isGitRepo: isGitRepo)
     }
 }
 
-public struct SpacesActiveDeviceWorkspaceRow: Equatable, Sendable {
+public struct SpacesDeviceWorkspaceRow: Equatable, Sendable {
     public let id: String
     public let projectID: String
     public let projectName: String
@@ -64,16 +64,16 @@ public struct SpacesActiveDeviceWorkspaceRow: Equatable, Sendable {
     }
 }
 
-public enum SpacesActiveDeviceWorkspaceLifecycle: String, Equatable, Sendable {
+public enum SpacesDeviceWorkspaceLifecycle: String, Equatable, Sendable {
     case stopped
     case running
 
     public init(isRunning: Bool) { self = isRunning ? .running : .stopped }
 }
 
-public struct SpacesActiveDeviceWorkspaceRuntime: Equatable, Sendable {
+public struct SpacesDeviceWorkspaceRuntime: Equatable, Sendable {
     public let workspaceID: String
-    public let lifecycleState: SpacesActiveDeviceWorkspaceLifecycle
+    public let lifecycleState: SpacesDeviceWorkspaceLifecycle
     public let hasTrackedRuntimeIndicators: Bool
     public let runningProcessCount: Int
     public let exitedProcessCount: Int
@@ -82,7 +82,7 @@ public struct SpacesActiveDeviceWorkspaceRuntime: Equatable, Sendable {
     public let missingConfiguredBrowserSessionCount: Int
 
     public init(
-        workspaceID: String, lifecycleState: SpacesActiveDeviceWorkspaceLifecycle, hasTrackedRuntimeIndicators: Bool, runningProcessCount: Int,
+        workspaceID: String, lifecycleState: SpacesDeviceWorkspaceLifecycle, hasTrackedRuntimeIndicators: Bool, runningProcessCount: Int,
         exitedProcessCount: Int, waitingAgentWindowCount: Int, missingConfiguredProcessCount: Int = 0, missingConfiguredBrowserSessionCount: Int = 0
     ) {
         self.workspaceID = workspaceID
@@ -96,30 +96,30 @@ public struct SpacesActiveDeviceWorkspaceRuntime: Equatable, Sendable {
     }
 }
 
-public struct SpacesActiveDeviceOverviewViewModel: Equatable, Sendable {
-    public let projects: [SpacesActiveDeviceProjectRow]
-    public let workspacesByProject: [String: [SpacesActiveDeviceWorkspaceRow]]
-    public let workspaceRuntimeStatusByID: [String: SpacesActiveDeviceWorkspaceRuntime]
+public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
+    public let projects: [SpacesDeviceProjectRow]
+    public let workspacesByProject: [String: [SpacesDeviceWorkspaceRow]]
+    public let workspaceRuntimeStatusByID: [String: SpacesDeviceWorkspaceRuntime]
 
     public init(overview: SpacesDeviceOverviewPayload) {
         if overview.projects.isEmpty {
             let grouped = Dictionary(grouping: overview.workspaces, by: \.projectID)
             projects = grouped.values.compactMap { workspaces in
                 guard let first = workspaces.first else { return nil }
-                return SpacesActiveDeviceProjectRow(
+                return SpacesDeviceProjectRow(
                     id: first.projectID, name: first.projectName, dir: "", isGitRepo: first.branch != nil || first.baseBranch != nil,
                     defaultBranch: first.baseBranch)
             }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         } else {
             projects = overview.projects.map {
-                SpacesActiveDeviceProjectRow(
+                SpacesDeviceProjectRow(
                     id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
             }
         }
 
         workspacesByProject = Dictionary(
             grouping: overview.workspaces.map {
-                SpacesActiveDeviceWorkspaceRow(
+                SpacesDeviceWorkspaceRow(
                     id: $0.id, projectID: $0.projectID, projectName: $0.projectName, title: $0.title, branch: $0.branch, baseBranch: $0.baseBranch,
                     dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
             }, by: \.projectID
@@ -136,8 +136,8 @@ public struct SpacesActiveDeviceOverviewViewModel: Equatable, Sendable {
                 let hasTrackedIndicators = runningProcessCount > 0 || exitedProcessCount > 0 || waitingAgentCount > 0 || workspace.sessionCount > 0
                 return (
                     workspace.id,
-                    SpacesActiveDeviceWorkspaceRuntime(
-                        workspaceID: workspace.id, lifecycleState: SpacesActiveDeviceWorkspaceLifecycle(isRunning: workspace.isRunning),
+                    SpacesDeviceWorkspaceRuntime(
+                        workspaceID: workspace.id, lifecycleState: SpacesDeviceWorkspaceLifecycle(isRunning: workspace.isRunning),
                         hasTrackedRuntimeIndicators: hasTrackedIndicators, runningProcessCount: runningProcessCount,
                         exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentCount)
                 )
