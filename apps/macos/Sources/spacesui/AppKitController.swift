@@ -2715,7 +2715,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 logStartupSnapshotProfile("sidebar_snapshot_config_ready")
                 let activeDeviceOverview = try SpacesActiveDeviceClient.overview(
                     database: SpacesClientDatabase(), clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                let mapped = activeDeviceSidebarData(from: activeDeviceOverview.overview)
+                let mapped = activeDeviceSidebarData(from: activeDeviceOverview.overview, deviceID: activeDeviceOverview.device.id)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_active_device_ready",
@@ -2741,19 +2741,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated static func activeDeviceSidebarData(from overview: SpacesDeviceOverviewPayload) -> (
+    nonisolated static func activeDeviceSidebarData(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> (
         projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
     ) {
         let model = SpacesActiveDeviceOverviewViewModel(overview: overview)
         let projects = model.projects.map {
             ProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed,
+                deviceID: deviceID)
         }
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
                 WorkspaceSummary(
                     id: $0.id, title: $0.title, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
-                    isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
+                    isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
             }
         }
         let workspaceRuntimeStatusByID = model.workspaceRuntimeStatusByID.mapValues { runtime in
@@ -4435,7 +4436,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     ) {
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         activeDeviceOverview = overview
-        let mapped = Self.activeDeviceSidebarData(from: overview)
+        let mapped = Self.activeDeviceSidebarData(from: overview, deviceID: activeDeviceID)
         projects = mapped.projects
         workspacesByProject = mapped.workspacesByProject
         workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
@@ -12621,8 +12622,10 @@ extension AppKitController {
         return items
     }
 
-    nonisolated static func activeDeviceCommandPaletteWorkspaceItems(from overview: SpacesDeviceOverviewPayload) -> [CommandPaletteItem] {
-        let mapped = activeDeviceSidebarData(from: overview)
+    nonisolated static func activeDeviceCommandPaletteWorkspaceItems(
+        from overview: SpacesDeviceOverviewPayload, deviceID: String = SpacesDeviceRecord.localDeviceID
+    ) -> [CommandPaletteItem] {
+        let mapped = activeDeviceSidebarData(from: overview, deviceID: deviceID)
         var items: [CommandPaletteItem] = []
 
         for project in mapped.projects {

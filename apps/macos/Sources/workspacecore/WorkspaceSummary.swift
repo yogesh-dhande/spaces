@@ -11,10 +11,11 @@ public struct WorkspaceSummary: Sendable {
     public let isHidden: Bool
     public let isDefault: Bool
     public let notes: String?
+    public let deviceID: String
 
     public init(
         id: String, title: String, branch: String?, baseBranch: String? = nil, dir: String, isRunning: Bool, isArchived: Bool, isHidden: Bool = false,
-        isDefault: Bool, notes: String? = nil
+        isDefault: Bool, notes: String? = nil, deviceID: String = SpacesDeviceRecord.localDeviceID
     ) {
         self.id = id
         self.title = title
@@ -26,5 +27,6 @@ public struct WorkspaceSummary: Sendable {
         self.isHidden = isHidden
         self.isDefault = isDefault
         self.notes = notes
+        self.deviceID = deviceID
     }
 }

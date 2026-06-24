@@ -681,8 +681,8 @@ public final class WorkspaceOrchestrator {
         }
         if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
         let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
-        return try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
-            project in importedDocument?.applying(to: &project)
+        return try configuredProjectRecord(baseRecord: normalizeDir(id: UUID().uuidString, normalizedDir)) { project in
+            importedDocument?.applying(to: &project)
         }
     }
 
@@ -694,8 +694,7 @@ public final class WorkspaceOrchestrator {
         }
         if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
         let importedDocument = try spacesYAMLDocumentIfPresent(in: URL(fileURLWithPath: normalizedDir, isDirectory: true))
-        let record = try configuredProjectRecord(baseRecord: normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)) {
-            project in
+        let record = try configuredProjectRecord(baseRecord: normalizeDir(id: UUID().uuidString, normalizedDir)) { project in
             guard let importedDocument else {
                 configure(&project)
                 return
@@ -713,7 +712,7 @@ public final class WorkspaceOrchestrator {
     public func addReviewedProject(dir: String, configure: (inout ProjectRecord) -> Void) throws -> ProjectRecord {
         let normalizedDir = normalizePath(dir)
         if try store.project(dir: normalizedDir) != nil { throw WorkspaceError.projectAlreadyExists(dir: normalizedDir) }
-        let baseRecord = try normalizeDir(id: projectID(namespace: "dir", source: normalizedDir), normalizedDir)
+        let baseRecord = try normalizeDir(id: UUID().uuidString, normalizedDir)
         let record = try configuredProjectRecord(baseRecord: baseRecord, update: configure)
         try store.upsert(project: record)
         do { try ensureDefaultWorkspace(for: record) } catch {
@@ -5460,7 +5459,16 @@ public final class WorkspaceOrchestrator {
     ]
 
     private func worktreeRoot(project: ProjectRecord) throws -> URL {
-        let projectDirname = managedProjectStorageDirectoryName(projectID: project.id, preferredName: project.name)
+        let projectDirname: String
+        if isManagedRepositoryDirectory(path: normalizePath(project.dir)) {
+            // Managed git clones live at repos/<leaf>; mirror that leaf under the
+            // workspaces root so the worktree root stays deterministic from the
+            // import URL (enabling orphaned-folder detection on re-import) even
+            // though the project id is an opaque unique identifier.
+            projectDirname = URL(fileURLWithPath: project.dir).lastPathComponent
+        } else {
+            projectDirname = managedProjectStorageDirectoryName(seed: project.id, preferredName: project.name)
+        }
         return workspaceRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
     }
 
@@ -5468,12 +5476,12 @@ public final class WorkspaceOrchestrator {
         let trimmedURL = gitURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
         let inferredName = inferredProjectName(from: trimmedURL)
-        let projectID = projectID(namespace: "git", source: trimmedURL)
+        let storageHash = managedStorageHash(namespace: "git", source: trimmedURL)
         let projectName = sanitizeDirname(inferredName, fallback: "project")
-        let projectDirname = managedProjectStorageDirectoryName(projectID: projectID, preferredName: projectName)
+        let projectDirname = managedProjectStorageDirectoryName(seed: storageHash, preferredName: projectName)
         let destination = repositoriesRootDirectory().appending(path: projectDirname, directoryHint: .isDirectory)
         let normalizedDestination = normalizePathPreservingLeaf(destination.path)
-        let project = ProjectRecord(id: projectID, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil)
+        let project = ProjectRecord(id: UUID().uuidString, name: projectName, dir: normalizedDestination, isGitRepo: true, defaultBranch: nil)
         return GitProjectImportPlan(gitURL: trimmedURL, project: project, destination: destination)
     }
 
@@ -5711,15 +5719,15 @@ public final class WorkspaceOrchestrator {
         return trimmed.isEmpty ? fallback : trimmed
     }
 
-    private func managedProjectStorageDirectoryName(projectID: String, preferredName: String) -> String {
+    private func managedProjectStorageDirectoryName(seed: String, preferredName: String) -> String {
         let sanitizedName = sanitizeDirname(preferredName, fallback: "project")
-        let hashSuffix = String(projectID.lowercased().prefix(16))
+        let hashSuffix = String(seed.lowercased().prefix(16))
         let maxNameLength = max(1, 255 - hashSuffix.count - 1)
         let truncatedName = String(sanitizedName.prefix(maxNameLength))
         return "\(truncatedName)-\(hashSuffix)"
     }
 
-    private func projectID(namespace: String, source: String) -> String {
+    private func managedStorageHash(namespace: String, source: String) -> String {
         let data = Data("\(namespace)\u{0}\(source)".utf8)
         #if canImport(CryptoKit)
             return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()

@@ -80,10 +80,12 @@ import workspacecore
                     ])
             ], sessions: [])
 
-        let mapped = AppKitController.activeDeviceSidebarData(from: overview)
+        let mapped = AppKitController.activeDeviceSidebarData(from: overview, deviceID: "remote-device")
 
         #expect(mapped.projects.map { $0.id } == ["project-1"])
         #expect(mapped.projects.first?.isGitRepo == true)
+        #expect(mapped.projects.first?.deviceID == "remote-device")
+        #expect(mapped.workspacesByProject["project-1"]?.first?.deviceID == "remote-device")
         #expect(mapped.workspacesByProject["project-1"]?.map { $0.id } == ["workspace-1"])
         #expect(mapped.workspacesByProject["project-1"]?.first?.notes == "Remote and local use this same payload.")
 

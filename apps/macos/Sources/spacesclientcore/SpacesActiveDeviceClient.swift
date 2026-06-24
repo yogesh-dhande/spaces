@@ -115,6 +115,18 @@ public enum SpacesActiveDeviceClient {
         }
     }
 
+    /// Fetches the overview for a specific paired device, independent of which device is currently active.
+    /// Used to populate the multi-device sidebar where every paired device is shown at once.
+    public static func overview(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil)
+        throws -> SpacesActiveDeviceOverview
+    {
+        try overview(
+            device: device, clientApp: clientApp, profile: profile,
+            requestProvider: { request, device, clientApp, profile in
+                try SpacesActiveDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
+            })
+    }
+
     private static func overview(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
     ) throws -> SpacesActiveDeviceOverview {
