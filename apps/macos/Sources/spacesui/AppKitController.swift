@@ -4529,6 +4529,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         deviceSections.first(where: { $0.deviceID == deviceID })?.device
     }
 
+    private func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
+
     /// The device that owns the current selection, so mutations route to the
     /// daemon that actually hosts the selected workspace/project rather than to a
     /// single global active device.
@@ -6646,6 +6648,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let revealButton = actionButton(
             title: "Reveal", symbol: "folder", tooltip: "Reveal workspace in Finder", action: #selector(revealDirectoryInFinder(_:)), primary: false)
         revealButton.identifier = NSUserInterfaceItemIdentifier(workspace.dir)
+        revealButton.isEnabled = isLocalWorkspace(workspace)
         revealButton.setAccessibilityIdentifier("workspace-setup-reveal")
 
         let copyLogButton = actionButton(
@@ -10023,7 +10026,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// workspace path (for Copy/Reveal) or workspace ID (for Archive/Hide) in their
     /// `identifier.rawValue`, letting the underlying action methods stay
     /// unchanged whether they're triggered by a button or a menu item.
-    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, isHidden: Bool, target: AnyObject?) -> NSMenu {
+    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, isHidden: Bool, target: AnyObject?, isLocalDevice: Bool = true) -> NSMenu
+    {
         let menu = NSMenu()
 
         func addItem(title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String) {
@@ -10038,9 +10042,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         addItem(
             title: "Copy path", symbol: "doc.on.doc", action: #selector(AppKitController.copyDirectoryPath(_:)), keyEquivalent: "", modifiers: [],
             identifier: path)
-        addItem(
-            title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
-            modifiers: [.command, .shift], identifier: path)
+        // Reveal in Finder needs a path on this Mac, so it is offered only for
+        // local-device workspaces; remote workspaces live on another daemon.
+        if isLocalDevice {
+            addItem(
+                title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
+                modifiers: [.command, .shift], identifier: path)
+        }
         menu.addItem(.separator())
         addItem(
             title: isHidden ? "Unhide" : "Hide", symbol: isHidden ? "eye" : "eye.slash",
@@ -10056,7 +10064,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let workspaceID = sender.identifier?.rawValue,
             let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == workspaceID })
         else { return }
-        let menu = Self.makeWorkspaceOverflowMenu(workspaceID: workspaceID, path: workspace.dir, isHidden: workspace.isHidden, target: self)
+        let menu = Self.makeWorkspaceOverflowMenu(
+            workspaceID: workspaceID, path: workspace.dir, isHidden: workspace.isHidden, target: self, isLocalDevice: isLocalWorkspace(workspace))
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }

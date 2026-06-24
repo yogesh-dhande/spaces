@@ -11,6 +11,14 @@ import Testing
         #expect(titles.contains("Reveal in Finder"))
     }
 
+    @Test func remoteWorkspaceMenuOmitsRevealButKeepsCopyPath() {
+        let menu = AppKitController.makeWorkspaceOverflowMenu(
+            workspaceID: "ws-1", path: "/remote/ws-1", isHidden: false, target: nil, isLocalDevice: false)
+        let titles = menu.items.map { $0.title }
+        #expect(titles.contains("Copy path"))
+        #expect(!titles.contains("Reveal in Finder"))
+    }
+
     @Test func copyPathItemCarriesPathWithoutShortcut() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(workspaceID: "ws-1", path: "/tmp/ws-1", isHidden: false, target: nil)
         guard let copy = menu.items.first(where: { $0.title == "Copy path" }) else {
