@@ -197,6 +197,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var activeDeviceIsRemote = false
     private var activePairedDevice: SpacesPairedDeviceRecord?
     private var activeDeviceOverview: SpacesDeviceOverviewPayload?
+    private var deviceSections: [DeviceSection] = []
     private var alertsGroups: [AlertsGroup] = []
     private var dismissedAlertsAttentionItemIDs: Set<String> = []
     private var visibleDetailWorkspaceID: String?
@@ -2020,6 +2021,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let requiresReconnect: Bool
     }
 
+    enum SidebarDeviceLoadState: Sendable, Equatable {
+        case loading
+        case offline(String)
+        case loaded
+    }
+
+    /// One paired device's slice of the sidebar. The sidebar shows every paired
+    /// device at once; each section loads independently so a slow or unreachable
+    /// device does not block the others.
+    private struct DeviceSection: Sendable {
+        let deviceID: String
+        let deviceName: String
+        let isLocal: Bool
+        var loadState: SidebarDeviceLoadState
+        var device: SpacesPairedDeviceRecord?
+        var projects: [ProjectSummary] = []
+        var workspacesByProject: [String: [WorkspaceSummary]] = [:]
+        var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
+        var alertsGroups: [AlertsGroup] = []
+        var overview: SpacesDeviceOverviewPayload?
+    }
+
     private struct ClientDevicePairingWindow {
         let deviceID: String
         let deviceName: String
@@ -2713,8 +2736,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 logStartupSnapshotProfile("sidebar_snapshot_store_ready")
                 let config = try orchestrator.syncConfig()
                 logStartupSnapshotProfile("sidebar_snapshot_config_ready")
-                let activeDeviceOverview = try SpacesActiveDeviceClient.overview(
-                    database: SpacesClientDatabase(), clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                // The sidebar shows every paired device at once; the initial snapshot
+                // always loads the local device first, then remote sections stream in
+                // independently (see loadRemoteDeviceSections).
+                let deviceClientApp = SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+                let localDevice = try SpacesActiveDeviceClient.bootstrapLocalDevice(database: SpacesClientDatabase(), clientApp: deviceClientApp)
+                let activeDeviceOverview = try SpacesActiveDeviceClient.overview(device: localDevice, clientApp: deviceClientApp)
                 let mapped = activeDeviceSidebarData(from: activeDeviceOverview.overview, deviceID: activeDeviceOverview.device.id)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
@@ -3772,24 +3799,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func refreshActiveDeviceSelector() {
-        guard let popup = activeDevicePopUpButton else { return }
-        let devices = connectedClientDevices()
-        popup.removeAllItems()
-        for device in devices {
-            popup.addItem(withTitle: device.name)
-            popup.lastItem?.representedObject = device.id
-            popup.lastItem?.toolTip = clientDeviceDetailText(device)
-            popup.lastItem?.isEnabled = device.isAvailable
-        }
-        if let item = popup.itemArray.first(where: { ($0.representedObject as? String) == activeDeviceID }) {
-            popup.select(item)
-        } else {
-            popup.selectItem(at: 0)
-        }
-        let hideSelector = devices.count <= 1
-        activeDeviceSelectorContainer?.isHidden = hideSelector
-        projectsSectionHeaderTopToDeviceSelector?.isActive = !hideSelector
-        projectsSectionHeaderTopToAlertsRow?.isActive = hideSelector
+        // The sidebar now shows every paired device as its own section, so the
+        // active-device picker is redundant and stays hidden.
+        activeDeviceSelectorContainer?.isHidden = true
+        projectsSectionHeaderTopToDeviceSelector?.isActive = false
+        projectsSectionHeaderTopToAlertsRow?.isActive = true
     }
 
     @objc private func activeDeviceSelectionChanged(_ sender: NSPopUpButton) {
@@ -4372,15 +4386,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         invalidateCommandPaletteCache()
         configCache = snapshot.config
         loadShortcutSpecs()
-        projects = snapshot.projects
-        workspacesByProject = snapshot.workspacesByProject
-        workspaceRuntimeStatusByID = snapshot.workspaceRuntimeStatusByID
+        deviceSections = [
+            DeviceSection(
+                deviceID: snapshot.activeDeviceID, deviceName: snapshot.activeDeviceName, isLocal: !snapshot.activeDeviceIsRemote, loadState: .loaded,
+                device: snapshot.activePairedDevice, projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject,
+                workspaceRuntimeStatusByID: snapshot.workspaceRuntimeStatusByID, alertsGroups: snapshot.alertsGroups,
+                overview: snapshot.activeDeviceOverview)
+        ]
         activeDeviceID = snapshot.activeDeviceID
         activeDeviceName = snapshot.activeDeviceName
         activeDeviceIsRemote = snapshot.activeDeviceIsRemote
         activePairedDevice = snapshot.activePairedDevice
         activeDeviceOverview = snapshot.activeDeviceOverview
-        alertsGroups = snapshot.alertsGroups
+        rebuildFlatSidebarData()
         loadAlertsDismissedAttentionItemIDs()
         pruneDismissedAlertsAttentionItemIDsIfNeeded()
         outlineView.reloadData()
@@ -4401,14 +4419,94 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updateAlertsSidebarBadge()
         logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(alertsGroups.count)")
         if showingAlerts { showAlertsDetail() }
+        loadRemoteDeviceSections()
+    }
+
+    /// Adds a section for every paired remote device and fetches each one's overview
+    /// independently so a slow or unreachable device never blocks the sidebar.
+    private func loadRemoteDeviceSections() {
+        let remotes = macPairedDevices()
+        for record in remotes where !deviceSections.contains(where: { $0.deviceID == record.id }) {
+            let available = Self.pairedDeviceHasRequiredCredentials(deviceID: record.id)
+            deviceSections.append(
+                DeviceSection(
+                    deviceID: record.id, deviceName: record.name, isLocal: false, loadState: available ? .loading : .offline("Reconnect required"),
+                    device: record))
+        }
+        outlineView.reloadData()
+        let clientApp = SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        for record in remotes where Self.pairedDeviceHasRequiredCredentials(deviceID: record.id) {
+            Task { @MainActor [weak self] in
+                let result: Result<SpacesActiveDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
+                    do { return .success(try SpacesActiveDeviceClient.overview(device: record, clientApp: clientApp)) } catch {
+                        return .failure(error)
+                    }
+                }.value
+                self?.applyRemoteDeviceSection(deviceID: record.id, result: result)
+            }
+        }
+    }
+
+    private func applyRemoteDeviceSection(deviceID: String, result: Result<SpacesActiveDeviceOverview, Error>) {
+        guard let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
+        switch result {
+        case .success(let overview):
+            let mapped = Self.activeDeviceSidebarData(from: overview.overview, deviceID: deviceID)
+            deviceSections[index].projects = mapped.projects
+            deviceSections[index].workspacesByProject = mapped.workspacesByProject
+            deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
+            deviceSections[index].alertsGroups = []  // Phase 4: aggregate daemon-reported alerts from the overview payload.
+            deviceSections[index].overview = overview.overview
+            deviceSections[index].device = overview.device
+            deviceSections[index].loadState = .loaded
+        case .failure(let error): deviceSections[index].loadState = .offline(error.localizedDescription)
+        }
+        rebuildFlatSidebarData()
+        outlineView.reloadData()
+        applySidebarProjectExpansionState()
+        updateAlertsSidebarBadge()
+    }
+
+    /// Recomputes the flat, id-keyed sidebar dictionaries as the union of every
+    /// loaded device section. Project/workspace ids are globally unique, so the
+    /// union never collides and all existing id-keyed lookups keep working.
+    private func rebuildFlatSidebarData() {
+        var mergedProjects: [ProjectSummary] = []
+        var mergedWorkspaces: [String: [WorkspaceSummary]] = [:]
+        var mergedRuntime: [String: WorkspaceRuntimeStatus] = [:]
+        var mergedAlerts: [AlertsGroup] = []
+        for section in deviceSections where section.loadState == .loaded {
+            mergedProjects.append(contentsOf: section.projects)
+            mergedWorkspaces.merge(section.workspacesByProject) { current, _ in current }
+            mergedRuntime.merge(section.workspaceRuntimeStatusByID) { current, _ in current }
+            mergedAlerts.append(contentsOf: section.alertsGroups)
+        }
+        projects = mergedProjects
+        workspacesByProject = mergedWorkspaces
+        workspaceRuntimeStatusByID = mergedRuntime
+        alertsGroups = mergedAlerts
     }
 
     nonisolated static func daemonStateMutationDevice(
         activePairedDevice: SpacesPairedDeviceRecord?, activeDeviceOverview _: SpacesDeviceOverviewPayload?
     ) -> SpacesPairedDeviceRecord? { activePairedDevice }
 
+    private func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
+        deviceSections.first(where: { $0.deviceID == deviceID })?.device
+    }
+
+    /// The device that owns the current selection, so mutations route to the
+    /// daemon that actually hosts the selected workspace/project rather than to a
+    /// single global active device.
+    private func selectedRowDeviceID() -> String? {
+        if let selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID) { return project.deviceID }
+        if let selectedProjectID, let project = projects.first(where: { $0.id == selectedProjectID }) { return project.deviceID }
+        return nil
+    }
+
     private func activeDeviceForDaemonStateMutation() -> SpacesPairedDeviceRecord? {
-        Self.daemonStateMutationDevice(activePairedDevice: activePairedDevice, activeDeviceOverview: activeDeviceOverview)
+        if let deviceID = selectedRowDeviceID(), let device = deviceRecord(forDeviceID: deviceID) { return device }
+        return activePairedDevice
     }
 
     private static func noActiveDeviceSelectedError() -> NSError {
@@ -4435,17 +4533,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         selectedWorkspaceID preferredWorkspaceID: String? = nil, preserveDetailPane: Bool = false
     ) {
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
-        activeDeviceOverview = overview
-        let mapped = Self.activeDeviceSidebarData(from: overview, deviceID: activeDeviceID)
-        projects = mapped.projects
-        workspacesByProject = mapped.workspacesByProject
-        workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-        if activeDeviceIsRemote {
-            alertsGroups = []
-        } else {
-            alertsGroups =
-                (try? Self.buildAlertsGroupsSnapshot(orchestrator: orchestrator, projects: projects, workspacesByProject: workspacesByProject)) ?? []
+        // The mutation's overview belongs to whichever device hosts the affected
+        // workspace; update only that device's section and re-merge so the other
+        // devices' rows stay intact.
+        let deviceID = preferredWorkspaceID.flatMap { findWorkspace(id: $0)?.0.deviceID } ?? selectedRowDeviceID() ?? activeDeviceID
+        let mapped = Self.activeDeviceSidebarData(from: overview, deviceID: deviceID)
+        if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
+            deviceSections[index].projects = mapped.projects
+            deviceSections[index].workspacesByProject = mapped.workspacesByProject
+            deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
+            deviceSections[index].overview = overview
+            if deviceSections[index].isLocal {
+                activeDeviceOverview = overview
+                deviceSections[index].alertsGroups =
+                    (try? Self.buildAlertsGroupsSnapshot(
+                        orchestrator: orchestrator, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject)) ?? []
+            }
         }
+        rebuildFlatSidebarData()
         if let preferredWorkspaceID, findWorkspace(id: preferredWorkspaceID) != nil {
             selectedWorkspaceID = preferredWorkspaceID
             selectedProjectID = findWorkspace(id: preferredWorkspaceID)?.0.id ?? preferredProjectID
@@ -9954,8 +10059,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func showRemoteWorkspacePathActionErrorIfNeeded(_ action: WorkspacePathAction) -> Bool {
-        guard activeDeviceForDaemonStateMutation() != nil, activeDeviceIsRemote else { return false }
-        showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: activeDeviceName)))
+        // Editor/Finder actions need a path on this Mac; gate them when the
+        // selected workspace lives on a remote device.
+        guard let deviceID = selectedRowDeviceID(), let section = deviceSections.first(where: { $0.deviceID == deviceID }), !section.isLocal else {
+            return false
+        }
+        showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: section.deviceName)))
         return true
     }
 
@@ -10151,6 +10260,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func hiddenWorkspaces() -> [(ProjectSummary, WorkspaceSummary)] {
         projects.flatMap { project in
+            (workspacesByProject[project.id] ?? []).compactMap { workspace in
+                guard !workspace.isArchived, workspace.isHidden else { return nil }
+                return (project, workspace)
+            }
+        }
+    }
+
+    /// True when more than one paired device is present, so the sidebar groups
+    /// projects under per-device header rows. With a single (local) device the
+    /// root stays a flat project list.
+    private var showsDeviceHeaders: Bool { deviceSections.count > 1 }
+
+    private func deviceProjects(deviceID: String) -> [ProjectSummary] { projects.filter { $0.deviceID == deviceID } }
+
+    private func hiddenWorkspaces(deviceID: String) -> [(ProjectSummary, WorkspaceSummary)] {
+        deviceProjects(deviceID: deviceID).flatMap { project in
             (workspacesByProject[project.id] ?? []).compactMap { workspace in
                 guard !workspace.isArchived, workspace.isHidden else { return nil }
                 return (project, workspace)
@@ -11484,14 +11609,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
+    private static let placeholderProject = ProjectSummary(id: "", name: "", dir: "", isGitRepo: false, defaultBranch: nil)
+
+    private var singleDeviceID: String { deviceSections.first?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID }
+
+    /// Number of outline rows directly under a device: its projects plus a Hidden
+    /// section row when that device has hidden workspaces.
+    private func deviceRowCount(deviceID: String) -> Int {
+        deviceProjects(deviceID: deviceID).count + (hiddenWorkspaces(deviceID: deviceID).isEmpty ? 0 : 1)
+    }
+
+    private func deviceChildRef(deviceID: String, index: Int) -> OutlineItemRef {
+        let deviceProjects = deviceProjects(deviceID: deviceID)
+        if index >= 0, index < deviceProjects.count { return outlineItemRef(for: .project(deviceProjects[index])) }
+        return outlineItemRef(for: .hiddenWorkspaces(deviceID))
+    }
+
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil { return projects.count + (hiddenWorkspaces().isEmpty ? 0 : 1) }
+        if item == nil { return showsDeviceHeaders ? deviceSections.count : deviceRowCount(deviceID: singleDeviceID) }
+        if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceRowCount(deviceID: deviceID) }
         if case .project(let project) = (item as? OutlineItemRef)?.item { return visibleWorkspaces(projectID: project.id).count }
-        if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item { return hiddenWorkspaces().count }
+        if case .hiddenWorkspaces(let deviceID) = (item as? OutlineItemRef)?.item { return hiddenWorkspaces(deviceID: deviceID).count }
         return 0
     }
 
     public func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        if case .device = (item as? OutlineItemRef)?.item { return true }
         if case .project = (item as? OutlineItemRef)?.item { return true }
         if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item { return true }
         return false
@@ -11503,9 +11646,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil {
-            if index < projects.count { return outlineItemRef(for: .project(projects[index])) }
-            return outlineItemRef(for: .hiddenWorkspaces)
+            if showsDeviceHeaders {
+                let deviceID = (index >= 0 && index < deviceSections.count) ? deviceSections[index].deviceID : singleDeviceID
+                return outlineItemRef(for: .device(deviceID))
+            }
+            return deviceChildRef(deviceID: singleDeviceID, index: index)
         }
+        if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceChildRef(deviceID: deviceID, index: index) }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             let visible = visibleWorkspaces(projectID: project.id)
             let workspace =
@@ -11514,18 +11661,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
-        if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item {
-            let hidden = hiddenWorkspaces()
+        if case .hiddenWorkspaces(let deviceID) = (item as? OutlineItemRef)?.item {
+            let hidden = hiddenWorkspaces(deviceID: deviceID)
             let entry =
                 (index >= 0 && index < hidden.count ? hidden[index] : nil) ?? (
-                    projects[0],
+                    deviceProjects(deviceID: deviceID).first ?? projects.first ?? Self.placeholderProject,
                     WorkspaceSummary(
                         id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: true,
                         isDefault: false)
                 )
             return outlineItemRef(for: .workspace(entry.0, entry.1))
         }
-        return outlineItemRef(for: .project(projects[0]))
+        return outlineItemRef(for: .project(projects.first ?? Self.placeholderProject))
     }
 
     private func outlineItemRef(for item: OutlineItem) -> OutlineItemRef {
@@ -11542,6 +11689,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let ref = item as? OutlineItemRef else { return nil }
         switch ref.item {
+        case .device(let deviceID):
+            return sidebarSectionRowCell(
+                title: deviceSectionTitle(deviceID: deviceID), isSelected: false, isExpanded: outlineView.isItemExpanded(ref))
         case .project(let project):
             return projectRowCell(
                 project: project, isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil,
@@ -11549,6 +11699,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .hiddenWorkspaces: return sidebarSectionRowCell(title: "Hidden", isSelected: false, isExpanded: outlineView.isItemExpanded(ref))
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: selectedWorkspaceID == workspace.id)
+        }
+    }
+
+    private func deviceSectionTitle(deviceID: String) -> String {
+        guard let section = deviceSections.first(where: { $0.deviceID == deviceID }) else { return deviceID }
+        switch section.loadState {
+        case .loading: return "\(section.deviceName) — Loading…"
+        case .offline: return "\(section.deviceName) — Offline"
+        case .loaded: return section.deviceName
         }
     }
 
@@ -11822,6 +11981,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let ref = item as? OutlineItemRef else { return 24 }
         switch ref.item {
+        case .device: return 30
         case .project(let project): return selectedProjectID == project.id && selectedWorkspaceID == nil ? 32 : 30
         case .hiddenWorkspaces: return 28
         case .workspace(_, let workspace): return workspace.isHidden ? 40 : 32
@@ -11899,6 +12059,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let previousWorkspaceID = selectedWorkspaceID
         lastSelectedRow = row
         switch item {
+        case .device: return
         case .project: return
         case .hiddenWorkspaces: return
         case .workspace(let project, let workspace):
@@ -11948,6 +12109,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return nil
     }
 
+    private func rowIndex(forDeviceID deviceID: String) -> Int? {
+        for row in 0..<outlineView.numberOfRows {
+            guard let ref = outlineView.item(atRow: row) as? OutlineItemRef else { continue }
+            if case .device(let id) = ref.item, id == deviceID { return row }
+        }
+        return nil
+    }
+
     private func toggleProjectExpanded(projectID: String) {
         guard let row = rowIndex(forProjectID: projectID), let item = outlineView.item(atRow: row) else { return }
         // true when currently expanded (want to collapse); false when currently collapsed (want to expand).
@@ -11979,6 +12148,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func applySidebarProjectExpansionState() {
+        if showsDeviceHeaders {
+            for section in deviceSections {
+                guard let row = rowIndex(forDeviceID: section.deviceID), let item = outlineView.item(atRow: row) else { continue }
+                outlineView.expandItem(item)
+            }
+        }
         for project in projects {
             guard let row = rowIndex(forProjectID: project.id), let item = outlineView.item(atRow: row) else { continue }
             if project.isCollapsed { outlineView.collapseItem(item) } else { outlineView.expandItem(item) }

@@ -3,14 +3,16 @@ import workspacecore
 
 extension AppKitController {
     enum OutlineItem: Hashable {
+        case device(String)
         case project(ProjectSummary)
-        case hiddenWorkspaces
+        case hiddenWorkspaces(String)
         case workspace(ProjectSummary, WorkspaceSummary)
 
         static func == (lhs: OutlineItem, rhs: OutlineItem) -> Bool {
             switch (lhs, rhs) {
+            case (.device(let a), .device(let b)): return a == b
             case (.project(let a), .project(let b)): return a.id == b.id
-            case (.hiddenWorkspaces, .hiddenWorkspaces): return true
+            case (.hiddenWorkspaces(let a), .hiddenWorkspaces(let b)): return a == b
             case (.workspace(_, let a), .workspace(_, let b)): return a.id == b.id
             default: return false
             }
@@ -18,10 +20,15 @@ extension AppKitController {
 
         func hash(into hasher: inout Hasher) {
             switch self {
+            case .device(let deviceID):
+                hasher.combine(3)
+                hasher.combine(deviceID)
             case .project(let project):
                 hasher.combine(0)
                 hasher.combine(project.id)
-            case .hiddenWorkspaces: hasher.combine(1)
+            case .hiddenWorkspaces(let deviceID):
+                hasher.combine(1)
+                hasher.combine(deviceID)
             case .workspace(_, let workspace):
                 hasher.combine(2)
                 hasher.combine(workspace.id)
@@ -43,8 +50,9 @@ extension AppKitController {
 extension AppKitController.OutlineItem {
     var cacheKey: String {
         switch self {
+        case .device(let deviceID): return "d:\(deviceID)"
         case .project(let project): return "p:\(project.id)"
-        case .hiddenWorkspaces: return "hidden"
+        case .hiddenWorkspaces(let deviceID): return "hidden:\(deviceID)"
         case .workspace(_, let workspace): return "w:\(workspace.id)"
         }
     }
