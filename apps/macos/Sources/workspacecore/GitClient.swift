@@ -94,7 +94,7 @@ public final class GitClient {
     }
 
     public func createWorktree(
-        path repoPath: String, worktreePath: String, branch: String, targetBranch: String? = nil, allowRemoteBranchLookup: Bool = true
+        path repoPath: String, worktreePath: String, branch: String, baseBranch: String? = nil, allowRemoteBranchLookup: Bool = true
     ) throws {
         if branchExists(path: repoPath, branch: branch) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", worktreePath, branch])
@@ -113,7 +113,7 @@ public final class GitClient {
             case .missing: break
             }
         }
-        if let startPoint = try resolveStartPoint(path: repoPath, targetBranch: targetBranch, allowRemoteBranchLookup: allowRemoteBranchLookup) {
+        if let startPoint = try resolveStartPoint(path: repoPath, baseBranch: baseBranch, allowRemoteBranchLookup: allowRemoteBranchLookup) {
             try runGitOrThrow(["-C", repoPath, "worktree", "add", "-b", branch, worktreePath, startPoint])
             return
         }
@@ -276,19 +276,19 @@ public final class GitClient {
         }
     }
 
-    private func resolveStartPoint(path: String, targetBranch: String?, allowRemoteBranchLookup: Bool) throws -> String? {
-        guard let targetBranch = targetBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !targetBranch.isEmpty else { return nil }
-        if branchExists(path: path, branch: targetBranch) { return targetBranch }
-        if remoteTrackingBranchExists(path: path, branch: targetBranch) { return "origin/\(targetBranch)" }
+    private func resolveStartPoint(path: String, baseBranch: String?, allowRemoteBranchLookup: Bool) throws -> String? {
+        guard let baseBranch = baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines), !baseBranch.isEmpty else { return nil }
+        if branchExists(path: path, branch: baseBranch) { return baseBranch }
+        if remoteTrackingBranchExists(path: path, branch: baseBranch) { return "origin/\(baseBranch)" }
         if allowRemoteBranchLookup {
-            switch try remoteBranchLookupStatus(path: path, branch: targetBranch) {
+            switch try remoteBranchLookupStatus(path: path, branch: baseBranch) {
             case .exists:
-                try fetchRemoteBranch(path: path, branch: targetBranch)
-                return "origin/\(targetBranch)"
+                try fetchRemoteBranch(path: path, branch: baseBranch)
+                return "origin/\(baseBranch)"
             case .missing: break
             }
         }
-        throw WorkspaceError.invalidArgument(message: "Target branch not found: \(targetBranch)")
+        throw WorkspaceError.invalidArgument(message: "Base branch not found: \(baseBranch)")
     }
 
     private func fetchRemoteBranch(path: String, branch: String) throws {

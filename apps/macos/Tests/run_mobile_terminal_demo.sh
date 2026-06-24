@@ -26,6 +26,9 @@ device_api_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
 remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+remote_demo_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
+remote_demo_device_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
   spaces_e2e_require_remote_host_env "$repo_root"
   remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
@@ -71,7 +74,6 @@ ipad_udid=""
 iphone_udid=""
 app_log=""
 device_api_log=""
-app_recovery_state_path=""
 ipad_screenshot=""
 iphone_screenshot=""
 ios_app_path=""
@@ -92,7 +94,6 @@ terminal_service_pid=""
 performance_log_path=""
 ghostty_demo_xdg_config_home=""
 demo_home=""
-app_recovery_wait_logged=0
 
 run_demo_env() {
   local -a env_args=(
@@ -246,6 +247,13 @@ validate_profile_mode() {
       exit 1
       ;;
   esac
+}
+
+require_remote_demo_config() {
+  if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" && -z "$remote_ssh_host" ]]; then
+    echo "Remote mobile demo requires SPACES_E2E_REMOTE_SSH_HOST. Set remote E2E config in .env or the environment." >&2
+    exit 1
+  fi
 }
 
 shell_quote() {
@@ -584,57 +592,9 @@ wait_for_spaces_app_ready() {
   exit 1
 }
 
-read_recovered_app_pid() {
-  [[ -n "$app_recovery_state_path" && -f "$app_recovery_state_path" ]] || return 1
-  python3 - "$app_recovery_state_path" <<'PY'
-import json
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-try:
-    payload = json.loads(path.read_text())
-except Exception:
-    raise SystemExit(1)
-pid = payload.get("newAppPID")
-if not isinstance(pid, int) or pid <= 0:
-    raise SystemExit(1)
-print(pid)
-PY
-}
-
 process_command() {
   local pid="$1"
   ps -p "$pid" -o command= 2>/dev/null || true
-}
-
-continue_after_app_recovery_if_needed() {
-  [[ -n "$app_recovery_state_path" && -f "$app_recovery_state_path" ]] || return 1
-
-  local recovered_pid
-  if ! recovered_pid="$(read_recovered_app_pid)"; then
-    if [[ "$app_recovery_wait_logged" != "1" ]]; then
-      echo "SpacesApp exited during app recovery. Waiting for recovered app owner." >&2
-      app_recovery_wait_logged=1
-    fi
-    return 0
-  fi
-
-  local command
-  command="$(process_command "$recovered_pid")"
-  if [[ -z "$command" || "$command" != *"SpacesApp"* ]]; then
-    if [[ "$app_recovery_wait_logged" != "1" ]]; then
-      echo "SpacesApp recovery marker has no live SpacesApp replacement yet. Waiting." >&2
-      app_recovery_wait_logged=1
-    fi
-    return 0
-  fi
-
-  app_pid="$recovered_pid"
-  app_recovery_wait_logged=0
-  rm -f "$app_recovery_state_path" >/dev/null 2>&1 || true
-  echo "SpacesApp recovered with pid $app_pid. Continuing demo." >&2
-  return 0
 }
 
 wait_for_device_api_port() {
@@ -732,6 +692,7 @@ pair_remote_demo_device() {
   fi
 
   remote_pairing_json="$temp_root/remote-device-pairing.json"
+  prepare_remote_demo_daemon
   echo "Pairing Mac client with remote spacesd at $remote_ssh_host..."
   if ! run_demo_env \
     HOME="$demo_home" \
@@ -767,6 +728,82 @@ remote_ssh_destination() {
   else
     printf '%s' "$remote_ssh_host"
   fi
+}
+
+remote_ssh_args() {
+  printf '%s\n' -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes
+  if [[ -n "$remote_ssh_port" ]]; then
+    printf '%s\n' -p "$remote_ssh_port"
+  fi
+}
+
+remote_ssh() {
+  local -a args=()
+  while IFS= read -r arg; do args+=("$arg"); done < <(remote_ssh_args)
+  ssh "${args[@]}" "$(remote_ssh_destination)" "$@"
+}
+
+remote_expand_path() {
+  local quoted
+  quoted="$(shell_quote "$1")"
+  remote_ssh "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted"
+}
+
+wait_for_remote_demo_daemon() {
+  local quoted_port
+  quoted_port="$(shell_quote "$remote_demo_daemon_port")"
+  remote_ssh "python3 - $quoted_port" <<'PY'
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+deadline = time.time() + 60
+last_error = None
+while time.time() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            raise SystemExit(0)
+    except OSError as exc:
+        last_error = exc
+        time.sleep(0.5)
+raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
+PY
+  remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null
+}
+
+prepare_remote_demo_daemon() {
+  [[ "$remote_demo_daemon_port" =~ ^[0-9]+$ ]] || {
+    echo "SPACES_E2E_REMOTE_DAEMON_PORT must be numeric, got: $remote_demo_daemon_port" >&2
+    exit 1
+  }
+  command -v ssh >/dev/null 2>&1 || {
+    echo "ssh is required to prepare the remote demo daemon." >&2
+    exit 1
+  }
+
+  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
+  echo "Preparing remote demo spacesd at $remote_ssh_host..."
+  SPACES_E2E_REMOTE_DAEMON_PORT="$remote_demo_daemon_port" \
+    SPACES_E2E_REMOTE_WORKSPACE_ROOT="$remote_demo_workspace_root" \
+    SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_device_root" \
+    SPACES_E2E_REMOTE_DEVICE_ROOT="$remote_demo_device_root" \
+    "$repo_root/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
+
+  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+  eval "$artifact_assignments"
+  artifact_url="${artifact_url:-}"
+  [[ "$artifact_url" == file://* ]] || {
+    echo "Remote demo artifact URL must be file://, got: $artifact_url" >&2
+    exit 1
+  }
+
+  archive_path="${artifact_url#file://}"
+  install_root="$(remote_expand_path "$remote_demo_device_root/install")"
+  quoted_archive="$(shell_quote "$archive_path")"
+  quoted_install="$(shell_quote "$install_root")"
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_demo_daemon_port $quoted_install/install.sh" >/dev/null
+  wait_for_remote_demo_daemon
 }
 
 start_remote_device_forward() {
@@ -837,13 +874,6 @@ with sqlite3.connect(db_path) as db:
 PY
 }
 
-select_local_demo_device() {
-  if [[ -z "$spaces_client_db_path" || ! -f "$spaces_client_db_path" ]]; then
-    return
-  fi
-  sqlite3 "$spaces_client_db_path" "DELETE FROM client_settings WHERE key = 'active_device_id';"
-}
-
 open_remote_device_pairing_window() {
   [[ -n "$remote_device_id" ]] || return 1
 
@@ -887,15 +917,13 @@ PY
 
 wait_for_session_owner() {
   local owner_session_id="$1"
-  python3 - "$spaces_db_path" "$spaces_runtime_dir" "$owner_session_id" <<'PY'
-import os
+  python3 - "$spaces_db_path" "$owner_session_id" <<'PY'
 import sqlite3
 import sys
 import time
 
 db_path = sys.argv[1]
-root_directory = os.path.normpath(os.path.join(sys.argv[2], "terminal", "sessions", sys.argv[3]))
-session_id = sys.argv[3]
+session_id = sys.argv[2]
 deadline = time.time() + 30
 last_snapshot = ""
 while time.time() < deadline:
@@ -904,10 +932,10 @@ while time.time() < deadline:
             """
             SELECT client_id, mode, COALESCE(detached_at, '')
             FROM terminal_attachments
-            WHERE root_directory = ?
+            WHERE session_id = ?
             ORDER BY attached_at, id
             """,
-            (root_directory,),
+            (session_id,),
         ).fetchall()
     last_snapshot = repr(rows)
     if any(mode == "owner" and not detached_at for _, mode, detached_at in rows):
@@ -1348,6 +1376,7 @@ EOF
 require_path "$ghostty_xcframework" "GhosttyKit.xcframework"
 require_path "$ghostty_resources" "Ghostty resources"
 validate_profile_mode
+require_remote_demo_config
 build_macos_debug_products
 require_executable "$spaces_app" "SpacesApp"
 require_executable "$spaces_cli" "spaces CLI"
@@ -1360,7 +1389,6 @@ local_project_dir="$project_dir"
 secondary_project_dir="$temp_root/scout-errors"
 app_log="$temp_root/app.log"
 device_api_log="$temp_root/device-api.log"
-app_recovery_state_path="$temp_root/app-recovery-state.json"
 performance_log_path="$temp_root/mobile-terminal-performance.jsonl"
 ipad_screenshot="$temp_root/ipad.png"
 iphone_screenshot="$temp_root/iphone.png"
@@ -1426,7 +1454,6 @@ fi
 
 require_path "$ios_app_path" "SpacesMobile.app"
 pair_remote_demo_device
-select_local_demo_device
 open_simulator_app
 boot_device "$ipad_udid"
 boot_device "$iphone_udid"
@@ -1551,10 +1578,6 @@ echo "  spaces_demo_tail_ipad_stderr"
 
 while true; do
   if ! ps -p "$app_pid" >/dev/null 2>&1; then
-    if continue_after_app_recovery_if_needed; then
-      sleep 1
-      continue
-    fi
     echo "SpacesApp exited. Cleaning up demo." >&2
     exit 0
   fi

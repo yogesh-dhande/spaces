@@ -17,6 +17,7 @@
 - Do not add unnecessary options, arguments, alternate code paths, or script modes. Extra surface area should only be added when it supports real product behavior or behavior required for testing, and the intended path should stay clear and singular.
 - Before committing, go through uncommitted changes to figure out if there are any unnecessary fixes, dead code, fallback paths, options, arguments, or script modes we added during debuging that we should consider removing to avoid unnecessary code complexity, code maintenance, or performance issues.
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title as multiple coding agents may have contributed to the same commit. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
+- When running `git commit`, allow at least a 10-minute timeout so pre-commit checks can finish.
 - When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
 - Use the real-system scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
 - When manually launching a repo-local debug build, use the derived profile helper or `scripts/dev-build-and-launch.sh` so the app, CLI, and E2E helpers stay on the same worktree-scoped profile.
@@ -30,12 +31,6 @@
 - PR checks and Spaces app releases consume Spaces-owned prebuilt artifacts from a GitHub release named `ghostty-artifacts-<full-ghostty-sha>` in this repo. Trusted same-repo PR, main-push, manual, and release workflows build from the pinned submodule and publish reusable artifacts when the matching release is missing or incomplete.
 - Fork PR checks build missing Ghostty artifacts locally without publishing reusable releases.
 - Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.
-
-## Verification Rules
-- Consider adding or expanding tests before finalizing code changes.
-- When a commit is planned, rely on the pre-commit hook to run the normal verification path; do not run `scripts/verify.sh` separately first.
-- When finalizing code changes without committing, run `scripts/verify.sh` for the normal macOS verification pass so lint, build, and coverage run sequentially.
-- When running `git commit` via Codex, allow at least a 10-minute timeout so pre-commit checks can finish.
 
 ## Documentation Rules
 - Keep docs concise and non-overlapping.

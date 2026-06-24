@@ -50,7 +50,7 @@ enum SpacesMobileDeviceStore {
                 saveSecret(transportKey, deviceID: id, kind: .transportKey)
                 return SpacesMobilePairedDeviceRecord(
                     id: id,
-                    name: seededDevice.name.nilIfBlank ?? "Spaces \(host)",
+                    name: seededDevice.name.nilIfBlank ?? host,
                     host: host,
                     port: seededDevice.port,
                     certificateFingerprint: fingerprint,
@@ -95,7 +95,7 @@ enum SpacesMobileDeviceStore {
         var settings = fallbackSettings
 
         if devices.isEmpty, fallbackSettings.isPaired {
-            let record = record(from: fallbackSettings, name: "Spaces \(fallbackSettings.trimmedHost)")
+            let record = record(from: fallbackSettings, name: fallbackSettings.trimmedHost)
             devices = [record]
             activeDeviceID = record.id
             saveSecret(fallbackSettings.authToken, deviceID: record.id, kind: .authToken)
@@ -146,6 +146,21 @@ enum SpacesMobileDeviceStore {
         saveDevices(devices)
         UserDefaults.standard.set(record.id, forKey: activeDeviceKey)
         return load(fallbackSettings: settings)
+    }
+
+    @discardableResult static func rename(
+        deviceID: String,
+        name: String,
+        fallbackSettings: SpacesMobileConnectionSettings
+    ) -> SpacesMobileDeviceStoreState {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var devices = loadDevices()
+        if !trimmed.isEmpty, let index = devices.firstIndex(where: { $0.id == deviceID }) {
+            devices[index].name = trimmed
+            devices[index].updatedAt = ISO8601DateFormatter().string(from: Date())
+            saveDevices(devices)
+        }
+        return load(fallbackSettings: fallbackSettings)
     }
 
     static func select(deviceID: String, installationID: String) -> SpacesMobileDeviceStoreState? {

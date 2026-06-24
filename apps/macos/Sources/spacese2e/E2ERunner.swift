@@ -81,7 +81,7 @@ enum E2ELane: String, ExpressibleByArgument {
         case .mobile:
             return [
                 "takeover", "codex", "codex-resume-reopen", "roundtrip", "scrollback", "terminal-link-preview", "two-session", "ctrl-c-final-frame",
-                "ctrl-c-final-frame-codex-survivor", "ownership-guard", "app-recovery", "ios-input-latency", "ios-scrollback-latency", "demo",
+                "ctrl-c-final-frame-codex-survivor", "ownership-guard", "ios-input-latency", "ios-scrollback-latency", "demo",
             ]
         case .deviceAPI: return E2EDeviceAPITarget.allCases.map(\.rawValue)
         case .all, .exhaustive: return []
@@ -159,10 +159,7 @@ private struct E2ERunner {
         case .deviceAPI: try runDeviceAPI(command.deviceAPITarget ?? .all)
         case .all: try runAll()
         case .exhaustive: try runExhaustive()
-        case .mobileDemo:
-            try runScript(
-                "run_mobile_terminal_demo.sh",
-                environment: remoteEnvironment(enabled: false).merging(["SPACES_MOBILE_DEMO_BUILD_MACOS": "0"], uniquingKeysWith: { _, new in new }))
+        case .mobileDemo: try runScript("run_mobile_terminal_demo.sh", environment: mobileDemoEnvironment())
         }
     }
 
@@ -233,13 +230,9 @@ private struct E2ERunner {
         for scenario in selected {
             switch scenario {
             case "ios-input-latency", "ios-scrollback-latency": latencyScenarios.append(scenario)
-            case "demo":
-                try runScript(
-                    "run_mobile_terminal_demo.sh",
-                    environment: remoteEnvironment(enabled: false).merging(
-                        ["SPACES_MOBILE_DEMO_BUILD_MACOS": "0"], uniquingKeysWith: { _, new in new }))
+            case "demo": try runScript("run_mobile_terminal_demo.sh", environment: mobileDemoEnvironment())
             case "takeover", "codex", "codex-resume-reopen", "roundtrip", "scrollback", "terminal-link-preview", "two-session", "ctrl-c-final-frame",
-                "ctrl-c-final-frame-codex-survivor", "ownership-guard", "app-recovery":
+                "ctrl-c-final-frame-codex-survivor", "ownership-guard":
                 uiScenarios.append(scenario)
                 if scenario == "takeover" || scenario == "two-session" { uiNeedsRemote = true }
             default: throw E2ERunnerError("Unknown mobile scenario: \(scenario)")
@@ -311,6 +304,14 @@ private struct E2ERunner {
     private func deviceAPIEnvironment(remote: Bool) -> [String: String] {
         var environment = remoteEnvironment(enabled: remote)
         if let samples = command.samples { environment["SPACES_E2E_DEVICE_TERMINAL_LATENCY_SAMPLES"] = String(samples) }
+        return environment
+    }
+
+    private func mobileDemoEnvironment() -> [String: String] {
+        var environment = remoteEnvironment(enabled: true)
+        environment["SPACES_MOBILE_DEMO_BUILD_MACOS"] = "0"
+        let inheritedPort = ProcessInfo.processInfo.environment["SPACES_MOBILE_DEMO_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if inheritedPort?.isEmpty ?? true { environment["SPACES_MOBILE_DEMO_PORT"] = "0" }
         return environment
     }
 

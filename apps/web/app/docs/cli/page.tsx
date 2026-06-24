@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { CodeBlock, Cmd } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -6,22 +7,6 @@ export const metadata: Metadata = {
   description:
     "Reference for the minimal spaces command-line interface used by coding agents and terminal workflows.",
 };
-
-function CodeBlock({ children }: { children: string }) {
-  return (
-    <pre className="mt-3 overflow-x-auto rounded-xl border border-line bg-[#0f1820] px-4 py-3 font-mono text-xs leading-6 text-[#98efc7]">
-      <code>{children}</code>
-    </pre>
-  );
-}
-
-function Cmd({ children }: { children: React.ReactNode }) {
-  return (
-    <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-xs text-accent">
-      {children}
-    </code>
-  );
-}
 
 function Flag({ name, description }: { name: string; description: string }) {
   return (
@@ -42,7 +27,7 @@ export default function CliReferencePage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions.
+          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions. To expose these actions to an MCP client such as Claude Code, see the <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> reference.
         </p>
         <CodeBlock>{`spaces --version
 spaces project list
@@ -84,7 +69,7 @@ spaces pair --json`}</CodeBlock>
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
           <Flag name="--workspace <id>" description="Workspace ID for runtime commands." />
           <Flag name="--title <title>" description="Optional title for workspace creation." />
-          <Flag name="--target-branch <branch>" description="Optional target branch for new branch creation." />
+          <Flag name="--base-branch <branch>" description="Optional base branch for new branch creation." />
           <Flag name="--existing-branch" description="Use an existing branch instead of creating one." />
           <Flag name="--include-archived" description="Include archived workspaces in list output." />
         </ul>

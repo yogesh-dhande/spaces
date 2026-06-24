@@ -7,12 +7,15 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
             try executeBatch(database: database, sql: destructiveResetSQL)
-        }
+        },
+        DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "Rename target_branch to base_branch", requiresBackup: false) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE workspaces RENAME COLUMN target_branch TO base_branch")
+        },
     ]
 
     static let terminalRemoteSessionStateSQL = """
@@ -201,7 +204,7 @@ public enum DatabaseSchema {
               runtime_path TEXT NOT NULL,
               dirname TEXT,
               branch TEXT,
-              target_branch TEXT,
+              base_branch TEXT,
               is_default INTEGER NOT NULL,
               is_archived INTEGER NOT NULL,
               is_hidden INTEGER NOT NULL DEFAULT 0,

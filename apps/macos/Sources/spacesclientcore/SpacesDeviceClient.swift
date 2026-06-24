@@ -7,7 +7,7 @@ import spacesterminalcore
     import Network
 #endif
 
-public struct SpacesActiveDeviceOverview: Sendable, Equatable {
+public struct SpacesDeviceOverview: Sendable, Equatable {
     public let device: SpacesPairedDeviceRecord
     public let overview: SpacesDeviceOverviewPayload
 
@@ -19,8 +19,7 @@ public struct SpacesActiveDeviceOverview: Sendable, Equatable {
     public var isLocal: Bool { device.id == SpacesPairedDeviceRecord.localDeviceID }
 }
 
-public enum SpacesActiveDeviceClientError: LocalizedError, Equatable {
-    case activeDeviceNotPaired(String)
+public enum SpacesDeviceClientError: LocalizedError, Equatable {
     case missingLocalBootstrap
     case missingOverview
     case missingTransportKey(String)
@@ -29,7 +28,6 @@ public enum SpacesActiveDeviceClientError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .activeDeviceNotPaired(let deviceID): "The selected device '\(deviceID)' is not paired. Select or reconnect a device."
         case .missingLocalBootstrap: "The local daemon did not return Device API credentials."
         case .missingOverview: "The device did not return project and workspace data."
         case .missingTransportKey(let deviceName): "Missing secure transport key for \(deviceName). Remove and reconnect this device."
@@ -39,7 +37,7 @@ public enum SpacesActiveDeviceClientError: LocalizedError, Equatable {
     }
 }
 
-public enum SpacesActiveDeviceClient {
+public enum SpacesDeviceClient {
     public typealias LocalBootstrapProvider = @Sendable (SpacesDeviceClientApp) throws -> SpacesDeviceAPIControlResponse
     typealias DeviceRequestProvider =
         @Sendable (SpacesDeviceAPIRequest, SpacesPairedDeviceRecord, SpacesDeviceClientApp, SpacesProfile?) throws -> SpacesDeviceAPIResponse
@@ -57,12 +55,12 @@ public enum SpacesActiveDeviceClient {
 
     @discardableResult public static func bootstrapLocalDevice(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
-        now: Date = Date(), bootstrap: LocalBootstrapProvider = SpacesActiveDeviceClient.defaultLocalBootstrapProvider
+        now: Date = Date(), bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
     ) throws -> SpacesPairedDeviceRecord {
         let database = try providedDatabase ?? SpacesClientDatabase()
         let response = try bootstrap(clientApp)
-        guard response.ok else { throw SpacesActiveDeviceClientError.requestRejected(response.message) }
-        guard let bootstrap = response.localClientBootstrap else { throw SpacesActiveDeviceClientError.missingLocalBootstrap }
+        guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        guard let bootstrap = response.localClientBootstrap else { throw SpacesDeviceClientError.missingLocalBootstrap }
         let timestamp = ISO8601DateFormatter().string(from: now)
         let existingCreatedAt = (try? database.pairedDevice(id: bootstrap.deviceID)?.createdAt) ?? timestamp
         let record = SpacesPairedDeviceRecord(
@@ -74,53 +72,48 @@ public enum SpacesActiveDeviceClient {
         return record
     }
 
-    public static func activeDevice(
+    public static func localOverview(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
-        bootstrap: LocalBootstrapProvider = SpacesActiveDeviceClient.defaultLocalBootstrapProvider
-    ) throws -> SpacesPairedDeviceRecord {
-        let database = try providedDatabase ?? SpacesClientDatabase()
-        let activeDeviceID = try database.activeDeviceID()?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if activeDeviceID == nil || activeDeviceID == "" || activeDeviceID == SpacesPairedDeviceRecord.localDeviceID {
-            let local = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
-            try database.setActiveDeviceID(local.id)
-            return local
-        }
-        guard let deviceID = activeDeviceID, let device = try database.pairedDevice(id: deviceID) else {
-            throw SpacesActiveDeviceClientError.activeDeviceNotPaired(activeDeviceID ?? "")
-        }
-        return device
-    }
-
-    public static func overview(
-        database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
-        bootstrap: LocalBootstrapProvider = SpacesActiveDeviceClient.defaultLocalBootstrapProvider
-    ) throws -> SpacesActiveDeviceOverview {
-        try overview(
+        bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
+    ) throws -> SpacesDeviceOverview {
+        try localOverview(
             database: providedDatabase, clientApp: clientApp, profile: profile, bootstrap: bootstrap,
             requestProvider: { request, device, clientApp, profile in
-                try SpacesActiveDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
+                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
             })
     }
 
-    static func overview(
+    static func localOverview(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
-        bootstrap: LocalBootstrapProvider = SpacesActiveDeviceClient.defaultLocalBootstrapProvider, requestProvider: DeviceRequestProvider
-    ) throws -> SpacesActiveDeviceOverview {
+        bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider, requestProvider: DeviceRequestProvider
+    ) throws -> SpacesDeviceOverview {
         let database = try providedDatabase ?? SpacesClientDatabase()
-        let device = try activeDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
+        let device = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
         do { return try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
-            guard device.id == SpacesPairedDeviceRecord.localDeviceID, isRetryableLocalDeviceAPIConnectionError(error) else { throw error }
+            guard isRetryableLocalDeviceAPIConnectionError(error) else { throw error }
             let refreshedDevice = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
             return try overview(device: refreshedDevice, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
         }
     }
 
+    /// Fetches the overview for a specific paired device, independent of which device is currently active.
+    /// Used to populate the multi-device sidebar where every paired device is shown at once.
+    public static func overview(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil)
+        throws -> SpacesDeviceOverview
+    {
+        try overview(
+            device: device, clientApp: clientApp, profile: profile,
+            requestProvider: { request, device, clientApp, profile in
+                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
+            })
+    }
+
     private static func overview(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
-    ) throws -> SpacesActiveDeviceOverview {
+    ) throws -> SpacesDeviceOverview {
         let response = try requestProvider(.init(command: .overview), device, clientApp, profile)
-        guard let overview = response.overview else { throw SpacesActiveDeviceClientError.missingOverview }
-        return SpacesActiveDeviceOverview(device: device, overview: overview)
+        guard let overview = response.overview else { throw SpacesDeviceClientError.missingOverview }
+        return SpacesDeviceOverview(device: device, overview: overview)
     }
 
     public static func workspaceCreateOptions(
@@ -130,9 +123,24 @@ public enum SpacesActiveDeviceClient {
         let response = try request(
             .init(command: .workspaceCreateOptions(.init(projectID: selectedProjectID))), device: device, clientApp: clientApp, profile: profile)
         guard let options = response.workspaceCreateOptions else {
-            throw SpacesActiveDeviceClientError.requestRejected("The device did not return workspace create options.")
+            throw SpacesDeviceClientError.requestRejected("The device did not return workspace create options.")
         }
         return options
+    }
+
+    public static func previewProject(
+        dir: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceProjectPreview {
+        let response = try request(.init(command: .previewProject(.init(dir: dir))), device: device, clientApp: clientApp, profile: profile)
+        guard let preview = response.projectPreview else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return preview
+    }
+
+    public static func listDirectories(
+        path: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [String] {
+        let response = try request(.init(command: .listDirectories(.init(path: path))), device: device, clientApp: clientApp, profile: profile)
+        return response.directorySuggestions?.paths ?? []
     }
 
     public static func createProject(
@@ -166,7 +174,7 @@ public enum SpacesActiveDeviceClient {
     }
 
     public static func createWorkspace(
-        projectID: String, title: String, branch: String?, targetBranch: String?, directoryName: String?, notes: String? = nil,
+        projectID: String, title: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil,
         allowExistingBranchReuse: Bool = false, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
@@ -174,7 +182,7 @@ public enum SpacesActiveDeviceClient {
             .init(
                 command: .createWorkspace(
                     .init(
-                        projectID: projectID, title: title, branch: branch, targetBranch: targetBranch, directoryName: directoryName, notes: notes,
+                        projectID: projectID, title: title, branch: branch, baseBranch: baseBranch, directoryName: directoryName, notes: notes,
                         allowExistingBranchReuse: allowExistingBranchReuse))), device: device, clientApp: clientApp, profile: profile)
     }
 
@@ -327,16 +335,16 @@ public enum SpacesActiveDeviceClient {
     ) throws -> SpacesDeviceAPIResponse {
         #if canImport(Network)
             guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
-                throw SpacesActiveDeviceClientError.missingTransportKey(device.name)
+                throw SpacesDeviceClientError.missingTransportKey(device.name)
             }
             let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile)
             let client = try SpacesDeviceAPIRequestClient(
                 host: device.host, port: device.port, transportKey: transportKey, timeoutSeconds: requestTimeoutSeconds(for: request.command))
             let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
-            guard response.ok else { throw SpacesActiveDeviceClientError.requestRejected(response.message) }
+            guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
             return response
         #else
-            throw SpacesActiveDeviceClientError.unavailable("Device API requests require Network.framework.")
+            throw SpacesDeviceClientError.unavailable("Device API requests require Network.framework.")
         #endif
     }
 
@@ -383,7 +391,7 @@ public enum SpacesActiveDeviceClient {
             .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess,
             .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
-        case .pair, .ping, .overview, .launchSpacesApp, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
+        case .pair, .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
             .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
             defaultRequestTimeoutSeconds
         }

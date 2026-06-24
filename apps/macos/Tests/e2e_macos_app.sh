@@ -964,7 +964,7 @@ mac_client_installation_id() {
     spaces_profile_mac_client_installation_id "$SPACES_E2E_CLI"
 }
 
-seed_remote_active_device_for_macos() {
+seed_remote_device_for_macos() {
   [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || return 0
   python3 - "$REMOTE_DEVICE_RESULT_JSON" "$TMP_CLIENT_DB" "$TMP_CLIENT_SECRET_DIR" <<'PY'
 import json
@@ -998,10 +998,6 @@ with sqlite3.connect(client_db) as db:
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           last_selected_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS client_settings (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS migration_state (
           current_version INTEGER NOT NULL
@@ -1042,14 +1038,6 @@ with sqlite3.connect(client_db) as db:
             now,
             now,
         ),
-    )
-    db.execute(
-        """
-        INSERT INTO client_settings(key, value)
-        VALUES ('active_device_id', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """,
-        (device_id,),
     )
 
 def sanitize(value: str) -> str:
@@ -1198,12 +1186,11 @@ PY
   pass_case
 }
 
-run_remote_active_device_ui_parity() {
-  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "Remote active-device UI parity requires a remote Device API result JSON."
-  begin_case "remote active-device UI parity"
+run_remote_device_ui_parity() {
+  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "Remote device UI parity requires a remote Device API result JSON."
+  begin_case "remote device UI parity"
   wait_for_spaces_frontmost_ready
   wait_for_spaces_splitter_ready
-  wait_for_ui_identifier "sidebar-active-device-selector" "active device selector"
   wait_for_ui_identifier "sidebar-project-title-$REMOTE_DEVICE_PROJECT_ID" "remote project row"
   wait_for_ui_identifier "sidebar-project-settings-$REMOTE_DEVICE_PROJECT_ID" "remote project settings action"
   wait_for_ui_identifier "sidebar-project-add-workspace-$REMOTE_DEVICE_PROJECT_ID" "remote add workspace action"
@@ -1216,13 +1203,11 @@ run_remote_active_device_ui_parity() {
   pass_case
 }
 
-relaunch_spaces_with_local_active_device() {
-  log_step "relaunching Spaces with local active device"
+relaunch_spaces_after_remote_device_parity() {
+  log_step "relaunching Spaces after remote device parity"
   HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI" "$ACTION_TIMEOUT_SECONDS" \
-    || fail "timed out waiting for Spaces to exit before local active-device E2E"
+    || fail "timed out waiting for Spaces to exit before local device E2E"
   SPACES_PID=""
-  sqlite3 "$TMP_CLIENT_DB" "DELETE FROM client_settings WHERE key = 'active_device_id';" \
-    || fail "failed to reset active device in client database"
   launch_spaces
 }
 
@@ -2065,7 +2050,7 @@ create_workspace_via_gui() {
     --title "$WORKSPACE_TITLE" \
     --existing-branch \
     --branch "$WORKSPACE_BRANCH" \
-    --target-branch main \
+    --base-branch main \
     --notes "$WORKSPACE_NOTES" >"$TMP_ROOT/created-workspace.json"
   transition_pause "workspace creation"
 }
@@ -2077,7 +2062,7 @@ create_scout_branch_workspace() {
     --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
     --existing-branch \
     --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
-    --target-branch main \
+    --base-branch main \
     --notes "$SCOUT_BRANCH_WORKSPACE_NOTES" >"$TMP_ROOT/scout-branch-workspace.json"
   transition_pause "scout branch workspace creation"
 }
@@ -5755,7 +5740,7 @@ main() {
   mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
   if (( SETUP_FIXTURES_ONLY == 0 )) && [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
     run_remote_device_e2e
-    seed_remote_active_device_for_macos
+    seed_remote_device_for_macos
   fi
   close_existing_spaces_instances
   setup_git_fixture
@@ -5769,8 +5754,8 @@ main() {
   fi
   launch_spaces
   if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
-    run_remote_active_device_ui_parity
-    relaunch_spaces_with_local_active_device
+    run_remote_device_ui_parity
+    relaunch_spaces_after_remote_device_parity
   fi
   run_local_device_api_parity
   create_workspace_via_gui

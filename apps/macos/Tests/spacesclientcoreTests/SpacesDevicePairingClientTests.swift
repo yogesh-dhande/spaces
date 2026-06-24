@@ -226,6 +226,19 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains("survives SSH setup disconnect"))
     }
 
+    func testMobileDemoPreparesRepoLocalLinuxArtifactBeforeRemotePairing() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
+            "run_mobile_terminal_demo.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        let prepareRange = try XCTUnwrap(script.range(of: "  prepare_remote_demo_daemon"))
+        let pairRange = try XCTUnwrap(script.range(of: #""$spacese2e" "${args[@]}" >"$remote_pairing_json""#))
+        XCTAssertLessThan(prepareRange.lowerBound, pairRange.lowerBound)
+        XCTAssertTrue(script.contains("deploy_linux_spacesd_e2e.sh"))
+        XCTAssertTrue(script.contains("SPACES_DEVICE_API_PORT=$remote_demo_daemon_port"))
+        XCTAssertTrue(script.contains("~/.spaces/bin/spaces mobile status"))
+    }
+
     #if canImport(CryptoKit)
         func testRemoteArtifactManifestSignatureVerificationUsesPinnedKey() throws {
             let key = Curve25519.Signing.PrivateKey()

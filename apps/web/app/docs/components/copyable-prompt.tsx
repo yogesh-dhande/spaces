@@ -21,7 +21,7 @@ export function CopyablePrompt({ label = "Prompt", text }: CopyablePromptProps) 
   };
 
   return (
-    <div className="relative mt-3 overflow-hidden rounded-xl border border-line/70 bg-[#0f1820] shadow-sm">
+    <div className="relative mt-3 overflow-hidden rounded-xl border border-line/70 bg-code-surface shadow-sm">
       <button
         type="button"
         onClick={handleCopy}
@@ -31,7 +31,7 @@ export function CopyablePrompt({ label = "Prompt", text }: CopyablePromptProps) 
       >
         {copied ? "Copied" : "Copy"}
       </button>
-      <pre className="w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words px-4 py-3 pr-20 font-mono text-xs leading-6 text-[#98efc7]">
+      <pre className="w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words px-4 py-3 pr-20 font-mono text-xs leading-6 text-code-foreground">
         <code>{text}</code>
       </pre>
     </div>

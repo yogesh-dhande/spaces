@@ -119,15 +119,6 @@ struct SpacesDeviceAPIClient: Sendable {
         return overview
     }
 
-    func launchSpacesApp(commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws {
-        let response = try await sendRequest(
-            .init(command: .launchSpacesApp, authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
-            timeout: .seconds(8),
-            commandChannel: commandChannel
-        )
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
-    }
-
     func fetchWorkspaceCreateOptions(
         projectID: String? = nil,
         commandChannel: SpacesDeviceAPICommandChannel? = nil
@@ -151,7 +142,7 @@ struct SpacesDeviceAPIClient: Sendable {
         projectID: String,
         title: String,
         branch: String?,
-        targetBranch: String?,
+        baseBranch: String?,
         directoryName: String?,
         allowExistingBranchReuse: Bool,
         commandChannel: SpacesDeviceAPICommandChannel? = nil
@@ -163,7 +154,7 @@ struct SpacesDeviceAPIClient: Sendable {
                         projectID: projectID,
                         title: title,
                         branch: branch,
-                        targetBranch: targetBranch,
+                        baseBranch: baseBranch,
                         directoryName: directoryName,
                         allowExistingBranchReuse: allowExistingBranchReuse
                     )),

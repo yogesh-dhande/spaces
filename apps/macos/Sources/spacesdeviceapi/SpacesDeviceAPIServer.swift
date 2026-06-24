@@ -690,7 +690,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let pairingCoordinator: SpacesDevicePairingCoordinator
     private let pairingStore: any SpacesDevicePairingStoreProtocol
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
-    private let launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
@@ -726,7 +725,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.certificateFingerprint = certificateFingerprint
         self.pairingCoordinator = pairingCoordinator
         self.onPairingSucceeded = onPairingSucceeded
-        launchSpacesAppHandler = nil
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         overviewLoaderForTesting = nil
@@ -744,7 +742,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(),
         pairingStoreProtocol: any SpacesDevicePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
-        launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
@@ -757,7 +754,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
         self.onPairingSucceeded = onPairingSucceeded
-        self.launchSpacesAppHandler = launchSpacesAppHandler
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.overviewLoaderForTesting = overviewLoaderForTesting
@@ -922,11 +918,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .overview:
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.", result: .overview(try loadOverview(clientApp: request.clientApp)))
-        case .launchSpacesApp: return try handleLaunchSpacesAppRequest()
         case .createProject(let payload): return try handleCreateProjectRequest(payload)
         case .deleteProject(let payload): return try handleDeleteProjectRequest(payload)
         case .importProject(let payload): return try handleImportProjectRequest(payload)
         case .exportProject(let payload): return try handleExportProjectRequest(payload)
+        case .previewProject(let payload): return try handlePreviewProjectRequest(payload)
+        case .listDirectories(let payload): return try handleListDirectoriesRequest(payload)
         case .workspaceCreateOptions(let payload): return try handleWorkspaceCreateOptionsRequest(payload)
         case .createWorkspace(let payload): return try handleCreateWorkspaceRequest(payload)
         case .launchWorkspace(let payload): return try handleLaunchWorkspaceRequest(payload)
@@ -1010,14 +1007,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private static func normalizedClientID(_ value: String?) -> String? {
         guard let clientID = value?.trimmingCharacters(in: .whitespacesAndNewlines), !clientID.isEmpty else { return nil }
         return clientID
-    }
-
-    private func handleLaunchSpacesAppRequest() throws -> SpacesDeviceAPIResponse {
-        guard let launchSpacesAppHandler else {
-            return SpacesDeviceAPIResponse(ok: false, message: "launchSpacesApp is only available from the daemon-hosted Device API.")
-        }
-        let outcome = try launchSpacesAppHandler()
-        return SpacesDeviceAPIResponse(ok: true, message: outcome.message)
     }
 
     private func loadOverview(clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload {
@@ -1222,6 +1211,56 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 SpacesDeviceWorkspaceCreateOptions(projects: projects, selectedProjectID: selectedProjectID, branchOptions: branchOptions)))
     }
 
+    private func handlePreviewProjectRequest(_ request: SpacesDeviceProjectPreviewRequest) throws -> SpacesDeviceAPIResponse {
+        guard let dir = normalizedString(request.dir) else { return SpacesDeviceAPIResponse(ok: false, message: "Provide a project directory.") }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let project = try deviceOrchestrator(store: store).previewProject(dir: dir)
+        let preview = SpacesDeviceProjectPreview(
+            name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
+            config: SpacesDeviceOverviewBuilder.projectConfig(from: project))
+        return SpacesDeviceAPIResponse(ok: true, message: "Loaded project preview.", result: .projectPreview(preview))
+    }
+
+    private func handleListDirectoriesRequest(_ request: SpacesDeviceDirectoryListRequest) throws -> SpacesDeviceAPIResponse {
+        let paths = Self.directorySuggestions(forPartialPath: request.path)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Loaded directory suggestions.", result: .directorySuggestions(SpacesDeviceDirectorySuggestions(paths: paths)))
+    }
+
+    static func directorySuggestions(forPartialPath partial: String, limit: Int = 20) -> [String] {
+        let trimmed = partial.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return [] }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        let usesTilde = trimmed == "~" || trimmed.hasPrefix("~/")
+        let home = NSHomeDirectory()
+        let parentDir: String
+        let prefix: String
+        if trimmed.hasSuffix("/") {
+            parentDir = expanded
+            prefix = ""
+        } else {
+            parentDir = (expanded as NSString).deletingLastPathComponent
+            prefix = (expanded as NSString).lastPathComponent
+        }
+        let listDir = parentDir.isEmpty ? "/" : parentDir
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: listDir) else { return [] }
+        let matches = entries.filter { name in
+            guard !name.hasPrefix(".") || prefix.hasPrefix(".") else { return false }
+            guard prefix.isEmpty || name.localizedCaseInsensitiveCompare(prefix) == .orderedSame || name.lowercased().hasPrefix(prefix.lowercased())
+            else { return false }
+            var isDirectory: ObjCBool = false
+            let full = (listDir as NSString).appendingPathComponent(name)
+            return fileManager.fileExists(atPath: full, isDirectory: &isDirectory) && isDirectory.boolValue
+        }.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        return matches.prefix(limit).map { name in
+            let full = (listDir as NSString).appendingPathComponent(name)
+            if usesTilde, full == home { return "~" }
+            if usesTilde, full.hasPrefix(home + "/") { return "~" + full.dropFirst(home.count) }
+            return full
+        }
+    }
+
     private func handleCreateProjectRequest(_ request: SpacesDeviceProjectCreateRequest) throws -> SpacesDeviceAPIResponse {
         let projectDir = normalizedString(request.projectDir)
         let gitURL = normalizedString(request.gitURL)
@@ -1276,7 +1315,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let orchestrator = deviceOrchestrator(store: store)
         let project = try store.project(id: projectID)
         let workspace = try orchestrator.createWorkspace(
-            projectID: projectID, name: title, branch: normalizedString(request.branch), targetBranch: normalizedString(request.targetBranch),
+            projectID: projectID, name: title, branch: normalizedString(request.branch), baseBranch: normalizedString(request.baseBranch),
             directoryName: normalizedString(request.directoryName), runSetupScript: true, allowRemoteBranchLookup: true,
             allowExistingBranchReuse: request.allowExistingBranchReuse)
         if let notes = normalizedOptionalString(request.notes) { try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes) }

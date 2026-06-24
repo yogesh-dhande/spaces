@@ -386,7 +386,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var overview: SpacesDeviceOverviewPayload?
     var isLoading = false
     var isMutating = false
-    var isLaunchingSpacesApp = false
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
@@ -519,24 +518,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    func launchSpacesAppIfNeeded() async {
-        guard settings.isPaired, !isLaunchingSpacesApp else { return }
-        isLaunchingSpacesApp = true
-        defer { isLaunchingSpacesApp = false }
-        do {
-            try await bridgeClient.launchSpacesApp(commandChannel: commandChannel)
-            connectionNotice = nil
-            errorMessage = nil
-        } catch {
-            handleBridgeError(error)
-        }
-    }
-
     func applyConnectionSettings(_ settings: SpacesMobileConnectionSettings, deviceName: String? = nil) {
         let previousCommandChannel = commandChannel
         let deviceState =
             settings.isPaired
-            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? "Spaces \(settings.trimmedHost)")
+            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? settings.trimmedHost)
             : SpacesMobileDeviceStore.load(fallbackSettings: settings)
         self.settings = deviceState.settings
         pairedDevices = deviceState.devices
@@ -578,8 +564,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
         SpacesMobileSettingsStore.save(settings)
         overview = nil
         workspaceCreateOptions = nil
-        connectionNotice = pairedDevices.isEmpty ? "Scan a QR code to pair this device." : nil
+        connectionNotice = nil
         Task { await previousCommandChannel.close() }
+    }
+
+    func renameDevice(id: String, name: String) {
+        let deviceState = SpacesMobileDeviceStore.rename(deviceID: id, name: name, fallbackSettings: settings)
+        pairedDevices = deviceState.devices
     }
 
     func dismissError() { errorMessage = nil }
@@ -624,7 +615,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         projectID: String,
         title: String,
         branch: String?,
-        targetBranch: String?,
+        baseBranch: String?,
         directoryName: String?,
         allowExistingBranchReuse: Bool
     ) async {
@@ -633,7 +624,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         defer { isMutating = false }
         do {
             let response = try await bridgeClient.createWorkspace(
-                projectID: projectID, title: title, branch: branch, targetBranch: targetBranch, directoryName: directoryName,
+                projectID: projectID, title: title, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
             applyMutationResponse(response)
             isShowingWorkspaceCreateSheet = false

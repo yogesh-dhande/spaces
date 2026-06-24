@@ -45,7 +45,7 @@ export default function GettingStartedDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Create a Workspace</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Use the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">+</code> button on a project in the sidebar, or press <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+n</code>. For a Git project, pick an existing branch or name a new one; the target branch defaults to <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">main</code> or <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">master</code>. Spaces sets up a git worktree for the branch.
+          Use the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">+</code> button on a project in the sidebar, or press <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+n</code>. For a Git project, pick an existing branch or name a new one; the base branch defaults to <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">main</code> or <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">master</code>. Spaces sets up a git worktree for the branch.
         </p>
       </article>
 

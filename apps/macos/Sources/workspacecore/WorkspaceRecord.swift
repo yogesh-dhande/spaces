@@ -9,7 +9,7 @@ public struct WorkspaceRecord: Codable, Sendable {
     public let runtimePath: String
     public let dirname: String?
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let isDefault: Bool
     public let isArchived: Bool
     public let isHidden: Bool
@@ -19,7 +19,7 @@ public struct WorkspaceRecord: Codable, Sendable {
 
     public init(
         id: String, projectID: String, deviceID: String = SpacesDeviceRecord.localDeviceID, title: String, dir: String, runtimePath: String? = nil,
-        dirname: String?, branch: String?, targetBranch: String? = nil, isDefault: Bool, isArchived: Bool, isHidden: Bool = false, isRunning: Bool,
+        dirname: String?, branch: String?, baseBranch: String? = nil, isDefault: Bool, isArchived: Bool, isHidden: Bool = false, isRunning: Bool,
         lastLaunchedAt: String?, notes: String? = nil
     ) {
         self.id = id
@@ -30,7 +30,7 @@ public struct WorkspaceRecord: Codable, Sendable {
         self.runtimePath = runtimePath ?? dir
         self.dirname = dirname
         self.branch = branch
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.isDefault = isDefault
         self.isArchived = isArchived
         self.isHidden = isHidden

@@ -762,13 +762,13 @@ final class StoreTests: XCTestCase {
             id: "default", projectID: aProject.id, title: "default", dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
             isRunning: false, lastLaunchedAt: nil)
         let archivedWorkspace = WorkspaceRecord(
-            id: "archived", projectID: aProject.id, title: "feature", dir: aDir, dirname: nil, branch: nil, targetBranch: "develop", isDefault: false,
+            id: "archived", projectID: aProject.id, title: "feature", dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false,
             isArchived: true, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: archivedWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
         XCTAssertEqual(try store.workspace(projectID: aProject.id, title: "feature")?.id, "archived")
-        XCTAssertEqual(try store.workspace(projectID: aProject.id, title: "feature")?.targetBranch, "develop")
+        XCTAssertEqual(try store.workspace(projectID: aProject.id, title: "feature")?.baseBranch, "develop")
         XCTAssertEqual(try store.workspaces(projectID: aProject.id, includeArchived: false).map(\.id), ["default"])
         XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id, includeArchived: true).map(\.id)), Set(["default", "archived"]))
     }

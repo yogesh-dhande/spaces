@@ -413,7 +413,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let projectName: String
     public let title: String
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let dir: String
     public let isRunning: Bool
     public let isArchived: Bool
@@ -429,7 +429,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
     public init(
-        id: String, projectID: String, projectName: String, title: String, branch: String?, targetBranch: String?, dir: String, isRunning: Bool,
+        id: String, projectID: String, projectName: String, title: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool,
         isArchived: Bool, isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
         setupState: SpacesDeviceWorkspaceSetupState? = nil, config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
         processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
@@ -440,7 +440,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.projectName = projectName
         self.title = title
         self.branch = branch
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.dir = dir
         self.isRunning = isRunning
         self.isArchived = isArchived
@@ -462,7 +462,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case projectName
         case title
         case branch
-        case targetBranch
+        case baseBranch
         case dir
         case isRunning
         case isArchived
@@ -485,7 +485,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         projectName = try container.decode(String.self, forKey: .projectName)
         title = try container.decode(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
-        targetBranch = try container.decodeIfPresent(String.self, forKey: .targetBranch)
+        baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         dir = try container.decode(String.self, forKey: .dir)
         isRunning = try container.decode(Bool.self, forKey: .isRunning)
         isArchived = try container.decode(Bool.self, forKey: .isArchived)
@@ -649,6 +649,28 @@ public struct SpacesDeviceWorkspaceCreateOptions: Codable, Sendable, Equatable {
         self.selectedProjectID = selectedProjectID
         self.branchOptions = branchOptions
     }
+}
+
+public struct SpacesDeviceProjectPreview: Codable, Sendable, Equatable {
+    public let name: String
+    public let dir: String
+    public let isGitRepo: Bool
+    public let defaultBranch: String?
+    public let config: SpacesDeviceProjectConfig
+
+    public init(name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, config: SpacesDeviceProjectConfig) {
+        self.name = name
+        self.dir = dir
+        self.isGitRepo = isGitRepo
+        self.defaultBranch = defaultBranch
+        self.config = config
+    }
+}
+
+public struct SpacesDeviceDirectorySuggestions: Codable, Sendable, Equatable {
+    public let paths: [String]
+
+    public init(paths: [String]) { self.paths = paths }
 }
 
 public enum SpacesDeviceTerminalLinkMediaKind: String, Codable, Sendable, Equatable {
@@ -844,23 +866,35 @@ public struct SpacesDeviceWorkspaceCreateOptionsRequest: Codable, Sendable, Equa
     public init(projectID: String? = nil) { self.projectID = projectID }
 }
 
+public struct SpacesDeviceProjectPreviewRequest: Codable, Sendable, Equatable {
+    public let dir: String
+
+    public init(dir: String) { self.dir = dir }
+}
+
+public struct SpacesDeviceDirectoryListRequest: Codable, Sendable, Equatable {
+    public let path: String
+
+    public init(path: String) { self.path = path }
+}
+
 public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
     public let projectID: String
     public let title: String
     public let branch: String?
-    public let targetBranch: String?
+    public let baseBranch: String?
     public let directoryName: String?
     public let notes: String?
     public let allowExistingBranchReuse: Bool
 
     public init(
-        projectID: String, title: String, branch: String?, targetBranch: String?, directoryName: String?, notes: String? = nil,
+        projectID: String, title: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil,
         allowExistingBranchReuse: Bool = false
     ) {
         self.projectID = projectID
         self.title = title
         self.branch = branch
-        self.targetBranch = targetBranch
+        self.baseBranch = baseBranch
         self.directoryName = directoryName
         self.notes = notes
         self.allowExistingBranchReuse = allowExistingBranchReuse
@@ -870,7 +904,7 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
         case projectID
         case title
         case branch
-        case targetBranch
+        case baseBranch
         case directoryName
         case notes
         case allowExistingBranchReuse
@@ -881,7 +915,7 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
         projectID = try container.decode(String.self, forKey: .projectID)
         title = try container.decode(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
-        targetBranch = try container.decodeIfPresent(String.self, forKey: .targetBranch)
+        baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         directoryName = try container.decodeIfPresent(String.self, forKey: .directoryName)
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         allowExistingBranchReuse = try container.decodeIfPresent(Bool.self, forKey: .allowExistingBranchReuse) ?? false
@@ -1145,11 +1179,12 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case pair(SpacesDevicePairRequest)
     case ping
     case overview
-    case launchSpacesApp
     case createProject(SpacesDeviceProjectCreateRequest)
     case deleteProject(SpacesDeviceProjectReference)
     case importProject(SpacesDeviceProjectImportRequest)
     case exportProject(SpacesDeviceProjectReference)
+    case previewProject(SpacesDeviceProjectPreviewRequest)
+    case listDirectories(SpacesDeviceDirectoryListRequest)
     case workspaceCreateOptions(SpacesDeviceWorkspaceCreateOptionsRequest)
     case createWorkspace(SpacesDeviceWorkspaceCreateRequest)
     case launchWorkspace(SpacesDeviceWorkspaceLifecycleRequest)
@@ -1179,11 +1214,12 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .pair: "pair"
         case .ping: "ping"
         case .overview: "overview"
-        case .launchSpacesApp: "launchSpacesApp"
         case .createProject: "createProject"
         case .deleteProject: "deleteProject"
         case .importProject: "importProject"
         case .exportProject: "exportProject"
+        case .previewProject: "previewProject"
+        case .listDirectories: "listDirectories"
         case .workspaceCreateOptions: "workspaceCreateOptions"
         case .createWorkspace: "createWorkspace"
         case .launchWorkspace: "launchWorkspace"
@@ -1242,7 +1278,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
-        case .ping, .overview, .workspaceCreateOptions, .state, .resolveTerminalLink, .readTerminalLinkChunk: true
+        case .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink, .readTerminalLinkChunk: true
         default: false
         }
     }
@@ -1253,11 +1289,12 @@ extension SpacesDeviceAPICommand: Codable {
         case pair
         case ping
         case overview
-        case launchSpacesApp
         case createProject
         case deleteProject
         case importProject
         case exportProject
+        case previewProject
+        case listDirectories
         case workspaceCreateOptions
         case createWorkspace
         case launchWorkspace
@@ -1297,13 +1334,12 @@ extension SpacesDeviceAPICommand: Codable {
         case .overview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .overview
-        case .launchSpacesApp:
-            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
-            self = .launchSpacesApp
         case .createProject: self = .createProject(try container.decode(SpacesDeviceProjectCreateRequest.self, forKey: key))
         case .deleteProject: self = .deleteProject(try container.decode(SpacesDeviceProjectReference.self, forKey: key))
         case .importProject: self = .importProject(try container.decode(SpacesDeviceProjectImportRequest.self, forKey: key))
         case .exportProject: self = .exportProject(try container.decode(SpacesDeviceProjectReference.self, forKey: key))
+        case .previewProject: self = .previewProject(try container.decode(SpacesDeviceProjectPreviewRequest.self, forKey: key))
+        case .listDirectories: self = .listDirectories(try container.decode(SpacesDeviceDirectoryListRequest.self, forKey: key))
         case .workspaceCreateOptions:
             self = .workspaceCreateOptions(try container.decode(SpacesDeviceWorkspaceCreateOptionsRequest.self, forKey: key))
         case .createWorkspace: self = .createWorkspace(try container.decode(SpacesDeviceWorkspaceCreateRequest.self, forKey: key))
@@ -1339,11 +1375,12 @@ extension SpacesDeviceAPICommand: Codable {
         case .pair(let payload): try container.encode(payload, forKey: .pair)
         case .ping: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .ping)
         case .overview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .overview)
-        case .launchSpacesApp: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .launchSpacesApp)
         case .createProject(let payload): try container.encode(payload, forKey: .createProject)
         case .deleteProject(let payload): try container.encode(payload, forKey: .deleteProject)
         case .importProject(let payload): try container.encode(payload, forKey: .importProject)
         case .exportProject(let payload): try container.encode(payload, forKey: .exportProject)
+        case .previewProject(let payload): try container.encode(payload, forKey: .previewProject)
+        case .listDirectories(let payload): try container.encode(payload, forKey: .listDirectories)
         case .workspaceCreateOptions(let payload): try container.encode(payload, forKey: .workspaceCreateOptions)
         case .createWorkspace(let payload): try container.encode(payload, forKey: .createWorkspace)
         case .launchWorkspace(let payload): try container.encode(payload, forKey: .launchWorkspace)
@@ -1413,6 +1450,8 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case overview(SpacesDeviceOverviewPayload)
     case terminalState(GhosttyRemoteSessionStatePayload)
     case workspaceCreateOptions(SpacesDeviceWorkspaceCreateOptions)
+    case projectPreview(SpacesDeviceProjectPreview)
+    case directorySuggestions(SpacesDeviceDirectorySuggestions)
     case mutation(SpacesDeviceMutationResult)
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
     case terminalLinkChunk(SpacesDeviceTerminalLinkChunk)
@@ -1424,6 +1463,8 @@ extension SpacesDeviceAPIResult: Codable {
         case overview
         case terminalState
         case workspaceCreateOptions
+        case projectPreview
+        case directorySuggestions
         case mutation
         case terminalLinkMetadata
         case terminalLinkChunk
@@ -1440,6 +1481,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .overview: self = .overview(try container.decode(SpacesDeviceOverviewPayload.self, forKey: key))
         case .terminalState: self = .terminalState(try container.decode(GhosttyRemoteSessionStatePayload.self, forKey: key))
         case .workspaceCreateOptions: self = .workspaceCreateOptions(try container.decode(SpacesDeviceWorkspaceCreateOptions.self, forKey: key))
+        case .projectPreview: self = .projectPreview(try container.decode(SpacesDeviceProjectPreview.self, forKey: key))
+        case .directorySuggestions: self = .directorySuggestions(try container.decode(SpacesDeviceDirectorySuggestions.self, forKey: key))
         case .mutation: self = .mutation(try container.decode(SpacesDeviceMutationResult.self, forKey: key))
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
         case .terminalLinkChunk: self = .terminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunk.self, forKey: key))
@@ -1453,6 +1496,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .overview(let payload): try container.encode(payload, forKey: .overview)
         case .terminalState(let payload): try container.encode(payload, forKey: .terminalState)
         case .workspaceCreateOptions(let payload): try container.encode(payload, forKey: .workspaceCreateOptions)
+        case .projectPreview(let payload): try container.encode(payload, forKey: .projectPreview)
+        case .directorySuggestions(let payload): try container.encode(payload, forKey: .directorySuggestions)
         case .mutation(let payload): try container.encode(payload, forKey: .mutation)
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
         case .terminalLinkChunk(let payload): try container.encode(payload, forKey: .terminalLinkChunk)
@@ -1485,6 +1530,12 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
 
     public var workspaceCreateOptions: SpacesDeviceWorkspaceCreateOptions? {
         if case .workspaceCreateOptions(let payload) = result { payload } else { nil }
+    }
+
+    public var projectPreview: SpacesDeviceProjectPreview? { if case .projectPreview(let payload) = result { payload } else { nil } }
+
+    public var directorySuggestions: SpacesDeviceDirectorySuggestions? {
+        if case .directorySuggestions(let payload) = result { payload } else { nil }
     }
 
     public var projectID: String? { if case .mutation(let payload) = result { payload.projectID } else { nil } }

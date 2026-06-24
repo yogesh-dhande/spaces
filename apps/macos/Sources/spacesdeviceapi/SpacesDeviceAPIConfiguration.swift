@@ -160,8 +160,8 @@ public final class SpacesDeviceAPISettingsStore {
     public static func bonjourServiceName() throws -> String {
         let hostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         let profile = try SpacesProfile.current()
-        if let branchSlug = profile.branchSlug, let worktreeHash = profile.worktreeHash { return "Spaces \(hostName) \(branchSlug)-\(worktreeHash)" }
-        return "Spaces \(hostName)"
+        if let branchSlug = profile.branchSlug, let worktreeHash = profile.worktreeHash { return "\(hostName) \(branchSlug)-\(worktreeHash)" }
+        return hostName
     }
 
     private func save(_ settings: SpacesDeviceAPISettings) throws {

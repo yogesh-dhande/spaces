@@ -82,7 +82,7 @@ struct WorkspaceCreateCommand: ParsableCommand {
     @Option(name: .long, help: "Project ID.") var project: String
     @Option(name: .long, help: "Workspace branch.") var branch: String
     @Option(name: .long, help: "Workspace title. Defaults to the branch name.") var title: String?
-    @Option(name: .long, help: "Target branch for new branch creation.") var targetBranch: String?
+    @Option(name: .long, help: "Base branch for new branch creation.") var baseBranch: String?
     @Flag(name: .long, help: "Use an existing branch instead of creating a new branch.") var existingBranch = false
 
     func run() throws {
@@ -90,7 +90,7 @@ struct WorkspaceCreateCommand: ParsableCommand {
         let workspace = try requireProfileWorkspace(
             try TerminalService.sendProfileCommand(
                 .init(
-                    operation: .workspaceCreate, projectID: project, branch: branch, title: title, targetBranch: targetBranch,
+                    operation: .workspaceCreate, projectID: project, branch: branch, title: title, baseBranch: baseBranch,
                     existingBranch: existingBranch)))
         try context.output.emit(
             text: "Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")",

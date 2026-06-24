@@ -9,6 +9,9 @@
   --line: #d5d8d3;
   --accent: #0f7a76;
   --accent-strong: #0d5f5d;
+  /* Terminal-styled code blocks stay dark in both color schemes. */
+  --code-surface: #0f1820;
+  --code-foreground: #98efc7;
   --font-sans: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", "Menlo", "Consolas", monospace;
 }
@@ -35,6 +38,8 @@
   --color-line: var(--line);
   --color-accent: var(--accent);
   --color-accent-strong: var(--accent-strong);
+  --color-code-surface: var(--code-surface);
+  --color-code-foreground: var(--code-foreground);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }
@@ -1486,7 +1491,7 @@ body {
 
 .app-pane-terminal-body {
   height: calc(100% - 1.27rem);
-  background: #0f1820;
+  background: var(--code-surface);
   padding: 0.28rem 0.34rem;
   display: grid;
   align-content: start;
@@ -1497,7 +1502,7 @@ body {
   margin: 0;
   font-family: var(--font-mono), monospace;
   font-size: 0.6rem;
-  color: #98efc7;
+  color: var(--code-foreground);
 }
 
 .app-pane-terminal-cursor {
