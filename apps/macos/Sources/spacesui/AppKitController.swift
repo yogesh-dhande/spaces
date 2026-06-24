@@ -10389,15 +10389,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func deviceProjects(deviceID: String) -> [ProjectSummary] { projects.filter { $0.deviceID == deviceID } }
 
-    private func hiddenWorkspaces(deviceID: String) -> [(ProjectSummary, WorkspaceSummary)] {
-        deviceProjects(deviceID: deviceID).flatMap { project in
-            (workspacesByProject[project.id] ?? []).compactMap { workspace in
-                guard !workspace.isArchived, workspace.isHidden else { return nil }
-                return (project, workspace)
-            }
-        }
-    }
-
     private func optimisticallyArchiveWorkspaceInSidebar(workspaceID: String) -> Bool {
         guard let (project, _) = findWorkspace(id: workspaceID) else { return false }
         guard var workspaces = workspacesByProject[project.id] else { return false }
@@ -11730,23 +11721,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var singleDeviceID: String { deviceSections.first?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID }
 
-    /// Number of outline rows directly under a device: its projects plus a Hidden
-    /// section row when that device has hidden workspaces.
-    private func deviceRowCount(deviceID: String) -> Int {
-        deviceProjects(deviceID: deviceID).count + (hiddenWorkspaces(deviceID: deviceID).isEmpty ? 0 : 1)
-    }
+    /// A single Hidden section sits at the sidebar root (below the device sections
+    /// or projects) and aggregates hidden workspaces across every device.
+    private var hasHiddenWorkspaces: Bool { !hiddenWorkspaces().isEmpty }
 
-    private func deviceChildRef(deviceID: String, index: Int) -> OutlineItemRef {
-        let deviceProjects = deviceProjects(deviceID: deviceID)
-        if index >= 0, index < deviceProjects.count { return outlineItemRef(for: .project(deviceProjects[index])) }
-        return outlineItemRef(for: .hiddenWorkspaces(deviceID))
+    private func rootChildRef(index: Int) -> OutlineItemRef {
+        let primaryCount = showsDeviceHeaders ? deviceSections.count : deviceProjects(deviceID: singleDeviceID).count
+        if index >= 0, index < primaryCount {
+            if showsDeviceHeaders { return outlineItemRef(for: .device(deviceSections[index].deviceID)) }
+            return outlineItemRef(for: .project(deviceProjects(deviceID: singleDeviceID)[index]))
+        }
+        return outlineItemRef(for: .hiddenWorkspaces)
     }
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil { return showsDeviceHeaders ? deviceSections.count : deviceRowCount(deviceID: singleDeviceID) }
-        if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceRowCount(deviceID: deviceID) }
+        if item == nil {
+            let primaryCount = showsDeviceHeaders ? deviceSections.count : deviceProjects(deviceID: singleDeviceID).count
+            return primaryCount + (hasHiddenWorkspaces ? 1 : 0)
+        }
+        if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceProjects(deviceID: deviceID).count }
         if case .project(let project) = (item as? OutlineItemRef)?.item { return visibleWorkspaces(projectID: project.id).count }
-        if case .hiddenWorkspaces(let deviceID) = (item as? OutlineItemRef)?.item { return hiddenWorkspaces(deviceID: deviceID).count }
+        if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item { return hiddenWorkspaces().count }
         return 0
     }
 
@@ -11762,14 +11757,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { return true }
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil {
-            if showsDeviceHeaders {
-                let deviceID = (index >= 0 && index < deviceSections.count) ? deviceSections[index].deviceID : singleDeviceID
-                return outlineItemRef(for: .device(deviceID))
-            }
-            return deviceChildRef(deviceID: singleDeviceID, index: index)
+        if item == nil { return rootChildRef(index: index) }
+        if case .device(let deviceID) = (item as? OutlineItemRef)?.item {
+            let deviceProjects = deviceProjects(deviceID: deviceID)
+            let project = (index >= 0 && index < deviceProjects.count) ? deviceProjects[index] : (deviceProjects.first ?? Self.placeholderProject)
+            return outlineItemRef(for: .project(project))
         }
-        if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceChildRef(deviceID: deviceID, index: index) }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             let visible = visibleWorkspaces(projectID: project.id)
             let workspace =
@@ -11778,11 +11771,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
-        if case .hiddenWorkspaces(let deviceID) = (item as? OutlineItemRef)?.item {
-            let hidden = hiddenWorkspaces(deviceID: deviceID)
+        if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item {
+            let hidden = hiddenWorkspaces()
             let entry =
                 (index >= 0 && index < hidden.count ? hidden[index] : nil) ?? (
-                    deviceProjects(deviceID: deviceID).first ?? projects.first ?? Self.placeholderProject,
+                    projects.first ?? Self.placeholderProject,
                     WorkspaceSummary(
                         id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: true,
                         isDefault: false)
