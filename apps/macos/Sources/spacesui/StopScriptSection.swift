@@ -127,6 +127,8 @@ import AppKit
         row.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 10, right: 14)
         row.translatesAutoresizingMaskIntoConstraints = false
         preview.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // A long single-line script must truncate, not stretch the host window.
+        preview.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         container.addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true

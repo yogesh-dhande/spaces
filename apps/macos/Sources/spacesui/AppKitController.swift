@@ -210,7 +210,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var suppressOutlineSelectionChanges = false
     private var projectHasUnsavedChanges = false
     private var showingSettings = false
-    private var hiddenWorkspacesCollapsed = true
 
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
@@ -266,6 +265,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
+    private var workspaceVisibilityWindow: NSWindow?
+    private let workspaceVisibilityTable = WorkspaceVisibilityTableController()
+    private weak var workspaceVisibilityTableView: NSTableView?
+    private var workspaceVisibilityQuery = ""
+    private var workspaceVisibilityDeviceFilter: String?
     private var projectSettingsProjectID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
     private weak var settingsSectionContentContainer: NSView?
@@ -3727,7 +3731,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         deviceSelector.translatesAutoresizingMaskIntoConstraints = false
 
         let sectionHeader = sidebarSectionHeader(
-            title: "Projects", actions: [(symbol: "plus", tooltip: "New project", action: #selector(addProject))])
+            title: "Projects",
+            actions: [
+                (symbol: "line.3.horizontal.decrease.circle", tooltip: "Filter workspaces", action: #selector(showWorkspaceVisibilityDialog)),
+                (symbol: "plus", tooltip: "New project", action: #selector(addProject)),
+            ])
         sectionHeader.translatesAutoresizingMaskIntoConstraints = false
 
         let scroll = NSScrollView()
@@ -3755,8 +3763,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.toggleProjectExpanded(projectID: project.id)
                 return true
             }
-            if case .hiddenWorkspaces = ref.item {
-                self.toggleHiddenWorkspacesExpanded()
+            if case .device = ref.item {
+                if self.outlineView.isItemExpanded(ref) { self.outlineView.collapseItem(ref) } else { self.outlineView.expandItem(ref) }
                 return true
             }
             return false
@@ -5965,6 +5973,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         sourceContentStack.spacing = 8
         sourceContentStack.detachesHiddenViews = true
         sourceSegmented.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        // Device selector: only meaningful when more than one device is paired.
+        // With a single device the project is created on the local Mac. The label
+        // sits above a full-width popup so it lines up with the controls below.
+        if deviceSections.count > 1 {
+            let devicePopUp = NSPopUpButton()
+            devicePopUp.target = self
+            devicePopUp.action = #selector(projectDeviceChanged(_:))
+            devicePopUp.setAccessibilityIdentifier("add-project-device")
+            for section in deviceSections {
+                devicePopUp.addItem(withTitle: section.deviceName)
+                devicePopUp.lastItem?.representedObject = section.deviceID
+            }
+            if let localItem = devicePopUp.itemArray.first(where: { ($0.representedObject as? String) == localProjectCreationDeviceID() }) {
+                devicePopUp.select(localItem)
+            }
+            let deviceField = NSStackView(views: [makeFieldHeader("Device"), devicePopUp])
+            deviceField.orientation = .vertical
+            deviceField.alignment = .leading
+            deviceField.spacing = 4
+            sourceContentStack.addArrangedSubview(deviceField)
+            constrainFormFieldToFillWidth(deviceField, in: sourceContentStack)
+            devicePopUp.widthAnchor.constraint(equalTo: deviceField.widthAnchor).isActive = true
+        }
         sourceContentStack.addArrangedSubview(sourceSegmented)
         sourceContentStack.addArrangedSubview(localSourceSection)
         sourceContentStack.addArrangedSubview(cloneSourceSection)
@@ -6029,8 +6060,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 stopScriptSection.view,
             ], createButton: createButton)
         activeAddProjectFormTag = createButton.tag
-        if let refs = AddProjectFieldCache.shared.cache[createButton.tag] { updateAddProjectSourceUI(refs) }
+        if let refs = AddProjectFieldCache.shared.cache[createButton.tag] {
+            refs.selectedDeviceID = localProjectCreationDeviceID()
+            updateAddProjectSourceUI(refs)
+        }
         addProjectWindow?.makeFirstResponder(dirField)
+    }
+
+    /// The default device for new projects: the local Mac.
+    private func localProjectCreationDeviceID() -> String {
+        deviceSections.first(where: { $0.isLocal })?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
+    }
+
+    @objc private func projectDeviceChanged(_ sender: NSPopUpButton) {
+        guard let tag = activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[tag] else { return }
+        refs.selectedDeviceID = (sender.selectedItem?.representedObject as? String) ?? localProjectCreationDeviceID()
+        // The folder lives on the chosen device, so re-validate any typed path there.
+        refs.preparedLocalDirectoryPath = nil
+        refs.directoryCompletions = []
+        updateAddProjectProgressiveDisclosure(refs)
+        scheduleAddProjectDirectoryPreview(refs)
+        scheduleAddProjectDirectorySuggestions(refs)
     }
 
     private func presentAddProjectWindow(hosting stack: NSStackView) {
@@ -6085,6 +6135,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             created.isMovableByWindowBackground = true
             created.isReleasedWhenClosed = false
             created.minSize = NSSize(width: 520, height: 480)
+            // Bound the width so long content (paths, commands) can't stretch the
+            // form into an unreadable wide layout; it stays tall-and-scrollable.
+            created.maxSize = NSSize(width: 720, height: 100_000)
             created.standardWindowButton(.miniaturizeButton)?.isHidden = true
             created.standardWindowButton(.zoomButton)?.isHidden = true
             created.standardWindowButton(.closeButton)?.isHidden = true
@@ -6093,6 +6146,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             window = created
         }
         window.contentView = root
+        // Enforce the width bound on every present, including a window reused from a
+        // wider session, so long content never leaves the form stretched.
+        if window.frame.width > 720 {
+            let contentHeight = window.contentRect(forFrameRect: window.frame).height
+            window.setContentSize(NSSize(width: 680, height: contentHeight))
+            window.center()
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         return window
@@ -6133,6 +6193,222 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let header = buildFormWindowHeader(
             symbol: "plus.rectangle.on.folder", title: "New Workspace", closeAction: #selector(closeAddWorkspaceWindow))
         addWorkspaceWindow = presentFormWindow(existing: addWorkspaceWindow, header: header, hosting: stack)
+    }
+
+    // MARK: - Workspace visibility dialog
+
+    @objc private func showWorkspaceVisibilityDialog() {
+        clearActiveAddFormStateAndCloseWindows()
+        workspaceVisibilityQuery = ""
+        workspaceVisibilityDeviceFilter = nil
+
+        let searchField = NSSearchField()
+        searchField.placeholderString = "Search workspaces"
+        searchField.target = self
+        searchField.action = #selector(workspaceVisibilitySearchChanged(_:))
+        searchField.sendsWholeSearchString = false
+        searchField.sendsSearchStringImmediately = false
+        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchField.setAccessibilityIdentifier("workspace-visibility-search")
+
+        let devicePopUp = NSPopUpButton()
+        devicePopUp.target = self
+        devicePopUp.action = #selector(workspaceVisibilityDeviceFilterChanged(_:))
+        devicePopUp.setContentHuggingPriority(.required, for: .horizontal)
+        populateWorkspaceVisibilityDevicePopUp(devicePopUp)
+
+        let filterRow = NSStackView(views: [searchField, devicePopUp])
+        filterRow.orientation = .horizontal
+        filterRow.spacing = 8
+        filterRow.distribution = .fill
+
+        let tableView = NSTableView()
+        tableView.dataSource = workspaceVisibilityTable
+        tableView.delegate = workspaceVisibilityTable
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.rowHeight = 24
+        tableView.allowsColumnSelection = false
+        tableView.headerView = NSTableHeaderView()
+        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.visibleColumn, title: "Show", width: 44, fixed: true)
+        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.titleColumn, title: "Workspace", width: 180)
+        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.projectColumn, title: "Project", width: 150)
+        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.deviceColumn, title: "Device", width: 130)
+        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.branchColumn, title: "Branch", width: 130)
+        workspaceVisibilityTableView = tableView
+        workspaceVisibilityTable.onToggleVisible = { [weak self] workspaceID, visible in
+            self?.setWorkspaceHidden(workspaceID: workspaceID, isHidden: !visible) { [weak self] _ in self?.reloadWorkspaceVisibilityRows() }
+        }
+
+        let scroll = NSScrollView()
+        scroll.documentView = tableView
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+
+        reloadWorkspaceVisibilityRows()
+        presentWorkspaceVisibilityWindow(filterRow: filterRow, tableScroll: scroll)
+    }
+
+    private func addWorkspaceVisibilityColumn(
+        _ tableView: NSTableView, id: NSUserInterfaceItemIdentifier, title: String, width: CGFloat, fixed: Bool = false
+    ) {
+        let column = NSTableColumn(identifier: id)
+        column.title = title
+        column.width = width
+        column.minWidth = fixed ? width : 60
+        if fixed { column.maxWidth = width }
+        tableView.addTableColumn(column)
+    }
+
+    private func populateWorkspaceVisibilityDevicePopUp(_ popup: NSPopUpButton) {
+        popup.removeAllItems()
+        popup.addItem(withTitle: "All devices")
+        for section in deviceSections {
+            popup.addItem(withTitle: section.deviceName)
+            popup.lastItem?.representedObject = section.deviceID
+        }
+        if let filter = workspaceVisibilityDeviceFilter, let item = popup.itemArray.first(where: { ($0.representedObject as? String) == filter }) {
+            popup.select(item)
+        } else {
+            popup.selectItem(at: 0)
+        }
+    }
+
+    @objc private func workspaceVisibilitySearchChanged(_ sender: NSSearchField) {
+        workspaceVisibilityQuery = sender.stringValue
+        reloadWorkspaceVisibilityRows()
+    }
+
+    @objc private func workspaceVisibilityDeviceFilterChanged(_ sender: NSPopUpButton) {
+        workspaceVisibilityDeviceFilter = sender.selectedItem?.representedObject as? String
+        reloadWorkspaceVisibilityRows()
+    }
+
+    private func buildWorkspaceVisibilityRows() -> [WorkspaceVisibilityRow] {
+        var rows: [WorkspaceVisibilityRow] = []
+        for project in projects {
+            let deviceName = deviceSection(id: project.deviceID)?.deviceName ?? project.deviceID
+            for workspace in workspacesByProject[project.id] ?? [] where !workspace.isArchived {
+                rows.append(
+                    WorkspaceVisibilityRow(
+                        workspaceID: workspace.id, deviceID: project.deviceID, title: workspace.title, projectName: project.name,
+                        deviceName: deviceName, branch: workspace.branch ?? "", isHidden: workspace.isHidden))
+            }
+        }
+        return rows
+    }
+
+    private func reloadWorkspaceVisibilityRows() {
+        let deviceFiltered =
+            workspaceVisibilityDeviceFilter.map { id in buildWorkspaceVisibilityRows().filter { $0.deviceID == id } }
+            ?? buildWorkspaceVisibilityRows()
+        let candidates = deviceFiltered.enumerated().map { offset, row in
+            CommandPaletteFuzzySearch.Candidate(
+                id: offset,
+                fields: [
+                    .init(text: row.title, weight: 1.0), .init(text: row.projectName, weight: 0.6), .init(text: row.deviceName, weight: 0.4),
+                    .init(text: row.branch, weight: 0.5),
+                ])
+        }
+        let ranked = CommandPaletteFuzzySearch.rank(query: workspaceVisibilityQuery, candidates: candidates)
+        workspaceVisibilityTable.rows = ranked.map { deviceFiltered[$0.id] }
+        workspaceVisibilityTableView?.reloadData()
+    }
+
+    private func presentWorkspaceVisibilityWindow(filterRow: NSView, tableScroll: NSView) {
+        let header = buildFormWindowHeader(
+            symbol: "line.3.horizontal.decrease.circle", title: "Workspaces", closeAction: #selector(closeWorkspaceVisibilityWindow))
+        let root = NSView()
+        root.wantsLayer = true
+        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        let headerDivider = settingsHairlineDivider()
+        for view in [header, headerDivider, filterRow, tableScroll] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor), header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            header.topAnchor.constraint(equalTo: root.topAnchor), header.heightAnchor.constraint(equalToConstant: 52),
+            headerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            headerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor), headerDivider.topAnchor.constraint(equalTo: header.bottomAnchor),
+            headerDivider.heightAnchor.constraint(equalToConstant: 1), filterRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            filterRow.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            filterRow.topAnchor.constraint(equalTo: headerDivider.bottomAnchor, constant: 12),
+            tableScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            tableScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            tableScroll.topAnchor.constraint(equalTo: filterRow.bottomAnchor, constant: 10),
+            tableScroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+        ])
+        let window: NSWindow
+        if let existing = workspaceVisibilityWindow {
+            window = existing
+        } else {
+            let created = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 720, height: 560), styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                backing: .buffered, defer: false)
+            created.titlebarAppearsTransparent = true
+            created.titleVisibility = .hidden
+            created.isMovableByWindowBackground = true
+            created.isReleasedWhenClosed = false
+            created.minSize = NSSize(width: 560, height: 360)
+            created.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            created.standardWindowButton(.zoomButton)?.isHidden = true
+            created.standardWindowButton(.closeButton)?.isHidden = true
+            created.center()
+            workspaceVisibilityWindow = created
+            window = created
+        }
+        window.contentView = root
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func closeWorkspaceVisibilityWindow() { workspaceVisibilityWindow?.performClose(nil) }
+
+    /// Sets a workspace's sidebar visibility (persisted as `isHidden`), routing to
+    /// the device that owns the workspace and stopping it first if it is running.
+    private func setWorkspaceHidden(workspaceID: String, isHidden: Bool, completion: @escaping (Bool) -> Void) {
+        guard let (project, workspace) = findWorkspace(id: workspaceID) else { return completion(false) }
+        if isHidden, workspace.isRunning {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Hide workspace?"
+            alert.informativeText = "\"\(workspace.title)\" is currently running. Hiding it stops the workspace first."
+            alert.addButton(withTitle: "Stop and Hide")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return completion(false) }
+            guard let device = deviceRecord(forDeviceID: deviceID(forWorkspaceID: workspaceID)) else {
+                showNoActiveDeviceSelectedError()
+                return completion(false)
+            }
+            if isHidden, workspace.isRunning {
+                let stopResult = await Self.activeDeviceMutation(device: device) { device in
+                    try SpacesActiveDeviceClient.stopWorkspace(
+                        workspaceID: workspaceID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                }
+                if case .failure(let error) = stopResult {
+                    showError(error)
+                    return completion(false)
+                }
+            }
+            let result = await Self.activeDeviceMutation(device: device) { device in
+                try SpacesActiveDeviceClient.updateWorkspaceMetadata(
+                    workspaceID: workspaceID, isHidden: isHidden, updatesHidden: true, device: device,
+                    clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            }
+            switch result {
+            case .success(let response):
+                if isHidden, selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
+                applyActiveDeviceMutationResponse(response, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
+                completion(true)
+            case .failure(let error):
+                showError(error)
+                completion(false)
+            }
+        }
     }
 
     @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
@@ -8246,11 +8522,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func sidebarRowIconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton(title: "", target: self, action: action)
         button.isBordered = false
+        button.imageScaling = .scaleNone
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(
             .init(pointSize: 12, weight: .semibold))
         button.contentTintColor = .secondaryLabelColor
         button.toolTip = tooltip
         button.setAccessibilityLabel(tooltip)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 18), button.heightAnchor.constraint(equalToConstant: 18)])
         return button
     }
 
@@ -9261,9 +9542,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func createProject(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            // The global "+" has no device context; new projects are created on the
-            // local Mac. (Folder autocomplete and preview below also use the local device.)
-            if let device = activePairedDevice {
+            // The project is created on the device chosen in the form (local by
+            // default); folder autocomplete and preview use the same device.
+            if let device = deviceRecord(forDeviceID: refs.selectedDeviceID) {
                 let projectDir: String?
                 let gitURL: String?
                 if refs.sourceSegmented.selectedSegment == 1 {
@@ -9289,7 +9570,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let originalTitle = sender.title
                 sender.isEnabled = false
                 sender.title = "Creating..."
-                showOperationProgressOverlay(message: "Creating project...", detail: "Creating the project on \(activeDeviceName).", context: .global)
+                showOperationProgressOverlay(
+                    message: "Creating project...",
+                    detail: "Creating the project on \(deviceSection(id: refs.selectedDeviceID)?.deviceName ?? activeDeviceName).", context: .global)
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
                     defer {
@@ -9311,7 +9594,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         clearActiveAddFormStateAndCloseWindows()
                         selectedProjectID = response.projectID
                         selectedWorkspaceID = response.workspaceID
-                        applyActiveDeviceMutationResponse(response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
+                        // A new project on a remote device belongs to that device's
+                        // section; reload so it lands there instead of the local one.
+                        if isRemoteDeviceID(refs.selectedDeviceID) {
+                            requestSidebarReload()
+                        } else {
+                            applyActiveDeviceMutationResponse(
+                                response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
+                        }
                     case .failure(let error): showError(error)
                     }
                 }
@@ -9334,7 +9624,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func updateAddProjectSourceUI(_ refs: AddProjectFieldRefs) {
         let cloneSelected = refs.sourceSegmented.selectedSegment == 1
-        let usesActiveDeviceCreate = activePairedDevice != nil
+        let usesActiveDeviceCreate = deviceRecord(forDeviceID: refs.selectedDeviceID) != nil
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
         let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -9355,7 +9645,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func isAddProjectSourcePrepared(_ refs: AddProjectFieldRefs) -> Bool {
         if refs.sourceSegmented.selectedSegment == 1 {
             let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if activePairedDevice != nil { return !repoURL.isEmpty && refs.gitPreparationID == nil }
+            if deviceRecord(forDeviceID: refs.selectedDeviceID) != nil { return !repoURL.isEmpty && refs.gitPreparationID == nil }
             return refs.gitPreparationID == nil && refs.preparedGitProject != nil && refs.preparedGitURL == repoURL
         }
         let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -9387,7 +9677,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func scheduleAddProjectDirectorySuggestions(_ refs: AddProjectFieldRefs) {
         refs.directorySuggestionTask?.cancel()
         let query = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, let device = activePairedDevice else {
+        guard !query.isEmpty, let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else {
             refs.directoryCompletions = []
             return
         }
@@ -9423,7 +9713,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.directoryPreviewTask?.cancel()
         let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !directoryPath.isEmpty, refs.preparedLocalDirectoryPath != directoryPath else { return }
-        guard let device = activePairedDevice else { return }
+        guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else { return }
         refs.directoryPreviewTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled, let self else { return }
@@ -9930,64 +10220,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    @objc private func toggleWorkspaceHidden(_ sender: Any) {
-        guard let id = Self.senderIdentifier(sender) else { return }
-        guard let (project, workspace) = findWorkspace(id: id) else { return }
-        let targetIsHidden = !workspace.isHidden
-        if targetIsHidden, workspace.isRunning {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Hide workspace?"
-            alert.informativeText =
-                "\"\(workspace.title)\" is currently running. Hiding it will stop the workspace first, then move it into Hidden Workspaces."
-            alert.addButton(withTitle: "Stop and Hide")
-            alert.addButton(withTitle: "Cancel")
-            let response = alert.runModal()
-            guard response == .alertFirstButtonReturn else { return }
-        }
-        let button = sender as? NSButton
-        button?.isEnabled = false
-        Task { @MainActor [weak self, weak button] in
-            guard let self else { return }
-            if let device = activeDeviceForDaemonStateMutation() {
-                if targetIsHidden, workspace.isRunning {
-                    let stopResult = await Self.activeDeviceMutation(device: device) { device in
-                        try SpacesActiveDeviceClient.stopWorkspace(
-                            workspaceID: id, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    }
-                    switch stopResult {
-                    case .success(let response): applyActiveDeviceMutationResponse(response, selectedWorkspaceID: id)
-                    case .failure(let error):
-                        button?.isEnabled = true
-                        showError(error)
-                        return
-                    }
-                }
-                let result = await Self.activeDeviceMutation(device: device) { device in
-                    try SpacesActiveDeviceClient.updateWorkspaceMetadata(
-                        workspaceID: id, isHidden: targetIsHidden, updatesHidden: true, device: device,
-                        clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-                button?.isEnabled = true
-                switch result {
-                case .success(let response):
-                    if targetIsHidden, selectedWorkspaceID == id {
-                        selectedWorkspaceID = nil
-                        selectedProjectID = project.id
-                        suppressOutlineSelectionChanges = true
-                        outlineView.deselectAll(nil)
-                        suppressOutlineSelectionChanges = false
-                    }
-                    applyActiveDeviceMutationResponse(response, selectedProjectID: selectedProjectID)
-                case .failure(let error): showError(error)
-                }
-                return
-            }
-            button?.isEnabled = true
-            showNoActiveDeviceSelectedError()
-        }
-    }
-
     @objc private func archiveWorkspace(_ sender: Any) {
         guard let id = Self.senderIdentifier(sender) else { return }
         guard let (project, workspace) = findWorkspace(id: id) else { return }
@@ -10081,8 +10313,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// workspace path (for Copy/Reveal) or workspace ID (for Archive/Hide) in their
     /// `identifier.rawValue`, letting the underlying action methods stay
     /// unchanged whether they're triggered by a button or a menu item.
-    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, isHidden: Bool, target: AnyObject?, isLocalDevice: Bool = true) -> NSMenu
-    {
+    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool = true) -> NSMenu {
         let menu = NSMenu()
 
         func addItem(title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String) {
@@ -10106,10 +10337,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         menu.addItem(.separator())
         addItem(
-            title: isHidden ? "Unhide" : "Hide", symbol: isHidden ? "eye" : "eye.slash",
-            action: #selector(AppKitController.toggleWorkspaceHidden(_:)), keyEquivalent: "", modifiers: [], identifier: workspaceID)
-        menu.addItem(.separator())
-        addItem(
             title: "Archive…", symbol: "archivebox", action: #selector(AppKitController.archiveWorkspace(_:)), keyEquivalent: "", modifiers: [],
             identifier: workspaceID)
         return menu
@@ -10120,7 +10347,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == workspaceID })
         else { return }
         let menu = Self.makeWorkspaceOverflowMenu(
-            workspaceID: workspaceID, path: workspace.dir, isHidden: workspace.isHidden, target: self, isLocalDevice: isLocalWorkspace(workspace))
+            workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace))
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }
@@ -10371,15 +10598,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
         (workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }
-    }
-
-    private func hiddenWorkspaces() -> [(ProjectSummary, WorkspaceSummary)] {
-        projects.flatMap { project in
-            (workspacesByProject[project.id] ?? []).compactMap { workspace in
-                guard !workspace.isArchived, workspace.isHidden else { return nil }
-                return (project, workspace)
-            }
-        }
     }
 
     /// True when more than one paired device is present, so the sidebar groups
@@ -10736,8 +10954,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 visibleWorkspaceIDsByProject: projects.map { project in
                     let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
                     return (project.id, visibleWorkspaceIDs)
-                }, hiddenWorkspaceIDs: hiddenWorkspacesCollapsed ? [] : hiddenWorkspaces().map { $0.1.id }, selectedProjectID: selectedProjectID,
-                selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, direction: direction)
+                }, hiddenWorkspaceIDs: [], selectedProjectID: selectedProjectID, selectedWorkspaceID: selectedWorkspaceID,
+                showingAlerts: showingAlerts, direction: direction)
         else { return false }
         switch target {
         case .alerts: showAlertsDetail()
@@ -11204,11 +11422,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func orderedSidebarWorkspaces() -> [WorkspaceSummary] {
-        let visible = projects.flatMap { visibleWorkspaces(projectID: $0.id) }
-        guard !hiddenWorkspacesCollapsed else { return visible }
-        return visible + hiddenWorkspaces().map(\.1)
-    }
+    private func orderedSidebarWorkspaces() -> [WorkspaceSummary] { projects.flatMap { visibleWorkspaces(projectID: $0.id) } }
 
     private func focusGlobalWindowNavigation(direction: Int) {
         let requestID = UUID().uuidString
@@ -11721,40 +11935,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var singleDeviceID: String { deviceSections.first?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID }
 
-    /// A single Hidden section sits at the sidebar root (below the device sections
-    /// or projects) and aggregates hidden workspaces across every device.
-    private var hasHiddenWorkspaces: Bool { !hiddenWorkspaces().isEmpty }
-
     private func rootChildRef(index: Int) -> OutlineItemRef {
-        let primaryCount = showsDeviceHeaders ? deviceSections.count : deviceProjects(deviceID: singleDeviceID).count
-        if index >= 0, index < primaryCount {
-            if showsDeviceHeaders { return outlineItemRef(for: .device(deviceSections[index].deviceID)) }
-            return outlineItemRef(for: .project(deviceProjects(deviceID: singleDeviceID)[index]))
+        if showsDeviceHeaders {
+            let deviceID = (index >= 0 && index < deviceSections.count) ? deviceSections[index].deviceID : singleDeviceID
+            return outlineItemRef(for: .device(deviceID))
         }
-        return outlineItemRef(for: .hiddenWorkspaces)
+        let deviceProjects = deviceProjects(deviceID: singleDeviceID)
+        let project = (index >= 0 && index < deviceProjects.count) ? deviceProjects[index] : (deviceProjects.first ?? Self.placeholderProject)
+        return outlineItemRef(for: .project(project))
     }
 
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil {
-            let primaryCount = showsDeviceHeaders ? deviceSections.count : deviceProjects(deviceID: singleDeviceID).count
-            return primaryCount + (hasHiddenWorkspaces ? 1 : 0)
-        }
+        if item == nil { return showsDeviceHeaders ? deviceSections.count : deviceProjects(deviceID: singleDeviceID).count }
         if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceProjects(deviceID: deviceID).count }
-        if case .project(let project) = (item as? OutlineItemRef)?.item { return visibleWorkspaces(projectID: project.id).count }
-        if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item { return hiddenWorkspaces().count }
+        if case .project(let project) = (item as? OutlineItemRef)?.item { return max(visibleWorkspaces(projectID: project.id).count, 1) }
         return 0
     }
 
     public func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         if case .device = (item as? OutlineItemRef)?.item { return true }
         if case .project = (item as? OutlineItemRef)?.item { return true }
-        if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item { return true }
         return false
     }
 
     public func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { true }
 
-    public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { return true }
+    public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+        if case .emptyProject = (item as? OutlineItemRef)?.item { return false }
+        return true
+    }
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil { return rootChildRef(index: index) }
@@ -11765,22 +11974,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
             let visible = visibleWorkspaces(projectID: project.id)
+            guard !visible.isEmpty else { return outlineItemRef(for: .emptyProject(project)) }
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
                 ?? WorkspaceSummary(
                     id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
-        }
-        if case .hiddenWorkspaces = (item as? OutlineItemRef)?.item {
-            let hidden = hiddenWorkspaces()
-            let entry =
-                (index >= 0 && index < hidden.count ? hidden[index] : nil) ?? (
-                    projects.first ?? Self.placeholderProject,
-                    WorkspaceSummary(
-                        id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: true,
-                        isDefault: false)
-                )
-            return outlineItemRef(for: .workspace(entry.0, entry.1))
         }
         return outlineItemRef(for: .project(projects.first ?? Self.placeholderProject))
     }
@@ -11806,9 +12005,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return projectRowCell(
                 project: project, isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil,
                 isExpanded: outlineView.isItemExpanded(ref))
-        case .hiddenWorkspaces: return sidebarSectionRowCell(title: "Hidden", isSelected: false, isExpanded: outlineView.isItemExpanded(ref))
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: selectedWorkspaceID == workspace.id)
+        case .emptyProject(let project): return emptyProjectRowCell(project: project)
         }
     }
 
@@ -11838,10 +12037,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         titleLabel.lineBreakMode = .byTruncatingTail
 
         let chevron = NSImageView()
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        chevron.imageScaling = .scaleNone
         chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
         chevron.contentTintColor = .tertiaryLabelColor
         chevron.setContentHuggingPriority(.required, for: .horizontal)
+        chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([chevron.widthAnchor.constraint(equalToConstant: 14), chevron.heightAnchor.constraint(equalToConstant: 14)])
 
         let contentRow = NSStackView()
         contentRow.orientation = .horizontal
@@ -11908,10 +12111,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if projectActions.showsSettings { accessoryStack.addArrangedSubview(settingsButton) }
 
         let chevron = NSImageView()
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        chevron.imageScaling = .scaleNone
         chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
         chevron.contentTintColor = .tertiaryLabelColor
         chevron.setContentHuggingPriority(.required, for: .horizontal)
+        chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([chevron.widthAnchor.constraint(equalToConstant: 14), chevron.heightAnchor.constraint(equalToConstant: 14)])
 
         let contentRow = NSStackView()
         contentRow.orientation = .horizontal
@@ -11942,6 +12149,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             addButton.setAccessibilityIdentifier("sidebar-project-add-workspace-\(project.id)")
             accessoryStack.addArrangedSubview(addButton)
         }
+        return cell
+    }
+
+    private func emptyProjectRowCell(project: ProjectSummary) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.setAccessibilityIdentifier("sidebar-project-empty-\(project.id)")
+
+        let hintLabel = NSTextField(labelWithString: "No workspaces yet")
+        hintLabel.font = NSFontManager.shared.convert(.systemFont(ofSize: 12), toHaveTrait: .italicFontMask)
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.lineBreakMode = .byTruncatingTail
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        cell.addSubview(hintLabel)
+        NSLayoutConstraint.activate([
+            hintLabel.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 22),
+            hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -10),
+            hintLabel.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
         return cell
     }
 
@@ -12005,26 +12231,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             warningIcon.heightAnchor.constraint(equalToConstant: 11).isActive = true
             titleRow.addArrangedSubview(warningIcon)
         }
-        if workspace.isHidden {
-            titleRow.addArrangedSubview(NSView())
-
-            let unhideButton = NSButton(title: "Unhide", target: self, action: #selector(toggleWorkspaceHidden(_:)))
-            unhideButton.bezelStyle = .texturedRounded
-            unhideButton.controlSize = .small
-            unhideButton.font = .systemFont(ofSize: 11)
-            unhideButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-            unhideButton.setAccessibilityIdentifier("sidebar-workspace-unhide-\(workspace.id)")
-            titleRow.addArrangedSubview(unhideButton)
-        }
         contentStack.addArrangedSubview(titleRow)
-
-        if workspace.isHidden {
-            if !project.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let projectRow = sidebarMetadataRow(symbol: "folder", text: project.name, isSelected: isSelected, leadingIndent: 20)
-                projectRow.setAccessibilityIdentifier("sidebar-workspace-project-\(workspace.id)")
-                contentStack.addArrangedSubview(projectRow)
-            }
-        }
 
         cardView.addSubview(contentStack)
         cell.addSubview(cardView)
@@ -12093,8 +12300,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch ref.item {
         case .device: return 30
         case .project(let project): return selectedProjectID == project.id && selectedWorkspaceID == nil ? 32 : 30
-        case .hiddenWorkspaces: return 28
-        case .workspace(_, let workspace): return workspace.isHidden ? 40 : 32
+        case .workspace: return 32
+        case .emptyProject: return 28
         }
     }
 
@@ -12152,17 +12359,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             return
         }
         let item = ref.item
-        if case .project = item {
+        switch item {
+        case .project, .device, .emptyProject:
             suppressOutlineSelectionChanges = true
             outlineView.deselectAll(nil)
             suppressOutlineSelectionChanges = false
             return
-        }
-        if case .hiddenWorkspaces = item {
-            suppressOutlineSelectionChanges = true
-            outlineView.deselectAll(nil)
-            suppressOutlineSelectionChanges = false
-            return
+        case .workspace: break
         }
 
         let previousProjectID = selectedProjectID
@@ -12171,7 +12374,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         switch item {
         case .device: return
         case .project: return
-        case .hiddenWorkspaces: return
+        case .emptyProject: return
         case .workspace(let project, let workspace):
             selectedProjectID = project.id
             selectedWorkspaceID = workspace.id
@@ -12207,14 +12410,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         for row in 0..<outlineView.numberOfRows {
             guard let ref = outlineView.item(atRow: row) as? OutlineItemRef else { continue }
             if case .project(let project) = ref.item, project.id == projectID { return row }
-        }
-        return nil
-    }
-
-    private func rowIndexForHiddenWorkspacesSection() -> Int? {
-        for row in 0..<outlineView.numberOfRows {
-            guard let ref = outlineView.item(atRow: row) as? OutlineItemRef else { continue }
-            if case .hiddenWorkspaces = ref.item { return row }
         }
         return nil
     }
@@ -12268,24 +12463,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let row = rowIndex(forProjectID: project.id), let item = outlineView.item(atRow: row) else { continue }
             if project.isCollapsed { outlineView.collapseItem(item) } else { outlineView.expandItem(item) }
         }
-        guard let row = rowIndexForHiddenWorkspacesSection(), let item = outlineView.item(atRow: row) else { return }
-        if hiddenWorkspacesCollapsed { outlineView.collapseItem(item) } else { outlineView.expandItem(item) }
-    }
-
-    private func toggleHiddenWorkspacesExpanded() {
-        guard let row = rowIndexForHiddenWorkspacesSection(), let item = outlineView.item(atRow: row) else { return }
-        hiddenWorkspacesCollapsed.toggle()
-        if hiddenWorkspacesCollapsed { outlineView.collapseItem(item) } else { outlineView.expandItem(item) }
-        if hiddenWorkspacesCollapsed, let currentWorkspaceID = selectedWorkspaceID, let (_, workspace) = findWorkspace(id: currentWorkspaceID),
-            workspace.isHidden
-        {
-            selectedWorkspaceID = nil
-            suppressOutlineSelectionChanges = true
-            outlineView.deselectAll(nil)
-            suppressOutlineSelectionChanges = false
-            refreshSelection()
-        }
-        outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
     }
 
     private func updateProjectCollapsedStateInMemory(projectID: String, isCollapsed: Bool) {

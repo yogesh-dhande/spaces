@@ -23,6 +23,9 @@ import workspacecore
     var directorySuggestionTask: Task<Void, Never>?
     var directoryPreviewTask: Task<Void, Never>?
     var directoryCompletions: [String] = []
+    /// The device the project will be created on. Defaults to the local Mac; the
+    /// New Project form lets the user pick another paired device.
+    var selectedDeviceID: String = SpacesDeviceRecord.localDeviceID
 
     init(
         sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
