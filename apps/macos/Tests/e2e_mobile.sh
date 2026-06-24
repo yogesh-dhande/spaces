@@ -3780,6 +3780,9 @@ case "$MOBILE_DEVICE_KEY" in
     fail "SPACES_MOBILE_E2E_DEVICE_KEY must be iphone or ipad, got: $MOBILE_DEVICE_KEY"
     ;;
 esac
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  spaces_e2e_require_remote_host_env "$ROOT_DIR"
+fi
 SUITE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-mobile-e2e.XXXXXX")"
 SCENARIO_RESULTS_LOG="$SUITE_ROOT/scenario-results.tsv"
 MOBILE_UDID="$(resolve_simulator_udid "$MOBILE_DEVICE_NAME")"

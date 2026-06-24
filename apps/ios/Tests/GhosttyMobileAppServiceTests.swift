@@ -90,6 +90,39 @@
             }
         }
 
+        private actor DeviceAPIRequestRecorder {
+            private var requests: [SpacesDeviceAPIRequest] = []
+
+            func append(_ request: SpacesDeviceAPIRequest) { requests.append(request) }
+
+            func snapshot() -> [SpacesDeviceAPIRequest] { requests }
+
+            func containsTerminalControlAction(_ action: SpacesDeviceTerminalControlAction) -> Bool {
+                requests.contains { request in
+                    if case .terminalControl(let payload) = request.command {
+                        return payload.action == action
+                    }
+                    return false
+                }
+            }
+
+            func countTerminalControlAction(_ action: SpacesDeviceTerminalControlAction) -> Int {
+                requests.filter { request in
+                    if case .terminalControl(let payload) = request.command {
+                        return payload.action == action
+                    }
+                    return false
+                }.count
+            }
+
+            func countStateRequests() -> Int {
+                requests.filter { request in
+                    if case .state = request.command { return true }
+                    return false
+                }.count
+            }
+        }
+
         private func settings() -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
             settings.host = "127.0.0.1"
@@ -155,6 +188,127 @@
             XCTAssertFalse(model.showsTakeOverAction)
             XCTAssertFalse(model.acceptsInput)
             XCTAssertEqual(model.visibleText, "This terminal session ended before a final render was available.")
+        }
+
+        func testStartingSessionShowsPreparingAndDoesNotOfferTakeOver() {
+            let model = TerminalViewerModel(session: session(state: .starting), settings: settings()) { _ in }
+
+            XCTAssertEqual(model.visibleText, "Preparing terminal…")
+            XCTAssertFalse(model.showsTakeOverAction)
+            XCTAssertFalse(model.acceptsInput)
+        }
+
+        func testStartingSessionAttachesViewerBeforeSubscribing() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting),
+                settings: settings(),
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.start()
+            for _ in 0..<40 {
+                if await recorder.containsTerminalControlAction(.attach) { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            model.stop()
+
+            let requests = await recorder.snapshot()
+            guard case .terminalControl(let payload)? = requests.first?.command else {
+                XCTFail("Expected starting terminal connect to attach the viewer before subscribing.")
+                return
+            }
+            XCTAssertEqual(payload.action, .attach)
+            XCTAssertEqual(payload.sessionID, "terminal-session")
+            XCTAssertEqual(payload.attachmentMode, .viewer)
+            XCTAssertEqual(payload.client?.kind, .remoteViewer)
+        }
+
+        func testStartingSessionRetriesUnavailableAttachWithoutMarkingEnded() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                if case .terminalControl(let payload) = request.command, payload.action == .attach {
+                    return SpacesDeviceAPIResponse(ok: false, message: "Terminal session terminal-session is not available.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting),
+                settings: settings(),
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.start()
+            for _ in 0..<40 {
+                if await recorder.countTerminalControlAction(.attach) >= 2 { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            model.stop()
+
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            XCTAssertGreaterThanOrEqual(attachCount, 2)
+            XCTAssertEqual(model.visibleText, "Preparing terminal…")
+            XCTAssertFalse(model.showsTakeOverAction)
+            XCTAssertFalse(model.acceptsInput)
+        }
+
+        func testStartingSessionRefreshesFailedStateWhenAttachReportsNotRunning() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let failedState = GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session",
+                reason: TerminalRemoteSessionStateReason.terminated,
+                emittedAt: "2026-06-04T14:23:30Z",
+                sessionStateRevision: nil,
+                sessionStateFlags: nil,
+                screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session",
+                    servicePID: 100,
+                    childPID: nil,
+                    state: .failed,
+                    updatedAt: "2026-06-04T14:23:30Z",
+                    exitedAt: "2026-06-04T14:23:30Z"),
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "terminal",
+                workingDirectory: "/tmp/work",
+                outputByteCount: 0)
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                switch request.command {
+                case .terminalControl(let payload) where payload.action == .attach:
+                    return SpacesDeviceAPIResponse(ok: false, message: "Terminal session terminal-session is not running.")
+                case .state:
+                    return Self.terminalStateResponse(failedState)
+                default:
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting),
+                settings: settings(),
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.start()
+            for _ in 0..<40 {
+                if model.latestState?.runtimeState?.state == .failed { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            model.stop()
+
+            let attachCount = await recorder.countTerminalControlAction(.attach)
+            let stateRequestCount = await recorder.countStateRequests()
+            XCTAssertEqual(attachCount, 1)
+            XCTAssertEqual(stateRequestCount, 1)
+            XCTAssertEqual(model.latestState?.runtimeState?.state, .failed)
+            XCTAssertEqual(model.renderMode, "ended")
+            XCTAssertFalse(model.showsTakeOverAction)
+            XCTAssertFalse(model.acceptsInput)
         }
 
         func testOpenTerminalLinkOpensNonMediaExternalURL() async {
@@ -752,6 +906,10 @@
 
         private nonisolated static func metadataResponse(_ metadata: SpacesDeviceTerminalLinkMetadata) -> SpacesDeviceAPIResponse {
             SpacesDeviceAPIResponse(ok: true, message: "ok", result: .terminalLinkMetadata(metadata))
+        }
+
+        private nonisolated static func terminalStateResponse(_ payload: GhosttyRemoteSessionStatePayload) -> SpacesDeviceAPIResponse {
+            SpacesDeviceAPIResponse(ok: true, message: "ok", result: .terminalState(payload))
         }
 
         private nonisolated static func chunkResponse(_ chunk: SpacesDeviceTerminalLinkChunk) -> SpacesDeviceAPIResponse {

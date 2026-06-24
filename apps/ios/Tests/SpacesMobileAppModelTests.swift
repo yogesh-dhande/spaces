@@ -252,6 +252,37 @@
             XCTAssertFalse(model.isMutating)
         }
 
+        func testOpenWorkspaceTerminalReturnsStartingSessionFromMutationOverview() async {
+            let startingSession = makeSession(id: "session-shell-new", state: .starting, isControlAvailable: false, isSubscriptionAvailable: false)
+            let refreshedOverview = makeOverview(sessions: [startingSession])
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true,
+                    message: "Opened workspace terminal.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(
+                            overview: refreshedOverview,
+                            workspaceID: "workspace-feature",
+                            sessionID: startingSession.id)))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            let session = await model.openWorkspaceTerminal(workspaceID: "workspace-feature")
+
+            XCTAssertEqual(session?.id, startingSession.id)
+            XCTAssertEqual(session?.state, .starting)
+            XCTAssertEqual(session?.isControlAvailable, false)
+            XCTAssertEqual(session?.isSubscriptionAvailable, false)
+            XCTAssertEqual(model.overview, refreshedOverview)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isMutating)
+            let request = await recorder.snapshot().first
+            XCTAssertEqual(request?.commandName, "openWorkspaceTerminal")
+        }
+
         private func makeOverview(
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
@@ -293,12 +324,17 @@
             return SpacesDeviceOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions)
         }
 
-        private func makeSession(id: String) -> SpacesDeviceTerminalSessionSummary {
+        private func makeSession(
+            id: String,
+            state: TerminalSessionState = .running,
+            isControlAvailable: Bool = true,
+            isSubscriptionAvailable: Bool = true
+        ) -> SpacesDeviceTerminalSessionSummary {
             SpacesDeviceTerminalSessionSummary(
                 id: id,
                 title: "api",
                 workingDirectory: "/repo/feature",
-                state: .running,
+                state: state,
                 backend: .ghosttyEmbedded,
                 lifetimePolicy: .persistent,
                 servicePID: 100,
@@ -309,8 +345,8 @@
                 projectName: "Project",
                 createdAt: "2026-01-01T00:00:00Z",
                 updatedAt: "2026-01-01T00:00:01Z",
-                isControlAvailable: true,
-                isSubscriptionAvailable: true,
+                isControlAvailable: isControlAvailable,
+                isSubscriptionAvailable: isSubscriptionAvailable,
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot()
             )
         }

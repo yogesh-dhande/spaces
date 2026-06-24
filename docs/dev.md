@@ -153,7 +153,7 @@ apps/macos/Tests/e2e.sh mobile
 
 The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
-The E2E runner loads `.env` only for selected scenarios that need remote host or physical-device signing values. Local-only scenarios run without `.env` by default.
+The E2E helpers source the worktree `.env` when it exists. Local-only scenarios run without `.env`; remote-host lanes require that file to provide `SPACES_E2E_REMOTE_SSH_HOST`.
 
 Each `apps/macos/Tests/e2e.sh` invocation writes an ignored Markdown report under `apps/macos/.artifacts/e2e-runs/<timestamp>-<lane>/summary.md`. The run directory stores collected metric artifacts as flat step-prefixed files alongside the report. The report includes the command timeline, per-case timing table, per-step logs, flattened tables for collected JSON metrics and result files, TSV tables for app metric/result logs, and links to raw JSONL performance logs.
 
@@ -170,7 +170,7 @@ apps/macos/Tests/e2e.sh device-api local
 apps/macos/Tests/e2e.sh device-api remote
 ```
 
-Both targets create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. During the terminal portion, the parity flow writes `terminal-latency-summary.json` with open-terminal request timing, state-readiness timing, send-to-state-progress samples, state request timing, and state progress counters. The remote target relies on the Linux installer enabling user lingering and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime. `apps/macos/Tests/e2e.sh device-api` runs local and remote parity.
+Both targets create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. During the terminal portion, the parity flow writes `terminal-latency-summary.json` with open-terminal request timing, state-readiness timing, send-to-state-progress samples, state request timing, and state progress counters. The remote target installs its test daemon against an isolated remote E2E database/runtime root, relies on the Linux installer enabling user lingering, and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime. `apps/macos/Tests/e2e.sh device-api` runs local and remote parity.
 
 Focused remote terminal latency comparisons use the configured `.env` remote host, create one remote Device API workspace, and compare Device API workspace-terminal latency against a local Spaces terminal that SSHes into the same remote workspace directory:
 

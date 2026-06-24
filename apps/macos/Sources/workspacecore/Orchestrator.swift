@@ -2104,36 +2104,39 @@ public final class WorkspaceOrchestrator {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: generatedTitle, workingDirectory: workingDirectory,
             shell: shellPath, command: command, createdAt: createdAt, workspaceID: workspace.id, kind: .shell)
-        if !isRemote {
-            let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-            FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
-            FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
-        }
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: sessionID, backend: launchConfiguration.backend, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil,
+                state: .starting, updatedAt: createdAt, title: generatedTitle, workingDirectory: workingDirectory), paths: paths)
+        _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+        _ = FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
         let existing = try store.windows(workspaceID: workspace.id)
         let nextOrder = Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200)
         let windowRecordID = UUID().uuidString
         let appName = TerminalHost.spaces.appName
-        if !isRemote {
-            try store.upsert(
-                window: WindowRecord(
-                    id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil, windowID: nil,
-                    terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
-        }
-        if !isRemote && !workspace.isRunning {
+        try store.upsert(
+            window: WindowRecord(
+                id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil, windowID: nil,
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+        if !workspace.isRunning {
             let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
         }
         return WorkspaceTerminalLaunchReservation(
-            sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: !isRemote,
-            appName: appName, title: generatedTitle, launchConfiguration: launchConfiguration, runtimePlan: isRemote ? runtimePlan : nil,
-            createdAt: createdAt, orderIndex: nextOrder)
+            sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
+            title: generatedTitle, launchConfiguration: launchConfiguration, runtimePlan: isRemote ? runtimePlan : nil, createdAt: createdAt,
+            orderIndex: nextOrder)
     }
 
     @discardableResult public func finishReservedWorkspaceTerminalLaunch(_ reservation: WorkspaceTerminalLaunchReservation) throws -> String {
         do {
             if reservation.windowRecordInsertedBeforeLaunch {
-                guard try reservedWorkspaceTerminalWindowExists(reservation) else { return reservation.sessionID }
+                guard try reservedWorkspaceTerminalWindowExists(reservation) else {
+                    markReservedWorkspaceTerminalLaunchFailed(reservation)
+                    return reservation.sessionID
+                }
             }
             let session: SpacesTerminalSessionHandle
             if let runtimePlan = reservation.runtimePlan {
@@ -2168,7 +2171,7 @@ public final class WorkspaceOrchestrator {
             try markWorkspaceRunningIfNeeded(workspaceID: reservation.workspaceID, launchedAtFallback: reservation.createdAt)
             return session.sessionID
         } catch {
-            try? store.deleteWindow(id: reservation.windowRecordID)
+            markReservedWorkspaceTerminalLaunchFailed(reservation)
             if let runtimePlan = reservation.runtimePlan {
                 terminateRemoteTerminalSession(reservation.sessionID, plan: runtimePlan)
             } else {
@@ -2176,6 +2179,34 @@ public final class WorkspaceOrchestrator {
             }
             throw error
         }
+    }
+
+    public func cancelReservedWorkspaceTerminalLaunch(_ reservation: WorkspaceTerminalLaunchReservation) {
+        markReservedWorkspaceTerminalLaunchFailed(reservation)
+    }
+
+    private func markReservedWorkspaceTerminalLaunchFailed(_ reservation: WorkspaceTerminalLaunchReservation) {
+        let now = nowISO8601()
+        if let paths = try? TerminalSessionPaths.forSession(id: reservation.sessionID) {
+            let previousRuntimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+            let failedState = TerminalSessionRuntimeState(
+                sessionID: reservation.sessionID, backend: previousRuntimeState?.backend ?? reservation.launchConfiguration.backend,
+                servicePID: previousRuntimeState?.servicePID ?? ProcessInfo.processInfo.processIdentifier, childPID: previousRuntimeState?.childPID,
+                state: .failed, updatedAt: now, exitedAt: now, title: previousRuntimeState?.title ?? reservation.launchConfiguration.title,
+                workingDirectory: previousRuntimeState?.workingDirectory ?? reservation.launchConfiguration.workingDirectory,
+                columns: previousRuntimeState?.columns, rows: previousRuntimeState?.rows, foregroundPID: previousRuntimeState?.foregroundPID,
+                foregroundExecutablePath: previousRuntimeState?.foregroundExecutablePath,
+                foregroundExecutableName: previousRuntimeState?.foregroundExecutableName, foregroundArgv: previousRuntimeState?.foregroundArgv,
+                foregroundDetectedAgentKind: previousRuntimeState?.foregroundDetectedAgentKind,
+                foregroundDisplayLabel: previousRuntimeState?.foregroundDisplayLabel,
+                foregroundDisplayCommand: previousRuntimeState?.foregroundDisplayCommand)
+            try? TerminalSessionPersistence.writeRuntimeState(failedState, paths: paths)
+            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
+            try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
+            try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
+        }
+        try? store.deleteWindow(id: reservation.windowRecordID)
+        try? clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: reservation.workspaceID)
     }
 
     private func markWorkspaceRunningIfNeeded(workspaceID: String, launchedAtFallback: String) throws {

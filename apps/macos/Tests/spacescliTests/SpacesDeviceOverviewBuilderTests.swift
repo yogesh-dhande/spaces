@@ -139,6 +139,28 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(rows.first(where: { $0.name == "web" })?.runState, .notStarted)
     }
 
+    func testStartingTerminalSessionSummaryKeepsWorkspaceTerminalRowRunning() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-starting", title: "shell-1", workingDirectory: workspace.dir, state: .starting, workspaceID: workspace.id,
+            attachmentSnapshot: .init(), isControlAvailable: false, isSubscriptionAvailable: false)
+
+        let overview = SpacesDeviceOverviewBuilder.build(workspaces: [.init(project: project, workspace: workspace)], sessions: [session])
+
+        let summary = overview.sessions.first
+        XCTAssertEqual(summary?.id, "session-starting")
+        XCTAssertEqual(summary?.state, .starting)
+        XCTAssertEqual(summary?.isControlAvailable, false)
+        XCTAssertEqual(summary?.isSubscriptionAvailable, false)
+        let row = overview.workspaces.first?.terminalRows.first
+        XCTAssertEqual(row?.sessionID, "session-starting")
+        XCTAssertEqual(row?.runState, .running)
+        XCTAssertEqual(row?.canOpenTerminal, true)
+    }
+
     func testBuildIncludesProjectAndWorkspaceConfigForClientParity() {
         let project = ProjectRecord(
             id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isCollapsed: true, setupScript: "make setup",

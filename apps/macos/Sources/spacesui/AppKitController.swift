@@ -1037,6 +1037,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let requestSender: RemoteGhosttyTerminalServiceRequestSender
         let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
         let launchConfiguration: TerminalSessionLaunchConfiguration
+        let initialRuntimeState: TerminalSessionRuntimeState?
     }
 
     private final class RemoteTerminalWindowClientStore: @unchecked Sendable {
@@ -1077,7 +1078,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 } else {
                     remoteRoute = try remoteTerminalSessionRoute(sessionID: sessionID)
                 }
-                if let remoteRoute { try ensureRemoteTerminalLaunchConfiguration(remoteRoute.launchConfiguration, paths: paths) }
+                if let remoteRoute { try ensureRemoteTerminalSessionMirror(remoteRoute, paths: paths) }
                 let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
                 if remoteRoute == nil {
                     agentSignalHandler = nil
@@ -1216,7 +1217,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, onEvent: onEvent, onDisconnect: onDisconnect)
                 try client.start()
                 return client
-            }, launchConfiguration: launchConfiguration)
+            }, launchConfiguration: launchConfiguration, initialRuntimeState: nil)
     }
 
     private func activeDeviceRemoteTerminalSessionRoute(_ request: ActiveDeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord) throws
@@ -1230,8 +1231,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, transportKey: transportKey)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
-            shell: "/bin/bash", command: nil, createdAt: ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID,
-            kind: request.kind)
+            shell: "/bin/bash", command: nil, createdAt: request.createdAt ?? ISO8601DateFormatter().string(from: Date()),
+            workspaceID: request.workspaceID, kind: request.kind)
+        let runtimeState = request.initialState.map {
+            TerminalSessionRuntimeState(
+                sessionID: request.sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
+                updatedAt: request.updatedAt ?? launchConfiguration.createdAt, title: request.title, workingDirectory: request.workingDirectory)
+        }
         return RemoteTerminalSessionRoute(
             requestSender: Self.activeDeviceTerminalServiceRequestSender(requestClient: requestClient, authToken: authToken, clientApp: clientApp),
             stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
@@ -1242,7 +1248,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     request: request, host: device.host, port: device.port, transportKey: transportKey, onEvent: onEvent, onDisconnect: onDisconnect)
                 try client.start()
                 return client
-            }, launchConfiguration: launchConfiguration)
+            }, launchConfiguration: launchConfiguration, initialRuntimeState: runtimeState)
     }
 
     private func openActiveDeviceTerminalSession(
@@ -1295,11 +1301,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func ensureRemoteTerminalLaunchConfiguration(_ launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
-        throws
-    {
+    private func ensureRemoteTerminalSessionMirror(_ route: RemoteTerminalSessionRoute, paths: TerminalSessionPaths) throws {
         if (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) == nil {
-            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(route.launchConfiguration, paths: paths)
+        }
+        if let initialRuntimeState = route.initialRuntimeState, (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) == nil {
+            try TerminalSessionPersistence.writeRuntimeState(initialRuntimeState, paths: paths)
         }
     }
 
@@ -3063,6 +3070,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let title: String
         let workingDirectory: String
         let kind: TerminalSessionKind
+        let initialState: TerminalSessionState?
+        let servicePID: Int32?
+        let childPID: Int32?
+        let createdAt: String?
+        let updatedAt: String?
+
+        init(
+            workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
+            initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil, createdAt: String? = nil,
+            updatedAt: String? = nil
+        ) {
+            self.workspaceID = workspaceID
+            self.sessionID = sessionID
+            self.title = title
+            self.workingDirectory = workingDirectory
+            self.kind = kind
+            self.initialState = initialState
+            self.servicePID = servicePID
+            self.childPID = childPID
+            self.createdAt = createdAt
+            self.updatedAt = updatedAt
+        }
     }
 
     enum ActiveDeviceWindowShortcutResolution: Sendable, Equatable {
@@ -3477,16 +3506,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let sessionID = row.sessionID
             else { return .noMatch }
             return .openTerminal(
-                ActiveDeviceTerminalOpenRequest(
-                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .process))
+                activeDeviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                    ?? ActiveDeviceTerminalOpenRequest(
+                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .process
+                    ))
         case .window:
             guard let windowListIndex = target.windowListIndex, detail.terminalRows.indices.contains(windowListIndex),
                 let sessionID = detail.terminalRows[windowListIndex].sessionID
             else { return .noMatch }
             let row = detail.terminalRows[windowListIndex]
             return .openTerminal(
-                ActiveDeviceTerminalOpenRequest(
-                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell))
+                activeDeviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                    ?? ActiveDeviceTerminalOpenRequest(
+                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell
+                    ))
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return .noMatch }
             let processTemplateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
@@ -3500,8 +3533,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let sessionID = row.sessionID
             else { return .noMatch }
             return .openTerminal(
-                ActiveDeviceTerminalOpenRequest(
-                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .agent))
+                activeDeviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                    ?? ActiveDeviceTerminalOpenRequest(
+                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .agent))
+        }
+    }
+
+    nonisolated static func activeDeviceTerminalOpenRequest(
+        workspaceID fallbackWorkspaceID: String, sessionID: String, overview: SpacesDeviceOverviewPayload?
+    ) -> ActiveDeviceTerminalOpenRequest? {
+        let session = overview?.sessions.first { $0.id == sessionID }
+        if let session {
+            return ActiveDeviceTerminalOpenRequest(
+                workspaceID: session.workspaceID ?? fallbackWorkspaceID, sessionID: session.id, title: session.title,
+                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), initialState: session.state,
+                servicePID: session.servicePID, childPID: session.childPID, createdAt: session.createdAt, updatedAt: session.updatedAt)
+        }
+        guard let workspace = overview?.workspaces.first(where: { $0.id == fallbackWorkspaceID }),
+            let row = workspace.terminalRows.first(where: { $0.sessionID == sessionID })
+        else { return nil }
+        return ActiveDeviceTerminalOpenRequest(
+            workspaceID: fallbackWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell)
+    }
+
+    nonisolated private static func terminalSessionKind(rowKind: SpacesDeviceTerminalSessionRowKind) -> TerminalSessionKind {
+        switch rowKind {
+        case .process: .process
+        case .agent: .agent
+        case .liveSession: .shell
         }
     }
 
@@ -3761,10 +3820,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             guard let self, let ref = self.outlineView.item(atRow: row) as? OutlineItemRef else { return false }
             if case .project(let project) = ref.item {
                 self.toggleProjectExpanded(projectID: project.id)
-                return true
-            }
-            if case .device = ref.item {
-                if self.outlineView.isItemExpanded(ref) { self.outlineView.collapseItem(ref) } else { self.outlineView.expandItem(ref) }
                 return true
             }
             return false
@@ -4663,7 +4718,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     ) {
         if let overview = response.overview {
             applyActiveDeviceOverview(
-                overview, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID, preserveDetailPane: true)
+                overview, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID, preserveDetailPane: false)
         } else {
             if let preferredWorkspaceID { selectedWorkspaceID = preferredWorkspaceID }
             if let preferredProjectID { selectedProjectID = preferredProjectID }
@@ -10408,20 +10463,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case ipc
     }
 
-    /// Opens the window for a freshly created workspace terminal: a local Ghostty
-    /// window for local workspaces, or a Device-API-backed remote terminal window
-    /// for workspaces that live on a remote device.
-    private func openWorkspaceTerminalWindow(sessionID: String, workspaceID: String, device: SpacesPairedDeviceRecord) {
-        guard isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) else {
-            _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
-            return
-        }
-        let summary = activeDeviceWorkspaceSummary(workspaceID: workspaceID)
-        let request = ActiveDeviceTerminalOpenRequest(
-            workspaceID: workspaceID, sessionID: sessionID, title: summary?.title ?? "Terminal", workingDirectory: summary?.dir ?? "", kind: .shell)
-        _ = openActiveDeviceTerminalSession(request, device: device)
-    }
-
     private func openWorkspaceTerminal(workspaceID: String, route: WorkspaceTerminalOpenRoute, completion: (() -> Void)? = nil) {
         let startedAt = Date()
         let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID)
@@ -10435,10 +10476,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
                 switch result {
                 case .success(let response):
-                    if let sessionID = response.sessionID {
-                        openWorkspaceTerminalWindow(sessionID: sessionID, workspaceID: workspaceID, device: device)
-                    }
                     applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    if let sessionID = response.sessionID {
+                        if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
+                            if let request = Self.activeDeviceTerminalOpenRequest(
+                                workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? activeDeviceOverview)
+                            {
+                                _ = openActiveDeviceTerminalSession(request, device: device)
+                            }
+                        } else {
+                            _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
+                        }
+                    }
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                     logPerfMetric(
                         "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
@@ -10597,7 +10646,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isArchived && !workspace.isHidden }
 
     private func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
-        (workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }
+        (workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }.sorted { lhs, rhs in
+            if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
     }
 
     /// True when more than one paired device is present, so the sidebar groups
@@ -11961,8 +12013,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { true }
 
     public func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        if case .emptyProject = (item as? OutlineItemRef)?.item { return false }
-        return true
+        switch (item as? OutlineItemRef)?.item {
+        case .device, .emptyProject: return false
+        default: return true
+        }
     }
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
@@ -11998,9 +12052,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let ref = item as? OutlineItemRef else { return nil }
         switch ref.item {
-        case .device(let deviceID):
-            return sidebarSectionRowCell(
-                title: deviceSectionTitle(deviceID: deviceID), isSelected: false, isExpanded: outlineView.isItemExpanded(ref))
+        case .device(let deviceID): return sidebarSectionRowCell(deviceID: deviceID)
         case .project(let project):
             return projectRowCell(
                 project: project, isSelected: selectedProjectID == project.id && selectedWorkspaceID == nil,
@@ -12011,61 +12063,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func deviceSectionTitle(deviceID: String) -> String {
-        guard let section = deviceSections.first(where: { $0.deviceID == deviceID }) else { return deviceID }
+    private func deviceSectionName(deviceID: String) -> String { deviceSections.first(where: { $0.deviceID == deviceID })?.deviceName ?? deviceID }
+
+    private func deviceSectionLoadStateLabel(deviceID: String) -> (text: String, color: NSColor)? {
+        guard let section = deviceSections.first(where: { $0.deviceID == deviceID }) else { return nil }
         switch section.loadState {
-        case .loading: return "\(section.deviceName) — Loading…"
-        case .offline: return "\(section.deviceName) — Offline"
-        case .loaded: return section.deviceName
+        case .loading: return ("loading…", .tertiaryLabelColor)
+        case .offline: return ("offline", sidebarFailedIndicatorColor())
+        case .loaded: return nil
         }
     }
 
-    private func sidebarSectionRowCell(title: String, isSelected: Bool, isExpanded: Bool) -> NSTableCellView {
+    /// Renders a paired device as a quiet, non-interactive section caption. The device node stays a
+    /// structural parent of its project rows (always expanded), so the caption carries no chevron or
+    /// selection chrome; load state is shown inline as muted trailing text.
+    private func sidebarSectionRowCell(deviceID: String) -> NSTableCellView {
         let cell = NSTableCellView()
 
-        let rowBackground = NSView()
-        rowBackground.translatesAutoresizingMaskIntoConstraints = false
-        rowBackground.wantsLayer = true
-        rowBackground.layer?.cornerRadius = UIRadius.regular
-        rowBackground.layer?.borderWidth = isSelected ? 1 : 0
-        rowBackground.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
-        rowBackground.layer?.backgroundColor = isSelected ? sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
-
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
-        titleLabel.lineBreakMode = .byTruncatingTail
-
-        let chevron = NSImageView()
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        chevron.imageScaling = .scaleNone
-        chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-        chevron.contentTintColor = .tertiaryLabelColor
-        chevron.setContentHuggingPriority(.required, for: .horizontal)
-        chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([chevron.widthAnchor.constraint(equalToConstant: 14), chevron.heightAnchor.constraint(equalToConstant: 14)])
+        let nameLabel = NSTextField(labelWithString: deviceSectionName(deviceID: deviceID).localizedUppercase)
+        nameLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        nameLabel.textColor = .secondaryLabelColor
+        nameLabel.lineBreakMode = .byTruncatingTail
 
         let contentRow = NSStackView()
         contentRow.orientation = .horizontal
         contentRow.alignment = .centerY
         contentRow.spacing = 6
         contentRow.translatesAutoresizingMaskIntoConstraints = false
-        contentRow.addArrangedSubview(titleLabel)
+        contentRow.addArrangedSubview(nameLabel)
         contentRow.addArrangedSubview(NSView())
-        contentRow.addArrangedSubview(chevron)
 
-        rowBackground.addSubview(contentRow)
-        cell.addSubview(rowBackground)
+        if let state = deviceSectionLoadStateLabel(deviceID: deviceID) {
+            let stateLabel = NSTextField(labelWithString: state.text)
+            stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            stateLabel.textColor = state.color
+            stateLabel.lineBreakMode = .byTruncatingTail
+            stateLabel.setContentHuggingPriority(.required, for: .horizontal)
+            stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            contentRow.addArrangedSubview(stateLabel)
+        }
+
+        cell.addSubview(contentRow)
         NSLayoutConstraint.activate([
-            rowBackground.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            rowBackground.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            rowBackground.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
-            rowBackground.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
-
-            contentRow.leadingAnchor.constraint(equalTo: rowBackground.leadingAnchor, constant: 10),
-            contentRow.trailingAnchor.constraint(equalTo: rowBackground.trailingAnchor, constant: -10),
-            contentRow.centerYAnchor.constraint(equalTo: rowBackground.centerYAnchor),
+            contentRow.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            contentRow.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            contentRow.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -4),
         ])
         return cell
     }

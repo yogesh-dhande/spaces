@@ -6,7 +6,7 @@ app_root="$(cd "$script_dir/.." && pwd)"
 repo_root="$(cd "$app_root/../.." && pwd)"
 source "$repo_root/scripts/spaces-e2e-env.sh"
 
-spaces_e2e_load_env "$repo_root"
+spaces_e2e_require_remote_host_env "$repo_root"
 
 remote_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_user="${SPACES_E2E_REMOTE_SSH_USER:-}"

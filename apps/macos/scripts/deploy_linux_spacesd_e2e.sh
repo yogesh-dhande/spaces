@@ -12,7 +12,7 @@ zig_cache_root="$linux_cache_root/zig"
 swiftpm_cache_root="$linux_cache_root/swiftpm"
 artifact_cache_root="$linux_cache_root/artifacts"
 
-spaces_e2e_load_env "$repo_root"
+spaces_e2e_require_remote_host_env "$repo_root"
 
 remote_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_user="${SPACES_E2E_REMOTE_SSH_USER:-}"

@@ -29,6 +29,12 @@ remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
 remote_demo_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
 remote_demo_device_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
 remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  spaces_e2e_require_remote_host_env "$repo_root"
+  remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
+  remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
+  remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+fi
 remote_pairing_json=""
 remote_pairing_window_json=""
 pairing_link=""
@@ -675,10 +681,6 @@ pair_remote_demo_device() {
   if [[ "${SPACES_E2E_RUN_REMOTE:-0}" != "1" ]]; then
     echo "Skipping remote demo device pairing for the selected scenario." >&2
     return
-  fi
-  if [[ -z "$remote_ssh_host" ]]; then
-    echo "Remote mobile demo requires SPACES_E2E_REMOTE_SSH_HOST. Set remote E2E config in .env or the environment." >&2
-    exit 1
   fi
 
   local -a args=(pair-remote-device --ssh-host "$remote_ssh_host")
