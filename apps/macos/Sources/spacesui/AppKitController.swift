@@ -4420,13 +4420,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         invalidateCommandPaletteCache()
         configCache = snapshot.config
         loadShortcutSpecs()
-        deviceSections = [
-            DeviceSection(
-                deviceID: snapshot.activeDeviceID, deviceName: snapshot.activeDeviceName, isLocal: !snapshot.activeDeviceIsRemote, loadState: .loaded,
-                device: snapshot.activePairedDevice, projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject,
-                workspaceRuntimeStatusByID: snapshot.workspaceRuntimeStatusByID, alertsGroups: snapshot.alertsGroups,
-                overview: snapshot.activeDeviceOverview)
-        ]
+        // Update the local device's section in place and keep already-loaded remote
+        // sections, so a periodic refresh never makes remote devices vanish and
+        // reload. Skip the full outline reload entirely when the local overview is
+        // unchanged, so background polls don't collapse expanded projects.
+        let localOutlineUnchanged = deviceSections.first(where: { $0.deviceID == snapshot.activeDeviceID })?.overview == snapshot.activeDeviceOverview
+        let localSection = DeviceSection(
+            deviceID: snapshot.activeDeviceID, deviceName: snapshot.activeDeviceName, isLocal: !snapshot.activeDeviceIsRemote, loadState: .loaded,
+            device: snapshot.activePairedDevice, projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject,
+            workspaceRuntimeStatusByID: snapshot.workspaceRuntimeStatusByID, alertsGroups: snapshot.alertsGroups,
+            overview: snapshot.activeDeviceOverview)
+        if let localIndex = deviceSections.firstIndex(where: { $0.deviceID == snapshot.activeDeviceID }) {
+            deviceSections[localIndex] = localSection
+        } else {
+            deviceSections.insert(localSection, at: 0)
+        }
         activeDeviceID = snapshot.activeDeviceID
         activeDeviceName = snapshot.activeDeviceName
         activeDeviceIsRemote = snapshot.activeDeviceIsRemote
@@ -4435,9 +4443,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         rebuildFlatSidebarData()
         loadAlertsDismissedAttentionItemIDs()
         pruneDismissedAlertsAttentionItemIDsIfNeeded()
-        outlineView.reloadData()
+        if !localOutlineUnchanged {
+            outlineView.reloadData()
+            applySidebarProjectExpansionState()
+        }
         refreshActiveDeviceSelector()
-        applySidebarProjectExpansionState()
         logStartupProfile("apply_snapshot_outline_ready")
         if !shouldPreserveDetailPane {
             refreshSelection()
@@ -4460,14 +4470,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// independently so a slow or unreachable device never blocks the sidebar.
     private func loadRemoteDeviceSections() {
         let remotes = macPairedDevices()
+        var addedSection = false
         for record in remotes where !deviceSections.contains(where: { $0.deviceID == record.id }) {
             let available = Self.pairedDeviceHasRequiredCredentials(deviceID: record.id)
             deviceSections.append(
                 DeviceSection(
                     deviceID: record.id, deviceName: record.name, isLocal: false, loadState: available ? .loading : .offline("Reconnect required"),
                     device: record))
+            addedSection = true
         }
-        outlineView.reloadData()
+        if addedSection {
+            outlineView.reloadData()
+            applySidebarProjectExpansionState()
+        }
         let clientApp = SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in remotes where Self.pairedDeviceHasRequiredCredentials(deviceID: record.id) {
             Task { @MainActor [weak self] in
@@ -4483,8 +4498,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func applyRemoteDeviceSection(deviceID: String, result: Result<SpacesActiveDeviceOverview, Error>) {
         guard let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
+        // A background refresh re-fetches each remote; only touch the outline when
+        // the device's overview or load state actually changed, so unchanged polls
+        // don't collapse expanded projects.
+        let wasLoaded = deviceSections[index].loadState == .loaded
         switch result {
         case .success(let overview):
+            if wasLoaded, deviceSections[index].overview == overview.overview {
+                updateAlertsSidebarBadge()
+                return
+            }
             let mapped = Self.activeDeviceSidebarData(from: overview.overview, deviceID: deviceID)
             deviceSections[index].projects = mapped.projects
             deviceSections[index].workspacesByProject = mapped.workspacesByProject
@@ -4493,7 +4516,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             deviceSections[index].overview = overview.overview
             deviceSections[index].device = overview.device
             deviceSections[index].loadState = .loaded
-        case .failure(let error): deviceSections[index].loadState = .offline(error.localizedDescription)
+        case .failure(let error):
+            if case .offline = deviceSections[index].loadState { return }
+            deviceSections[index].loadState = .offline(error.localizedDescription)
         }
         rebuildFlatSidebarData()
         outlineView.reloadData()
@@ -4557,11 +4582,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func showNoActiveDeviceSelectedError() { showError(Self.noActiveDeviceSelectedError()) }
 
     private func activeDeviceProjectSummary(projectID: String) -> SpacesDeviceProjectSummary? {
-        activeDeviceOverview?.projects.first(where: { $0.id == projectID })
+        // Search every device section's overview, not just the local one, so detail
+        // and config flows resolve projects that live on a remote device.
+        for section in deviceSections { if let project = section.overview?.projects.first(where: { $0.id == projectID }) { return project } }
+        return nil
     }
 
     private func activeDeviceWorkspaceSummary(workspaceID: String) -> SpacesDeviceWorkspaceSummary? {
-        activeDeviceOverview?.workspaces.first(where: { $0.id == workspaceID })
+        for section in deviceSections { if let workspace = section.overview?.workspaces.first(where: { $0.id == workspaceID }) { return workspace } }
+        return nil
     }
 
     private func applyActiveDeviceOverview(
@@ -6565,7 +6594,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         title.textColor = .labelColor
         stack.addArrangedSubview(title)
 
-        let detail = NSTextField(labelWithString: "Spaces is loading workspace details from \(activeDeviceName).")
+        let workspaceDeviceName = deviceSections.first(where: { $0.deviceID == workspace.deviceID })?.deviceName ?? activeDeviceName
+        let detail = NSTextField(labelWithString: "Spaces is loading workspace details from \(workspaceDeviceName).")
         detail.font = .systemFont(ofSize: 12)
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
