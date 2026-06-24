@@ -409,7 +409,12 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func shouldDeferInitialOwnerPresentation(wasVisible: Bool) -> Bool {
-        !Self.isRunningUnderXCTest && !wasVisible && launchConfiguration != nil && backend == .ghosttyEmbedded && preferredAttachmentMode == .owner
+        shouldDeferInitialOwnerPresentation(wasVisible: wasVisible, runningUnderXCTest: Self.isRunningUnderXCTest)
+    }
+
+    private func shouldDeferInitialOwnerPresentation(wasVisible: Bool, runningUnderXCTest: Bool) -> Bool {
+        guard !isStartingRuntimeState(lastObservedRuntimeState) else { return false }
+        return !runningUnderXCTest && !wasVisible && launchConfiguration != nil && backend == .ghosttyEmbedded && preferredAttachmentMode == .owner
             && !ownerRendererReadyForInitialPresentation()
     }
 
@@ -813,6 +818,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public func takeOverOwnership(now: Date = Date()) {
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
             updateInputStatus(message: "Session is not running.", isError: true)
+            return
+        }
+        guard canAttachToGhosttyRuntime(lastObservedRuntimeState) else {
+            updateInputStatus(message: "Terminal is still preparing.", isError: false)
             return
         }
         if let takeoverTask {
@@ -1371,13 +1380,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 shouldShowOwnerStateLabel = shouldShowCompactOwnerStateLabel(runtimeState: runtimeState, isOwner: isOwner)
                 visibleRenderer = resolveVisibleRenderer(isOwner: isOwner)
                 updateRendererVisibility()
-                updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive)
+                updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive && canAttachToRuntime)
                 rendererLabel.stringValue = rendererSummary(isOwner: isOwner)
             } else {
                 shouldShowOwnerStateLabel = true
                 visibleRenderer = .textView
                 updateRendererVisibility()
-                updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive)
+                updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive && canAttachToRuntime)
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
             guard visibleRenderer != .ghosttyOwner else {
@@ -1914,6 +1923,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     private func currentGhosttyStatusMessage(isOwner: Bool, runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?) -> String {
+        if runtimeState?.state == .starting { return "Preparing terminal...\nThe shell is still starting." }
         if runtimeState?.state.isInteractive == true {
             if isOwner { return "" }
             let ownerLabel = ownerClient.map(Self.displayLabel(for:)) ?? "another client"
@@ -2029,13 +2039,17 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private func isInteractiveRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool { runtimeState?.state.isInteractive == true }
 
+    private func isStartingRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool { runtimeState?.state == .starting }
+
     private func isExplicitlyNonInteractiveRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool {
         guard let runtimeState else { return false }
         return !runtimeState.state.isInteractive
     }
 
     private func canAttachToGhosttyRuntime(_ runtimeState: TerminalSessionRuntimeState?) -> Bool {
-        !isExplicitlyNonInteractiveRuntimeState(runtimeState)
+        guard !isStartingRuntimeState(runtimeState) else { return false }
+        guard !isExplicitlyNonInteractiveRuntimeState(runtimeState) else { return false }
+        return true
     }
 
     private func runtimeStateText(runtimeState: TerminalSessionRuntimeState?, ownerClient: TerminalClient?, isOwner: Bool) -> String {
@@ -2173,6 +2187,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var debugWindowTitle: String { window?.title ?? "" }
     var debugWindowRepresentedPath: String? { window?.representedURL?.path }
     var debugWindowFrame: NSRect { window?.frame ?? .zero }
+    func debugShouldDeferInitialOwnerPresentationInProduction(wasVisible: Bool = false) -> Bool {
+        shouldDeferInitialOwnerPresentation(wasVisible: wasVisible, runningUnderXCTest: false)
+    }
     public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
     public var didClose: Bool { didCloseWindow }
     public var terminalSessionID: String { sessionID }

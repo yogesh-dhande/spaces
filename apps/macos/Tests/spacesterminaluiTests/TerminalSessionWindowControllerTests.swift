@@ -1177,7 +1177,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let deadline = Date().addingTimeInterval(1)
         while Date() < deadline {
             controller.debugForceRefresh()
-            if attempts.count >= 2 && controller.attachmentMode == .owner { break }
+            if attempts.count >= 2 && controller.attachmentMode == .owner && !controller.debugTakeoverPending { break }
             try? await Task.sleep(for: .milliseconds(25))
         }
 
@@ -1466,6 +1466,61 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTakeoverMessage)
         XCTAssertTrue(controller.debugRenderedOutput.contains("Terminal render unavailable."))
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: unavailable")
+    }
+
+    @MainActor func testGhosttyCustomOwnerRouteShowsPreparingForStartingSessionWithoutAttaching() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-starting-remote", backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-06-22T12:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-starting-remote", backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .starting,
+                updatedAt: "2026-06-22T12:00:00Z"), paths: paths)
+        let capture = ClientCapture()
+        let controller = makeGhosttyController(
+            sessionID: "session-starting-remote", paths: paths, preferredAttachmentMode: .owner,
+            attachClientAction: { _, mode in capture.attachedModes.append(mode) }, detachClientAction: { _ in })
+
+        controller.show()
+
+        XCTAssertTrue(capture.attachedModes.isEmpty)
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
+        XCTAssertTrue(controller.debugRenderedOutput.contains("Preparing terminal"))
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugTakeoverEnabled)
+    }
+
+    @MainActor func testGhosttyLocalReservedStartingSessionDoesNotDeferInitialPresentation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-starting-local", backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-06-22T12:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-starting-local", backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .starting,
+                updatedAt: "2026-06-22T12:00:00Z"), paths: paths)
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(sessionID: "session-starting-local", paths: paths, host: fakeHost)
+
+        controller.show()
+
+        XCTAssertFalse(controller.debugShouldDeferInitialOwnerPresentationInProduction())
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
+        XCTAssertTrue(controller.debugRenderedOutput.contains("Preparing terminal"))
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugTakeoverEnabled)
     }
 
     @MainActor func testGhosttyOwnerStatusShellDisablesInlineInputWhenSessionIsNotRunning() throws {

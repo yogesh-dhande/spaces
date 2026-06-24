@@ -26,6 +26,12 @@ device_api_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
 remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+  spaces_e2e_require_remote_host_env "$repo_root"
+  remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
+  remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
+  remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+fi
 remote_pairing_json=""
 remote_pairing_window_json=""
 pairing_link=""
@@ -714,10 +720,6 @@ start_device_api() {
 pair_remote_demo_device() {
   if [[ "${SPACES_E2E_RUN_REMOTE:-0}" != "1" ]]; then
     echo "Skipping remote demo device pairing for the selected scenario." >&2
-    return
-  fi
-  if [[ -z "$remote_ssh_host" ]]; then
-    echo "Skipping remote demo device pairing because SPACES_E2E_REMOTE_SSH_HOST is not set." >&2
     return
   fi
 

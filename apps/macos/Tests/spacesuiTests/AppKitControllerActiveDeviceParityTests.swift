@@ -204,6 +204,108 @@ import workspacecore
                         kind: .process)))
     }
 
+    @Test func activeDeviceTerminalOpenRequestPreservesStartingSessionMetadata() {
+        let session = SpacesDeviceTerminalSessionSummary(
+            id: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature", state: .starting, backend: .ghosttyEmbedded,
+            lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
+            projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z",
+            isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession)
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [session])
+
+        let request = AppKitController.activeDeviceTerminalOpenRequest(
+            workspaceID: "workspace-fallback", sessionID: "session-starting", overview: overview)
+
+        #expect(
+            request
+                == AppKitController.ActiveDeviceTerminalOpenRequest(
+                    workspaceID: "workspace-1", sessionID: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature",
+                    kind: .shell, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
+                    updatedAt: "2026-06-22T12:00:01Z"))
+    }
+
+    @Test func activeDeviceShortcutResolvesStartingTerminalRowWithSessionMetadata() {
+        let session = startingSessionSummary(id: "session-starting-shell", title: "shell-1", rowKind: .liveSession)
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", targetBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    terminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-1", title: "shell-1", workingDirectory: "/device/project-feature",
+                            sessionID: "session-starting-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                    ])
+            ], sessions: [session])
+
+        let resolution = AppKitController.activeDeviceWindowShortcutResolution(index: 1, selectedWorkspaceID: "workspace-1", overview: overview)
+
+        #expect(
+            resolution
+                == .openTerminal(
+                    AppKitController.ActiveDeviceTerminalOpenRequest(
+                        workspaceID: "workspace-1", sessionID: "session-starting-shell", title: "shell-1",
+                        workingDirectory: "/device/project-feature", kind: .shell, initialState: .starting, servicePID: 321, childPID: nil,
+                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
+    }
+
+    @Test func activeDeviceShortcutResolvesStartingProcessWithSessionMetadata() {
+        let session = startingSessionSummary(id: "session-starting-process", title: "web", rowKind: .process)
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", targetBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    config: SpacesDeviceWorkspaceConfig(processes: [
+                        SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
+                    ]),
+                    processRows: [
+                        SpacesDeviceWorkspaceProcessRow(
+                            id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
+                            processID: "running-web", sessionID: "session-starting-process", runState: .running, canRun: false, canStop: true,
+                            canRestart: true)
+                    ])
+            ], sessions: [session])
+
+        let resolution = AppKitController.activeDeviceWindowShortcutResolution(index: 1, selectedWorkspaceID: "workspace-1", overview: overview)
+
+        #expect(
+            resolution
+                == .openTerminal(
+                    AppKitController.ActiveDeviceTerminalOpenRequest(
+                        workspaceID: "workspace-1", sessionID: "session-starting-process", title: "web", workingDirectory: "/device/project-feature",
+                        kind: .process, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
+                        updatedAt: "2026-06-22T12:00:01Z")))
+    }
+
+    @Test func activeDeviceShortcutResolvesStartingAgentWithSessionMetadata() {
+        let session = startingSessionSummary(id: "session-starting-agent", title: "Codex", rowKind: .agent)
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", targetBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    codingAgentRows: [
+                        SpacesDeviceWorkspaceCodingAgentRow(
+                            id: "agent-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "agent-codex",
+                            agentID: "running-agent", sessionID: "session-starting-agent", isConfigured: true, runState: .running,
+                            activityState: .waiting, canRun: false, canStop: true, canRestart: true)
+                    ])
+            ], sessions: [session])
+
+        let resolution = AppKitController.activeDeviceWindowShortcutResolution(index: 1, selectedWorkspaceID: "workspace-1", overview: overview)
+
+        #expect(
+            resolution
+                == .openTerminal(
+                    AppKitController.ActiveDeviceTerminalOpenRequest(
+                        workspaceID: "workspace-1", sessionID: "session-starting-agent", title: "Codex", workingDirectory: "/device/project-feature",
+                        kind: .agent, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
+                        updatedAt: "2026-06-22T12:00:01Z")))
+    }
+
     @Test func activeDeviceTerminalControlRequestTranslatesRendererControlPayload() throws {
         let control = TerminalControlRequest(command: "resize", clientID: "mac-client", columns: 120, rows: 40, ownerEpoch: 7, resizeSerial: 3)
 
@@ -216,5 +318,14 @@ import workspacecore
         #expect(request.rows == 40)
         #expect(request.ownerEpoch == 7)
         #expect(request.resizeSerial == 3)
+    }
+
+    private func startingSessionSummary(id: String, title: String, rowKind: SpacesDeviceTerminalSessionRowKind) -> SpacesDeviceTerminalSessionSummary
+    {
+        SpacesDeviceTerminalSessionSummary(
+            id: id, title: title, workingDirectory: "/device/project-feature", state: .starting, backend: .ghosttyEmbedded,
+            lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
+            projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z",
+            isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: rowKind)
     }
 }

@@ -693,6 +693,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
+    private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
@@ -728,6 +729,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         launchSpacesAppHandler = nil
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        overviewLoaderForTesting = nil
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper()
@@ -745,7 +747,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         launchSpacesAppHandler: (() throws -> SpacesAppLaunchOutcome)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL
+        terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
+        overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil
     ) {
         self.host = host
         self.port = port
@@ -757,6 +760,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.launchSpacesAppHandler = launchSpacesAppHandler
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.overviewLoaderForTesting = overviewLoaderForTesting
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
         #endif
@@ -1017,6 +1021,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func loadOverview(clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload {
+        if let overviewLoaderForTesting { return try overviewLoaderForTesting(clientApp) }
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
         let projects = try store.projects()
@@ -1173,6 +1178,28 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         WorkspaceOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
             builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+    }
+
+    private func finishReservedWorkspaceTerminalLaunchInBackground(_ reservation: WorkspaceOrchestrator.WorkspaceTerminalLaunchReservation) {
+        let launcher = builtInTerminalSessionLauncher
+        let terminator = builtInTerminalSessionTerminator
+        let traceEnabled = traceEnabled
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let orchestrator = WorkspaceOrchestrator(
+                    store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: terminator,
+                    builtInTerminalSessionLauncher: launcher)
+                try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation)
+            } catch {
+                guard traceEnabled else { return }
+                let message = String(describing: error).replacingOccurrences(of: "\n", with: "\\n")
+                FileHandle.standardOutput.write(
+                    Data(
+                        "spaces-device-api-trace workspace_terminal_background_launch_error session=\(reservation.sessionID) error=\(message)\n".utf8)
+                )
+            }
+        }
     }
 
     private func handleWorkspaceCreateOptionsRequest(_ request: SpacesDeviceWorkspaceCreateOptionsRequest) throws -> SpacesDeviceAPIResponse {
@@ -1336,8 +1363,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleOpenWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceReference) throws -> SpacesDeviceAPIResponse {
         let workspaceID = request.workspaceID
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let sessionID = try deviceOrchestrator(store: store).openWorkspaceTerminal(workspaceID: workspaceID)
-        return try refreshedMutationResponse(message: "Opened workspace terminal.", workspaceID: workspaceID, sessionID: sessionID)
+        let orchestrator = deviceOrchestrator(store: store)
+        let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
+        let response: SpacesDeviceAPIResponse
+        do {
+            response = try refreshedMutationResponse(
+                message: "Opened workspace terminal.", workspaceID: workspaceID, sessionID: reservation.sessionID)
+        } catch {
+            orchestrator.cancelReservedWorkspaceTerminalLaunch(reservation)
+            throw error
+        }
+        finishReservedWorkspaceTerminalLaunchInBackground(reservation)
+        return response
     }
 
     private func handleStopWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceTerminalRequest) throws -> SpacesDeviceAPIResponse {

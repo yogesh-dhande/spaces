@@ -5,14 +5,17 @@ set -euo pipefail
 # to launch it. Device-specific values live in .env so they stay local.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="${SPACES_ENV_FILE:-$REPO_ROOT/.env}"
+ENV_FILE="$REPO_ROOT/.env"
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "$ENV_FILE"
-  set +a
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Error: required env file was not found at $ENV_FILE." >&2
+  exit 1
 fi
+
+set -a
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+set +a
 
 IOS_PROJECT="$REPO_ROOT/apps/ios/SpacesMobile.xcodeproj"
 SCHEME="${SPACES_IOS_SCHEME:-SpacesMobile}"
@@ -33,7 +36,6 @@ Required:
   SPACES_IOS_DEVICE_UDID  Physical iPhone/iPad UDID, usually set in .env
 
 Optional:
-  SPACES_ENV_FILE                  Path to an env file (default: .env)
   SPACES_IOS_DEVELOPMENT_TEAM      Xcode development team override
   SPACES_IOS_DERIVED_DATA_PATH     DerivedData path (default: .build/ios-device-derived-data)
   SPACES_IOS_CONFIGURATION         Xcode configuration (default: Debug)
