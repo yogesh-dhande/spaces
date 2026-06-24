@@ -192,9 +192,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
+    // These represent the local device (the macOS app always loads the local
+    // daemon first); per-row device context is resolved via deviceID(for…) helpers
+    // and the device sections, not a single "active device".
     private var activeDeviceID = SpacesPairedDeviceRecord.localDeviceID
     private var activeDeviceName = "This Mac"
-    private var activeDeviceIsRemote = false
     private var activePairedDevice: SpacesPairedDeviceRecord?
     private var activeDeviceOverview: SpacesDeviceOverviewPayload?
     private var deviceSections: [DeviceSection] = []
@@ -4437,7 +4439,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         activeDeviceID = snapshot.activeDeviceID
         activeDeviceName = snapshot.activeDeviceName
-        activeDeviceIsRemote = snapshot.activeDeviceIsRemote
         activePairedDevice = snapshot.activePairedDevice
         activeDeviceOverview = snapshot.activeDeviceOverview
         rebuildFlatSidebarData()
@@ -4552,6 +4553,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? {
         deviceSections.first(where: { $0.deviceID == deviceID })?.device
+    }
+
+    private func deviceSection(id deviceID: String) -> DeviceSection? { deviceSections.first(where: { $0.deviceID == deviceID }) }
+
+    /// The id of the device that owns a workspace/project, falling back to the
+    /// local device. These give every action its per-row device context so it
+    /// routes to the daemon that actually hosts the workspace.
+    private func deviceID(forWorkspaceID workspaceID: String) -> String {
+        findWorkspace(id: workspaceID)?.0.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
+    }
+
+    private func deviceID(forProjectID projectID: String) -> String {
+        projects.first(where: { $0.id == projectID })?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
+    }
+
+    private func isRemoteDeviceID(_ deviceID: String) -> Bool {
+        deviceSection(id: deviceID).map { !$0.isLocal } ?? (deviceID != SpacesPairedDeviceRecord.localDeviceID)
     }
 
     private func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
@@ -6293,7 +6311,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
         guard project.isGitRepo else { return }
         let formTag = createButton.tag
-        guard let activeDevice = activeDeviceForDaemonStateMutation() else {
+        guard let activeDevice = deviceRecord(forDeviceID: deviceID(forProjectID: project.id)) else {
             showNoActiveDeviceSelectedError()
             return
         }
@@ -6724,7 +6742,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             setupScriptSection.onCommit = { [weak self] value in
                 guard let self else { return }
                 do {
-                    if let device = activeDeviceForDaemonStateMutation(), let current = activeDeviceProjectSummary(projectID: project.id)?.config {
+                    if let device = deviceRecord(forDeviceID: deviceID(forProjectID: project.id)),
+                        let current = activeDeviceProjectSummary(projectID: project.id)?.config
+                    {
                         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                         let updated = SpacesDeviceProjectConfig(
                             setupScript: trimmed.isEmpty ? nil : value, stopScript: current.stopScript, ports: current.ports,
@@ -9241,7 +9261,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func createProject(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            if let device = activeDeviceForDaemonStateMutation() {
+            // The global "+" has no device context; new projects are created on the
+            // local Mac. (Folder autocomplete and preview below also use the local device.)
+            if let device = activePairedDevice {
                 let projectDir: String?
                 let gitURL: String?
                 if refs.sourceSegmented.selectedSegment == 1 {
@@ -9312,7 +9334,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func updateAddProjectSourceUI(_ refs: AddProjectFieldRefs) {
         let cloneSelected = refs.sourceSegmented.selectedSegment == 1
-        let usesActiveDeviceCreate = activeDeviceForDaemonStateMutation() != nil
+        let usesActiveDeviceCreate = activePairedDevice != nil
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
         let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -9333,7 +9355,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func isAddProjectSourcePrepared(_ refs: AddProjectFieldRefs) -> Bool {
         if refs.sourceSegmented.selectedSegment == 1 {
             let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if activeDeviceForDaemonStateMutation() != nil { return !repoURL.isEmpty && refs.gitPreparationID == nil }
+            if activePairedDevice != nil { return !repoURL.isEmpty && refs.gitPreparationID == nil }
             return refs.gitPreparationID == nil && refs.preparedGitProject != nil && refs.preparedGitURL == repoURL
         }
         let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -9365,7 +9387,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func scheduleAddProjectDirectorySuggestions(_ refs: AddProjectFieldRefs) {
         refs.directorySuggestionTask?.cancel()
         let query = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty, let device = activeDeviceForDaemonStateMutation() else {
+        guard !query.isEmpty, let device = activePairedDevice else {
             refs.directoryCompletions = []
             return
         }
@@ -9401,7 +9423,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         refs.directoryPreviewTask?.cancel()
         let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !directoryPath.isEmpty, refs.preparedLocalDirectoryPath != directoryPath else { return }
-        guard let device = activeDeviceForDaemonStateMutation() else { return }
+        guard let device = activePairedDevice else { return }
         refs.directoryPreviewTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled, let self else { return }
@@ -9693,7 +9715,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
-            if let device = activeDeviceForDaemonStateMutation() {
+            let workspaceTargetDeviceID = deviceID(forProjectID: refs.projectID)
+            if let device = deviceRecord(forDeviceID: workspaceTargetDeviceID) {
                 let input = WorkspaceCreateInput(
                     projectID: refs.projectID, name: name, branch: branch, baseBranch: baseBranch, directoryName: resolvedDirectoryName,
                     notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing,
@@ -9702,7 +9725,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 sender.isEnabled = false
                 sender.title = "Creating..."
                 showOperationProgressOverlay(
-                    message: "Creating workspace...", detail: "Creating the workspace on \(activeDeviceName).", context: .project(refs.projectID))
+                    message: "Creating workspace...",
+                    detail: "Creating the workspace on \(deviceSection(id: workspaceTargetDeviceID)?.deviceName ?? activeDeviceName).",
+                    context: .project(refs.projectID))
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
                     defer {
@@ -10156,19 +10181,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case ipc
     }
 
+    /// Opens the window for a freshly created workspace terminal: a local Ghostty
+    /// window for local workspaces, or a Device-API-backed remote terminal window
+    /// for workspaces that live on a remote device.
+    private func openWorkspaceTerminalWindow(sessionID: String, workspaceID: String, device: SpacesPairedDeviceRecord) {
+        guard isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) else {
+            _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
+            return
+        }
+        let summary = activeDeviceWorkspaceSummary(workspaceID: workspaceID)
+        let request = ActiveDeviceTerminalOpenRequest(
+            workspaceID: workspaceID, sessionID: sessionID, title: summary?.title ?? "Terminal", workingDirectory: summary?.dir ?? "", kind: .shell)
+        _ = openActiveDeviceTerminalSession(request, device: device)
+    }
+
     private func openWorkspaceTerminal(workspaceID: String, route: WorkspaceTerminalOpenRoute, completion: (() -> Void)? = nil) {
         let startedAt = Date()
+        let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID)
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { completion?() }
-            if let device = activeDeviceForDaemonStateMutation() {
+            if let device = deviceRecord(forDeviceID: workspaceDeviceID) {
                 let result = await Self.activeDeviceMutation(device: device) { device in
                     try SpacesActiveDeviceClient.openWorkspaceTerminal(
                         workspaceID: workspaceID, device: device, clientApp: SpacesActiveDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                 }
                 switch result {
                 case .success(let response):
-                    if !activeDeviceIsRemote, let sessionID = response.sessionID { _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner) }
+                    if let sessionID = response.sessionID {
+                        openWorkspaceTerminalWindow(sessionID: sessionID, workspaceID: workspaceID, device: device)
+                    }
                     applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                     logPerfMetric(
@@ -10906,7 +10948,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
         logWindowShortcutProfile("stage=received index=\(index) alerts=\(showingAlerts ? 1 : 0)")
-        if activeDeviceIsRemote {
+        // Focus through the Device API when the selected workspace lives on a remote
+        // device; its processes/terminals have no local windows to raise.
+        if let selectedWorkspaceID, isRemoteDeviceID(deviceID(forWorkspaceID: selectedWorkspaceID)) {
             await runActiveDeviceWindowShortcut(index: index, startedAt: startedAt)
             return
         }
@@ -10947,7 +10991,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func runActiveDeviceWindowShortcut(index: Int, startedAt: Date) async {
         let routeStartedAt = Date()
-        guard let overview = activeDeviceOverview else {
+        guard let overview = selectedWorkspaceID.flatMap({ deviceSection(id: deviceID(forWorkspaceID: $0))?.overview }) ?? activeDeviceOverview else {
             logWindowShortcutProfile(
                 "stage=aborted index=\(index) reason=no_active_device_overview elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
