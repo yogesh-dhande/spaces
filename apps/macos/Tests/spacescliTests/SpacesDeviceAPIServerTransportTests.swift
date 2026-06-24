@@ -350,6 +350,174 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    func testOpenWorkspaceTerminalReturnsReservedStartingSessionBeforeLauncherCompletes() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let launcher = BlockingDeviceAPITerminalLauncher()
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionLauncher: launcher.launch)
+            try server.start()
+            defer {
+                launcher.release()
+                _ = launcher.waitUntilFinished(timeout: 2)
+                server.stop()
+            }
+
+            let projectDir = root.appendingPathComponent("terminal-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-terminal", name: "Terminal Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let workspace = WorkspaceRecord(
+                id: "workspace-terminal", projectID: project.id, title: "Terminal Workspace", dir: projectDir.path, dirname: nil, branch: nil,
+                isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-TERMINAL", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let startedAt = Date()
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .openWorkspaceTerminal(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+            let elapsed = Date().timeIntervalSince(startedAt)
+
+            XCTAssertTrue(response.ok, response.message)
+            XCTAssertLessThan(elapsed, 2)
+            let sessionID = try XCTUnwrap(response.sessionID)
+            XCTAssertTrue(launcher.waitUntilStarted(timeout: 2))
+            XCTAssertEqual(launcher.configurationsSnapshot().map(\.sessionID), [sessionID])
+            let overview = try XCTUnwrap(response.overview)
+            let summary = try XCTUnwrap(overview.sessions.first { $0.id == sessionID })
+            XCTAssertEqual(summary.state, .starting)
+            XCTAssertEqual(summary.workspaceID, workspace.id)
+            XCTAssertFalse(summary.isControlAvailable)
+            XCTAssertFalse(summary.isSubscriptionAvailable)
+            let overviewWorkspace = try XCTUnwrap(overview.workspaces.first { $0.id == workspace.id })
+            let row = try XCTUnwrap(overviewWorkspace.terminalRows.first { $0.sessionID == sessionID })
+            XCTAssertEqual(row.runState, .running)
+            XCTAssertTrue(row.canOpenTerminal)
+            XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+
+            launcher.release()
+            XCTAssertTrue(launcher.waitUntilFinished(timeout: 2))
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
+        }
+    }
+
+    func testOpenWorkspaceTerminalResponseKeepsReservedSessionWhenBackgroundLaunchFailsImmediately() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let launcher = FailingDeviceAPITerminalLauncher()
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionLauncher: launcher.launch)
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("terminal-failure-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(
+                id: "project-terminal-failure", name: "Terminal Failure Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let workspace = WorkspaceRecord(
+                id: "workspace-terminal-failure", projectID: project.id, title: "Terminal Failure Workspace", dir: projectDir.path, dirname: nil,
+                branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-TERMINAL-FAILURE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .openWorkspaceTerminal(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok, response.message)
+            let sessionID = try XCTUnwrap(response.sessionID)
+            let overview = try XCTUnwrap(response.overview)
+            let summary = try XCTUnwrap(overview.sessions.first { $0.id == sessionID })
+            XCTAssertEqual(summary.state, .starting)
+            XCTAssertEqual(summary.workspaceID, workspace.id)
+            let overviewWorkspace = try XCTUnwrap(overview.workspaces.first { $0.id == workspace.id })
+            let row = try XCTUnwrap(overviewWorkspace.terminalRows.first { $0.sessionID == sessionID })
+            XCTAssertEqual(row.runState, .running)
+            XCTAssertTrue(row.canOpenTerminal)
+
+            XCTAssertTrue(launcher.waitUntilFinished(timeout: 2))
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            XCTAssertTrue(waitForTerminalRuntimeState(.failed, sessionID: sessionID, timeout: 2))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
+            XCTAssertTrue(waitForWorkspaceWindowsEmpty(workspaceID: workspace.id, store: store, timeout: 2))
+        }
+    }
+
+    func testOpenWorkspaceTerminalCleansReservedSessionWhenOverviewRefreshFails() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let launches = DeviceAPITerminalLaunchCapture()
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionLauncher: { configuration in
+                    let childPID = launches.append(configuration)
+                    return TerminalServiceSessionSummary(
+                        id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                        backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123,
+                        childPID: Int32(childPID), controlSocketPath: "/tmp/control-\(configuration.sessionID)",
+                        outputPath: "/tmp/output-\(configuration.sessionID)", launchConfiguration: configuration)
+                },
+                overviewLoaderForTesting: { _ in
+                    throw NSError(
+                        domain: "SpacesDeviceAPIServerTransportTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "overview refresh failed"])
+                })
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("terminal-overview-failure-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(
+                id: "project-terminal-overview-failure", name: "Terminal Overview Failure Project", dir: projectDir.path, isGitRepo: false,
+                defaultBranch: nil)
+            let workspace = WorkspaceRecord(
+                id: "workspace-terminal-overview-failure", projectID: project.id, title: "Terminal Overview Failure Workspace", dir: projectDir.path,
+                dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-WORKSPACE-TERMINAL-OVERVIEW-FAILURE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "ios", deviceName: "iPhone", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .openWorkspaceTerminal(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertFalse(response.ok)
+            XCTAssertTrue(response.message.localizedStandardContains("overview refresh failed"), response.message)
+            XCTAssertTrue(launches.configurationsSnapshot().isEmpty)
+            let knownSessions = try TerminalSessionPersistence.listKnownSessions()
+            XCTAssertEqual(knownSessions.count, 1)
+            let reservedSession = try XCTUnwrap(knownSessions.first)
+            let paths = try TerminalSessionPaths.forSession(id: reservedSession.sessionID)
+            XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .failed)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
+            XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+            XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        }
+    }
+
     func testCreateProjectRequiresOneSource() throws {
         try withTemporaryProfile { root in
             let transportKey = SpacesDeviceAPISettings.generateTransportKey()
@@ -709,6 +877,31 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         return server.requestConnectionCountForTesting == expectedCount
     }
 
+    private func waitForTerminalRuntimeState(_ expectedState: TerminalSessionState, sessionID: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+                let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths).state, state == expectedState
+            {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths).state
+        else { return false }
+        return state == expectedState
+    }
+
+    private func waitForWorkspaceWindowsEmpty(workspaceID: String, store: SQLiteStore, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if (try? store.windows(workspaceID: workspaceID).isEmpty) == true { return true }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return (try? store.windows(workspaceID: workspaceID).isEmpty) == true
+    }
+
     private func makeAvailableTCPPort() throws -> Int {
         let socketFD = socket(AF_INET, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -818,6 +1011,77 @@ private final class DeviceAPITerminalLaunchCapture: @unchecked Sendable {
         defer { lock.unlock() }
         return configurations.map(\.title)
     }
+
+    func configurationsSnapshot() -> [TerminalSessionLaunchConfiguration] {
+        lock.lock()
+        defer { lock.unlock() }
+        return configurations
+    }
+}
+
+private final class BlockingDeviceAPITerminalLauncher: @unchecked Sendable {
+    private let lock = NSLock()
+    private let started = DispatchSemaphore(value: 0)
+    private let released = DispatchSemaphore(value: 0)
+    private let finished = DispatchSemaphore(value: 0)
+    private var configurations: [TerminalSessionLaunchConfiguration] = []
+    private var didRelease = false
+
+    func launch(_ configuration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
+        lock.lock()
+        configurations.append(configuration)
+        lock.unlock()
+        started.signal()
+        released.wait()
+        defer { finished.signal() }
+
+        let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+        FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+        FileManager.default.createFile(atPath: paths.subscriptionSocketPath, contents: Data())
+        FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: configuration.sessionID, backend: configuration.backend, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+                childPID: 9_001, state: .running, updatedAt: "2026-06-22T12:00:00Z", title: configuration.title,
+                workingDirectory: configuration.workingDirectory), paths: paths)
+        return TerminalServiceSessionSummary(
+            id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory, backend: configuration.backend,
+            lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+            childPID: 9_001, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
+    }
+
+    func configurationsSnapshot() -> [TerminalSessionLaunchConfiguration] {
+        lock.lock()
+        defer { lock.unlock() }
+        return configurations
+    }
+
+    func release() {
+        lock.lock()
+        guard !didRelease else {
+            lock.unlock()
+            return
+        }
+        didRelease = true
+        lock.unlock()
+        released.signal()
+    }
+
+    func waitUntilStarted(timeout: TimeInterval) -> Bool { started.wait(timeout: .now() + timeout) == .success }
+    func waitUntilFinished(timeout: TimeInterval) -> Bool { finished.wait(timeout: .now() + timeout) == .success }
+}
+
+private final class FailingDeviceAPITerminalLauncher: @unchecked Sendable {
+    private let finished = DispatchSemaphore(value: 0)
+
+    func launch(_: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
+        defer { finished.signal() }
+        throw NSError(domain: "SpacesDeviceAPIServerTransportTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "launcher failed"])
+    }
+
+    func waitUntilFinished(timeout: TimeInterval) -> Bool { finished.wait(timeout: .now() + timeout) == .success }
 }
 
 private final class DeviceAPITerminalTerminationCapture: @unchecked Sendable {

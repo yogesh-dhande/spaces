@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
-spaces_e2e_load_env "$ROOT_DIR"
+spaces_e2e_require_remote_host_env "$ROOT_DIR"
 
 SPACES_E2E_BIN="${SPACES_E2E:-$ROOT_DIR/apps/macos/.build/debug/spacese2e}"
 REMOTE_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
@@ -99,7 +99,8 @@ require_remote_config() {
 }
 
 prepare_remote_daemon() {
-  local artifact_assignments artifact_url artifact_sha256 archive_path install_root performance_log_path quoted_archive quoted_install quoted_performance_log
+  local artifact_assignments artifact_url artifact_sha256 archive_path install_root performance_log_path db_path runtime_dir
+  local quoted_archive quoted_install quoted_performance_log quoted_db_path quoted_runtime_dir
   SPACES_E2E_REMOTE_DAEMON_PORT="$REMOTE_DAEMON_PORT" \
     SPACES_E2E_REMOTE_WORKSPACE_ROOT="$REMOTE_WORKSPACE_ROOT" \
     SPACES_E2E_REMOTE_INSTALL_ROOT="$REMOTE_E2E_ROOT" \
@@ -117,10 +118,14 @@ prepare_remote_daemon() {
   fi
   install_root="$(remote_expand_path "$REMOTE_E2E_ROOT/install")"
   performance_log_path="$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")"
+  db_path="$(remote_expand_path "$REMOTE_E2E_ROOT/spaces.db")"
+  runtime_dir="$(remote_expand_path "$REMOTE_E2E_ROOT/runtime")"
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
   quoted_performance_log="$(shell_quote "$performance_log_path")"
-  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$quoted_performance_log $quoted_install/install.sh" >/dev/null
+  quoted_db_path="$(shell_quote "$db_path")"
+  quoted_runtime_dir="$(shell_quote "$runtime_dir")"
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DB_PATH=$quoted_db_path SPACES_RUNTIME_DIR=$quoted_runtime_dir SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$quoted_performance_log $quoted_install/install.sh" >/dev/null
   write_remote_daemon_cache_marker "$artifact_sha256"
 }
 
@@ -163,6 +168,21 @@ with socket.create_connection((host, port), timeout=2):
 PY
 }
 
+remote_profile_env_prefix() {
+  local db_path runtime_dir
+  db_path="$(remote_expand_path "$REMOTE_E2E_ROOT/spaces.db")"
+  runtime_dir="$(remote_expand_path "$REMOTE_E2E_ROOT/runtime")"
+  printf 'SPACES_DB_PATH=%s SPACES_RUNTIME_DIR=%s' "$(shell_quote "$db_path")" "$(shell_quote "$runtime_dir")"
+}
+
+remote_spaces_mobile_status() {
+  remote_ssh "$(remote_profile_env_prefix) ~/.spaces/bin/spaces mobile status"
+}
+
+remote_spaces_pair_json() {
+  remote_ssh "$(remote_profile_env_prefix) ~/.spaces/bin/spaces pair --json"
+}
+
 wait_for_remote_daemon() {
   local quoted_port
   quoted_port="$(shell_quote "$REMOTE_DAEMON_PORT")"
@@ -183,7 +203,7 @@ while time.time() < deadline:
         time.sleep(0.5)
 raise SystemExit(f"remote daemon port {port} did not open: {last_error}")
 PY
-  remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null
+  remote_spaces_mobile_status >/dev/null
 }
 
 remote_daemon_cache_marker_path() {
@@ -192,7 +212,12 @@ remote_daemon_cache_marker_path() {
 
 remote_daemon_cache_marker_value() {
   local artifact_sha256="$1"
-  printf '%s port=%s performance_log=%s\n' "$artifact_sha256" "$REMOTE_DAEMON_PORT" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")"
+  printf '%s port=%s db=%s runtime=%s performance_log=%s\n' \
+    "$artifact_sha256" \
+    "$REMOTE_DAEMON_PORT" \
+    "$(remote_expand_path "$REMOTE_E2E_ROOT/spaces.db")" \
+    "$(remote_expand_path "$REMOTE_E2E_ROOT/runtime")" \
+    "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")"
 }
 
 remote_daemon_cache_ready() {
@@ -204,7 +229,7 @@ remote_daemon_cache_ready() {
   actual="$(remote_ssh "cat $(shell_quote "$marker_path") 2>/dev/null || true" 2>/dev/null || true)"
   [[ "$actual" == "$expected" ]] || return 1
   remote_daemon_reachable_from_mac || return 1
-  remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null 2>&1 || return 1
+  remote_spaces_mobile_status >/dev/null 2>&1 || return 1
 }
 
 write_remote_daemon_cache_marker() {
@@ -218,7 +243,7 @@ write_remote_daemon_cache_marker() {
 
 open_remote_pairing_window() {
   local pair_output parsed
-  pair_output="$(remote_ssh "~/.spaces/bin/spaces pair --json")"
+  pair_output="$(remote_spaces_pair_json)"
   parsed="$(
     python3 - "$pair_output" <<'PY'
 import json

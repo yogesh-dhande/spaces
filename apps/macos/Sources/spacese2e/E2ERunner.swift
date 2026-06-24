@@ -317,10 +317,7 @@ private struct E2ERunner {
     private func remoteEnvironment(enabled: Bool) -> [String: String] {
         var environment = sharedEnvironment
         environment["SPACES_E2E_RUN_REMOTE"] = enabled ? "1" : "0"
-        if !enabled {
-            environment["SPACES_SKIP_ENV_FILE"] = "1"
-            environment["SPACES_MOBILE_LATENCY_TERMINAL_TARGETS"] = "local"
-        }
+        if !enabled { environment["SPACES_MOBILE_LATENCY_TERMINAL_TARGETS"] = "local" }
         return environment
     }
 

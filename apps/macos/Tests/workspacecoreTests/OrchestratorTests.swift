@@ -48,6 +48,8 @@ private final class TerminalCloseCapture: @unchecked Sendable { var sessionIDs: 
 
 private final class TerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
+private final class TerminalLaunchAttemptCapture: @unchecked Sendable { var count = 0 }
+
 private final class RemoteStateCapture: @unchecked Sendable {
     private let lock = NSLock()
     private let sessionID: String
@@ -1253,7 +1255,80 @@ final class OrchestratorTests: XCTestCase {
 
         let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
         XCTAssertFalse(reservation.sessionID.isEmpty)
+        let paths = try TerminalSessionPaths.forSession(id: reservation.sessionID)
+        let launchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+        let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(launchConfiguration.sessionID, reservation.sessionID)
+        XCTAssertEqual(launchConfiguration.workspaceID, workspace.id)
+        XCTAssertEqual(launchConfiguration.kind, .shell)
+        XCTAssertEqual(runtimeState.sessionID, reservation.sessionID)
+        XCTAssertEqual(runtimeState.state, .starting)
+        XCTAssertEqual(runtimeState.title, reservation.title)
+        XCTAssertGreaterThan(runtimeState.servicePID, 0)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.outputPath)).count, 0)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.serviceLogPath)).count, 0)
+        let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == reservation.windowRecordID })
+        XCTAssertEqual(terminalWindow.role, "terminal")
+        XCTAssertEqual(terminalWindow.terminalNativeID, reservation.sessionID)
+        XCTAssertEqual(terminalWindow.terminalTrackingID, reservation.sessionID)
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
+    }
+
+    func testWorkspaceTerminalLaunchFailureMarksReservedSessionFailedAndClearsWindowRow() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            builtInTerminalSessionLauncher: { _ in throw WorkspaceError.invalidArgument(message: "launcher failed") })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
+        let paths = try TerminalSessionPaths.forSession(id: reservation.sessionID)
+
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .starting)
+        XCTAssertThrowsError(
+            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
+                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation) }
+            })
+
+        let failedState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(failedState.state, .failed)
+        XCTAssertNotNil(failedState.exitedAt)
+        XCTAssertNil(try store.windows(workspaceID: workspace.id).first { $0.id == reservation.windowRecordID })
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.controlSocketPath))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.subscriptionSocketPath))
+    }
+
+    func testRemovedWorkspaceTerminalReservationMarksSessionFailedBeforeLaunch() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchAttemptCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            builtInTerminalSessionLauncher: { _ in
+                launchCapture.count += 1
+                throw WorkspaceError.invalidArgument(message: "launcher should not run")
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
+        let paths = try TerminalSessionPaths.forSession(id: reservation.sessionID)
+
+        try store.deleteWindow(id: reservation.windowRecordID)
+        XCTAssertNoThrow(try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation))
+
+        XCTAssertEqual(launchCapture.count, 0)
+        let failedState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+        XCTAssertEqual(failedState.state, TerminalSessionState.failed)
+        XCTAssertNotNil(failedState.exitedAt)
+        XCTAssertNil(try store.windows(workspaceID: workspace.id).first { $0.id == reservation.windowRecordID })
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
     }
 
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.

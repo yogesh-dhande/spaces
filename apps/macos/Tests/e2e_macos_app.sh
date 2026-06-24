@@ -5740,6 +5740,9 @@ main() {
   # These checks are intentionally explicit because this script targets the real
   # machine, not the hermetic unit-test environment.
   parse_args "$@"
+  if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+    spaces_e2e_require_remote_host_env "$ROOT_DIR"
+  fi
   require_cmd git
   require_cmd osascript
   require_cmd python3

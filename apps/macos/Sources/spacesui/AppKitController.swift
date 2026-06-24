@@ -1016,6 +1016,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let requestSender: RemoteGhosttyTerminalServiceRequestSender
         let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
         let launchConfiguration: TerminalSessionLaunchConfiguration
+        let initialRuntimeState: TerminalSessionRuntimeState?
     }
 
     private final class RemoteTerminalWindowClientStore: @unchecked Sendable {
@@ -1056,7 +1057,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 } else {
                     remoteRoute = try remoteTerminalSessionRoute(sessionID: sessionID)
                 }
-                if let remoteRoute { try ensureRemoteTerminalLaunchConfiguration(remoteRoute.launchConfiguration, paths: paths) }
+                if let remoteRoute { try ensureRemoteTerminalSessionMirror(remoteRoute, paths: paths) }
                 let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
                 if remoteRoute == nil {
                     agentSignalHandler = nil
@@ -1195,7 +1196,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, onEvent: onEvent, onDisconnect: onDisconnect)
                 try client.start()
                 return client
-            }, launchConfiguration: launchConfiguration)
+            }, launchConfiguration: launchConfiguration, initialRuntimeState: nil)
     }
 
     private func activeDeviceRemoteTerminalSessionRoute(_ request: ActiveDeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord) throws
@@ -1209,8 +1210,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, transportKey: transportKey)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
-            shell: "/bin/bash", command: nil, createdAt: ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID,
-            kind: request.kind)
+            shell: "/bin/bash", command: nil, createdAt: request.createdAt ?? ISO8601DateFormatter().string(from: Date()),
+            workspaceID: request.workspaceID, kind: request.kind)
+        let runtimeState = request.initialState.map {
+            TerminalSessionRuntimeState(
+                sessionID: request.sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
+                updatedAt: request.updatedAt ?? launchConfiguration.createdAt, title: request.title, workingDirectory: request.workingDirectory)
+        }
         return RemoteTerminalSessionRoute(
             requestSender: Self.activeDeviceTerminalServiceRequestSender(requestClient: requestClient, authToken: authToken, clientApp: clientApp),
             stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
@@ -1221,7 +1227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     request: request, host: device.host, port: device.port, transportKey: transportKey, onEvent: onEvent, onDisconnect: onDisconnect)
                 try client.start()
                 return client
-            }, launchConfiguration: launchConfiguration)
+            }, launchConfiguration: launchConfiguration, initialRuntimeState: runtimeState)
     }
 
     private func openActiveDeviceTerminalSession(
@@ -1274,11 +1280,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func ensureRemoteTerminalLaunchConfiguration(_ launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths)
-        throws
-    {
+    private func ensureRemoteTerminalSessionMirror(_ route: RemoteTerminalSessionRoute, paths: TerminalSessionPaths) throws {
         if (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) == nil {
-            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(route.launchConfiguration, paths: paths)
+        }
+        if let initialRuntimeState = route.initialRuntimeState, (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) == nil {
+            try TerminalSessionPersistence.writeRuntimeState(initialRuntimeState, paths: paths)
         }
     }
 
@@ -2972,6 +2979,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let title: String
         let workingDirectory: String
         let kind: TerminalSessionKind
+        let initialState: TerminalSessionState?
+        let servicePID: Int32?
+        let childPID: Int32?
+        let createdAt: String?
+        let updatedAt: String?
+
+        init(
+            workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
+            initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil, createdAt: String? = nil,
+            updatedAt: String? = nil
+        ) {
+            self.workspaceID = workspaceID
+            self.sessionID = sessionID
+            self.title = title
+            self.workingDirectory = workingDirectory
+            self.kind = kind
+            self.initialState = initialState
+            self.servicePID = servicePID
+            self.childPID = childPID
+            self.createdAt = createdAt
+            self.updatedAt = updatedAt
+        }
     }
 
     enum ActiveDeviceWindowShortcutResolution: Sendable, Equatable {
@@ -3386,16 +3415,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let sessionID = row.sessionID
             else { return .noMatch }
             return .openTerminal(
-                ActiveDeviceTerminalOpenRequest(
-                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .process))
+                activeDeviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                    ?? ActiveDeviceTerminalOpenRequest(
+                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .process
+                    ))
         case .window:
             guard let windowListIndex = target.windowListIndex, detail.terminalRows.indices.contains(windowListIndex),
                 let sessionID = detail.terminalRows[windowListIndex].sessionID
             else { return .noMatch }
             let row = detail.terminalRows[windowListIndex]
             return .openTerminal(
-                ActiveDeviceTerminalOpenRequest(
-                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell))
+                activeDeviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                    ?? ActiveDeviceTerminalOpenRequest(
+                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell
+                    ))
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return .noMatch }
             let processTemplateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
@@ -3409,8 +3442,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let sessionID = row.sessionID
             else { return .noMatch }
             return .openTerminal(
-                ActiveDeviceTerminalOpenRequest(
-                    workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .agent))
+                activeDeviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                    ?? ActiveDeviceTerminalOpenRequest(
+                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .agent))
+        }
+    }
+
+    nonisolated static func activeDeviceTerminalOpenRequest(
+        workspaceID fallbackWorkspaceID: String, sessionID: String, overview: SpacesDeviceOverviewPayload?
+    ) -> ActiveDeviceTerminalOpenRequest? {
+        let session = overview?.sessions.first { $0.id == sessionID }
+        if let session {
+            return ActiveDeviceTerminalOpenRequest(
+                workspaceID: session.workspaceID ?? fallbackWorkspaceID, sessionID: session.id, title: session.title,
+                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), initialState: session.state,
+                servicePID: session.servicePID, childPID: session.childPID, createdAt: session.createdAt, updatedAt: session.updatedAt)
+        }
+        guard let workspace = overview?.workspaces.first(where: { $0.id == fallbackWorkspaceID }),
+            let row = workspace.terminalRows.first(where: { $0.sessionID == sessionID })
+        else { return nil }
+        return ActiveDeviceTerminalOpenRequest(
+            workspaceID: fallbackWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell)
+    }
+
+    nonisolated private static func terminalSessionKind(rowKind: SpacesDeviceTerminalSessionRowKind) -> TerminalSessionKind {
+        switch rowKind {
+        case .process: .process
+        case .agent: .agent
+        case .liveSession: .shell
         }
     }
 
@@ -4444,7 +4503,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     ) {
         if let overview = response.overview {
             applyActiveDeviceOverview(
-                overview, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID, preserveDetailPane: true)
+                overview, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID, preserveDetailPane: false)
         } else {
             if let preferredWorkspaceID { selectedWorkspaceID = preferredWorkspaceID }
             if let preferredProjectID { selectedProjectID = preferredProjectID }
@@ -9637,8 +9696,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 }
                 switch result {
                 case .success(let response):
-                    if !activeDeviceIsRemote, let sessionID = response.sessionID { _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner) }
                     applyActiveDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    if let sessionID = response.sessionID {
+                        if activeDeviceIsRemote {
+                            if let request = Self.activeDeviceTerminalOpenRequest(
+                                workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? activeDeviceOverview)
+                            {
+                                _ = openActiveDeviceTerminalSession(request, device: device)
+                            }
+                        } else {
+                            _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
+                        }
+                    }
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                     logPerfMetric(
                         "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),

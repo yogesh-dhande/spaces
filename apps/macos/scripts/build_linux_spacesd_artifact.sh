@@ -359,6 +359,8 @@ service_dir="$HOME/.config/systemd/user"
 service_path="$service_dir/spacesd.service"
 device_api_host="${SPACES_DEVICE_API_HOST:-0.0.0.0}"
 device_api_port="${SPACES_DEVICE_API_PORT:-47847}"
+db_path="${SPACES_DB_PATH:-$HOME/.spaces/spaces.db}"
+runtime_dir="${SPACES_RUNTIME_DIR:-$HOME/.spaces/runtime}"
 performance_log_path="${SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH:-}"
 
 cleanup_install_staging() {
@@ -396,7 +398,7 @@ ensure_user_linger() {
     fi
 }
 
-mkdir -p "$release_parent" "$bin_root" "$HOME/.spaces/runtime" "$HOME/.spaces/workspaces" "$service_dir"
+mkdir -p "$release_parent" "$bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/.spaces/workspaces" "$service_dir"
 rm -rf "$release_staging_dir" "$previous_release_dir"
 mkdir -p "$release_staging_dir"
 cp -a "$artifact_root/." "$release_staging_dir/"
@@ -421,8 +423,8 @@ ExecStart=%h/.spaces/bin/spacesd
 Restart=always
 RestartSec=2
 WorkingDirectory=%h
-Environment=SPACES_DB_PATH=%h/.spaces/spaces.db
-Environment=SPACES_RUNTIME_DIR=%h/.spaces/runtime
+Environment=SPACES_DB_PATH=$db_path
+Environment=SPACES_RUNTIME_DIR=$runtime_dir
 Environment=SPACES_DEVICE_API_HOST=$device_api_host
 Environment=SPACES_DEVICE_API_PORT=$device_api_port
 SERVICE

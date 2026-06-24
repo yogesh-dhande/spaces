@@ -227,6 +227,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         if renderModeValue == .ownerBootstrapping {
             return "Preparing terminal…"
         }
+        if isStartingState {
+            return "Preparing terminal…"
+        }
         if isTakingOver {
             return "Attempting takeover…"
         }
@@ -239,7 +242,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     var isTakingOver: Bool { !isOwner && (isAwaitingTakeoverConfirmation || isBusy || isOwnershipSynchronizationPending) }
     var acceptsInput: Bool { !isEndedState && isOwner && !isBusy && !isConnecting && !isOwnershipSynchronizationPending && !isSessionUnavailable }
     var keepsTerminalInputSurfaceActive: Bool { !isEndedState && isOwner && !isConnecting && !isSessionUnavailable }
-    var showsTakeOverAction: Bool { !isEndedState && !isSessionUnavailable && !isOwner && !isTakingOver && !isConnecting }
+    var showsTakeOverAction: Bool { !isEndedState && !isStartingState && !isSessionUnavailable && !isOwner && !isTakingOver && !isConnecting }
     var isPreparingInput: Bool {
         guard !isEndedState, isOwner && !isSessionUnavailable else { return false }
         guard ownerRenderEpochState != nil, isInputSurfaceReady else { return true }
@@ -1150,6 +1153,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
         if let error {
             if handleAuthenticationFailure(error) { return }
+            if await retryStartingStateIfLaunchIsNotReady(error, reason: "disconnect_starting_launch_not_ready") {
+                return
+            }
             if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "disconnect_missing_live_stream") {
                 return
             }
@@ -1170,6 +1176,12 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func handleConnectError(_ error: Error) async {
         trace("connect_error error=\(sanitizedTraceDetail(error.localizedDescription)) silent=\(shouldReconnectSilently ? 1 : 0)")
         if handleAuthenticationFailure(error) { return }
+        if await retryStartingStateIfLaunchIsNotReady(error, reason: "connect_starting_launch_not_ready") {
+            return
+        }
+        if await recoverStartingStateAfterTerminalStopped(error, reason: "connect_starting_terminal_stopped") {
+            return
+        }
         if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "connect_missing_live_stream") {
             return
         }
@@ -1207,6 +1219,22 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         return false
     }
 
+    private func retryStartingStateIfLaunchIsNotReady(_ error: Error, reason: String) async -> Bool {
+        guard Self.isStartingSessionLaunchNotReadyError(error), !isStopping, isStartingState else { return false }
+        trace("starting_launch_not_ready_retry reason=\(reason)")
+        isBusy = false
+        isConnecting = false
+        isSessionUnavailable = false
+        errorMessage = nil
+        scheduleReconnect(after: Self.silentReconnectDelay)
+        return true
+    }
+
+    private func recoverStartingStateAfterTerminalStopped(_ error: Error, reason: String) async -> Bool {
+        guard isStartingState else { return false }
+        return await recoverEndedStateAfterTerminalStopped(error, reason: reason)
+    }
+
     private func recoverEndedStateAfterTerminalStopped(_ error: Error, reason: String) async -> Bool {
         guard Self.isTerminalNoLongerLiveError(error), !isStopping else { return false }
         trace("terminal_stopped_state_refresh reason=\(reason)")
@@ -1236,6 +1264,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private var isEndedState: Bool {
         let state = latestState?.runtimeState?.state ?? session.state
         return Self.isEndedRuntimeState(state)
+    }
+
+    private var isStartingState: Bool {
+        (latestState?.runtimeState?.state ?? session.state) == .starting
     }
 
     private static func isEndedRuntimeState(_ state: TerminalSessionState?) -> Bool {
@@ -1513,13 +1545,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func unavailableMessage(for error: Error) -> String? {
+        guard Self.isTerminalSessionUnavailableError(error) else { return nil }
+        return "This terminal session ended. Return to Terminals to open the current live session."
+    }
+
+    private static func isTerminalSessionUnavailableError(_ error: Error) -> Bool {
         switch error {
         case SpacesDeviceAPIClientError.requestFailed(let message),
              SpacesDeviceAPIClientError.streamFailed(let message):
-            guard message.localizedStandardContains("is not available") else { return nil }
-            return "This terminal session ended. Return to Terminals to open the current live session."
+            return message.localizedStandardContains("terminal session") && message.localizedStandardContains("is not available")
         default:
-            return nil
+            return false
         }
     }
 
@@ -1611,6 +1647,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         default:
             return false
         }
+    }
+
+    private static func isStartingSessionLaunchNotReadyError(_ error: Error) -> Bool {
+        isMissingLiveStateStreamError(error) || isTerminalSessionUnavailableError(error)
     }
 
     private static func isTerminalNoLongerLiveError(_ error: Error) -> Bool {

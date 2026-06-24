@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$APP_ROOT/../.." && pwd)"
 source "$REPO_ROOT/scripts/spaces-e2e-env.sh"
-spaces_e2e_load_env "$REPO_ROOT"
+spaces_e2e_require_remote_host_env "$REPO_ROOT"
 source "$SCRIPT_DIR/terminal_harness_lock.sh"
 
 SPACES_E2E="${SPACES_E2E:-$APP_ROOT/.build/debug/spacese2e}"
