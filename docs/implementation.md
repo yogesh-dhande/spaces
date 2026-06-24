@@ -179,7 +179,7 @@ flowchart TD
 - macOS client SQLite stores paired-device metadata under `<profile-root>/Client/spaces-client.db`, with timestamped backups under `<profile-root>/Client/Backups/`.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active daemon schema is version `2`.
+- `migration_state.current_version` records the canonical schema version. The active daemon schema is version `3`.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -204,7 +204,7 @@ flowchart TD
 
 ## Data Model
 
-The canonical daemon schema is `DatabaseSchema.currentVersion == 2`. Foreign keys below reflect the SQLite schema. Terminal tables also correlate by `session_id` and `root_directory` because they are shared by local and daemon-hosted terminal persistence paths.
+The canonical daemon schema is `DatabaseSchema.currentVersion == 3`. Foreign keys below reflect the SQLite schema. Terminal tables also correlate by `session_id` and `root_directory` because they are shared by local and daemon-hosted terminal persistence paths.
 
 ```mermaid
 erDiagram

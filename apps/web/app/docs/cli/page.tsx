@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { CodeBlock, Cmd } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -6,22 +7,6 @@ export const metadata: Metadata = {
   description:
     "Reference for the minimal spaces command-line interface used by coding agents and terminal workflows.",
 };
-
-function CodeBlock({ children }: { children: string }) {
-  return (
-    <pre className="mt-3 overflow-x-auto rounded-xl border border-line bg-[#0f1820] px-4 py-3 font-mono text-xs leading-6 text-[#98efc7]">
-      <code>{children}</code>
-    </pre>
-  );
-}
-
-function Cmd({ children }: { children: React.ReactNode }) {
-  return (
-    <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-xs text-accent">
-      {children}
-    </code>
-  );
-}
 
 function Flag({ name, description }: { name: string; description: string }) {
   return (

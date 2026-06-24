@@ -103,22 +103,6 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertEqual(runtime?.waitingAgentWindowCount, 1)
     }
 
-    func testOverviewViewModelBuildsProjectsFromLegacyWorkspaceOnlyPayload() {
-        let overview = SpacesDeviceOverviewPayload(
-            projects: [],
-            workspaces: [
-                SpacesDeviceWorkspaceSummary(
-                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", baseBranch: "main",
-                    dir: "/device/project-feature", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
-            ], sessions: [])
-
-        let model = SpacesDeviceOverviewViewModel(overview: overview)
-
-        XCTAssertEqual(model.projects.map(\.id), ["project-1"])
-        XCTAssertEqual(model.projects.first?.isGitRepo, true)
-        XCTAssertEqual(model.projects.first?.defaultBranch, "main")
-    }
-
     func testProjectSettingsViewModelPreservesFullConfigSurface() {
         let project = SpacesDeviceProjectSummary(
             id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main",
@@ -141,7 +125,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertTrue(model.actions.showsAddWorkspace)
     }
 
-    func testWorkspaceDetailViewModelPreservesFullVisibleSurface() {
+    func testWorkspaceDetailViewModelPreservesFullWorkspaceContents() {
         let workspace = fullWorkspaceSummary(dir: "/device/project-feature")
 
         let model = SpacesDeviceWorkspaceDetailViewModel(workspace: workspace)
@@ -159,36 +143,12 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         XCTAssertEqual(model.processRows.map(\.id), ["process-web"])
         XCTAssertEqual(model.codingAgentRows.map(\.id), ["agent-codex"])
         XCTAssertEqual(model.terminalRows.map(\.sessionID), ["session-shell"])
-        XCTAssertEqual(model.actions.launchOrRestart, .restart)
-        XCTAssertTrue(model.actions.showsStop)
-        XCTAssertTrue(model.actions.showsOpenTerminal)
-        XCTAssertTrue(model.actions.showsOpenEditor)
-        XCTAssertTrue(model.actions.showsRevealInFinder)
-        XCTAssertTrue(model.actions.showsRunSetup)
-        XCTAssertTrue(model.surface.showsNotes)
-        XCTAssertTrue(model.surface.showsPorts)
-        XCTAssertTrue(model.surface.showsProcesses)
-        XCTAssertTrue(model.surface.showsBrowserSessions)
-        XCTAssertTrue(model.surface.showsAgentLaunchers)
-        XCTAssertTrue(model.surface.showsTerminals)
-        XCTAssertTrue(model.surface.showsStopScript)
-        XCTAssertEqual(model.surface.configuredPortCount, 1)
-        XCTAssertEqual(model.surface.assignedPortCount, 1)
-        XCTAssertEqual(model.surface.configuredProcessCount, 1)
-        XCTAssertEqual(model.surface.runningProcessCount, 1)
-        XCTAssertEqual(model.surface.configuredBrowserSessionCount, 1)
-        XCTAssertEqual(model.surface.resolvedBrowserSessionCount, 1)
-        XCTAssertEqual(model.surface.configuredAgentLauncherCount, 1)
-        XCTAssertEqual(model.surface.runningCodingAgentCount, 1)
-        XCTAssertEqual(model.surface.terminalCount, 1)
     }
 
-    func testWorkspaceDetailVisibleActionsDoNotDependOnDeviceLocation() {
+    func testWorkspaceDetailContentsDoNotDependOnDeviceLocation() {
         let local = SpacesDeviceWorkspaceDetailViewModel(workspace: fullWorkspaceSummary(dir: "/Users/me/project-feature"))
         let remote = SpacesDeviceWorkspaceDetailViewModel(workspace: fullWorkspaceSummary(dir: "/home/me/project-feature"))
 
-        XCTAssertEqual(local.actions, remote.actions)
-        XCTAssertEqual(local.surface, remote.surface)
         XCTAssertEqual(local.config, remote.config)
         XCTAssertEqual(local.assignedPorts, remote.assignedPorts)
         XCTAssertEqual(local.processRows, remote.processRows)

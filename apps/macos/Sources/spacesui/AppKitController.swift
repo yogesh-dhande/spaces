@@ -190,8 +190,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var orchestrator: WorkspaceOrchestrator!
     private var projects: [ProjectSummary] = []
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
-    private var workspacesByProject: [String: [WorkspaceSummary]] = [:]
+    private var workspacesByProject: [String: [WorkspaceSummary]] = [:] { didSet { visibleWorkspacesCache.removeAll(keepingCapacity: true) } }
     private var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
+    /// Memoized filtered+sorted visible workspaces per project. `visibleWorkspaces`
+    /// is on the NSOutlineView data-source hot path (queried per row); caching keeps
+    /// it from re-filtering and re-sorting on every query, and it is invalidated
+    /// whenever `workspacesByProject` changes.
+    private var visibleWorkspacesCache: [String: [WorkspaceSummary]] = [:]
     // The macOS app always loads its own local daemon first; these hold that local
     // device and act as the default target when no row is selected. Per-row device
     // context is resolved via deviceID(for…) helpers and the device sections.
@@ -200,6 +205,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var localPairedDevice: SpacesPairedDeviceRecord?
     private var localDeviceOverview: SpacesDeviceOverviewPayload?
     private var deviceSections: [DeviceSection] = []
+    /// Long-lived client-database connection reused for the hot paired-device read
+    /// path, so background sidebar polls don't reopen SQLite (and rerun schema
+    /// checks) on every cycle.
+    private var cachedClientDatabase: SpacesClientDatabase?
+    /// Per-remote-device timestamp of the last overview fetch, so polls driven by
+    /// local events (process monitor, worktree discovery) don't re-request every
+    /// remote's overview on every cycle; each device refreshes at most once per
+    /// `sidebarMetadataRefreshInterval`.
+    private var remoteOverviewFetchInstants: [String: ContinuousClock.Instant] = [:]
     private var alertsGroups: [AlertsGroup] = []
     private var dismissedAlertsAttentionItemIDs: Set<String> = []
     private var visibleDetailWorkspaceID: String?
@@ -313,6 +327,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
     private var pendingSidebarReloadFailureMessage: String?
+    private var pendingSidebarReloadForceRemoteRefresh = false
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
     private var didLogFirstStartupInteraction = false
@@ -4226,7 +4241,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func invalidateCommandPaletteCache() { commandPaletteNeedsReload = true }
 
-    private func reloadData() { requestSidebarReload() }
+    private func reloadData(forceRemoteRefresh: Bool = false) { requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh) }
 
     private func startBackgroundServicesIfNeeded() {
         guard !didStartBackgroundServices else { return }
@@ -4358,9 +4373,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updateAlertsRowAppearance()
     }
 
-    private func requestSidebarReload(failurePlaceholderMessage: String? = nil) {
+    private func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false) {
         if let sidebarReloadTask, !sidebarReloadTask.isCancelled {
             pendingSidebarReloadRequest = true
+            pendingSidebarReloadForceRemoteRefresh = pendingSidebarReloadForceRemoteRefresh || forceRemoteRefresh
             pendingSidebarReloadFailureMessage = pendingSidebarReloadFailureMessage ?? failurePlaceholderMessage
             return
         }
@@ -4370,7 +4386,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             let result = await Self.initialSidebarDataSnapshot()
             guard !Task.isCancelled else { return }
             switch result {
-            case .success(let snapshot): self.applySidebarDataSnapshot(snapshot, preserveDetailPane: true)
+            case .success(let snapshot): self.applySidebarDataSnapshot(snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh)
             case .failure(let error):
                 if let currentFailurePlaceholderMessage {
                     self.showError(error)
@@ -4382,14 +4398,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             self.sidebarReloadTask = nil
             if self.pendingSidebarReloadRequest {
                 let pendingFailurePlaceholderMessage = self.pendingSidebarReloadFailureMessage
+                let pendingForceRemoteRefresh = self.pendingSidebarReloadForceRemoteRefresh
                 self.pendingSidebarReloadRequest = false
                 self.pendingSidebarReloadFailureMessage = nil
-                self.requestSidebarReload(failurePlaceholderMessage: pendingFailurePlaceholderMessage)
+                self.pendingSidebarReloadForceRemoteRefresh = false
+                self.requestSidebarReload(failurePlaceholderMessage: pendingFailurePlaceholderMessage, forceRemoteRefresh: pendingForceRemoteRefresh)
             }
         }
     }
 
-    private func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false) {
+    private func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false) {
         logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         pendingWorktreeDiscoveryReload = false
@@ -4437,16 +4455,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         updateAlertsSidebarBadge()
         logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(alertsGroups.count)")
         if showingAlerts { showAlertsDetail() }
-        loadRemoteDeviceSections()
+        loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh)
     }
 
     /// Adds a section for every paired remote device and fetches each one's overview
     /// independently so a slow or unreachable device never blocks the sidebar.
-    private func loadRemoteDeviceSections() {
+    private func loadRemoteDeviceSections(forceRefresh: Bool = false) {
         let remotes = macPairedDevices()
+        // Each keychain lookup is two reads, so resolve availability once per device
+        // and reuse it for both the section-add loop and the fetch loop.
+        let credentialsByDevice = Dictionary(uniqueKeysWithValues: remotes.map { ($0.id, Self.pairedDeviceHasRequiredCredentials(deviceID: $0.id)) })
         var addedSection = false
         for record in remotes where !deviceSections.contains(where: { $0.deviceID == record.id }) {
-            let available = Self.pairedDeviceHasRequiredCredentials(deviceID: record.id)
+            let available = credentialsByDevice[record.id] ?? false
             deviceSections.append(
                 DeviceSection(
                     deviceID: record.id, deviceName: record.name, isLocal: false, loadState: available ? .loading : .offline("Reconnect required"),
@@ -4458,7 +4479,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             applySidebarProjectExpansionState()
         }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-        for record in remotes where Self.pairedDeviceHasRequiredCredentials(deviceID: record.id) {
+        let now = ContinuousClock.now
+        let freshnessWindow = Duration.seconds(PollingConstants.sidebarMetadataRefreshInterval)
+        for record in remotes where credentialsByDevice[record.id] == true {
+            // A snapshot can be applied far more often than the metadata cadence
+            // (process monitor, worktree discovery, event-driven reloads). Skip
+            // devices fetched within the freshness window so local activity doesn't
+            // spam remote overview requests; a freshly paired device has no recorded
+            // instant and refreshes immediately. Forced reloads (explicit refresh,
+            // mutations that expect fresh remote data) bypass the gate.
+            if !forceRefresh, let last = remoteOverviewFetchInstants[record.id], now - last < freshnessWindow { continue }
+            remoteOverviewFetchInstants[record.id] = now
             Task { @MainActor [weak self] in
                 let result: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
                     do { return .success(try SpacesDeviceClient.overview(device: record, clientApp: clientApp)) } catch { return .failure(error) }
@@ -4555,6 +4586,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return localPairedDevice
     }
 
+    /// Resolves the paired-device record for a mutation target by owning-device id.
+    /// Local ids route to the local record; remote ids route to their loaded
+    /// section, returning nil when that remote section is offline/unloaded so
+    /// callers surface a not-loaded error instead of misrouting the mutation to the
+    /// local daemon (which does not host the workspace).
+    private func deviceForMutation(deviceID: String) -> SpacesPairedDeviceRecord? {
+        if deviceID == SpacesPairedDeviceRecord.localDeviceID { return localPairedDevice }
+        return deviceRecord(forDeviceID: deviceID)
+    }
+
+    /// The device that owns a specific workspace, so per-workspace mutations route
+    /// to the daemon that actually hosts it rather than the currently selected
+    /// row's device. Clicking a row button or invoking a context menu does not
+    /// change the outline selection, so these actions must resolve their target
+    /// from the workspace ID they carry, not the selection.
+    private func deviceForWorkspaceMutation(workspaceID: String) -> SpacesPairedDeviceRecord? {
+        deviceForMutation(deviceID: deviceID(forWorkspaceID: workspaceID))
+    }
+
     private static func deviceNotLoadedError() -> NSError {
         NSError(
             domain: "Spaces", code: 1001,
@@ -4585,8 +4635,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         // The mutation's overview belongs to whichever device hosts the affected
         // workspace; update only that device's section and re-merge so the other
-        // devices' rows stay intact.
-        let deviceID = preferredWorkspaceID.flatMap { findWorkspace(id: $0)?.0.deviceID } ?? selectedRowDeviceID() ?? localDeviceID
+        // devices' rows stay intact. An archive removes the workspace before this
+        // runs, so fall back to the affected project's device before the current
+        // selection to avoid installing the overview into the wrong section.
+        let deviceID =
+            preferredWorkspaceID.flatMap { findWorkspace(id: $0)?.0.deviceID } ?? preferredProjectID.flatMap { projectID in
+                projects.first(where: { $0.id == projectID })?.deviceID
+            } ?? selectedRowDeviceID() ?? localDeviceID
         let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
             deviceSections[index].projects = mapped.projects
@@ -4726,7 +4781,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showDeviceNotLoadedError()
             return
         }
-        requestSidebarReload()
+        // Live setup progress for a remote workspace must bypass the remote overview
+        // freshness gate, or its logs/status/completion update only at the metadata
+        // interval. A local setup needs no forced remote fetch.
+        requestSidebarReload(forceRemoteRefresh: isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)))
     }
 
     private func showPlaceholder(message: String = "Select a project or workspace.") {
@@ -6326,22 +6384,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// the device that owns the workspace and stopping it first if it is running.
     private func setWorkspaceHidden(workspaceID: String, isHidden: Bool, completion: @escaping (Bool) -> Void) {
         guard let (project, workspace) = findWorkspace(id: workspaceID) else { return completion(false) }
-        if isHidden, workspace.isRunning {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Hide workspace?"
-            alert.informativeText = "\"\(workspace.title)\" is currently running. Hiding it stops the workspace first."
-            alert.addButton(withTitle: "Stop and Hide")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
-        }
         Task { @MainActor [weak self] in
             guard let self else { return completion(false) }
             guard let device = deviceRecord(forDeviceID: deviceID(forWorkspaceID: workspaceID)) else {
                 showDeviceNotLoadedError()
                 return completion(false)
             }
-            if isHidden, workspace.isRunning {
+            // Decide the "Stop and Hide" prompt and the stop from fresh daemon state,
+            // not a possibly-stale cached snapshot (remote overviews refresh on a
+            // throttled cadence), so a running workspace is never hidden without being
+            // stopped, nor a stopped one prompted about needlessly.
+            var isRunning = workspace.isRunning
+            if isHidden {
+                let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+                let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
+                    do { return .success(try SpacesDeviceClient.overview(device: device, clientApp: clientApp)) } catch { return .failure(error) }
+                }.value
+                switch overviewResult {
+                case .success(let overview): isRunning = overview.overview.workspaces.first(where: { $0.id == workspaceID })?.isRunning ?? false
+                case .failure(let error):
+                    showError(error)
+                    return completion(false)
+                }
+            }
+            if isHidden, isRunning {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Hide workspace?"
+                alert.informativeText = "\"\(workspace.title)\" is currently running. Hiding it stops the workspace first."
+                alert.addButton(withTitle: "Stop and Hide")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
                 let stopResult = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.stopWorkspace(
                         workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -8683,7 +8756,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return id
     }
 
-    @objc private func reloadTapped() { requestSidebarReload() }
+    @objc private func reloadTapped() {
+        // An explicit reload should refresh remotes immediately, bypassing the
+        // per-device freshness gate in loadRemoteDeviceSections.
+        reloadData(forceRemoteRefresh: true)
+    }
 
     @objc private func showMobileConnection() {
         devicePanelStatusMessage = nil
@@ -9163,8 +9240,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do { refreshVisibleDeviceSettings(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
     }
 
+    /// Reused client-database connection for the hot read path. Opening a fresh
+    /// `SpacesClientDatabase` reruns connection setup and schema checks, so the
+    /// connection is cached for the lifetime of the controller.
+    private func clientDatabase() -> SpacesClientDatabase? {
+        if let cachedClientDatabase { return cachedClientDatabase }
+        let database = try? SpacesClientDatabase()
+        cachedClientDatabase = database
+        return database
+    }
+
     private func macPairedDevices() -> [SpacesPairedDeviceRecord] {
-        ((try? SpacesClientDatabase().pairedDevices()) ?? []).filter { $0.id != SpacesPairedDeviceRecord.localDeviceID }
+        guard let database = clientDatabase() else { return [] }
+        return ((try? database.pairedDevices()) ?? []).filter { $0.id != SpacesPairedDeviceRecord.localDeviceID }
     }
 
     nonisolated private static func normalizedPanelField(_ value: String) -> String? {
@@ -9549,9 +9637,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         selectedProjectID = response.projectID
                         selectedWorkspaceID = response.workspaceID
                         // A new project on a remote device belongs to that device's
-                        // section; reload so it lands there instead of the local one.
+                        // section; force a remote refresh so it lands there immediately
+                        // instead of waiting out the per-device freshness gate.
                         if isRemoteDeviceID(refs.selectedDeviceID) {
-                            requestSidebarReload()
+                            requestSidebarReload(forceRemoteRefresh: true)
                         } else {
                             applyDeviceMutationResponse(response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
                         }
@@ -10101,7 +10190,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
             let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForDaemonStateMutation() {
+            if let device = deviceForWorkspaceMutation(workspaceID: id) {
                 result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.launchWorkspace(
                         workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -10127,7 +10216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
             let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForDaemonStateMutation() {
+            if let device = deviceForWorkspaceMutation(workspaceID: id) {
                 result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.restartWorkspace(
                         workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -10153,7 +10242,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
             let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForDaemonStateMutation() {
+            if let device = deviceForWorkspaceMutation(workspaceID: id) {
                 result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.stopWorkspace(
                         workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -10211,6 +10300,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let deleteLocalBranch = project.isGitRepo && deleteLocalBranchCheckbox.state == .on
         let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
+        // Resolve the owning device before the optimistic removal below; once the row
+        // is gone from workspacesByProject, deviceForWorkspaceMutation can no longer
+        // find it and would fall back to the local device, misrouting remote archives.
+        let device = deviceForMutation(deviceID: project.deviceID)
         let didOptimisticallyArchive = optimisticallyArchiveWorkspaceInSidebar(workspaceID: id)
         if !didOptimisticallyArchive { button?.isEnabled = false }
         showOperationProgressOverlay(
@@ -10218,7 +10311,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, weak button] in
             guard let self else { return }
             defer { hideOperationProgressOverlay() }
-            if let device = deviceForDaemonStateMutation() {
+            if let device {
                 let result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.archiveWorkspace(
                         workspaceID: id, deleteLocalBranch: deleteLocalBranch, deleteRemoteBranch: deleteRemoteBranch, device: device,
@@ -10336,18 +10429,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.runModal()
     }
 
-    private func showRemoteWorkspacePathActionErrorIfNeeded(_ action: WorkspacePathAction) -> Bool {
-        // Editor/Finder actions need a path on this Mac; gate them when the
-        // selected workspace lives on a remote device.
-        guard let deviceID = selectedRowDeviceID(), let section = deviceSections.first(where: { $0.deviceID == deviceID }), !section.isLocal else {
-            return false
-        }
+    private func showRemoteWorkspacePathActionErrorIfNeeded(_ action: WorkspacePathAction, workspaceID: String? = nil) -> Bool {
+        // Editor/Finder actions need a path on this Mac; gate them when the affected
+        // workspace lives on a remote device. The action carries its own workspace
+        // id, which can differ from the selected row, so resolve the owning device
+        // from it and fall back to the selection only for path-based callers.
+        let targetDeviceID = workspaceID.map { deviceID(forWorkspaceID: $0) } ?? selectedRowDeviceID()
+        guard let targetDeviceID, let section = deviceSections.first(where: { $0.deviceID == targetDeviceID }), !section.isLocal else { return false }
         showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: section.deviceName)))
         return true
     }
 
     private func openWorkspaceEditor(workspaceID: String) {
-        if showRemoteWorkspacePathActionErrorIfNeeded(.openEditor) { return }
+        if showRemoteWorkspacePathActionErrorIfNeeded(.openEditor, workspaceID: workspaceID) { return }
         do {
             try orchestrator.openWorkspaceEditor(workspaceID: workspaceID)
             reloadData()
@@ -10409,7 +10503,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let startedAt = Date()
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if let device = deviceForDaemonStateMutation() {
+            if let device = deviceForWorkspaceMutation(workspaceID: workspaceID) {
                 let result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.runWorkspaceProcess(
                         workspaceID: workspaceID, processKey: processName, processTemplateID: nil, device: device,
@@ -10442,7 +10536,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                if let device = deviceForDaemonStateMutation() {
+                if let device = deviceForWorkspaceMutation(workspaceID: workspaceID) {
                     let response = try SpacesDeviceClient.stopWorkspaceProcess(
                         workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil, device: device,
                         clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -10470,7 +10564,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                if let device = deviceForDaemonStateMutation() {
+                if let device = deviceForWorkspaceMutation(workspaceID: workspaceID) {
                     let response = try SpacesDeviceClient.restartWorkspaceProcess(
                         workspaceID: workspaceID, processID: nil, processKey: processName, processTemplateID: nil, device: device,
                         clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -10497,7 +10591,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let startedAt = Date()
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if let device = deviceForDaemonStateMutation() {
+            if let device = deviceForWorkspaceMutation(workspaceID: workspaceID) {
                 let result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.runCodingAgent(
                         workspaceID: workspaceID, agentName: launcherName, agentLauncherID: nil, device: device,
@@ -10526,7 +10620,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func openWorkspaceFinder(workspaceID: String) {
-        if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
+        if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: workspaceID) { return }
         guard let (_, workspace) = findWorkspace(id: workspaceID) else { return }
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
         if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
@@ -10544,10 +10638,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isArchived && !workspace.isHidden }
 
     private func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] {
-        (workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }.sorted { lhs, rhs in
+        if let cached = visibleWorkspacesCache[projectID] { return cached }
+        let result = (workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }.sorted { lhs, rhs in
             if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }
+        visibleWorkspacesCache[projectID] = result
+        return result
     }
 
     /// True when more than one paired device is present, so the sidebar groups
@@ -10768,7 +10865,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func handleReloadShortcut(event: NSEvent) -> Bool {
         guard let reloadShortcutSpec, matches(event: event, spec: reloadShortcutSpec) else { return false }
-        reloadData()
+        reloadData(forceRemoteRefresh: true)
         return true
     }
 

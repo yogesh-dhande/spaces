@@ -31,39 +31,6 @@ public struct SpacesDeviceProjectRow: Equatable, Sendable {
     }
 }
 
-public struct SpacesDeviceWorkspaceRow: Equatable, Sendable {
-    public let id: String
-    public let projectID: String
-    public let projectName: String
-    public let title: String
-    public let branch: String?
-    public let baseBranch: String?
-    public let dir: String
-    public let isRunning: Bool
-    public let isArchived: Bool
-    public let isHidden: Bool
-    public let isDefault: Bool
-    public let notes: String?
-
-    public init(
-        id: String, projectID: String, projectName: String, title: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool,
-        isArchived: Bool, isHidden: Bool, isDefault: Bool, notes: String?
-    ) {
-        self.id = id
-        self.projectID = projectID
-        self.projectName = projectName
-        self.title = title
-        self.branch = branch
-        self.baseBranch = baseBranch
-        self.dir = dir
-        self.isRunning = isRunning
-        self.isArchived = isArchived
-        self.isHidden = isHidden
-        self.isDefault = isDefault
-        self.notes = notes
-    }
-}
-
 public enum SpacesDeviceWorkspaceLifecycle: String, Equatable, Sendable {
     case stopped
     case running
@@ -98,35 +65,21 @@ public struct SpacesDeviceWorkspaceRuntime: Equatable, Sendable {
 
 public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
     public let projects: [SpacesDeviceProjectRow]
-    public let workspacesByProject: [String: [SpacesDeviceWorkspaceRow]]
+    public let workspacesByProject: [String: [SpacesDeviceWorkspaceSummary]]
     public let workspaceRuntimeStatusByID: [String: SpacesDeviceWorkspaceRuntime]
 
     public init(overview: SpacesDeviceOverviewPayload) {
-        if overview.projects.isEmpty {
-            let grouped = Dictionary(grouping: overview.workspaces, by: \.projectID)
-            projects = grouped.values.compactMap { workspaces in
-                guard let first = workspaces.first else { return nil }
-                return SpacesDeviceProjectRow(
-                    id: first.projectID, name: first.projectName, dir: "", isGitRepo: first.branch != nil || first.baseBranch != nil,
-                    defaultBranch: first.baseBranch)
-            }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        } else {
-            projects = overview.projects.map {
-                SpacesDeviceProjectRow(
-                    id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
-            }
+        projects = overview.projects.map {
+            SpacesDeviceProjectRow(
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
         }
 
-        workspacesByProject = Dictionary(
-            grouping: overview.workspaces.map {
-                SpacesDeviceWorkspaceRow(
-                    id: $0.id, projectID: $0.projectID, projectName: $0.projectName, title: $0.title, branch: $0.branch, baseBranch: $0.baseBranch,
-                    dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes)
-            }, by: \.projectID
-        ).mapValues { rows in rows.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending } }
+        workspacesByProject = Dictionary(grouping: overview.workspaces, by: \.projectID).mapValues { workspaces in
+            workspaces.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        }
 
         workspaceRuntimeStatusByID = Dictionary(
-            uniqueKeysWithValues: overview.workspaces.map { workspace in
+            overview.workspaces.map { workspace -> (String, SpacesDeviceWorkspaceRuntime) in
                 let runningProcessCount =
                     workspace.processRows.filter { $0.runState == .running }.count + workspace.terminalRows.filter { $0.runState == .running }.count
                 let exitedProcessCount =
@@ -141,6 +94,9 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
                         hasTrackedRuntimeIndicators: hasTrackedIndicators, runningProcessCount: runningProcessCount,
                         exitedProcessCount: exitedProcessCount, waitingAgentWindowCount: waitingAgentCount)
                 )
-            })
+            },
+            // A malformed or racy overview payload could repeat a workspace id; keep
+            // the last occurrence instead of trapping and crashing the client.
+            uniquingKeysWith: { _, latest in latest })
     }
 }

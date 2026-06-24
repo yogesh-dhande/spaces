@@ -21,69 +21,6 @@ public struct SpacesDeviceProjectSettingsViewModel: Equatable, Sendable {
     }
 }
 
-public enum SpacesDeviceWorkspaceLifecycleCommand: String, Equatable, Sendable {
-    case launch
-    case restart
-}
-
-public struct SpacesDeviceWorkspaceDetailActions: Equatable, Sendable {
-    public let launchOrRestart: SpacesDeviceWorkspaceLifecycleCommand
-    public let showsStop: Bool
-    public let showsOverflow: Bool
-    public let showsOpenTerminal: Bool
-    public let showsOpenEditor: Bool
-    public let showsRevealInFinder: Bool
-    public let showsRunSetup: Bool
-
-    public init(isRunning: Bool) {
-        launchOrRestart = isRunning ? .restart : .launch
-        showsStop = true
-        showsOverflow = true
-        showsOpenTerminal = true
-        showsOpenEditor = true
-        showsRevealInFinder = true
-        showsRunSetup = true
-    }
-}
-
-public struct SpacesDeviceWorkspaceDetailSurface: Equatable, Sendable {
-    public let showsNotes: Bool
-    public let showsPorts: Bool
-    public let showsProcesses: Bool
-    public let showsBrowserSessions: Bool
-    public let showsAgentLaunchers: Bool
-    public let showsTerminals: Bool
-    public let showsStopScript: Bool
-    public let configuredPortCount: Int
-    public let assignedPortCount: Int
-    public let configuredProcessCount: Int
-    public let runningProcessCount: Int
-    public let configuredBrowserSessionCount: Int
-    public let resolvedBrowserSessionCount: Int
-    public let configuredAgentLauncherCount: Int
-    public let runningCodingAgentCount: Int
-    public let terminalCount: Int
-
-    public init(workspace: SpacesDeviceWorkspaceSummary) {
-        showsNotes = true
-        showsPorts = true
-        showsProcesses = true
-        showsBrowserSessions = true
-        showsAgentLaunchers = true
-        showsTerminals = true
-        showsStopScript = true
-        configuredPortCount = workspace.config.ports.count
-        assignedPortCount = workspace.assignedPorts.count
-        configuredProcessCount = workspace.config.processes.count
-        runningProcessCount = workspace.processRows.filter { $0.runState == .running }.count
-        configuredBrowserSessionCount = workspace.config.browserSessions.count
-        resolvedBrowserSessionCount = workspace.config.resolvedBrowserSessions.count
-        configuredAgentLauncherCount = workspace.config.agentLaunchers.count
-        runningCodingAgentCount = workspace.codingAgentRows.filter { $0.runState == .running }.count
-        terminalCount = workspace.terminalRows.count
-    }
-}
-
 public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let id: String
     public let projectID: String
@@ -103,8 +40,6 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let processRows: [SpacesDeviceWorkspaceProcessRow]
     public let codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
-    public let actions: SpacesDeviceWorkspaceDetailActions
-    public let surface: SpacesDeviceWorkspaceDetailSurface
 
     public init(workspace: SpacesDeviceWorkspaceSummary) {
         id = workspace.id
@@ -125,7 +60,5 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
         processRows = workspace.processRows
         codingAgentRows = workspace.codingAgentRows
         terminalRows = workspace.terminalRows
-        actions = SpacesDeviceWorkspaceDetailActions(isRunning: workspace.isRunning)
-        surface = SpacesDeviceWorkspaceDetailSurface(workspace: workspace)
     }
 }

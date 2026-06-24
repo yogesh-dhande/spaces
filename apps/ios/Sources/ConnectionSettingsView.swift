@@ -181,8 +181,20 @@ struct ConnectionSettingsView: View {
     }
 
     @MainActor private func beginRename(for device: SpacesMobilePairedDeviceRecord) {
+        // Persist any in-progress edit before switching fields; otherwise the prior
+        // field's onDisappear fires after renamingDeviceID has already moved on and
+        // its guard silently drops the edit.
+        commitActiveRename()
         renameText = device.name
         renamingDeviceID = device.id
+    }
+
+    @MainActor private func commitActiveRename() {
+        guard let activeID = renamingDeviceID, let device = pairedDevices.first(where: { $0.id == activeID }) else {
+            renamingDeviceID = nil
+            return
+        }
+        commitRename(for: device)
     }
 
     @MainActor private func commitRename(for device: SpacesMobilePairedDeviceRecord) {
