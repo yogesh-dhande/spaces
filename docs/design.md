@@ -201,6 +201,7 @@ These are examples of how the general guidelines apply to important parts of the
 ### Sidebar Navigation
 - Two-line rows are appropriate when an item has one clear identity and one important secondary piece of metadata.
 - Inline status indicators and muted secondary metadata are preferred over noisy labels and badges.
+- When more than one device is paired, the sidebar groups projects under a per-device section header; with a single device the header is omitted and the sidebar stays a flat project list. Section headers carry the device's load state (loading or offline) inline rather than as a separate row, and a device that is still loading or unreachable shows the header alone with no children.
 
 ### List Editors
 - Inline row editing is the preferred pattern for small, repeatable resource collections.

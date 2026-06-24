@@ -2620,6 +2620,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
+    /// Builds attention alerts for a remote device from its overview payload.
+    /// A remote device has no local orchestrator, but its overview already carries
+    /// per-workspace process run states and coding-agent activity states, which is
+    /// exactly what the attention list needs — so alerts aggregate across devices
+    /// without any daemon protocol change.
+    nonisolated private static func buildRemoteAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> [AlertsGroup] {
+        var groups: [AlertsGroup] = []
+        for workspace in overview.workspaces where !workspace.isArchived {
+            var items: [AlertsAttentionEntry] = []
+            if workspace.isRunning {
+                for process in workspace.processRows where process.runState == .exited {
+                    items.append(
+                        AlertsAttentionEntry(
+                            attentionID: "remote:\(deviceID):p:\(process.id)", icon: "terminal", iconTint: .terminal, label: process.name,
+                            detail: process.command, shortcut: "", processStatus: .exited, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                            focusRequest: process.processID.map { .workspaceProcess(workspaceID: workspace.id, processID: $0) }))
+                }
+            }
+            for agent in workspace.codingAgentRows where agent.activityState == .waiting {
+                items.append(
+                    AlertsAttentionEntry(
+                        attentionID: "remote:\(deviceID):a:\(agent.id)", icon: "cpu.fill", iconTint: .warning, label: agent.name, detail: nil,
+                        shortcut: "", processStatus: nil, agentStatus: .waiting, countsTowardBadge: true, eventDate: nil,
+                        focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: agent.name)))
+            }
+            guard !items.isEmpty else { continue }
+            groups.append(
+                AlertsGroup(
+                    projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.title, workspaceBranch: workspace.branch,
+                    items: items))
+        }
+        return groups
+    }
+
     nonisolated private static func buildAlertsGroupsSnapshot(
         orchestrator: WorkspaceOrchestrator, projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]]
     ) throws -> [AlertsGroup] {
@@ -4455,7 +4489,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             deviceSections[index].projects = mapped.projects
             deviceSections[index].workspacesByProject = mapped.workspacesByProject
             deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-            deviceSections[index].alertsGroups = []  // Phase 4: aggregate daemon-reported alerts from the overview payload.
+            deviceSections[index].alertsGroups = Self.buildRemoteAlertsGroups(from: overview.overview, deviceID: deviceID)
             deviceSections[index].overview = overview.overview
             deviceSections[index].device = overview.device
             deviceSections[index].loadState = .loaded

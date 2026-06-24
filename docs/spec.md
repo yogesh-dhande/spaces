@@ -127,14 +127,15 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 
 ## Devices and Pairing
 - Every Mac or Linux `spacesd` is authoritative for its own projects, workspaces, configuration, runtime rows, terminal sessions, notes, alerts, paired clients, daemon name, TLS identity, database, runtime files, and workspace filesystem.
-- macOS and iOS apps are thin clients connected to one active paired device. Projects and workspaces are created separately on each device; Spaces does not share workspace records across devices.
-- Home shows an add/connect device state when no device is paired, shows the paired device directly when exactly one device is paired, and shows a device selector before the selected device's projects and workspaces when multiple devices are paired.
+- macOS and iOS apps are thin clients over paired daemons. Projects and workspaces are created separately on each device; Spaces does not share workspace records across devices. Each project and workspace has a globally unique identifier so the same repository on two devices is two distinct entries.
+- The macOS sidebar lists every paired device at once: the local Mac plus each paired remote device as its own section grouping that device's projects and workspaces. The local device loads immediately and each remote device's projects load independently, so a slow or unreachable device shows its own loading or offline state without blocking the rest. With a single device the sidebar is a flat project list with no device header.
+- The iOS client connects to one selected device at a time and shows an add/connect device state when no device is paired.
 - Device API traffic uses TLS with pinned daemon identity plus a per-client full-control token. Clients reject endpoint identity mismatches before sending authenticated requests.
 - `spaces pair` opens a short-lived pairing window on the same-machine daemon and prints `spaces://pair?...` details for terminal-driven iOS pairing. The Mac Devices settings section shows QR codes for pairing iPhone and iPad clients with any device already connected to the Mac client.
 - Pairing stores the pinned daemon identity and client token in Keychain. Client SQLite backup files contain paired-device metadata only and do not contain pairing tokens.
 - Pairing a remote device for macOS asks for SSH host, user, and port, validates SSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, requires a remote Mac to have the DMG install markers, prepares supported Linux hosts automatically over SSH when Spaces is missing or not responding, runs `~/.spaces/bin/spaces pair --json` on the remote device, then pairs with the Device API at the effective OpenSSH `HostName` and returned API port. Missing or failing SSH is a setup failure for pairing, remote terminal attach, browser forwarding, and editor opening.
-- Paired clients have full control of the selected daemon. The client Devices UI lists connected daemons and lets the user select the active daemon; paired-client administration is handled by daemon control paths rather than shown as a normal client screen.
-- Creating projects, workspaces, terminals, processes, and coding-agent runs from macOS or iOS always targets the active paired daemon. Project creation accepts a daemon-side Git URL or an existing daemon-local path.
+- Paired clients have full control of every daemon they are paired with. Paired-client administration is handled by daemon control paths rather than shown as a normal client screen.
+- Creating projects, workspaces, terminals, processes, and coding-agent runs targets the daemon that owns the affected row: on macOS that is the device of the selected project or workspace, and on iOS it is the selected device. Editor and Reveal-in-Finder actions are available only for local-device workspaces. Project creation accepts a daemon-side Git URL or an existing daemon-local path.
 - The `spaces` CLI targets only the same-machine daemon. It does not create or mutate projects, workspaces, or terminals on paired remote devices.
 - Remote terminal attach opens a local terminal window attached to the remote daemon session through SSH. Remote browser sessions that target a daemon-local service open through an SSH local forward. Remote editor actions open the daemon worktree through the configured SSH-capable editor.
 - Each device stores workspaces under its own workspace root by default. The default root is `~/.spaces/workspaces/` for installed macOS and Linux daemons.
@@ -264,6 +265,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 
 ## Alerts and Health
 - The app should surface attention items across workspaces in one place.
+- On macOS the Alerts list and badge aggregate attention items across every paired device, so a single combined badge reflects work needing attention on the local Mac and on remote devices together. Remote attention items are derived from each remote device's overview.
 - Attention includes exited processes and coding-agent states such as waiting or done.
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
 - Alerts rows should support direct window focus by click and by the numbered window shortcuts.
