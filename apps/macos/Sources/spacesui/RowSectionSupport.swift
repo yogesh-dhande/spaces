@@ -5,7 +5,7 @@ import AppKit
 /// a live count, an optional subtitle, and a trailing "+ add" button; the only
 /// per-section differences are the title text and the add button's
 /// accessibility identifier.
-enum RowSectionHeader {
+@MainActor enum RowSectionHeader {
     static func make(title: String, addButtonAccessibilityIdentifier: String, countLabel: NSTextField, subtitle: String? = nil) -> NSStackView {
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
