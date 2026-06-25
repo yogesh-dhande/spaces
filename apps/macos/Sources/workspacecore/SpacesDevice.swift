@@ -56,16 +56,6 @@ public struct SpacesDeviceRecord: Codable, Sendable, Equatable, Identifiable {
     public var isLocal: Bool { kind == .local }
 }
 
-public struct SpacesDeviceDeletionResult: Codable, Sendable, Equatable {
-    public let deviceID: String
-    public let credentialTokenDeleted: Bool
-
-    public init(deviceID: String, credentialTokenDeleted: Bool) {
-        self.deviceID = deviceID
-        self.credentialTokenDeleted = credentialTokenDeleted
-    }
-}
-
 public enum SpacesDeviceSelection: Sendable, Equatable {
     case local(SpacesDeviceRecord)
     case remote(SpacesDeviceRecord)
@@ -195,63 +185,17 @@ public enum SpacesDevicePlanner {
         return SpacesDaemonConnectionTarget(transport: .localUnixSocket, deviceID: device.id, displayName: device.name, socketPath: localSocketPath)
     }
 
-    public static func proposedRemoteWorkspacePath(device: SpacesDeviceRecord, project: ProjectRecord, workspace: WorkspaceRecord) -> String {
-        let root = device.workspaceRoot.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let projectComponent = stablePathComponent(name: project.name, id: project.id)
-        let workspaceName = workspace.dirname ?? workspace.branch ?? workspace.title
-        let workspaceComponent = stablePathComponent(name: workspaceName, id: workspace.id)
-        return "/" + [root, projectComponent, workspaceComponent].filter { !$0.isEmpty }.joined(separator: "/")
-    }
-
     public static func runtimeManifest(
-        project: ProjectRecord, workspace: WorkspaceRecord, selection: SpacesDeviceSelection, namedPorts: [WorkspaceRuntimePortMapping],
-        gitRemoteURL: String? = nil
+        project: ProjectRecord, workspace: WorkspaceRecord, selection: SpacesDeviceSelection, namedPorts: [WorkspaceRuntimePortMapping]
     ) -> WorkspaceRuntimeManifest {
-        let location: WorkspaceRuntimeManifest.Location = .local
         let workingPath = workspace.runtimePath
         var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id]
         for mapping in namedPorts { environment[mapping.name] = String(mapping.port) }
 
         return WorkspaceRuntimeManifest(
-            workspaceID: workspace.id, projectID: project.id, deviceID: SpacesDeviceRecord.localDeviceID, location: location,
+            workspaceID: workspace.id, projectID: project.id, deviceID: SpacesDeviceRecord.localDeviceID, location: .local,
             localPath: workspace.runtimePath, remotePath: nil, branch: workspace.branch, baseBranch: workspace.baseBranch, gitRemoteURL: nil,
             namedPorts: namedPorts, processEnvironment: environment, allowedFileRoots: [workingPath])
-    }
-
-    public static func remoteSSHURI(device: SpacesDeviceRecord, path: String) -> String {
-        let authority: String
-        if let user = normalized(device.sshUser) { authority = "\(user)@\(device.sshHost)" } else { authority = device.sshHost }
-        let normalizedPath = path.hasPrefix("/") ? path : "/\(path)"
-        let portQuery = device.sshPort.map { "?port=\($0)" } ?? ""
-        return "vscode-remote://ssh-remote+\(authority)\(normalizedPath)\(portQuery)"
-    }
-
-    private static func stablePathComponent(name: String, id: String) -> String {
-        let slug = slugify(name)
-        let shortID = id.replacingOccurrences(of: "-", with: "").prefix(8)
-        return shortID.isEmpty ? slug : "\(slug)-\(shortID)"
-    }
-
-    private static func slugify(_ value: String) -> String {
-        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        var scalars: [UnicodeScalar] = []
-        var lastWasSeparator = false
-        for scalar in lowercased.unicodeScalars {
-            if CharacterSet.alphanumerics.contains(scalar) {
-                scalars.append(scalar)
-                lastWasSeparator = false
-            } else if !lastWasSeparator {
-                scalars.append("-")
-                lastWasSeparator = true
-            }
-        }
-        let slug = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return slug.isEmpty ? "workspace" : slug
-    }
-
-    private static func normalized(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-        return trimmed
     }
 }
 

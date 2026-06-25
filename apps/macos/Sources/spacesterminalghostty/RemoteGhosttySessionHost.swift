@@ -426,12 +426,6 @@
 
         private func currentSnapshot() -> GhosttyTerminalSnapshot? { latestSnapshotIfCompatible() }
 
-        private func currentSnapshotForRenderUpdate() -> GhosttyTerminalSnapshot? {
-            if let snapshot = latestSnapshotIfCompatible() { return snapshot }
-            guard !terminalView.hasRenderedSurfaceContent else { return nil }
-            return nil
-        }
-
         private func currentRenderFrameForRenderUpdate() -> GhosttyRenderFrame? {
             guard let frame = latestState?.decodedRenderUpdate?.fullFrame,
                 Self.shouldUseRenderFrameSnapshot(frame.snapshot, runtimeState: latestState?.runtimeState, reason: latestState?.reason)

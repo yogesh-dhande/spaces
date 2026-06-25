@@ -144,39 +144,6 @@ final class TerminalServiceProtocolTests: XCTestCase {
         lock.release()
     }
 
-    func testClientCanSendRequestToRemoteServiceSocket() throws {
-        let queue = DispatchQueue(label: "terminal-service-tcp-protocol-test")
-        let received = expectation(description: "received request")
-        let server = TerminalServiceTCPServer(host: "127.0.0.1", port: 0, authToken: "SECRET", queue: queue) { request in
-            XCTAssertEqual(request, TerminalServiceRequest(command: .ping, authToken: "SECRET"))
-            received.fulfill()
-            return TerminalServiceResponse(ok: true, message: "pong")
-        }
-        try server.start()
-        defer { server.stop() }
-
-        let response = try TerminalServiceClient.send(
-            request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET")
-
-        wait(for: [received], timeout: 2)
-        XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
-    }
-
-    func testRemoteServiceSocketRejectsInvalidAuthToken() throws {
-        let queue = DispatchQueue(label: "terminal-service-tcp-auth-test")
-        let server = TerminalServiceTCPServer(host: "127.0.0.1", port: 0, authToken: "SECRET", queue: queue) { _ in
-            XCTFail("Unauthorized requests should not reach handler")
-            return TerminalServiceResponse(ok: true, message: "unexpected")
-        }
-        try server.start()
-        defer { server.stop() }
-
-        let response = try TerminalServiceClient.send(
-            request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "WRONG")
-
-        XCTAssertEqual(response, TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client."))
-    }
-
     func testPinnedTLSClientCanSendRequestToRemoteService() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -382,8 +382,6 @@
             refreshRuntimeState(force: true)
         }
 
-        public func takeover(client: TerminalClient) throws { try attachClient(client, mode: .owner) }
-
         public func isOwner(clientID: String) -> Bool {
             guard isRuntimeInteractiveForControl() else { return false }
             return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).contains { $0.clientID == clientID && $0.mode == .owner }
@@ -1466,8 +1464,6 @@
         }
 
         public func detach(clientID: String) throws { try core.detach(clientID: clientID) }
-
-        public func takeover(client: TerminalClient, into container: NSView?) throws { try attach(client: client, mode: .owner, into: container) }
 
         public func releaseRendererSurface() { core.rendererHost.releaseRendererSurface() }
 

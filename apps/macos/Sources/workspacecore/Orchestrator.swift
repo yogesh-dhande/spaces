@@ -20,7 +20,6 @@ public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionTerminator = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionLauncher = @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary
-    public typealias RemoteTerminalServiceClient = @Sendable (SpacesDaemonConnectionTarget, TerminalServiceRequest) throws -> TerminalServiceResponse
 
     #if canImport(UserNotifications)
         private final class NotificationAuthorizationCache: @unchecked Sendable {
@@ -134,34 +133,8 @@ public final class WorkspaceOrchestrator {
     public static func sendTerminalServiceRequest(to target: SpacesDaemonConnectionTarget, request: TerminalServiceRequest) throws
         -> TerminalServiceResponse
     {
-        switch target.transport {
-        case .localUnixSocket:
-            guard let socketPath = target.socketPath else { throw WorkspaceError.invalidArgument(message: "Local spacesd socket path is missing.") }
-            return try TerminalServiceClient.send(request: request, socketPath: socketPath, timeout: 15)
-        case .pinnedTLS:
-            #if canImport(Network) && canImport(Security)
-                guard let endpoint = target.endpoint else {
-                    throw WorkspaceError.invalidArgument(message: "Remote spacesd endpoint is missing for \(target.displayName).")
-                }
-                return try TerminalServiceClient.sendPinnedTLS(
-                    request: request, host: endpoint.host, port: endpoint.port, authToken: try remoteDaemonAuthToken(target: target),
-                    certificateFingerprint: endpoint.certificateFingerprint, timeout: 30)
-            #else
-                throw WorkspaceError.invalidArgument(message: "Pinned-TLS remote daemon forwarding is unavailable in this spacesd build.")
-            #endif
-        }
-    }
-
-    private static func defaultRemoteTerminalServiceClient(target: SpacesDaemonConnectionTarget, request: TerminalServiceRequest) throws
-        -> TerminalServiceResponse
-    { try sendTerminalServiceRequest(to: target, request: request) }
-
-    private static func remoteDaemonAuthToken(target: SpacesDaemonConnectionTarget) throws -> String? { nil }
-
-    private enum ExtractedBrowserFocusOutcome {
-        case focused
-        case staleMapping
-        case notMapped
+        guard let socketPath = target.socketPath else { throw WorkspaceError.invalidArgument(message: "Local spacesd socket path is missing.") }
+        return try TerminalServiceClient.send(request: request, socketPath: socketPath, timeout: 15)
     }
 
     private struct ResolvedBrowserSession {
@@ -240,7 +213,6 @@ public final class WorkspaceOrchestrator {
         let appName: String
         let title: String
         let launchConfiguration: TerminalSessionLaunchConfiguration
-        let runtimePlan: WorkspaceRuntimePlan?
         let createdAt: String
         let orderIndex: Int
     }
@@ -302,7 +274,6 @@ public final class WorkspaceOrchestrator {
     private let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     private let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     private let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
-    private let remoteTerminalServiceClient: RemoteTerminalServiceClient
     private let windowFocusPulseEnabledProvider: () throws -> Bool
     private let windowFocusPulseColorProvider: () throws -> (r: Int, g: Int, b: Int)
     private let projectsRootDirectoryURL: URL?
@@ -329,7 +300,7 @@ public final class WorkspaceOrchestrator {
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, remoteTerminalServiceClient: RemoteTerminalServiceClient? = nil,
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil,
         windowFocusPulseEnabledProvider: (() throws -> Bool)? = nil, windowFocusPulseColorProvider: (() throws -> (r: Int, g: Int, b: Int))? = nil,
         currentDate: @escaping () -> Date = Date.init
     ) {
@@ -389,7 +360,6 @@ public final class WorkspaceOrchestrator {
                     throw WorkspaceError.invalidArgument(message: "Local TerminalService launch is unavailable in this spacesd build.")
                 }
         #endif
-        self.remoteTerminalServiceClient = remoteTerminalServiceClient ?? Self.defaultRemoteTerminalServiceClient
         self.currentDate = currentDate
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             Self.writeStandardError("spaces: DEBUG=1 enabled (browser/cycle profiling active)\n")
@@ -407,39 +377,10 @@ public final class WorkspaceOrchestrator {
         return config
     }
 
-    public func listSpacesDevices() throws -> [SpacesDeviceRecord] { try store.spacesDevices() }
-
-    public func upsertSpacesDevice(_ device: SpacesDeviceRecord) throws {
-        guard device.isLocal else {
-            throw WorkspaceError.invalidArgument(message: "Remote device records are not part of the device-owned daemon model.")
-        }
-        try store.upsert(spacesDevice: device)
-    }
-
-    public func validateSpacesDeviceDeletion(id: String) throws {
-        let deviceID = normalizedSpacesDeviceID(id) ?? id
-        if deviceID == SpacesDeviceRecord.localDeviceID {
-            throw WorkspaceError.invalidArgument(message: "The local device record cannot be removed.")
-        }
-        throw WorkspaceError.invalidArgument(message: "Remote device records are not stored on this device.")
-    }
-
-    @discardableResult public func deleteSpacesDevice(id: String) throws -> SpacesDeviceDeletionResult {
-        let deviceID = normalizedSpacesDeviceID(id) ?? id
-        try validateSpacesDeviceDeletion(id: deviceID)
-        try store.deleteSpacesDevice(id: deviceID)
-        return SpacesDeviceDeletionResult(deviceID: deviceID, credentialTokenDeleted: false)
-    }
-
     public func effectiveSpacesDevice(workspaceID: String) throws -> SpacesDeviceSelection {
         guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
         guard try store.project(id: workspace.projectID) != nil else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
         return .local(SpacesDeviceRecord.local())
-    }
-
-    private func normalizedSpacesDeviceID(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-        return trimmed
     }
 
     public func workspaceRuntimePlan(workspaceID: String) throws -> WorkspaceRuntimePlan {
@@ -447,12 +388,6 @@ public final class WorkspaceOrchestrator {
         guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
         return try workspaceRuntimePlan(
             project: project, workspace: workspace, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspace.id))
-    }
-
-    public func requireLocalWorkspaceRuntime(workspaceID: String) throws -> WorkspaceRuntimePlan {
-        let plan = try workspaceRuntimePlan(workspaceID: workspaceID)
-        try requireLocalWorkspaceRuntime(plan)
-        return plan
     }
 
     public func listProjects() throws -> [ProjectSummary] {
@@ -505,16 +440,15 @@ public final class WorkspaceOrchestrator {
     /// actual values. The `url` field of each returned session is the fully-expanded prefix used for
     /// matching. Sessions whose URL is empty after expansion are omitted; duplicate resolved URLs are
     /// deduplicated (first occurrence wins, preserving order).
-    public func resolvedWorkspaceBrowserSessions(workspaceID: String, openRemoteForwards: Bool = false) throws -> [BrowserSession] {
+    public func resolvedWorkspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return [] }
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan, openRemoteForwards: openRemoteForwards).map { resolved in
+            runtimeManifest: try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts).manifest)
+        return resolveBrowserSessions(sessions, env: env).map { resolved in
             BrowserSession(name: resolved.session.name, url: resolved.prefix, extractedWindow: resolved.session.extractedWindow)
         }
     }
@@ -1004,13 +938,9 @@ public final class WorkspaceOrchestrator {
     }
 
     public func createWorkspaceOnDevice(
-        projectID: String, name: String, branch: String, deviceID: String, baseBranch: String? = nil, directoryName: String? = nil,
+        projectID: String, name: String, branch: String, baseBranch: String? = nil, directoryName: String? = nil,
         notes: String? = nil, runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
     ) throws -> WorkspaceRecord {
-        let normalizedDeviceID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalizedDeviceID.isEmpty || normalizedDeviceID == SpacesDeviceRecord.localDeviceID else {
-            throw WorkspaceError.invalidArgument(message: "The spaces CLI can create workspaces only on this device's daemon.")
-        }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace name is required.") }
         let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1249,7 +1179,7 @@ public final class WorkspaceOrchestrator {
         if let config {
             newWindows.append(
                 contentsOf: try launchProcesses(
-                    workspace: workspace, templates: config.processes, env: env, runtimePlan: runtimePlan, background: background))
+                    workspace: workspace, templates: config.processes, env: env, background: background))
         }
 
         if let config {
@@ -1308,10 +1238,6 @@ public final class WorkspaceOrchestrator {
         let windows = try indexedWorkspaceWindows(workspaceID: workspace.id)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        if runtimePlan.selection.isRemote {
-            return try stopRemoteWorkspaceUnlocked(project: project, workspace: workspace, windows: windows, runtimePlan: runtimePlan)
-        }
-        try requireLocalWorkspaceRuntime(runtimePlan)
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
@@ -1369,50 +1295,6 @@ public final class WorkspaceOrchestrator {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
         try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
-    }
-
-    private func stopRemoteWorkspaceUnlocked(
-        project: ProjectRecord, workspace: WorkspaceRecord, windows: [WindowRecord], runtimePlan: WorkspaceRuntimePlan
-    ) throws -> WorkspaceStopOutcome {
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        var closedRemoteTerminalSessionIDs = Set<String>()
-        for process in try store.runningProcesses(workspaceID: workspace.id) {
-            guard let sessionID = normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID) else { continue }
-            terminateRemoteTerminalSession(sessionID, plan: runtimePlan)
-            closedRemoteTerminalSessionIDs.insert(sessionID)
-        }
-        for agent in try store.agentWindows(workspaceID: workspace.id) {
-            guard let sessionID = normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID) else { continue }
-            terminateRemoteTerminalSession(sessionID, plan: runtimePlan)
-            closedRemoteTerminalSessionIDs.insert(sessionID)
-        }
-        if let script = settings?.stopScript?.trimmingCharacters(in: .whitespacesAndNewlines), !script.isEmpty {
-            let result = try runRemoteWorkspaceCommand(applyEnvVars(script, env: env), plan: runtimePlan, env: env)
-            guard result.exitCode == 0 else {
-                throw WorkspaceError.invalidArgument(message: "Stop script exited with code \(result.exitCode). See log: \(result.logPath)")
-            }
-        }
-        for window in windows {
-            if window.role == "browser" {
-                closeTrackedBrowserTab(window)
-                continue
-            }
-            if window.role == "terminal", let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID),
-                !closedRemoteTerminalSessionIDs.contains(sessionID)
-            {
-                terminateRemoteTerminalSession(sessionID, plan: runtimePlan)
-            }
-        }
-        try store.deleteRunningProcesses(workspaceID: workspace.id)
-        try store.deleteWindows(workspaceID: workspace.id)
-        try store.deleteAgentWindows(workspaceID: workspace.id)
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-        try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
-        return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: false)
     }
 
     public func archiveWorkspace(workspaceID: String, deleteLocalBranch: Bool = false, deleteRemoteBranch: Bool = false) throws
@@ -1495,7 +1377,6 @@ public final class WorkspaceOrchestrator {
     }
 
     public func workspaceRuntimeStatus(workspaceID: String) throws -> WorkspaceRuntimeStatus {
-        _ = try synchronizeRemoteAgentSignals(workspaceID: workspaceID)
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let lifecycleState = WorkspaceLifecycleState(isRunning: workspace.isRunning)
         let runningProcesses = try store.runningProcesses(workspaceID: workspaceID)
@@ -1701,17 +1582,7 @@ public final class WorkspaceOrchestrator {
         let now = currentDate()
         let formatter = ISO8601DateFormatter()
         var didUpdate = false
-        let workspaceUsesRemoteDaemon: Bool
-        if let assignedPorts = try? store.workspacePortsAssigned(workspaceID: workspace.id),
-            let runtimePlan = try? workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts),
-            runtimePlan.selection.isRemote
-        {
-            workspaceUsesRemoteDaemon = true
-        } else {
-            workspaceUsesRemoteDaemon = false
-        }
         for process in processes where process.status == .running {
-            if workspaceUsesRemoteDaemon { continue }
             if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
                 now.timeIntervalSince(startedAt) < 10.0
             {
@@ -1897,24 +1768,15 @@ public final class WorkspaceOrchestrator {
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
         let session: SpacesTerminalSessionHandle
-        if runtimePlan.selection.isRemote {
-            terminateRemoteTerminalSession(for: process, plan: runtimePlan)
-            let command = try spacesTerminalCommand(
-                template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                includeProfileEnvironment: false, commandPrelude: remoteDeviceProfilePathPrelude(plan: runtimePlan))
-            session = try launchRemoteTerminalSession(
-                title: process.templateName, command: command, plan: runtimePlan, kind: .process, showMode: .owner)
+        if isManagedTerminalApp(process.terminalApp) {
+            terminateBuiltInTerminalSession(for: process)
         } else {
-            if isManagedTerminalApp(process.terminalApp) {
-                terminateBuiltInTerminalSession(for: process)
-            } else {
-                _ = terminateProcessForRestart(process)
-            }
-            let command = try spacesTerminalCommand(template: template, env: env)
-            session = try launchSpacesTerminalSession(
-                title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
+            _ = terminateProcessForRestart(process)
         }
+        let command = try spacesTerminalCommand(template: template, env: env)
+        session = try launchSpacesTerminalSession(
+            title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
+            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             Self.writeStandardError(
                 "spaces: restart_process launched workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-") new_session=\(session.sessionID)\n"
@@ -2023,42 +1885,25 @@ public final class WorkspaceOrchestrator {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
         let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let isRemote = runtimePlan.selection.isRemote
         let env = terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimePlan.manifest
-            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: !isRemote
+            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true
         )
-        let workingDirectory = isRemote ? try runtimeWorkingDirectory(for: runtimePlan) : workspace.dir
-        let shellPath = isRemote ? remoteShellPath(for: runtimePlan) : (terminalShellPathOverride() ?? "/bin/zsh")
+        let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let rawCommand: String
         if let command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             rawCommand = command
         } else {
-            rawCommand = isRemote ? remoteInteractiveShellCommand(shellPath: shellPath) : interactiveShellCommand(cwd: workspace.dir)
+            rawCommand = interactiveShellCommand(cwd: workspace.dir)
         }
         let launchCommand = commandPrefixedWithShellEnvironment(rawCommand, env: env)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title ?? "shell", workingDirectory: workingDirectory,
+            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title ?? "shell", workingDirectory: workspace.dir,
             shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: .shell)
 
-        let session: TerminalServiceSessionSummary
-        if isRemote {
-            let response = try sendRemoteTerminalServiceRequest(
-                plan: runtimePlan,
-                command: .create(
-                    .init(
-                        launchConfiguration: launchConfiguration, runtimeManifest: terminalServiceManifest(runtimePlan.manifest),
-                        worktreeRefresh: remoteWorktreeRefreshRequest(for: runtimePlan))))
-            guard let remoteSession = response.session else {
-                throw WorkspaceError.invalidArgument(message: "\(runtimePlan.daemonTarget.displayName): spacesd did not return session metadata.")
-            }
-            try mirrorRemoteTerminalSession(remoteSession, requestedLaunchConfiguration: launchConfiguration)
-            session = remoteSession
-        } else {
-            session = try builtInTerminalSessionLauncher(launchConfiguration)
-        }
+        let session = try builtInTerminalSessionLauncher(launchConfiguration)
         if !workspace.isRunning {
             let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
             try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
@@ -2072,17 +1917,16 @@ public final class WorkspaceOrchestrator {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
         let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let isRemote = runtimePlan.selection.isRemote
         let env = terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimePlan.manifest
-            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: !isRemote
+            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true
         )
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
-        let workingDirectory = isRemote ? try runtimeWorkingDirectory(for: runtimePlan) : workspace.dir
-        let shellPath = isRemote ? remoteShellPath(for: runtimePlan) : (terminalShellPathOverride() ?? "/bin/zsh")
-        let shellCommand = isRemote ? remoteInteractiveShellCommand(shellPath: shellPath) : interactiveShellCommand(cwd: workspace.dir)
+        let workingDirectory = workspace.dir
+        let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
+        let shellCommand = interactiveShellCommand(cwd: workspace.dir)
         let command = commandPrefixedWithShellEnvironment(shellCommand, env: env)
         let createdAt = nowISO8601()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
@@ -2110,8 +1954,7 @@ public final class WorkspaceOrchestrator {
         }
         return WorkspaceTerminalLaunchReservation(
             sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
-            title: generatedTitle, launchConfiguration: launchConfiguration, runtimePlan: isRemote ? runtimePlan : nil, createdAt: createdAt,
-            orderIndex: nextOrder)
+            title: generatedTitle, launchConfiguration: launchConfiguration, createdAt: createdAt, orderIndex: nextOrder)
     }
 
     @discardableResult public func finishReservedWorkspaceTerminalLaunch(_ reservation: WorkspaceTerminalLaunchReservation) throws -> String {
@@ -2122,27 +1965,15 @@ public final class WorkspaceOrchestrator {
                     return reservation.sessionID
                 }
             }
-            let session: SpacesTerminalSessionHandle
-            if let runtimePlan = reservation.runtimePlan {
-                session = try launchRemoteTerminalSession(
-                    title: reservation.launchConfiguration.title, command: reservation.launchConfiguration.command, plan: runtimePlan,
-                    sessionID: reservation.sessionID, lifetimePolicy: reservation.launchConfiguration.lifetimePolicy,
-                    kind: reservation.launchConfiguration.kind)
-            } else {
-                session = try launchSpacesTerminalSession(
-                    title: reservation.launchConfiguration.title, workingDirectory: reservation.launchConfiguration.workingDirectory,
-                    command: reservation.launchConfiguration.command, showMode: .owner, backend: reservation.launchConfiguration.backend,
-                    readinessPolicy: .stableChildPID, sessionID: reservation.sessionID,
-                    lifetimePolicy: reservation.launchConfiguration.lifetimePolicy, workspaceID: reservation.launchConfiguration.workspaceID,
-                    kind: reservation.launchConfiguration.kind)
-            }
+            let session = try launchSpacesTerminalSession(
+                title: reservation.launchConfiguration.title, workingDirectory: reservation.launchConfiguration.workingDirectory,
+                command: reservation.launchConfiguration.command, showMode: .owner, backend: reservation.launchConfiguration.backend,
+                readinessPolicy: .stableChildPID, sessionID: reservation.sessionID,
+                lifetimePolicy: reservation.launchConfiguration.lifetimePolicy, workspaceID: reservation.launchConfiguration.workspaceID,
+                kind: reservation.launchConfiguration.kind)
             if reservation.windowRecordInsertedBeforeLaunch {
                 guard try reservedWorkspaceTerminalWindowExists(reservation) else {
-                    if let runtimePlan = reservation.runtimePlan {
-                        terminateRemoteTerminalSession(reservation.sessionID, plan: runtimePlan)
-                    } else {
-                        builtInTerminalSessionTerminator(reservation.sessionID)
-                    }
+                    builtInTerminalSessionTerminator(reservation.sessionID)
                     return session.sessionID
                 }
             }
@@ -2156,11 +1987,7 @@ public final class WorkspaceOrchestrator {
             return session.sessionID
         } catch {
             markReservedWorkspaceTerminalLaunchFailed(reservation)
-            if let runtimePlan = reservation.runtimePlan {
-                terminateRemoteTerminalSession(reservation.sessionID, plan: runtimePlan)
-            } else {
-                builtInTerminalWindowCloser(reservation.sessionID)
-            }
+            builtInTerminalWindowCloser(reservation.sessionID)
             throw error
         }
     }
@@ -2200,19 +2027,6 @@ public final class WorkspaceOrchestrator {
 
     private func reservedWorkspaceTerminalWindowExists(_ reservation: WorkspaceTerminalLaunchReservation) throws -> Bool {
         try store.windows(workspaceID: reservation.workspaceID).contains { $0.id == reservation.windowRecordID }
-    }
-
-    public func persistBuiltInTerminalWindowID(sessionID: String, windowID: Int) throws {
-        guard windowID > 0, let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return }
-        guard (try? yabai.listWindows().contains { $0.id == windowID }) ?? false else { return }
-        let now = nowISO8601()
-        for window in try store.windows(workspaceID: workspaceID) where (window.terminalNativeID ?? window.terminalTrackingID) == sessionID {
-            try store.upsert(
-                window: WindowRecord(
-                    id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                    targetURL: window.targetURL, windowID: windowID, terminalTrackingID: window.terminalTrackingID,
-                    terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: now))
-        }
     }
 
     public func focusWorkspace(workspaceID: String) throws {
@@ -2413,12 +2227,7 @@ public final class WorkspaceOrchestrator {
         let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
             $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
         }.map(\.id)
-        let runtimePlan = try workspaceRuntimePlan(workspaceID: workspaceID)
-        if runtimePlan.selection.isRemote {
-            terminateRemoteTerminalSession(sessionID, plan: runtimePlan)
-        } else {
-            terminateBuiltInTerminalSession(sessionID)
-        }
+        terminateBuiltInTerminalSession(sessionID)
         for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
         try deleteAgentRows(forBuiltInTerminalSession: sessionID, workspaceID: workspaceID)
         try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
@@ -2896,12 +2705,6 @@ public final class WorkspaceOrchestrator {
         windowNavigationLock.unlock()
     }
 
-    private func windowNavigationHistory(workspaceID: String) -> [WorkspaceNavigationCursor] {
-        windowNavigationLock.lock()
-        defer { windowNavigationLock.unlock() }
-        return windowNavigationHistoryByWorkspace[workspaceID] ?? []
-    }
-
     private func windowNavigationCycleSession(workspaceID: String, now: Date) -> WorkspaceNavigationCycleSession? {
         windowNavigationLock.lock()
         defer { windowNavigationLock.unlock() }
@@ -2983,7 +2786,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).compactMap { resolved in
+        return try resolveBrowserSessions(sessions, env: env).compactMap { resolved in
             guard let targetURL = sanitizedFocusName(resolved.prefix) else { return nil }
             let name = try requiredConfiguredFocusName(resolved.session.name, kind: "Browser session")
             return (name, targetURL)
@@ -3065,18 +2868,6 @@ public final class WorkspaceOrchestrator {
 
     private func navigationTargetIndex(cursor: WorkspaceNavigationCursor, targets: [WorkspaceNavigationTarget]) -> Int? {
         targets.enumerated().first(where: { navigationCursor(for: $0.element) == cursor })?.offset
-    }
-
-    private func rememberFocusedNavigationTarget(workspaceID: String) throws {
-        let targets = try workspaceNavigationTargets(workspaceID: workspaceID)
-        guard !targets.isEmpty else {
-            setWindowNavigationCursor(nil, workspaceID: workspaceID)
-            return
-        }
-        let cursor = try currentFocusedNavigationTargetIndex(targets: targets, workspaceID: workspaceID).flatMap {
-            navigationCursor(for: targets[$0])
-        }
-        setWindowNavigationCursor(cursor, workspaceID: workspaceID)
     }
 
     private func windowNavigationCursor(workspaceID: String) -> WorkspaceNavigationCursor? {
@@ -3299,8 +3090,6 @@ public final class WorkspaceOrchestrator {
 
     private func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
 
-    private func remoteInteractiveShellCommand(shellPath: String) -> String { "exec \(shellSingleQuoted(shellPath)) -l" }
-
     private func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true)
         -> [String: String]
     {
@@ -3342,110 +3131,6 @@ public final class WorkspaceOrchestrator {
     private enum BuiltInTerminalReadinessPolicy: String {
         case sessionReady = "session_ready"
         case stableChildPID = "stable_child_pid"
-    }
-
-    private func runtimeWorkingDirectory(for plan: WorkspaceRuntimePlan) throws -> String {
-        switch plan.selection {
-        case .local: return plan.workspace.runtimePath
-        case .remote:
-            guard let remotePath = plan.manifest.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines), !remotePath.isEmpty else {
-                throw WorkspaceError.invalidArgument(message: "Remote workspace path is missing for \(plan.daemonTarget.displayName).")
-            }
-            return remotePath
-        }
-    }
-
-    private func remoteShellPath(for _: WorkspaceRuntimePlan) -> String { "/bin/bash" }
-
-    private func terminalServiceManifest(_ manifest: WorkspaceRuntimeManifest) -> TerminalServiceWorkspaceRuntimeManifest {
-        TerminalServiceWorkspaceRuntimeManifest(
-            workspaceID: manifest.workspaceID, projectID: manifest.projectID, deviceID: manifest.deviceID,
-            location: manifest.location == .remote ? .remote : .local, localPath: manifest.localPath, remotePath: manifest.remotePath,
-            branch: manifest.branch, baseBranch: manifest.baseBranch, gitRemoteURL: manifest.gitRemoteURL,
-            namedPorts: manifest.namedPorts.map { TerminalServiceWorkspaceRuntimePortMapping(id: $0.id, name: $0.name, port: $0.port) },
-            processEnvironment: manifest.processEnvironment, allowedFileRoots: manifest.allowedFileRoots)
-    }
-
-    private func remoteWorktreeRefreshRequest(for plan: WorkspaceRuntimePlan) -> TerminalServiceWorktreeRefreshRequest? {
-        guard plan.selection.isRemote else { return nil }
-        guard let path = plan.manifest.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { return nil }
-        guard let branch = plan.manifest.branch?.trimmingCharacters(in: .whitespacesAndNewlines), !branch.isEmpty else { return nil }
-        return TerminalServiceWorktreeRefreshRequest(path: path, branch: branch, hostName: plan.daemonTarget.displayName)
-    }
-
-    private func sendRemoteTerminalServiceRequest(plan: WorkspaceRuntimePlan, command: TerminalServiceCommand) throws -> TerminalServiceResponse {
-        let request = TerminalServiceRequest(command: command)
-        let response = try remoteTerminalServiceClient(plan.daemonTarget, request)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: "\(plan.daemonTarget.displayName): \(response.message)") }
-        return response
-    }
-
-    private func launchRemoteTerminalSession(
-        title: String, command: String?, plan: WorkspaceRuntimePlan, sessionID: String? = nil,
-        lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, kind: TerminalSessionKind = .shell, showMode: TerminalAttachmentMode? = nil
-    ) throws -> SpacesTerminalSessionHandle {
-        let sessionID = sessionID ?? UUID().uuidString
-        let workingDirectory = try runtimeWorkingDirectory(for: plan)
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory,
-            shell: remoteShellPath(for: plan), command: command, createdAt: nowISO8601(), workspaceID: plan.workspace.id, kind: kind)
-        let response = try sendRemoteTerminalServiceRequest(
-            plan: plan,
-            command: .create(
-                .init(
-                    launchConfiguration: launchConfiguration, runtimeManifest: terminalServiceManifest(plan.manifest),
-                    worktreeRefresh: remoteWorktreeRefreshRequest(for: plan))))
-        guard let session = response.session else {
-            throw WorkspaceError.invalidArgument(message: "\(plan.daemonTarget.displayName): spacesd did not return session metadata.")
-        }
-        try mirrorRemoteTerminalSession(session, requestedLaunchConfiguration: launchConfiguration)
-        if let showMode { builtInTerminalWindowOpener(session.id, showMode) }
-        return SpacesTerminalSessionHandle(
-            sessionID: session.id, childPID: session.childPID.map(Int.init), windowID: nil, outputPath: session.outputPath)
-    }
-
-    private func mirrorRemoteTerminalSession(
-        _ session: TerminalServiceSessionSummary, requestedLaunchConfiguration: TerminalSessionLaunchConfiguration
-    ) throws {
-        let paths = try TerminalSessionPaths.forSession(id: session.id)
-        let launchConfiguration = session.launchConfiguration ?? requestedLaunchConfiguration
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        let runtimeState =
-            session.runtimeState
-            ?? TerminalSessionRuntimeState(
-                sessionID: session.id, backend: session.backend, servicePID: session.servicePID, childPID: session.childPID, state: session.state,
-                updatedAt: nowISO8601(), title: session.title, workingDirectory: session.workingDirectory)
-        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
-        if let attachmentSnapshot = session.attachmentSnapshot {
-            try TerminalSessionPersistence.writeAttachmentSnapshot(attachmentSnapshot, paths: paths)
-        }
-        FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
-        FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
-    }
-
-    private func remoteDeviceProfilePathPrelude(plan: WorkspaceRuntimePlan) -> String? {
-        guard plan.selection.deviceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return nil }
-        let helperPath = "~/.spaces/bin/spaces"
-        return "export PATH=~/.spaces/bin:$PATH; spaces() { \(helperPath) \"$@\"; }; export -f spaces"
-    }
-
-    private func runRemoteWorkspaceCommand(_ command: String, plan: WorkspaceRuntimePlan, env: [String: String], logPath: String? = nil) throws
-        -> WorkspaceSetupRunResult
-    {
-        let workingDirectory = try runtimeWorkingDirectory(for: plan)
-        let request = TerminalServiceWorkspaceCommandRequest(
-            command: command, workingDirectory: workingDirectory,
-            environment: terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: false), logPath: logPath)
-        let response = try sendRemoteTerminalServiceRequest(
-            plan: plan,
-            command: .runWorkspaceCommand(
-                .init(
-                    runtimeManifest: terminalServiceManifest(plan.manifest), worktreeRefresh: remoteWorktreeRefreshRequest(for: plan),
-                    workspaceCommand: request)))
-        guard let result = response.commandResult else {
-            throw WorkspaceError.invalidArgument(message: "\(plan.daemonTarget.displayName): spacesd did not return command metadata.")
-        }
-        return WorkspaceSetupRunResult(exitCode: result.exitCode, logPath: result.logPath)
     }
 
     private func launchSpacesTerminalSession(
@@ -3567,7 +3252,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).map(\.prefix)
+        return resolveBrowserSessions(sessions, env: env).map(\.prefix)
     }
 
     private func resolveBrowserSessions(_ sessions: [BrowserSession], env: [String: String]) -> [ResolvedBrowserSession] {
@@ -3581,112 +3266,6 @@ public final class WorkspaceOrchestrator {
             resolved.append(ResolvedBrowserSession(index: index, prefix: prefix, session: session))
         }
         return resolved
-    }
-
-    private func resolveBrowserSessions(
-        _ sessions: [BrowserSession], env: [String: String], runtimePlan: WorkspaceRuntimePlan, openRemoteForwards: Bool = true
-    ) throws -> [ResolvedBrowserSession] {
-        let resolved = resolveBrowserSessions(sessions, env: env)
-        guard runtimePlan.selection.isRemote else { return resolved }
-        var forwarded: [ResolvedBrowserSession] = []
-        var seen = Set<String>()
-        for session in resolved {
-            let prefix: String
-            if let reusable = BrowserSSHForwardResolver.reusableResolvedURL(
-                session.session.extractedWindow?.targetURL, for: session.prefix, runtimePlan: runtimePlan)
-            {
-                prefix = reusable
-            } else if !openRemoteForwards {
-                prefix = session.prefix
-            } else {
-                prefix = try BrowserSSHForwardResolver.resolvedURL(session.prefix, runtimePlan: runtimePlan)
-            }
-            guard !prefix.isEmpty, !seen.contains(prefix) else { continue }
-            seen.insert(prefix)
-            forwarded.append(ResolvedBrowserSession(index: session.index, prefix: prefix, session: session.session))
-        }
-        return forwarded
-    }
-
-    private func extractSessionWindowIfNeeded(
-        session: ResolvedBrowserSession, matches: [ChromeWindowMatch], refreshedSessions: inout [BrowserSession]
-    ) throws -> Int? {
-        if let extractedWindow = session.session.extractedWindow, extractedWindow.isValid,
-            matches.contains(where: { $0.windowID == extractedWindow.windowID })
-        {
-            refreshedSessions[session.index].extractedWindow = ExtractedBrowserWindowMapping(
-                targetURL: session.prefix, windowID: extractedWindow.windowID, isValid: true)
-            return extractedWindow.windowID
-        }
-        guard let firstMatch = matches.first else { return nil }
-        guard let extractedWindowID = try chrome.extractTabToWindow(windowID: firstMatch.windowID, tabIndex: firstMatch.tabIndex) else { return nil }
-        refreshedSessions[session.index].extractedWindow = ExtractedBrowserWindowMapping(
-            targetURL: session.prefix, windowID: extractedWindowID, isValid: true)
-        return extractedWindowID
-    }
-
-    private func focusExtractedBrowserWindow(workspaceID: String, targetURL: String) throws -> ExtractedBrowserFocusOutcome {
-        let startedAt = currentDate()
-        let resolveWorkspaceStartedAt = currentDate()
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=resolve_workspace elapsed_ms=\(elapsedMS(since: resolveWorkspaceStartedAt))")
-
-        let loadSessionsStartedAt = currentDate()
-        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=load_sessions elapsed_ms=\(elapsedMS(since: loadSessionsStartedAt)) count=\(sessions.count)"
-        )
-        guard !sessions.isEmpty else { return .notMapped }
-
-        let namedPortsStartedAt = currentDate()
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=load_named_ports elapsed_ms=\(elapsedMS(since: namedPortsStartedAt)) count=\(assignedPorts.count)"
-        )
-
-        let resolveSessionsStartedAt = currentDate()
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        let resolvedSessions = try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=resolve_sessions elapsed_ms=\(elapsedMS(since: resolveSessionsStartedAt)) count=\(resolvedSessions.count)"
-        )
-        guard !resolvedSessions.isEmpty else { return .notMapped }
-
-        let matchSessionStartedAt = currentDate()
-        guard
-            let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
-                guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }
-                return (resolved, score)
-            }).max(by: { lhs, rhs in
-                if lhs.score == rhs.score { return lhs.session.prefix.count < rhs.session.prefix.count }
-                return lhs.score < rhs.score
-            })?.session, let extractedWindow = sessions[matchedSession.index].extractedWindow, extractedWindow.isValid
-        else { return .notMapped }
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=match_session elapsed_ms=\(elapsedMS(since: matchSessionStartedAt)) window_id=\(extractedWindow.windowID)"
-        )
-
-        let focusStartedAt = currentDate()
-        let focused = try yabai.focusWindow(id: extractedWindow.windowID)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=yabai_focus elapsed_ms=\(elapsedMS(since: focusStartedAt)) window_id=\(extractedWindow.windowID) success=\(focused ? 1 : 0)"
-        )
-        guard focused else {
-            let markMissingStartedAt = currentDate()
-            try markBrowserWindowMissing(workspaceID: workspace.id, targetURL: targetURL, windowID: extractedWindow.windowID)
-            logBrowserFocus(
-                "workspace=\(workspaceID) path=extracted_substep step=mark_missing elapsed_ms=\(elapsedMS(since: markMissingStartedAt)) window_id=\(extractedWindow.windowID)"
-            )
-            return .staleMapping
-        }
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=total elapsed_ms=\(elapsedMS(since: startedAt)) window_id=\(extractedWindow.windowID)"
-        )
-        return .focused
     }
 
     private func markExtractedWindowInvalid(workspaceID: String, sessions: [BrowserSession], index: Int) throws {
@@ -3933,18 +3512,6 @@ public final class WorkspaceOrchestrator {
         return BrowserWindowScanResult(windows: browserWindows, tabIndexByWindowAndURL: tabIndexByWindowAndURL)
     }
 
-    private func normalizedBrowserWindowRows(_ windows: [WindowRecord]) -> [WindowRecord] {
-        let browserWindowIDsWithTarget = Set(
-            windows.compactMap { window -> Int? in
-                guard window.role == "browser", let windowID = window.windowID, window.targetURL != nil else { return nil }
-                return windowID
-            })
-        return windows.filter { window in
-            guard window.role == "browser", window.targetURL == nil, let windowID = window.windowID else { return true }
-            return !browserWindowIDsWithTarget.contains(windowID)
-        }
-    }
-
     public func listSpaceOptions() throws -> [SpaceOption] {
         let spaces = try yabai.listSpaces()
         return spaces.map { SpaceOption(displayIndex: $0.display, spaceIndex: $0.index) }.sorted { lhs, rhs in
@@ -4021,38 +3588,10 @@ public final class WorkspaceOrchestrator {
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
     }
 
-    private func ensureImportedGitDefaultWorkspace(for project: ProjectRecord, branch: String) throws {
-        if let existing = try defaultWorkspace(projectID: project.id) {
-            if existing.isArchived {
-                let revived = WorkspaceRecord(
-                    id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
-                    branch: existing.branch, baseBranch: existing.baseBranch, isDefault: true, isArchived: false, isHidden: existing.isHidden,
-                    isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
-                try store.upsert(workspace: revived)
-            }
-            return
-        }
-
-        let workspace = try createImportedGitDefaultWorkspaceOnDisk(project: project, branch: branch)
-        try store.upsert(workspace: workspace)
-        try seedWorkspaceSettings(project: project, workspace: workspace)
-        let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
-        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
-    }
-
     private func resolveWorkspace(id: String) throws -> (ProjectRecord, WorkspaceRecord) {
         guard let workspace = try store.workspace(id: id) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
         guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
         return (project, workspace)
-    }
-
-    private func ensureWorkspaceSettings(for project: ProjectRecord) throws {
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
-        for workspace in workspaces {
-            let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
-            if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
-        }
     }
 
     private func createImportedGitDefaultWorkspaceOnDisk(project: ProjectRecord, branch: String) throws -> WorkspaceRecord {
@@ -4268,20 +3807,6 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name || left.command != right.command || left.kind != right.kind || left.onExit != right.onExit { return false }
-        }
-        return true
-    }
-
-    private func browserSessionsMatch(_ lhs: [BrowserSession], _ rhs: [BrowserSession]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) where left.name != right.name || left.url != right.url { return false }
-        return true
-    }
-
     private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions, agentLaunchers: project.agentLaunchers,
@@ -4392,12 +3917,7 @@ public final class WorkspaceOrchestrator {
             let env = buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimePlan.manifest)
-            if runtimePlan.selection.isRemote {
-                result = try runRemoteWorkspaceCommand(applyEnvVars(setupScript, env: env), plan: runtimePlan, env: env, logPath: nil)
-            } else {
-                try requireLocalWorkspaceRuntime(runtimePlan)
-                result = try runWorkspaceSetupScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir, logPath: logPath)
-            }
+            result = try runWorkspaceSetupScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir, logPath: logPath)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             try store.setWorkspaceSetupState(
@@ -4508,23 +4028,11 @@ public final class WorkspaceOrchestrator {
             WorkspaceRuntimePortMapping(id: $0.definitionID.isEmpty ? $0.name : $0.definitionID, name: $0.name, port: $0.port)
         }
         let manifest = SpacesDevicePlanner.runtimeManifest(
-            project: project, workspace: workspace, selection: selection, namedPorts: namedPorts,
-            gitRemoteURL: gitRemoteURLForRuntime(project: project, selection: selection))
+            project: project, workspace: workspace, selection: selection, namedPorts: namedPorts)
         let daemonTarget = SpacesDevicePlanner.daemonTarget(selection: selection, localSocketPath: try TerminalServicePaths.socketPath())
-        let remoteSSHURI: String?
-        if case .remote(let device) = selection {
-            let remotePath = workspace.runtimePath
-            remoteSSHURI = SpacesDevicePlanner.remoteSSHURI(device: device, path: remotePath)
-        } else {
-            remoteSSHURI = nil
-        }
         return WorkspaceRuntimePlan(
-            project: project, workspace: workspace, selection: selection, manifest: manifest, daemonTarget: daemonTarget, remoteSSHURI: remoteSSHURI)
+            project: project, workspace: workspace, selection: selection, manifest: manifest, daemonTarget: daemonTarget, remoteSSHURI: nil)
     }
-
-    private func requireLocalWorkspaceRuntime(_ plan: WorkspaceRuntimePlan) throws { return }
-
-    private func gitRemoteURLForRuntime(project: ProjectRecord, selection: SpacesDeviceSelection) -> String? { nil }
 
     private func processKey(for template: ProcessTemplate) -> String {
         let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -4633,119 +4141,6 @@ public final class WorkspaceOrchestrator {
         return (logFile, pidFile)
     }
 
-    private func reconcileProcesses(workspace: WorkspaceRecord, previous: [ProcessTemplate], updated: [ProcessTemplate], env: [String: String]) throws
-    {
-        struct DesiredProcess {
-            let matchKey: String
-            let desiredKey: String
-            let template: ProcessTemplate
-        }
-
-        let running = try store.runningProcesses(workspaceID: workspace.id)
-        let runningByKey = Dictionary(uniqueKeysWithValues: running.map { ($0.templateName, $0) })
-        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
-
-        var desiredByMatch: [String: DesiredProcess] = [:]
-        for template in updated {
-            let desiredKey = processKey(for: template)
-            let matchKey = previousByID[template.id].map(processKey(for:)) ?? desiredKey
-            if desiredByMatch[matchKey] == nil {
-                desiredByMatch[matchKey] = DesiredProcess(matchKey: matchKey, desiredKey: desiredKey, template: template)
-            }
-        }
-
-        let toStop = running.filter { desiredByMatch[$0.templateName] == nil }
-        let toStart = desiredByMatch.filter { runningByKey[$0.key] == nil }
-        var toRestart: [(DesiredProcess, RunningProcessRecord)] = []
-        var toRelabel: [(DesiredProcess, RunningProcessRecord)] = []
-        for desired in desiredByMatch.values {
-            if let running = runningByKey[desired.matchKey] {
-                if running.command != desired.template.command {
-                    toRestart.append((desired, running))
-                } else if running.templateName != desired.desiredKey {
-                    toRelabel.append((desired, running))
-                }
-            }
-        }
-
-        for process in toStop {
-            if isManagedTerminalApp(process.terminalApp) {
-                terminateBuiltInTerminalSession(for: process)
-            } else if let pid = resolvedRuntimePID(for: process) {
-                terminateProcessGroup(pid: pid)
-            }
-            try store.deleteRunningProcess(id: process.id)
-            if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: { matchesTrackedTerminalWindow($0, process: process) })
-            {
-                try store.deleteWindow(id: terminalWindow.id)
-            }
-        }
-
-        for (desired, process) in toRelabel {
-            let updated = RunningProcessRecord(
-                id: process.id, workspaceID: workspace.id, templateID: desired.template.id, templateName: desired.desiredKey,
-                command: process.command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
-                terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID, pid: process.pid, status: process.status,
-                logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
-            try store.upsert(runningProcess: updated)
-            if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: {
-                $0.role == "terminal" && matchesTrackedTerminalWindow($0, process: process)
-            }) {
-                try store.upsert(
-                    window: WindowRecord(
-                        id: terminalWindow.id, workspaceID: terminalWindow.workspaceID, app: terminalWindow.app, name: desired.desiredKey,
-                        detail: updated.command, targetURL: terminalWindow.targetURL, windowID: terminalWindow.windowID,
-                        terminalTrackingID: terminalWindow.terminalTrackingID, terminalNativeID: terminalWindow.terminalNativeID,
-                        role: terminalWindow.role, orderIndex: terminalWindow.orderIndex, lastSeenAt: nowISO8601()))
-            }
-        }
-
-        for (desired, process) in toRestart {
-            let name = desired.desiredKey
-            let updatedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateID: desired.template.id, templateName: name,
-                command: desired.template.command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp,
-                windowID: process.windowID, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
-                pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                exitedAt: process.exitedAt)
-            try restartProcessInTerminal(workspaceID: workspace.id, process: updatedProcess, templateOverride: desired.template)
-        }
-
-        for (_, desired) in toStart.sorted(by: { $0.value.desiredKey.localizedStandardCompare($1.value.desiredKey) == .orderedAscending }) {
-            _ = try launchConfiguredProcess(template: desired.template, workspace: workspace, env: env)
-        }
-    }
-
-    private func reconcileBrowserSessions(project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String])
-        throws
-    {
-        _ = project
-        let tracked = try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
-        if resolvedSessions.isEmpty {
-            for window in tracked {
-                closeTrackedBrowserTab(window)
-                try store.deleteWindow(id: window.id)
-            }
-            return
-        }
-        let desiredOrderByTargetURL = Dictionary(uniqueKeysWithValues: resolvedSessions.map { ($0.prefix, $0.index) })
-        for window in tracked {
-            guard let targetURL = window.targetURL, let desiredOrder = desiredOrderByTargetURL[targetURL] else {
-                if window.windowID != nil { closeTrackedBrowserTab(window) }
-                try store.deleteWindow(id: window.id)
-                continue
-            }
-            if window.orderIndex != desiredOrder {
-                try store.upsert(
-                    window: WindowRecord(
-                        id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                        targetURL: targetURL, windowID: window.windowID, terminalTrackingID: window.terminalTrackingID,
-                        terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: desiredOrder, lastSeenAt: window.lastSeenAt))
-            }
-        }
-    }
-
     @discardableResult private func pruneMissingWindows(workspaceID: String) throws -> Int {
         let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
@@ -4794,14 +4189,14 @@ public final class WorkspaceOrchestrator {
         guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
         guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
         if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
-            return builtInSessionIsStillLive(sessionID: sessionID, workspaceID: window.workspaceID)
+            return builtInSessionIsStillLive(sessionID: sessionID)
                 || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
         if builtInSessionBelongsToConfiguredAgent(sessionID: sessionID, workspaceID: window.workspaceID) {
-            return builtInSessionIsStillLive(sessionID: sessionID, workspaceID: window.workspaceID)
+            return builtInSessionIsStillLive(sessionID: sessionID)
                 || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
-        if builtInSessionIsStillLive(sessionID: sessionID, workspaceID: window.workspaceID)
+        if builtInSessionIsStillLive(sessionID: sessionID)
             && builtInSessionHasActiveAttachments(sessionID: sessionID)
         {
             return true
@@ -4815,27 +4210,12 @@ public final class WorkspaceOrchestrator {
         return builtInSessionBelongsToAgent(sessionID: sessionID, workspaceID: window.workspaceID)
     }
 
-    private func builtInSessionIsStillLive(sessionID: String, workspaceID: String? = nil) -> Bool {
-        if let workspaceID {
-            do {
-                if let remoteLiveness = try remoteBuiltInSessionIsStillLive(sessionID: sessionID, workspaceID: workspaceID) { return remoteLiveness }
-            } catch { return false }
-        }
+    private func builtInSessionIsStillLive(sessionID: String) -> Bool {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
         guard runtimeState.state.isInteractive else { return false }
         return isProcessAlive(pid: Int(runtimeState.servicePID))
-    }
-
-    private func remoteBuiltInSessionIsStillLive(sessionID: String, workspaceID: String) throws -> Bool? {
-        let runtimePlan = try workspaceRuntimePlan(workspaceID: workspaceID)
-        guard runtimePlan.selection.isRemote else { return nil }
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
-        let response = try sendRemoteTerminalServiceRequest(plan: runtimePlan, command: .state(.init(sessionID: sessionID)))
-        guard let payload = response.sessionState else { return false }
-        try? TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
-        return payload.runtimeState?.state.isInteractive ?? false
     }
 
     private func builtInSessionLaunchIsPending(sessionID: String, now: Date = Date()) -> Bool {
@@ -4866,7 +4246,7 @@ public final class WorkspaceOrchestrator {
     private func builtInAgentSessionIsStillLive(_ record: AgentWindowRecord) -> Bool {
         guard record.provider == .spaces else { return false }
         guard let sessionID = builtInAgentSessionID(for: record) else { return false }
-        return builtInSessionIsStillLive(sessionID: sessionID, workspaceID: record.workspaceID)
+        return builtInSessionIsStillLive(sessionID: sessionID)
     }
 
     private func builtInAgentSessionID(for record: AgentWindowRecord) -> String? {
@@ -4939,39 +4319,13 @@ public final class WorkspaceOrchestrator {
         _ = try? yabai.closeWindow(id: trackedWindowID)
     }
 
-    private func upsertCapturedTerminalWindows(_ captured: [WindowRecord], existingWindowIDs: inout Set<Int>, terminalCount: inout Int) throws {
-        for windowRecord in captured {
-            guard let id = windowRecord.windowID, !existingWindowIDs.contains(id) else { continue }
-            existingWindowIDs.insert(id)
-            terminalCount += 1
-            try store.upsert(window: windowRecord)
-        }
-    }
-
-    private func terminalWindowsFromRunningProcesses(workspace: WorkspaceRecord, existingWindows: [WindowRecord]) throws -> [WindowRecord] {
-        let processRecords = try store.runningProcesses(workspaceID: workspace.id)
-        var seenWindowIDs = Set(existingWindows.compactMap(\.windowID))
-        var synthesized: [WindowRecord] = []
-        for process in processRecords where isManagedTerminalApp(process.terminalApp) {
-            guard let windowID = process.windowID, !seenWindowIDs.contains(windowID) else { continue }
-            seenWindowIDs.insert(windowID)
-            synthesized.append(
-                WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: process.terminalApp ?? TerminalHost.spaces.appName,
-                    name: process.templateName, detail: process.command, windowID: windowID, terminalTrackingID: process.terminalTrackingID,
-                    role: "terminal", orderIndex: 200 + synthesized.count, lastSeenAt: nowISO8601()))
-        }
-        return synthesized
-    }
-
     static func nextWindowOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
         let maxIndex = existing.filter { $0.role == role }.map(\.orderIndex).max() ?? (orderOffset - 1)
         return max(maxIndex + 1, orderOffset)
     }
 
     private func launchProcesses(
-        workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], runtimePlan: WorkspaceRuntimePlan? = nil,
-        background: Bool = false
+        workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false
     ) throws -> [WindowRecord] {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !templates.isEmpty else {
@@ -4979,27 +4333,15 @@ public final class WorkspaceOrchestrator {
             try store.deleteRunningProcesses(workspaceID: workspace.id)
             return []
         }
-        if let runtimePlan, runtimePlan.selection.isRemote {
-            try terminateRemoteTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id, plan: runtimePlan)
-        } else {
-            try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
-        }
+        try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         var terminalWindows: [WindowRecord] = []
         for (index, template) in templates.enumerated() {
             let name = template.name ?? template.command
-            let session: SpacesTerminalSessionHandle
-            if let runtimePlan, runtimePlan.selection.isRemote {
-                let sessionCommand = try spacesTerminalCommand(
-                    template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                    includeProfileEnvironment: false, commandPrelude: remoteDeviceProfilePathPrelude(plan: runtimePlan))
-                session = try launchRemoteTerminalSession(title: name, command: sessionCommand, plan: runtimePlan, kind: .process, showMode: .owner)
-            } else {
-                let sessionCommand = try spacesTerminalCommand(template: template, env: env)
-                session = try launchSpacesTerminalSession(
-                    title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                    readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
-            }
+            let sessionCommand = try spacesTerminalCommand(template: template, env: env)
+            let session = try launchSpacesTerminalSession(
+                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
+                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
             let now = nowISO8601()
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
@@ -5014,49 +4356,6 @@ public final class WorkspaceOrchestrator {
                     role: "terminal", orderIndex: 200 + index, lastSeenAt: now))
         }
         return terminalWindows
-    }
-
-    private func ensureBrowserSessions(
-        project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String], extractOnAttach: Bool,
-        runtimePlan: WorkspaceRuntimePlan? = nil, background: Bool = false
-    ) throws -> (windows: [WindowRecord], sessions: [BrowserSession]) {
-        _ = project
-        _ = extractOnAttach
-        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
-        guard !sessions.isEmpty else { return ([], []) }
-        guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
-        let resolvedSessions =
-            if let runtimePlan { try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan) } else {
-                resolveBrowserSessions(sessions, env: env)
-            }
-        var attached: [WindowRecord] = []
-        var refreshedSessions = sessions
-        for resolvedSession in resolvedSessions {
-            if let extractedWindow = refreshedSessions[resolvedSession.index].extractedWindow, extractedWindow.isValid,
-                let liveWindow = try yabai.listWindows().first(where: { $0.id == extractedWindow.windowID && $0.app == "Google Chrome" })
-            {
-                attached.append(
-                    WindowRecord(
-                        id: UUID().uuidString, workspaceID: workspace.id, app: liveWindow.app,
-                        name: try browserFocusName(workspaceID: workspace.id, targetURL: resolvedSession.prefix) ?? resolvedSession.prefix,
-                        detail: resolvedSession.prefix, targetURL: resolvedSession.prefix, windowID: liveWindow.id, role: "browser",
-                        orderIndex: attached.count, lastSeenAt: nowISO8601()))
-                continue
-            }
-
-            let snapshot = try yabai.listWindows()
-            _ = try chrome.openWindow(url: resolvedSession.prefix, background: background)
-            guard let newWindow = try captureNewAppWindow(snapshot: snapshot, appName: "Google Chrome") else { continue }
-            refreshedSessions[resolvedSession.index].extractedWindow = ExtractedBrowserWindowMapping(
-                targetURL: resolvedSession.prefix, windowID: newWindow.id, isValid: true)
-            attached.append(
-                WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: newWindow.app,
-                    name: try browserFocusName(workspaceID: workspace.id, targetURL: resolvedSession.prefix) ?? resolvedSession.prefix,
-                    detail: resolvedSession.prefix, targetURL: resolvedSession.prefix, windowID: newWindow.id, role: "browser",
-                    orderIndex: attached.count, lastSeenAt: nowISO8601()))
-        }
-        return (attached, refreshedSessions)
     }
 
     private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
@@ -5077,10 +4376,6 @@ public final class WorkspaceOrchestrator {
 
     private func captureCreatedAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
         try captureCreatedAppWindow(snapshot: snapshot, appName: appName)?.id
-    }
-
-    private func captureNewAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
-        try captureNewAppWindow(snapshot: snapshot, appName: appName)?.id
     }
 
     private func captureSummonedBuiltInTerminalWindowID(appName: String) throws -> Int? {
@@ -5121,30 +4416,6 @@ public final class WorkspaceOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         return applyEnvVars(command, env: env)
-    }
-
-    private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws -> CommandOutcome {
-        let process = Process()
-        let out = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-lc", command]
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        process.standardOutput = out
-        process.standardError = out
-
-        var environment = currentProcessEnvironment()
-        for (key, value) in env { environment[key] = value }
-        process.environment = environment
-
-        try process.run()
-
-        let deadline = Date().addingTimeInterval(TimeInterval(timeout))
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-        if process.isRunning { process.terminate() }
-        process.waitUntilExit()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return CommandOutcome(exitCode: process.terminationStatus, output: output)
     }
 
     private func currentProcessEnvironment() -> [String: String] {
@@ -5675,11 +4946,6 @@ public final class WorkspaceOrchestrator {
         throw WorkspaceError.invalidArgument(message: "Imported git repository must contain a main or master branch.")
     }
 
-    private func importedDefaultWorkspaceDirectory(project: ProjectRecord, branch: String) throws -> String {
-        let root = try worktreeRoot(project: project)
-        return root.appendingPathComponent(branch, isDirectory: true).path
-    }
-
     private func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
     }
@@ -5792,33 +5058,6 @@ public final class WorkspaceOrchestrator {
                 environmentKeys: event.environmentKeys)
         }
         return true
-    }
-
-    @discardableResult public func synchronizeRemoteAgentSignals(workspaceID: String) throws -> Bool {
-        let plan = try workspaceRuntimePlan(workspaceID: workspaceID)
-        guard plan.selection.isRemote else { return false }
-        var didApply = false
-        for agent in try store.agentWindows(workspaceID: workspaceID) where agent.provider == .spaces {
-            guard let sessionID = builtInTerminalSessionID(for: agent) else { continue }
-            let response: TerminalServiceResponse
-            do {
-                response = try Self.sendTerminalServiceRequest(
-                    to: plan.daemonTarget, request: TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
-            } catch { continue }
-            guard response.ok else { continue }
-            var acknowledgedIDs: [String] = []
-            for event in response.agentSignals ?? [] {
-                if try recordRemoteAgentSignal(event) {
-                    acknowledgedIDs.append(event.id)
-                    didApply = true
-                }
-            }
-            guard !acknowledgedIDs.isEmpty else { continue }
-            _ = try? Self.sendTerminalServiceRequest(
-                to: plan.daemonTarget,
-                request: TerminalServiceRequest(command: .ackAgentSignals(.init(sessionID: sessionID, eventIDs: acknowledgedIDs))))
-        }
-        return didApply
     }
 
     private func remoteAgentSignalWorkspaceID(_ event: TerminalServiceAgentSignalEvent) throws -> String? {
@@ -6282,23 +5521,6 @@ public final class WorkspaceOrchestrator {
         builtInTerminalSessionTerminator(sessionID)
     }
 
-    private func terminateRemoteTerminalSession(_ sessionID: String?, plan: WorkspaceRuntimePlan) {
-        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return }
-        builtInTerminalWindowCloser(sessionID)
-        _ = try? sendRemoteTerminalServiceRequest(plan: plan, command: .terminate(.init(sessionID: sessionID)))
-    }
-
-    private func terminateRemoteTerminalSession(for process: RunningProcessRecord, plan: WorkspaceRuntimePlan) {
-        terminateRemoteTerminalSession(process.terminalNativeID ?? process.terminalTrackingID, plan: plan)
-    }
-
-    private func terminateRemoteTerminalSession(for agent: AgentWindowRecord, plan: WorkspaceRuntimePlan) {
-        terminateRemoteTerminalSession(agent.terminalNativeID ?? agent.terminalTrackingID, plan: plan)
-    }
-
-    private func terminateRemoteTerminalSessionsForConfiguredProcesses(workspaceID: String, plan: WorkspaceRuntimePlan) throws {
-        for process in try store.runningProcesses(workspaceID: workspaceID) { terminateRemoteTerminalSession(for: process, plan: plan) }
-    }
 
     private func terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: String) throws {
         for process in try store.runningProcesses(workspaceID: workspaceID) { terminateBuiltInTerminalSession(for: process) }
@@ -6459,7 +5681,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, runtimePlan: runtimePlan)
+        _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env)
         try markWorkspaceRunningIfNeeded(workspace)
         logPerfMetric(
             "process_recover", workspaceID: workspaceID, target: configuredProcessMatchKey(name: template.name),
@@ -6531,37 +5753,22 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        var launchEnv = terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: !runtimePlan.selection.isRemote)
+        var launchEnv = terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: true)
         _ = background
         let agentSessionID = UUID().uuidString
         launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID
-        let shellPath = runtimePlan.selection.isRemote ? remoteShellPath(for: runtimePlan) : terminalShellPathOverride()
-        let commandPrelude = runtimePlan.selection.isRemote ? remoteDeviceProfilePathPrelude(plan: runtimePlan) : nil
+        let shellPath = terminalShellPathOverride()
         let sessionCommand = commandPrefixedWithShellEnvironment(
             wrappedAgentLauncherCommand(
-                name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: commandPrelude),
+                name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: nil),
             env: launchEnv)
-        let session: SpacesTerminalSessionHandle
-        if runtimePlan.selection.isRemote {
-            session = try launchRemoteTerminalSession(
-                title: launcher.name, command: sessionCommand, plan: runtimePlan, sessionID: agentSessionID, kind: .agent, showMode: .owner)
-        } else {
-            session = try launchSpacesTerminalSession(
-                title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady, sessionID: agentSessionID, workspaceID: workspace.id, kind: .agent)
-        }
+        let session = try launchSpacesTerminalSession(
+            title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
+            readinessPolicy: .sessionReady, sessionID: agentSessionID, workspaceID: workspace.id, kind: .agent)
         let record = try registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: launcher.name, terminalTrackingID: session.sessionID,
             terminalNativeID: session.sessionID, yabaiWindowID: session.windowID, status: .idle, claimedLauncherID: launcher.id,
             claimedLauncherName: launcher.name)
-        if runtimePlan.selection.isRemote {
-            let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
-            try store.upsert(
-                window: WindowRecord(
-                    id: record.runtimeTargetID ?? record.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: launcher.name,
-                    detail: launcher.command, targetURL: nil, windowID: nil, terminalTrackingID: session.sessionID,
-                    terminalNativeID: session.sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
-        }
         try markWorkspaceRunningIfNeeded(workspace)
         return record
     }
@@ -6608,7 +5815,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        let resolvedSessions = try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan)
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
         guard
             let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
                 guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }
@@ -6656,18 +5863,6 @@ public final class WorkspaceOrchestrator {
     }
 
     private func stopRunningProcess(_ process: RunningProcessRecord, workspaceID: String) throws {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let runtimePlan = try workspaceRuntimePlan(
-            project: project, workspace: workspace, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspaceID))
-        if runtimePlan.selection.isRemote {
-            terminateRemoteTerminalSession(for: process, plan: runtimePlan)
-            if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
-                try store.deleteWindow(id: terminalWindow.id)
-            }
-            try store.deleteRunningProcess(id: process.id)
-            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
-            return
-        }
         let closedManagedTerminalWindowID: Int?
         if isManagedTerminalApp(process.terminalApp) {
             terminateBuiltInTerminalSession(for: process)
@@ -6736,24 +5931,15 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult private func launchConfiguredProcess(
-        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], runtimePlan: WorkspaceRuntimePlan? = nil,
-        background: Bool = false
+        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], background: Bool = false
     ) throws -> RunningProcessRecord {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         _ = background
         let name = processKey(for: template)
-        let session: SpacesTerminalSessionHandle
-        if let runtimePlan, runtimePlan.selection.isRemote {
-            let sessionCommand = try spacesTerminalCommand(
-                template: template, env: env, shellPath: remoteShellPath(for: runtimePlan), includeInheritedPath: false,
-                includeProfileEnvironment: false, commandPrelude: remoteDeviceProfilePathPrelude(plan: runtimePlan))
-            session = try launchRemoteTerminalSession(title: name, command: sessionCommand, plan: runtimePlan, kind: .process, showMode: .owner)
-        } else {
-            let sessionCommand = try spacesTerminalCommand(template: template, env: env)
-            session = try launchSpacesTerminalSession(
-                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
-        }
+        let sessionCommand = try spacesTerminalCommand(template: template, env: env)
+        let session = try launchSpacesTerminalSession(
+            title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
+            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
         let now = nowISO8601()
         let record = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,

@@ -1313,7 +1313,7 @@ private struct CreateWorkspaceCommand: ParsableCommand {
             throw ValidationError("Project not found: \(normalizedProjectDir)")
         }
         let workspace = try orchestrator.createWorkspaceOnDevice(
-            projectID: project.id, name: title, branch: branch, deviceID: SpacesDeviceRecord.localDeviceID, baseBranch: baseBranch,
+            projectID: project.id, name: title, branch: branch, baseBranch: baseBranch,
             directoryName: directoryName, notes: notes, runSetupScript: false, allowRemoteBranchLookup: false,
             allowExistingBranchReuse: existingBranch)
         try emitJSON(
@@ -1337,7 +1337,6 @@ private struct DumpWorkspaceCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
-        _ = try orchestrator.synchronizeRemoteAgentSignals(workspaceID: workspace.id)
         let payload = WorkspaceDumpPayload(
             workspace: .init(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
@@ -2571,7 +2570,8 @@ private func axAttributeValue(_ element: AXUIElement, attribute: String) -> CFTy
 }
 
 private func axElementAttribute(_ element: AXUIElement, attribute: String) -> AXUIElement? {
-    axAttributeValue(element, attribute: attribute) as! AXUIElement?
+    guard let value = axAttributeValue(element, attribute: attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
 }
 
 private func axElementArrayAttribute(_ element: AXUIElement, attribute: String) -> [AXUIElement] {

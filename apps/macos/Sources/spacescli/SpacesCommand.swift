@@ -49,7 +49,7 @@ struct ProjectListCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         let projects = try TerminalService.sendProfileCommand(.init(operation: .projectList)).projects ?? []
-        try context.output.emitLines(text: projects.map { "\($0.id)\tname=\($0.name)\tdir=\($0.dir)" }, json: projects)
+        context.output.emitLines(projects.map { "\($0.id)\tname=\($0.name)\tdir=\($0.dir)" })
     }
 }
 
@@ -70,9 +70,8 @@ struct WorkspaceListCommand: ParsableCommand {
         let workspaces =
             try TerminalService.sendProfileCommand(.init(operation: .workspaceList, projectID: project, includeArchived: includeArchived)).workspaces
             ?? []
-        try context.output.emitLines(
-            text: workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\ttitle=\($0.title)" },
-            json: workspaces)
+        context.output.emitLines(
+            workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\ttitle=\($0.title)" })
     }
 }
 
@@ -92,9 +91,7 @@ struct WorkspaceCreateCommand: ParsableCommand {
                 .init(
                     operation: .workspaceCreate, projectID: project, branch: branch, title: title, baseBranch: baseBranch,
                     existingBranch: existingBranch)))
-        try context.output.emit(
-            text: "Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")",
-            json: MutationResultPayload(message: "Created workspace.", resource: workspace))
+        context.output.emit("Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")")
     }
 }
 
@@ -105,9 +102,8 @@ struct WorkspaceStartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceStart, workspaceID: workspace)))
-        try context.output.emit(
-            text: "Workspace is running \(workspace)", json: MutationResultPayload(message: "Workspace is running.", resource: updated))
+        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceStart, workspaceID: workspace)))
+        context.output.emit("Workspace is running \(workspace)")
     }
 }
 
@@ -118,9 +114,8 @@ struct WorkspaceRestartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        let updated = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceRestart, workspaceID: workspace)))
-        try context.output.emit(
-            text: "Workspace restarted \(workspace)", json: MutationResultPayload(message: "Workspace restarted.", resource: updated))
+        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceRestart, workspaceID: workspace)))
+        context.output.emit("Workspace restarted \(workspace)")
     }
 }
 
@@ -140,12 +135,9 @@ struct AgentSignalCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        let response = try TerminalService.sendProfileCommand(
+        _ = try TerminalService.sendProfileCommand(
             .init(operation: .agentSignal, workspaceID: workspace, terminalSessionID: session, agentEvent: type.rawValue))
-        try context.output.emit(
-            text: "Agent \(type.rawValue): workspace=\(workspace)",
-            json: MutationResultPayload(
-                message: response.message, resource: ["workspaceID": workspace, "sessionID": session, "status": type.status.rawValue]))
+        context.output.emit("Agent \(type.rawValue): workspace=\(workspace)")
     }
 }
 

@@ -184,11 +184,6 @@
             GhosttyEmbeddedAppService.shared.tick()
         }
 
-        func processOutput(_ data: Data) {
-            outputPipe.process(data)
-            requestSurfaceRefresh()
-        }
-
         func foregroundPID() -> Int32? {
             if let pid = hostPTY?.foregroundPID() { return pid }
             guard let session else { return nil }
@@ -211,14 +206,6 @@
         func setFocused(_ focused: Bool) {
             guard let session else { return }
             ghostty_session_set_focus(session, focused)
-        }
-
-        func updateGeometry(width: UInt32, height: UInt32, scale: Double, displayID: UInt32?) {
-            guard let session else { return }
-            ghostty_session_set_content_scale(session, scale, scale)
-            if let displayID { ghostty_session_set_display_id(session, displayID) }
-            ghostty_session_set_size(session, width, height)
-            notifySurfaceCellSizeIfChanged()
         }
 
         @discardableResult func resizeCellGrid(columns: Int, rows: Int) -> Bool {
