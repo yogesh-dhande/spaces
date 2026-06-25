@@ -441,7 +441,7 @@ import workspacecore
             }
             let workspace = try orchestrator.createWorkspaceOnDevice(
                 projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch,
-                deviceID: SpacesDeviceRecord.localDeviceID, baseBranch: command.baseBranch, allowExistingBranchReuse: command.existingBranch ?? false)
+                baseBranch: command.baseBranch, allowExistingBranchReuse: command.existingBranch ?? false)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
         case .workspaceStart:
             let orchestrator = try makeProfileOrchestrator()

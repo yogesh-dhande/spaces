@@ -384,39 +384,10 @@ public final class WorkspaceOrchestrator {
         return config
     }
 
-    public func listSpacesDevices() throws -> [SpacesDeviceRecord] { try store.spacesDevices() }
-
-    public func upsertSpacesDevice(_ device: SpacesDeviceRecord) throws {
-        guard device.isLocal else {
-            throw WorkspaceError.invalidArgument(message: "Remote device records are not part of the device-owned daemon model.")
-        }
-        try store.upsert(spacesDevice: device)
-    }
-
-    public func validateSpacesDeviceDeletion(id: String) throws {
-        let deviceID = normalizedSpacesDeviceID(id) ?? id
-        if deviceID == SpacesDeviceRecord.localDeviceID {
-            throw WorkspaceError.invalidArgument(message: "The local device record cannot be removed.")
-        }
-        throw WorkspaceError.invalidArgument(message: "Remote device records are not stored on this device.")
-    }
-
-    @discardableResult public func deleteSpacesDevice(id: String) throws -> SpacesDeviceDeletionResult {
-        let deviceID = normalizedSpacesDeviceID(id) ?? id
-        try validateSpacesDeviceDeletion(id: deviceID)
-        try store.deleteSpacesDevice(id: deviceID)
-        return SpacesDeviceDeletionResult(deviceID: deviceID, credentialTokenDeleted: false)
-    }
-
     public func effectiveSpacesDevice(workspaceID: String) throws -> SpacesDeviceSelection {
         guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
         guard try store.project(id: workspace.projectID) != nil else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
         return .local(SpacesDeviceRecord.local())
-    }
-
-    private func normalizedSpacesDeviceID(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-        return trimmed
     }
 
     public func workspaceRuntimePlan(workspaceID: String) throws -> WorkspaceRuntimePlan {
@@ -979,13 +950,9 @@ public final class WorkspaceOrchestrator {
     }
 
     public func createWorkspaceOnDevice(
-        projectID: String, name: String, branch: String, deviceID: String, baseBranch: String? = nil, directoryName: String? = nil,
+        projectID: String, name: String, branch: String, baseBranch: String? = nil, directoryName: String? = nil,
         notes: String? = nil, runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
     ) throws -> WorkspaceRecord {
-        let normalizedDeviceID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalizedDeviceID.isEmpty || normalizedDeviceID == SpacesDeviceRecord.localDeviceID else {
-            throw WorkspaceError.invalidArgument(message: "The spaces CLI can create workspaces only on this device's daemon.")
-        }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace name is required.") }
         let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)

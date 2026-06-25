@@ -1313,7 +1313,7 @@ private struct CreateWorkspaceCommand: ParsableCommand {
             throw ValidationError("Project not found: \(normalizedProjectDir)")
         }
         let workspace = try orchestrator.createWorkspaceOnDevice(
-            projectID: project.id, name: title, branch: branch, deviceID: SpacesDeviceRecord.localDeviceID, baseBranch: baseBranch,
+            projectID: project.id, name: title, branch: branch, baseBranch: baseBranch,
             directoryName: directoryName, notes: notes, runSetupScript: false, allowRemoteBranchLookup: false,
             allowExistingBranchReuse: existingBranch)
         try emitJSON(

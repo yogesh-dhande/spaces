@@ -294,22 +294,6 @@ public final class SQLiteStore {
         try execute(sql: "UPDATE workspaces SET notes = ? WHERE id = ?", bindings: [notes ?? "", id])
     }
 
-    public func upsert(spacesDevice: SpacesDeviceRecord) throws {
-        guard spacesDevice.isLocal else {
-            throw WorkspaceError.invalidArgument(message: "Remote device records are not stored in this daemon database.")
-        }
-    }
-
-    public func spacesDevice(id: String) throws -> SpacesDeviceRecord? { id == SpacesDeviceRecord.localDeviceID ? SpacesDeviceRecord.local() : nil }
-
-    public func spacesDevices() throws -> [SpacesDeviceRecord] { [SpacesDeviceRecord.local()] }
-
-    public func deleteSpacesDevice(id: String) throws {
-        guard id != SpacesDeviceRecord.localDeviceID else {
-            throw WorkspaceError.invalidArgument(message: "The local device record cannot be removed.")
-        }
-    }
-
     public func updateWorkspaceTitle(id: String, title: String) throws {
         try execute(sql: "UPDATE workspaces SET title = ? WHERE id = ?", bindings: [title, id])
     }
