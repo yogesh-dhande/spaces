@@ -152,7 +152,7 @@ struct SpacesDeviceOverviewBuilder {
             seen.insert(project.id)
             return SpacesDeviceProjectSummary(
                 id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
-                isCollapsed: project.isCollapsed, config: projectConfig(from: project))
+                config: projectConfig(from: project))
         }
     }
 

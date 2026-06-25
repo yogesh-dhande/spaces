@@ -149,7 +149,7 @@ public enum SpacesDevicePairingClient {
             guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
             let now = ISO8601DateFormatter().string(from: Date())
-            let database = try SpacesClientDatabase()
+            let database = try SpacesClientDatabase.defaultDatabase()
             try database.upsert(
                 device: SpacesPairedDeviceRecord(
                     id: deviceID, name: metadata.name, platform: "remote", host: deviceAPIHost, port: metadata.port,

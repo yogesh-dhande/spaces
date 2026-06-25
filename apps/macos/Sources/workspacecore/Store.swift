@@ -53,20 +53,19 @@ public final class SQLiteStore {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO projects(id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       name = excluded.name,
                       dir = excluded.dir,
                       is_git = excluded.is_git,
                       default_branch = excluded.default_branch,
-                      is_collapsed = excluded.is_collapsed,
                       setup_script = excluded.setup_script,
                       stop_script = excluded.stop_script
                     """,
                 bindings: [
-                    project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "",
-                    project.isCollapsed ? "1" : "0", project.setupScript ?? "", project.stopScript ?? "",
+                    project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.setupScript ?? "",
+                    project.stopScript ?? "",
                 ])
             try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
             for (index, definition) in normalizedPortDefinitions.enumerated() {
@@ -99,7 +98,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script
+                    SELECT id, name, dir, is_git, default_branch, setup_script, stop_script
                     FROM projects
                     WHERE id = ?
                     """, bindings: [id])
@@ -111,7 +110,7 @@ public final class SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script
+                    SELECT id, name, dir, is_git, default_branch, setup_script, stop_script
                     FROM projects
                     WHERE dir = ?
                     """, bindings: [dir])
@@ -122,7 +121,7 @@ public final class SQLiteStore {
     public func projects() throws -> [ProjectRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, name, dir, is_git, default_branch, is_collapsed, setup_script, stop_script
+                SELECT id, name, dir, is_git, default_branch, setup_script, stop_script
                 FROM projects
                 ORDER BY name
                 """)
@@ -321,10 +320,6 @@ public final class SQLiteStore {
 
     public func updateWorkspaceDirname(id: String, dirname: String?) throws {
         try execute(sql: "UPDATE workspaces SET dirname = ? WHERE id = ?", bindings: [dirname ?? "", id])
-    }
-
-    public func updateProjectCollapsed(id: String, isCollapsed: Bool) throws {
-        try execute(sql: "UPDATE projects SET is_collapsed = ? WHERE id = ?", bindings: [isCollapsed ? "1" : "0", id])
     }
 
     public func updateWorkspaceName(id: String, name: String) throws {
@@ -845,15 +840,13 @@ public final class SQLiteStore {
     }
 
     public func appConfig() throws -> AppConfig {
-        let editor = try setting(key: SettingsKey.appEditor).flatMap { EditorPreference(rawValue: $0) }
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
         let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
-        return AppConfig(editor: editor, portRange: portRange)
+        return AppConfig(portRange: portRange)
     }
 
     public func setAppConfig(_ config: AppConfig) throws {
-        try setSetting(key: SettingsKey.appEditor, value: config.editor?.rawValue)
         try setSetting(key: SettingsKey.appPortRangeStart, value: String(config.portRange.start))
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
     }
@@ -1090,7 +1083,7 @@ public final class SQLiteStore {
     }
 
     private func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
-        guard row.count >= 8 else { return nil }
+        guard row.count >= 7 else { return nil }
         let id = row[0]
         let portRows = try queryRows(sql: "SELECT id, name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id])
         let ports = portRows.map { row in PortDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
@@ -1108,8 +1101,8 @@ public final class SQLiteStore {
             sql: "SELECT id, name, command FROM project_agent_launchers WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in AgentLauncher(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1], command: row[2]) }
         return ProjectRecord(
-            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4], isCollapsed: row[5] == "1",
-            setupScript: row[6].isEmpty ? nil : row[6], stopScript: row[7].isEmpty ? nil : row[7], ports: ports, processes: processes,
+            id: id, name: row[1], dir: row[2], isGitRepo: row[3] == "1", defaultBranch: row[4].isEmpty ? nil : row[4],
+            setupScript: row[5].isEmpty ? nil : row[5], stopScript: row[6].isEmpty ? nil : row[6], ports: ports, processes: processes,
             browserSessions: browserSessions, agentLaunchers: agentLaunchers)
     }
 

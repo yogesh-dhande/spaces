@@ -4,12 +4,18 @@ import XCTest
 @testable import workspacecore
 
 final class EditorLauncherTests: XCTestCase {
-    // Tests open returns when editor is nil by arranging representative inputs and asserting the expected result.
-    func testOpenReturnsWhenEditorIsNil() throws { XCTAssertNoThrow(try EditorLauncher.open(editor: nil, directory: "/path/that/does/not/exist")) }
+    // Tests open rejects missing editor configuration by arranging representative inputs and asserting the expected result.
+    func testOpenThrowsWhenEditorIsNil() throws {
+        XCTAssertThrowsError(try EditorLauncher.open(editor: nil, directory: "/path/that/does/not/exist")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Preferred editor is not configured"))
+        }
+    }
 
-    // Tests open returns when editor is none by arranging representative inputs and asserting the expected result.
-    func testOpenReturnsWhenEditorIsNone() throws {
-        XCTAssertNoThrow(try EditorLauncher.open(editor: EditorPreference.none, directory: "/path/that/does/not/exist"))
+    // Tests open rejects explicit no-editor configuration by arranging representative inputs and asserting the expected result.
+    func testOpenThrowsWhenEditorIsNone() throws {
+        XCTAssertThrowsError(try EditorLauncher.open(editor: EditorPreference.none, directory: "/path/that/does/not/exist")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Preferred editor is not configured"))
+        }
     }
 
     // Tests open uses expected app per editor by arranging representative inputs and asserting the expected result.

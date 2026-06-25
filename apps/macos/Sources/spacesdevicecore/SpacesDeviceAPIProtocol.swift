@@ -233,11 +233,10 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
-    public let isCollapsed: Bool
     public let config: SpacesDeviceProjectConfig
 
     public init(
-        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, isCollapsed: Bool = false,
+        id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?,
         config: SpacesDeviceProjectConfig = SpacesDeviceProjectConfig()
     ) {
         self.id = id
@@ -245,7 +244,6 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         self.dir = dir
         self.isGitRepo = isGitRepo
         self.defaultBranch = defaultBranch
-        self.isCollapsed = isCollapsed
         self.config = config
     }
 
@@ -255,7 +253,6 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         case dir
         case isGitRepo
         case defaultBranch
-        case isCollapsed
         case config
     }
 
@@ -266,7 +263,6 @@ public struct SpacesDeviceProjectSummary: Codable, Sendable, Equatable, Identifi
         dir = try container.decode(String.self, forKey: .dir)
         isGitRepo = try container.decode(Bool.self, forKey: .isGitRepo)
         defaultBranch = try container.decodeIfPresent(String.self, forKey: .defaultBranch)
-        isCollapsed = try container.decodeIfPresent(Bool.self, forKey: .isCollapsed) ?? false
         config = try container.decodeIfPresent(SpacesDeviceProjectConfig.self, forKey: .config) ?? SpacesDeviceProjectConfig()
     }
 }

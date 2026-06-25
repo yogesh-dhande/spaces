@@ -15,6 +15,7 @@
 ## Coding Agent Workflow
 - Do not add fallback paths without explicit approval. We should first fully understand, implement, and harden the intended path without complicating code or behavior behind fallback paths.
 - Do not add unnecessary options, arguments, alternate code paths, or script modes. Extra surface area should only be added when it supports real product behavior or behavior required for testing, and the intended path should stay clear and singular.
+- Tests should validate product behavior, not database schema shape. Do not add schema-only tests for table or column ownership when code and behavior tests cover the contract.
 - Before committing, go through uncommitted changes to figure out if there are any unnecessary fixes, dead code, fallback paths, options, arguments, or script modes we added during debuging that we should consider removing to avoid unnecessary code complexity, code maintenance, or performance issues.
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title as multiple coding agents may have contributed to the same commit. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
 - When running `git commit`, allow at least a 10-minute timeout so pre-commit checks can finish.

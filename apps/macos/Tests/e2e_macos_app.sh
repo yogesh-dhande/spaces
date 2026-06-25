@@ -664,7 +664,7 @@ launch_spaces() {
   log_step "launching Spaces with isolated HOME=$TMP_HOME"
   : >"$APP_LOG"
   APP_LOG_SEARCH_FROM_LINE=1
-  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB" SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" SPACES_CLIENT_DB_PATH="$TMP_CLIENT_DB" SPACES_CLIENT_SECRET_DIR="$TMP_CLIENT_SECRET_DIR" SPACESD_EXECUTABLE="$MACOS_DIR/.build/debug/spacesd" SPACES_E2E_EVENTS_LOG="$EVENT_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
   SPACES_PID=$!
   ensure_profile_spaces_owner "$SPACES_PID"
   start_desktop_awake_assertion
@@ -960,8 +960,18 @@ PY
 }
 
 mac_client_installation_id() {
-  HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
-    spaces_profile_mac_client_installation_id "$SPACES_E2E_CLI"
+  python3 - "$TMP_ROOT" <<'PY'
+import sys
+
+profile_root = sys.argv[1]
+if profile_root.startswith("/private/var/"):
+    profile_root = profile_root.removeprefix("/private")
+value = 14695981039346656037
+for byte in profile_root.encode("utf-8"):
+    value ^= byte
+    value = (value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+print(f"macos-{value:x}")
+PY
 }
 
 seed_remote_device_for_macos() {

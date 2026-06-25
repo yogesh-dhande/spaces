@@ -60,7 +60,7 @@ import XCTest
 
         private func makeTemporaryDirectory() throws -> URL {
             let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
-                "spacesd-tests-\(UUID().uuidString)", isDirectory: true)
+                "spacesd tests \(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             return root
         }

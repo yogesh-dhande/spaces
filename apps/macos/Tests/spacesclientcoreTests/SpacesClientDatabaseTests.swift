@@ -5,6 +5,37 @@ import XCTest
 @testable import spacesterminalcore
 
 final class SpacesClientDatabaseTests: XCTestCase {
+    func testClientSettingsRoundTripAndClear() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setSetting(key: "app_editor", value: "cursor")
+        XCTAssertEqual(try database.setting(key: "app_editor"), "cursor")
+
+        try database.setSetting(key: "app_editor", value: nil)
+        XCTAssertNil(try database.setting(key: "app_editor"))
+    }
+
+    func testProjectCollapseStateIsScopedByDeviceAndProject() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
+        try database.setProjectCollapsed(deviceID: "remote", projectID: "project-1", isCollapsed: false)
+
+        XCTAssertTrue(try database.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
+        XCTAssertFalse(try database.isProjectCollapsed(deviceID: "remote", projectID: "project-1"))
+        XCTAssertEqual(try database.projectCollapseStates(deviceID: "local"), ["project-1": true])
+    }
+
+    func testTerminalWindowFrameIsClientLocal() throws {
+        let database = try makeTemporaryClientDatabase()
+        let frame = TerminalSessionWindowFrame(x: 10, y: 20, width: 900, height: 600)
+
+        try database.writeTerminalWindowFrame(frame, rootDirectory: "/tmp/workspace", sessionID: "session-1", mode: .owner)
+
+        XCTAssertEqual(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .owner), frame)
+        XCTAssertNil(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .viewer))
+    }
+
     func testDefaultPathUsesEnvironmentOverride() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -110,6 +141,67 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertTrue(try databaseB.pairedDevices().isEmpty)
     }
 
+    func testDefaultDatabaseCacheFollowsResolvedDefaultPath() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let databaseAPath = root.appendingPathComponent("a/spaces-client.db", isDirectory: false).path
+        let databaseBPath = root.appendingPathComponent("b/spaces-client.db", isDirectory: false).path
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        defer {
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseAPath, 1)
+        try SpacesClientDatabase.defaultDatabase().setSetting(key: "active_workspace_id", value: "workspace-a")
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseBPath, 1)
+        XCTAssertNil(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"))
+        try SpacesClientDatabase.defaultDatabase().setSetting(key: "active_workspace_id", value: "workspace-b")
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseAPath, 1)
+        XCTAssertEqual(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"), "workspace-a")
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseBPath, 1)
+        XCTAssertEqual(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"), "workspace-b")
+    }
+
+    func testDefaultDatabaseSerializesConcurrentSharedConnectionOperations() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let databasePath = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false).path
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databasePath, 1)
+        defer {
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let queue = DispatchQueue(label: "spaces-client-database-concurrency", attributes: .concurrent)
+        let group = DispatchGroup()
+        let errors = ErrorCollector()
+        let records = (0..<50).map { device(id: "device-\($0)") }
+
+        for (index, record) in records.enumerated() {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                do {
+                    let database = try SpacesClientDatabase.defaultDatabase()
+                    let id = record.id
+                    try database.upsert(device: record)
+                    try database.setSetting(key: "setting-\(index)", value: "value-\(index)")
+                    try database.setProjectCollapsed(deviceID: id, projectID: "project-\(index)", isCollapsed: true)
+                    try database.deletePairedDevice(id: id)
+                } catch { errors.append(error) }
+            }
+        }
+
+        group.wait()
+
+        let collectedErrors = errors.values()
+        XCTAssertTrue(collectedErrors.isEmpty, collectedErrors.map(\.localizedDescription).joined(separator: "\n"))
+        XCTAssertTrue(try SpacesClientDatabase.defaultDatabase().pairedDevices().isEmpty)
+    }
+
     func testPairedDeviceMetadataPersistsWithoutToken() throws {
         try withTemporaryProfile { root in
             let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)
@@ -138,10 +230,10 @@ final class SpacesClientDatabaseTests: XCTestCase {
             try SpacesDeviceCredentialStore.saveToken("SECRET-TOKEN", deviceID: record.id)
             defer { try? SpacesDeviceCredentialStore.deleteToken(deviceID: record.id) }
 
-            let failingStep = SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Intentional failure") { _ in
+            let failingStep = SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Intentional failure") { _ in
                 throw NSError(domain: "SpacesClientDatabaseTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "boom"])
             }
-            XCTAssertThrowsError(try SpacesClientDatabase(path: databaseURL.path, currentVersion: 2, migrationSteps: [failingStep]))
+            XCTAssertThrowsError(try SpacesClientDatabase(path: databaseURL.path, currentVersion: 3, migrationSteps: [failingStep]))
 
             let restored = try SpacesClientDatabase(path: databaseURL.path)
             XCTAssertEqual(try restored.pairedDevice(id: record.id), record)
@@ -158,6 +250,13 @@ final class SpacesClientDatabaseTests: XCTestCase {
             id: id, name: "Studio Mac", platform: "macos", host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc",
             sshHost: "studio.local", sshUser: "yogesh", sshPort: 22, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
             lastSelectedAt: "2026-06-17T00:01:00Z")
+    }
+
+    private func makeTemporaryClientDatabase() throws -> SpacesClientDatabase {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
     }
 
     private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {
@@ -190,4 +289,21 @@ final class SpacesClientDatabaseTests: XCTestCase {
     }
 
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+}
+
+private final class ErrorCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var errors: [Error] = []
+
+    func append(_ error: Error) {
+        lock.lock()
+        errors.append(error)
+        lock.unlock()
+    }
+
+    func values() -> [Error] {
+        lock.lock()
+        defer { lock.unlock() }
+        return errors
+    }
 }

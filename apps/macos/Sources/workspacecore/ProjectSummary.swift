@@ -6,7 +6,7 @@ public struct ProjectSummary: Sendable {
     public let dir: String
     public let isGitRepo: Bool
     public let defaultBranch: String?
-    public let isCollapsed: Bool
+    public var isCollapsed: Bool
     public let deviceID: String
 
     public init(

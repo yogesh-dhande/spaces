@@ -577,10 +577,10 @@ def last_performance_event(
 
 
 def extract_session_id(output: str) -> str:
-    match = re.findall(r"[0-9A-Fa-f-]{36}", output)
+    match = re.search(r"^Started terminal session ([0-9A-Fa-f-]{36})(?:\s|$)", output, re.MULTILINE)
     if not match:
         raise RuntimeError(f"failed to parse session id from: {output}")
-    return match[-1].upper()
+    return match.group(1).upper()
 
 
 def control_socket_path(session_id: str) -> Path:

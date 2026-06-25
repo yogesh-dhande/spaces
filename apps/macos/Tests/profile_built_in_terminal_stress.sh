@@ -9,6 +9,7 @@ source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
+SPACESD_EXECUTABLE="$BUILD_DIR/spacesd"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
 
@@ -83,7 +84,7 @@ wait_for_file_pattern() {
 
 extract_session_id() {
   local output="$1"
-  printf '%s\n' "$output" | grep -Eo '[0-9A-F-]{36}' | tail -n 1
+  printf '%s\n' "$output" | sed -nE 's/^Started terminal session ([0-9A-F-]{36})([[:space:]].*)?$/\1/p' | tail -n 1
 }
 
 ms_now() {
@@ -291,6 +292,8 @@ PY
 
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
+require_binary "$SPACESD_EXECUTABLE"
+export SPACESD_EXECUTABLE
 [[ -x "$FIXTURE_SCRIPT" ]] || chmod +x "$FIXTURE_SCRIPT"
 
 mkdir -p "$(dirname "$DB_PATH")"
