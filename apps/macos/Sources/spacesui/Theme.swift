@@ -118,6 +118,14 @@ enum Theme {
     static let statusIdleStroke = mutedSecondary
     static let statusWaitingFill = orange
 
+    // MARK: Metrics
+
+    /// Corner radius for the transparent "card" surfaces (workspace-detail sections, script editors).
+    static let cardCornerRadius: CGFloat = 10
+
+    /// Standard inset for a card's content row: 14 pt horizontal padding, 10 pt vertical.
+    static let cardContentInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+
     // MARK: Button styling
 
     /// Applies shared layout constraints so both button styles match in height and have

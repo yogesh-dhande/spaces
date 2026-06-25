@@ -49,7 +49,7 @@ enum RowSectionHeader {
             header.orientation = .horizontal
             header.alignment = .centerY
             header.spacing = 8
-            header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+            header.edgeInsets = Theme.cardContentInsets
             header.translatesAutoresizingMaskIntoConstraints = false
             return header
         }
@@ -58,7 +58,7 @@ enum RowSectionHeader {
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
-        header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        header.edgeInsets = Theme.cardContentInsets
         header.translatesAutoresizingMaskIntoConstraints = false
         return header
     }
@@ -111,7 +111,7 @@ private nonisolated(unsafe) var rowSectionRetainKey: UInt8 = 0
     static func wrap(_ content: NSView) -> NSView {
         let card = ColoredBackgroundView()
         card.fillColor = .clear
-        card.cornerRadius = 10
+        card.cornerRadius = Theme.cardCornerRadius
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(content)
         NSLayoutConstraint.activate([

@@ -5746,7 +5746,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
         headerRow.spacing = 8
-        headerRow.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        headerRow.edgeInsets = Theme.cardContentInsets
         headerRow.translatesAutoresizingMaskIntoConstraints = false
 
         let innerStack = NSStackView()

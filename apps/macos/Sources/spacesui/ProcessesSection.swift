@@ -631,7 +631,7 @@ import workspacecore
         form.orientation = .vertical
         form.alignment = .leading
         form.spacing = 6
-        form.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        form.edgeInsets = Theme.cardContentInsets
         form.translatesAutoresizingMaskIntoConstraints = false
 
         // Anchor the target to the form so it lives as long as the form does.

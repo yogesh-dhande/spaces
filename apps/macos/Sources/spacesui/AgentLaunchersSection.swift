@@ -615,7 +615,7 @@ import workspacecore
         form.orientation = .vertical
         form.alignment = .leading
         form.spacing = 6
-        form.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        form.edgeInsets = Theme.cardContentInsets
         form.translatesAutoresizingMaskIntoConstraints = false
         retainAssociatedObject(target, on: form)
         return (form, (nameField, commandField))
