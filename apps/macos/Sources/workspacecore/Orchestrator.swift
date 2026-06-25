@@ -137,12 +137,6 @@ public final class WorkspaceOrchestrator {
         return try TerminalServiceClient.send(request: request, socketPath: socketPath, timeout: 15)
     }
 
-    private enum ExtractedBrowserFocusOutcome {
-        case focused
-        case staleMapping
-        case notMapped
-    }
-
     private struct ResolvedBrowserSession {
         let index: Int
         let prefix: String
@@ -2035,19 +2029,6 @@ public final class WorkspaceOrchestrator {
         try store.windows(workspaceID: reservation.workspaceID).contains { $0.id == reservation.windowRecordID }
     }
 
-    public func persistBuiltInTerminalWindowID(sessionID: String, windowID: Int) throws {
-        guard windowID > 0, let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return }
-        guard (try? yabai.listWindows().contains { $0.id == windowID }) ?? false else { return }
-        let now = nowISO8601()
-        for window in try store.windows(workspaceID: workspaceID) where (window.terminalNativeID ?? window.terminalTrackingID) == sessionID {
-            try store.upsert(
-                window: WindowRecord(
-                    id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                    targetURL: window.targetURL, windowID: windowID, terminalTrackingID: window.terminalTrackingID,
-                    terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: now))
-        }
-    }
-
     public func focusWorkspace(workspaceID: String) throws {
         let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
         for window in windows {
@@ -2724,12 +2705,6 @@ public final class WorkspaceOrchestrator {
         windowNavigationLock.unlock()
     }
 
-    private func windowNavigationHistory(workspaceID: String) -> [WorkspaceNavigationCursor] {
-        windowNavigationLock.lock()
-        defer { windowNavigationLock.unlock() }
-        return windowNavigationHistoryByWorkspace[workspaceID] ?? []
-    }
-
     private func windowNavigationCycleSession(workspaceID: String, now: Date) -> WorkspaceNavigationCycleSession? {
         windowNavigationLock.lock()
         defer { windowNavigationLock.unlock() }
@@ -2893,18 +2868,6 @@ public final class WorkspaceOrchestrator {
 
     private func navigationTargetIndex(cursor: WorkspaceNavigationCursor, targets: [WorkspaceNavigationTarget]) -> Int? {
         targets.enumerated().first(where: { navigationCursor(for: $0.element) == cursor })?.offset
-    }
-
-    private func rememberFocusedNavigationTarget(workspaceID: String) throws {
-        let targets = try workspaceNavigationTargets(workspaceID: workspaceID)
-        guard !targets.isEmpty else {
-            setWindowNavigationCursor(nil, workspaceID: workspaceID)
-            return
-        }
-        let cursor = try currentFocusedNavigationTargetIndex(targets: targets, workspaceID: workspaceID).flatMap {
-            navigationCursor(for: targets[$0])
-        }
-        setWindowNavigationCursor(cursor, workspaceID: workspaceID)
     }
 
     private func windowNavigationCursor(workspaceID: String) -> WorkspaceNavigationCursor? {
@@ -3305,87 +3268,6 @@ public final class WorkspaceOrchestrator {
         return resolved
     }
 
-    private func extractSessionWindowIfNeeded(
-        session: ResolvedBrowserSession, matches: [ChromeWindowMatch], refreshedSessions: inout [BrowserSession]
-    ) throws -> Int? {
-        if let extractedWindow = session.session.extractedWindow, extractedWindow.isValid,
-            matches.contains(where: { $0.windowID == extractedWindow.windowID })
-        {
-            refreshedSessions[session.index].extractedWindow = ExtractedBrowserWindowMapping(
-                targetURL: session.prefix, windowID: extractedWindow.windowID, isValid: true)
-            return extractedWindow.windowID
-        }
-        guard let firstMatch = matches.first else { return nil }
-        guard let extractedWindowID = try chrome.extractTabToWindow(windowID: firstMatch.windowID, tabIndex: firstMatch.tabIndex) else { return nil }
-        refreshedSessions[session.index].extractedWindow = ExtractedBrowserWindowMapping(
-            targetURL: session.prefix, windowID: extractedWindowID, isValid: true)
-        return extractedWindowID
-    }
-
-    private func focusExtractedBrowserWindow(workspaceID: String, targetURL: String) throws -> ExtractedBrowserFocusOutcome {
-        let startedAt = currentDate()
-        let resolveWorkspaceStartedAt = currentDate()
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=resolve_workspace elapsed_ms=\(elapsedMS(since: resolveWorkspaceStartedAt))")
-
-        let loadSessionsStartedAt = currentDate()
-        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=load_sessions elapsed_ms=\(elapsedMS(since: loadSessionsStartedAt)) count=\(sessions.count)"
-        )
-        guard !sessions.isEmpty else { return .notMapped }
-
-        let namedPortsStartedAt = currentDate()
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=load_named_ports elapsed_ms=\(elapsedMS(since: namedPortsStartedAt)) count=\(assignedPorts.count)"
-        )
-
-        let resolveSessionsStartedAt = currentDate()
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=resolve_sessions elapsed_ms=\(elapsedMS(since: resolveSessionsStartedAt)) count=\(resolvedSessions.count)"
-        )
-        guard !resolvedSessions.isEmpty else { return .notMapped }
-
-        let matchSessionStartedAt = currentDate()
-        guard
-            let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
-                guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }
-                return (resolved, score)
-            }).max(by: { lhs, rhs in
-                if lhs.score == rhs.score { return lhs.session.prefix.count < rhs.session.prefix.count }
-                return lhs.score < rhs.score
-            })?.session, let extractedWindow = sessions[matchedSession.index].extractedWindow, extractedWindow.isValid
-        else { return .notMapped }
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=match_session elapsed_ms=\(elapsedMS(since: matchSessionStartedAt)) window_id=\(extractedWindow.windowID)"
-        )
-
-        let focusStartedAt = currentDate()
-        let focused = try yabai.focusWindow(id: extractedWindow.windowID)
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=yabai_focus elapsed_ms=\(elapsedMS(since: focusStartedAt)) window_id=\(extractedWindow.windowID) success=\(focused ? 1 : 0)"
-        )
-        guard focused else {
-            let markMissingStartedAt = currentDate()
-            try markBrowserWindowMissing(workspaceID: workspace.id, targetURL: targetURL, windowID: extractedWindow.windowID)
-            logBrowserFocus(
-                "workspace=\(workspaceID) path=extracted_substep step=mark_missing elapsed_ms=\(elapsedMS(since: markMissingStartedAt)) window_id=\(extractedWindow.windowID)"
-            )
-            return .staleMapping
-        }
-        logBrowserFocus(
-            "workspace=\(workspaceID) path=extracted_substep step=total elapsed_ms=\(elapsedMS(since: startedAt)) window_id=\(extractedWindow.windowID)"
-        )
-        return .focused
-    }
-
     private func markExtractedWindowInvalid(workspaceID: String, sessions: [BrowserSession], index: Int) throws {
         guard sessions.indices.contains(index), let extractedWindow = sessions[index].extractedWindow else { return }
         guard extractedWindow.isValid else { return }
@@ -3630,18 +3512,6 @@ public final class WorkspaceOrchestrator {
         return BrowserWindowScanResult(windows: browserWindows, tabIndexByWindowAndURL: tabIndexByWindowAndURL)
     }
 
-    private func normalizedBrowserWindowRows(_ windows: [WindowRecord]) -> [WindowRecord] {
-        let browserWindowIDsWithTarget = Set(
-            windows.compactMap { window -> Int? in
-                guard window.role == "browser", let windowID = window.windowID, window.targetURL != nil else { return nil }
-                return windowID
-            })
-        return windows.filter { window in
-            guard window.role == "browser", window.targetURL == nil, let windowID = window.windowID else { return true }
-            return !browserWindowIDsWithTarget.contains(windowID)
-        }
-    }
-
     public func listSpaceOptions() throws -> [SpaceOption] {
         let spaces = try yabai.listSpaces()
         return spaces.map { SpaceOption(displayIndex: $0.display, spaceIndex: $0.index) }.sorted { lhs, rhs in
@@ -3718,38 +3588,10 @@ public final class WorkspaceOrchestrator {
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
     }
 
-    private func ensureImportedGitDefaultWorkspace(for project: ProjectRecord, branch: String) throws {
-        if let existing = try defaultWorkspace(projectID: project.id) {
-            if existing.isArchived {
-                let revived = WorkspaceRecord(
-                    id: existing.id, projectID: project.id, title: existing.title, dir: existing.dir, dirname: existing.dirname,
-                    branch: existing.branch, baseBranch: existing.baseBranch, isDefault: true, isArchived: false, isHidden: existing.isHidden,
-                    isRunning: existing.isRunning, lastLaunchedAt: existing.lastLaunchedAt)
-                try store.upsert(workspace: revived)
-            }
-            return
-        }
-
-        let workspace = try createImportedGitDefaultWorkspaceOnDisk(project: project, branch: branch)
-        try store.upsert(workspace: workspace)
-        try seedWorkspaceSettings(project: project, workspace: workspace)
-        let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
-        _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
-    }
-
     private func resolveWorkspace(id: String) throws -> (ProjectRecord, WorkspaceRecord) {
         guard let workspace = try store.workspace(id: id) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
         guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
         return (project, workspace)
-    }
-
-    private func ensureWorkspaceSettings(for project: ProjectRecord) throws {
-        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
-        for workspace in workspaces {
-            let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
-            if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
-        }
     }
 
     private func createImportedGitDefaultWorkspaceOnDisk(project: ProjectRecord, branch: String) throws -> WorkspaceRecord {
@@ -3963,20 +3805,6 @@ public final class WorkspaceOrchestrator {
 
             return launcher
         }
-    }
-
-    private func processTemplatesMatch(_ lhs: [ProcessTemplate], _ rhs: [ProcessTemplate]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) {
-            if left.name != right.name || left.command != right.command || left.kind != right.kind || left.onExit != right.onExit { return false }
-        }
-        return true
-    }
-
-    private func browserSessionsMatch(_ lhs: [BrowserSession], _ rhs: [BrowserSession]) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (left, right) in zip(lhs, rhs) where left.name != right.name || left.url != right.url { return false }
-        return true
     }
 
     private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
@@ -4313,119 +4141,6 @@ public final class WorkspaceOrchestrator {
         return (logFile, pidFile)
     }
 
-    private func reconcileProcesses(workspace: WorkspaceRecord, previous: [ProcessTemplate], updated: [ProcessTemplate], env: [String: String]) throws
-    {
-        struct DesiredProcess {
-            let matchKey: String
-            let desiredKey: String
-            let template: ProcessTemplate
-        }
-
-        let running = try store.runningProcesses(workspaceID: workspace.id)
-        let runningByKey = Dictionary(uniqueKeysWithValues: running.map { ($0.templateName, $0) })
-        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
-
-        var desiredByMatch: [String: DesiredProcess] = [:]
-        for template in updated {
-            let desiredKey = processKey(for: template)
-            let matchKey = previousByID[template.id].map(processKey(for:)) ?? desiredKey
-            if desiredByMatch[matchKey] == nil {
-                desiredByMatch[matchKey] = DesiredProcess(matchKey: matchKey, desiredKey: desiredKey, template: template)
-            }
-        }
-
-        let toStop = running.filter { desiredByMatch[$0.templateName] == nil }
-        let toStart = desiredByMatch.filter { runningByKey[$0.key] == nil }
-        var toRestart: [(DesiredProcess, RunningProcessRecord)] = []
-        var toRelabel: [(DesiredProcess, RunningProcessRecord)] = []
-        for desired in desiredByMatch.values {
-            if let running = runningByKey[desired.matchKey] {
-                if running.command != desired.template.command {
-                    toRestart.append((desired, running))
-                } else if running.templateName != desired.desiredKey {
-                    toRelabel.append((desired, running))
-                }
-            }
-        }
-
-        for process in toStop {
-            if isManagedTerminalApp(process.terminalApp) {
-                terminateBuiltInTerminalSession(for: process)
-            } else if let pid = resolvedRuntimePID(for: process) {
-                terminateProcessGroup(pid: pid)
-            }
-            try store.deleteRunningProcess(id: process.id)
-            if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: { matchesTrackedTerminalWindow($0, process: process) })
-            {
-                try store.deleteWindow(id: terminalWindow.id)
-            }
-        }
-
-        for (desired, process) in toRelabel {
-            let updated = RunningProcessRecord(
-                id: process.id, workspaceID: workspace.id, templateID: desired.template.id, templateName: desired.desiredKey,
-                command: process.command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
-                terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID, pid: process.pid, status: process.status,
-                logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
-            try store.upsert(runningProcess: updated)
-            if let terminalWindow = try store.windows(workspaceID: workspace.id).first(where: {
-                $0.role == "terminal" && matchesTrackedTerminalWindow($0, process: process)
-            }) {
-                try store.upsert(
-                    window: WindowRecord(
-                        id: terminalWindow.id, workspaceID: terminalWindow.workspaceID, app: terminalWindow.app, name: desired.desiredKey,
-                        detail: updated.command, targetURL: terminalWindow.targetURL, windowID: terminalWindow.windowID,
-                        terminalTrackingID: terminalWindow.terminalTrackingID, terminalNativeID: terminalWindow.terminalNativeID,
-                        role: terminalWindow.role, orderIndex: terminalWindow.orderIndex, lastSeenAt: nowISO8601()))
-            }
-        }
-
-        for (desired, process) in toRestart {
-            let name = desired.desiredKey
-            let updatedProcess = RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateID: desired.template.id, templateName: name,
-                command: desired.template.command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp,
-                windowID: process.windowID, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
-                pid: process.pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                exitedAt: process.exitedAt)
-            try restartProcessInTerminal(workspaceID: workspace.id, process: updatedProcess, templateOverride: desired.template)
-        }
-
-        for (_, desired) in toStart.sorted(by: { $0.value.desiredKey.localizedStandardCompare($1.value.desiredKey) == .orderedAscending }) {
-            _ = try launchConfiguredProcess(template: desired.template, workspace: workspace, env: env)
-        }
-    }
-
-    private func reconcileBrowserSessions(project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String])
-        throws
-    {
-        _ = project
-        let tracked = try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
-        if resolvedSessions.isEmpty {
-            for window in tracked {
-                closeTrackedBrowserTab(window)
-                try store.deleteWindow(id: window.id)
-            }
-            return
-        }
-        let desiredOrderByTargetURL = Dictionary(uniqueKeysWithValues: resolvedSessions.map { ($0.prefix, $0.index) })
-        for window in tracked {
-            guard let targetURL = window.targetURL, let desiredOrder = desiredOrderByTargetURL[targetURL] else {
-                if window.windowID != nil { closeTrackedBrowserTab(window) }
-                try store.deleteWindow(id: window.id)
-                continue
-            }
-            if window.orderIndex != desiredOrder {
-                try store.upsert(
-                    window: WindowRecord(
-                        id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                        targetURL: targetURL, windowID: window.windowID, terminalTrackingID: window.terminalTrackingID,
-                        terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: desiredOrder, lastSeenAt: window.lastSeenAt))
-            }
-        }
-    }
-
     @discardableResult private func pruneMissingWindows(workspaceID: String) throws -> Int {
         let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
@@ -4604,31 +4319,6 @@ public final class WorkspaceOrchestrator {
         _ = try? yabai.closeWindow(id: trackedWindowID)
     }
 
-    private func upsertCapturedTerminalWindows(_ captured: [WindowRecord], existingWindowIDs: inout Set<Int>, terminalCount: inout Int) throws {
-        for windowRecord in captured {
-            guard let id = windowRecord.windowID, !existingWindowIDs.contains(id) else { continue }
-            existingWindowIDs.insert(id)
-            terminalCount += 1
-            try store.upsert(window: windowRecord)
-        }
-    }
-
-    private func terminalWindowsFromRunningProcesses(workspace: WorkspaceRecord, existingWindows: [WindowRecord]) throws -> [WindowRecord] {
-        let processRecords = try store.runningProcesses(workspaceID: workspace.id)
-        var seenWindowIDs = Set(existingWindows.compactMap(\.windowID))
-        var synthesized: [WindowRecord] = []
-        for process in processRecords where isManagedTerminalApp(process.terminalApp) {
-            guard let windowID = process.windowID, !seenWindowIDs.contains(windowID) else { continue }
-            seenWindowIDs.insert(windowID)
-            synthesized.append(
-                WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: process.terminalApp ?? TerminalHost.spaces.appName,
-                    name: process.templateName, detail: process.command, windowID: windowID, terminalTrackingID: process.terminalTrackingID,
-                    role: "terminal", orderIndex: 200 + synthesized.count, lastSeenAt: nowISO8601()))
-        }
-        return synthesized
-    }
-
     static func nextWindowOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
         let maxIndex = existing.filter { $0.role == role }.map(\.orderIndex).max() ?? (orderOffset - 1)
         return max(maxIndex + 1, orderOffset)
@@ -4668,46 +4358,6 @@ public final class WorkspaceOrchestrator {
         return terminalWindows
     }
 
-    private func ensureBrowserSessions(
-        project: ProjectRecord, workspace: WorkspaceRecord, sessions: [BrowserSession], env: [String: String], extractOnAttach: Bool,
-        runtimePlan: WorkspaceRuntimePlan? = nil, background: Bool = false
-    ) throws -> (windows: [WindowRecord], sessions: [BrowserSession]) {
-        _ = project
-        _ = extractOnAttach
-        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
-        guard !sessions.isEmpty else { return ([], []) }
-        guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
-        var attached: [WindowRecord] = []
-        var refreshedSessions = sessions
-        for resolvedSession in resolvedSessions {
-            if let extractedWindow = refreshedSessions[resolvedSession.index].extractedWindow, extractedWindow.isValid,
-                let liveWindow = try yabai.listWindows().first(where: { $0.id == extractedWindow.windowID && $0.app == "Google Chrome" })
-            {
-                attached.append(
-                    WindowRecord(
-                        id: UUID().uuidString, workspaceID: workspace.id, app: liveWindow.app,
-                        name: try browserFocusName(workspaceID: workspace.id, targetURL: resolvedSession.prefix) ?? resolvedSession.prefix,
-                        detail: resolvedSession.prefix, targetURL: resolvedSession.prefix, windowID: liveWindow.id, role: "browser",
-                        orderIndex: attached.count, lastSeenAt: nowISO8601()))
-                continue
-            }
-
-            let snapshot = try yabai.listWindows()
-            _ = try chrome.openWindow(url: resolvedSession.prefix, background: background)
-            guard let newWindow = try captureNewAppWindow(snapshot: snapshot, appName: "Google Chrome") else { continue }
-            refreshedSessions[resolvedSession.index].extractedWindow = ExtractedBrowserWindowMapping(
-                targetURL: resolvedSession.prefix, windowID: newWindow.id, isValid: true)
-            attached.append(
-                WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: newWindow.app,
-                    name: try browserFocusName(workspaceID: workspace.id, targetURL: resolvedSession.prefix) ?? resolvedSession.prefix,
-                    detail: resolvedSession.prefix, targetURL: resolvedSession.prefix, windowID: newWindow.id, role: "browser",
-                    orderIndex: attached.count, lastSeenAt: nowISO8601()))
-        }
-        return (attached, refreshedSessions)
-    }
-
     private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
         -> [WindowRecord]
     { try captureNewWindows(snapshot: snapshot, role: role, appNames: [appName], workspaceID: workspaceID, orderOffset: orderOffset) }
@@ -4726,10 +4376,6 @@ public final class WorkspaceOrchestrator {
 
     private func captureCreatedAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
         try captureCreatedAppWindow(snapshot: snapshot, appName: appName)?.id
-    }
-
-    private func captureNewAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
-        try captureNewAppWindow(snapshot: snapshot, appName: appName)?.id
     }
 
     private func captureSummonedBuiltInTerminalWindowID(appName: String) throws -> Int? {
@@ -4770,30 +4416,6 @@ public final class WorkspaceOrchestrator {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspaceID)
         let env = buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: namedPorts)
         return applyEnvVars(command, env: env)
-    }
-
-    private func runCommandWithTimeout(command: String, cwd: String, timeout: Int, env: [String: String]) throws -> CommandOutcome {
-        let process = Process()
-        let out = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-lc", command]
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        process.standardOutput = out
-        process.standardError = out
-
-        var environment = currentProcessEnvironment()
-        for (key, value) in env { environment[key] = value }
-        process.environment = environment
-
-        try process.run()
-
-        let deadline = Date().addingTimeInterval(TimeInterval(timeout))
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-        if process.isRunning { process.terminate() }
-        process.waitUntilExit()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return CommandOutcome(exitCode: process.terminationStatus, output: output)
     }
 
     private func currentProcessEnvironment() -> [String: String] {
@@ -5322,11 +4944,6 @@ public final class WorkspaceOrchestrator {
         if git.branchExists(path: path, branch: "main") { return "main" }
         if git.branchExists(path: path, branch: "master") { return "master" }
         throw WorkspaceError.invalidArgument(message: "Imported git repository must contain a main or master branch.")
-    }
-
-    private func importedDefaultWorkspaceDirectory(project: ProjectRecord, branch: String) throws -> String {
-        let root = try worktreeRoot(project: project)
-        return root.appendingPathComponent(branch, isDirectory: true).path
     }
 
     private func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
