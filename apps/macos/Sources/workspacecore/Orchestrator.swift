@@ -219,7 +219,6 @@ public final class WorkspaceOrchestrator {
         let appName: String
         let title: String
         let launchConfiguration: TerminalSessionLaunchConfiguration
-        let runtimePlan: WorkspaceRuntimePlan?
         let createdAt: String
         let orderIndex: Int
     }
@@ -397,10 +396,6 @@ public final class WorkspaceOrchestrator {
             project: project, workspace: workspace, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspace.id))
     }
 
-    public func requireLocalWorkspaceRuntime(workspaceID: String) throws -> WorkspaceRuntimePlan {
-        try workspaceRuntimePlan(workspaceID: workspaceID)
-    }
-
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
             ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
@@ -451,16 +446,15 @@ public final class WorkspaceOrchestrator {
     /// actual values. The `url` field of each returned session is the fully-expanded prefix used for
     /// matching. Sessions whose URL is empty after expansion are omitted; duplicate resolved URLs are
     /// deduplicated (first occurrence wins, preserving order).
-    public func resolvedWorkspaceBrowserSessions(workspaceID: String, openRemoteForwards: Bool = false) throws -> [BrowserSession] {
+    public func resolvedWorkspaceBrowserSessions(workspaceID: String) throws -> [BrowserSession] {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return [] }
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan, openRemoteForwards: openRemoteForwards).map { resolved in
+            runtimeManifest: try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts).manifest)
+        return resolveBrowserSessions(sessions, env: env).map { resolved in
             BrowserSession(name: resolved.session.name, url: resolved.prefix, extractedWindow: resolved.session.extractedWindow)
         }
     }
@@ -1191,7 +1185,7 @@ public final class WorkspaceOrchestrator {
         if let config {
             newWindows.append(
                 contentsOf: try launchProcesses(
-                    workspace: workspace, templates: config.processes, env: env, runtimePlan: runtimePlan, background: background))
+                    workspace: workspace, templates: config.processes, env: env, background: background))
         }
 
         if let config {
@@ -1966,8 +1960,7 @@ public final class WorkspaceOrchestrator {
         }
         return WorkspaceTerminalLaunchReservation(
             sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
-            title: generatedTitle, launchConfiguration: launchConfiguration, runtimePlan: nil, createdAt: createdAt,
-            orderIndex: nextOrder)
+            title: generatedTitle, launchConfiguration: launchConfiguration, createdAt: createdAt, orderIndex: nextOrder)
     }
 
     @discardableResult public func finishReservedWorkspaceTerminalLaunch(_ reservation: WorkspaceTerminalLaunchReservation) throws -> String {
@@ -2818,7 +2811,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).compactMap { resolved in
+        return try resolveBrowserSessions(sessions, env: env).compactMap { resolved in
             guard let targetURL = sanitizedFocusName(resolved.prefix) else { return nil }
             let name = try requiredConfiguredFocusName(resolved.session.name, kind: "Browser session")
             return (name, targetURL)
@@ -3296,7 +3289,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        return try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan).map(\.prefix)
+        return resolveBrowserSessions(sessions, env: env).map(\.prefix)
     }
 
     private func resolveBrowserSessions(_ sessions: [BrowserSession], env: [String: String]) -> [ResolvedBrowserSession] {
@@ -3310,12 +3303,6 @@ public final class WorkspaceOrchestrator {
             resolved.append(ResolvedBrowserSession(index: index, prefix: prefix, session: session))
         }
         return resolved
-    }
-
-    private func resolveBrowserSessions(
-        _ sessions: [BrowserSession], env: [String: String], runtimePlan: WorkspaceRuntimePlan, openRemoteForwards: Bool = true
-    ) throws -> [ResolvedBrowserSession] {
-        resolveBrowserSessions(sessions, env: env)
     }
 
     private func extractSessionWindowIfNeeded(
@@ -3360,7 +3347,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        let resolvedSessions = try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan)
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
         logBrowserFocus(
             "workspace=\(workspaceID) path=extracted_substep step=resolve_sessions elapsed_ms=\(elapsedMS(since: resolveSessionsStartedAt)) count=\(resolvedSessions.count)"
         )
@@ -4487,14 +4474,14 @@ public final class WorkspaceOrchestrator {
         guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
         guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
         if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
-            return builtInSessionIsStillLive(sessionID: sessionID, workspaceID: window.workspaceID)
+            return builtInSessionIsStillLive(sessionID: sessionID)
                 || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
         if builtInSessionBelongsToConfiguredAgent(sessionID: sessionID, workspaceID: window.workspaceID) {
-            return builtInSessionIsStillLive(sessionID: sessionID, workspaceID: window.workspaceID)
+            return builtInSessionIsStillLive(sessionID: sessionID)
                 || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
-        if builtInSessionIsStillLive(sessionID: sessionID, workspaceID: window.workspaceID)
+        if builtInSessionIsStillLive(sessionID: sessionID)
             && builtInSessionHasActiveAttachments(sessionID: sessionID)
         {
             return true
@@ -4508,7 +4495,7 @@ public final class WorkspaceOrchestrator {
         return builtInSessionBelongsToAgent(sessionID: sessionID, workspaceID: window.workspaceID)
     }
 
-    private func builtInSessionIsStillLive(sessionID: String, workspaceID: String? = nil) -> Bool {
+    private func builtInSessionIsStillLive(sessionID: String) -> Bool {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
         guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
@@ -4544,7 +4531,7 @@ public final class WorkspaceOrchestrator {
     private func builtInAgentSessionIsStillLive(_ record: AgentWindowRecord) -> Bool {
         guard record.provider == .spaces else { return false }
         guard let sessionID = builtInAgentSessionID(for: record) else { return false }
-        return builtInSessionIsStillLive(sessionID: sessionID, workspaceID: record.workspaceID)
+        return builtInSessionIsStillLive(sessionID: sessionID)
     }
 
     private func builtInAgentSessionID(for record: AgentWindowRecord) -> String? {
@@ -4648,8 +4635,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private func launchProcesses(
-        workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], runtimePlan: WorkspaceRuntimePlan? = nil,
-        background: Bool = false
+        workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false
     ) throws -> [WindowRecord] {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !templates.isEmpty else {
@@ -4691,10 +4677,7 @@ public final class WorkspaceOrchestrator {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         guard !sessions.isEmpty else { return ([], []) }
         guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
-        let resolvedSessions =
-            if let runtimePlan { try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan) } else {
-                resolveBrowserSessions(sessions, env: env)
-            }
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
         var attached: [WindowRecord] = []
         var refreshedSessions = sessions
         for resolvedSession in resolvedSessions {
@@ -6081,7 +6064,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env, runtimePlan: runtimePlan)
+        _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env)
         try markWorkspaceRunningIfNeeded(workspace)
         logPerfMetric(
             "process_recover", workspaceID: workspaceID, target: configuredProcessMatchKey(name: template.name),
@@ -6215,7 +6198,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        let resolvedSessions = try resolveBrowserSessions(sessions, env: env, runtimePlan: runtimePlan)
+        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
         guard
             let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
                 guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }
@@ -6331,8 +6314,7 @@ public final class WorkspaceOrchestrator {
     }
 
     @discardableResult private func launchConfiguredProcess(
-        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], runtimePlan: WorkspaceRuntimePlan? = nil,
-        background: Bool = false
+        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], background: Bool = false
     ) throws -> RunningProcessRecord {
         try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
         _ = background

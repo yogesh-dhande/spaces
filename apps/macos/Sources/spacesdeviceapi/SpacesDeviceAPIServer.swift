@@ -30,6 +30,33 @@ protocol SpacesDevicePairingStoreProtocol: Sendable {
 
 extension SpacesDevicePairingStore: SpacesDevicePairingStoreProtocol {}
 
+/// Performance-logging attributes describing a terminal state-stream relay payload.
+/// Shared by the Linux and Network device-API server relay paths.
+private func deviceAPIStreamRelayAttributes(for data: Data) -> [String: String] {
+    var attributes: [String: String] = [
+        "payload_bytes": String(data.count), "payload_count": String(data.split(separator: 0x0A, omittingEmptySubsequences: true).count),
+    ]
+    guard let firstLine = data.split(separator: 0x0A, maxSplits: 1, omittingEmptySubsequences: true).first,
+        let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(firstLine))
+    else {
+        attributes["render_update"] = "unknown"
+        return attributes
+    }
+    attributes["reason"] = payload.reason
+    attributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
+    attributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
+    if let update = payload.decodedRenderUpdate {
+        attributes["frame_kind"] = update.frameKindMetricValue
+        attributes["operation_count"] = String(update.operationCount)
+        attributes["changed_cell_count"] = String(update.changedCellCount)
+        attributes["scroll_operation_count"] = String(update.scrollOperationCount)
+        attributes["base_revision"] = update.baseRevision.map(String.init) ?? "nil"
+        attributes["full_frame_fallback_reason"] = update.fallbackReason ?? "none"
+    }
+    attributes["target_revision"] = payload.screenStateRevision.map(String.init) ?? "nil"
+    return attributes
+}
+
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private static let ownerGatedTerminalCommands: Set<SpacesDeviceTerminalControlAction> = [.send, .key, .clearScreen, .resize, .scroll]
     private static let streamRelayReadBufferSize = 256 * 1024
@@ -1707,7 +1734,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 try buffer.withUnsafeBytes { rawBuffer in
                     guard let baseAddress = rawBuffer.baseAddress else { return }
                     let data = Data(bytes: baseAddress, count: count)
-                    let attributes = performanceLoggingEnabled ? linuxStreamRelayAttributes(for: data) : [:]
+                    let attributes = performanceLoggingEnabled ? deviceAPIStreamRelayAttributes(for: data) : [:]
                     let writeStartedAt = performanceLoggingEnabled ? Date() : nil
                     if performanceLoggingEnabled {
                         logDeviceAPIPerformance(
@@ -1729,30 +1756,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 success: true)
         }
 
-        private func linuxStreamRelayAttributes(for data: Data) -> [String: String] {
-            var attributes: [String: String] = [
-                "payload_bytes": String(data.count), "payload_count": String(data.split(separator: 0x0A, omittingEmptySubsequences: true).count),
-            ]
-            guard let firstLine = data.split(separator: 0x0A, maxSplits: 1, omittingEmptySubsequences: true).first,
-                let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(firstLine))
-            else {
-                attributes["render_update"] = "unknown"
-                return attributes
-            }
-            attributes["reason"] = payload.reason
-            attributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
-            attributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
-            if let update = payload.decodedRenderUpdate {
-                attributes["frame_kind"] = update.frameKindMetricValue
-                attributes["operation_count"] = String(update.operationCount)
-                attributes["changed_cell_count"] = String(update.changedCellCount)
-                attributes["scroll_operation_count"] = String(update.scrollOperationCount)
-                attributes["base_revision"] = update.baseRevision.map(String.init) ?? "nil"
-                attributes["full_frame_fallback_reason"] = update.fallbackReason ?? "none"
-            }
-            attributes["target_revision"] = payload.screenStateRevision.map(String.init) ?? "nil"
-            return attributes
-        }
     #endif
 
     #if canImport(Network) && canImport(Security)
@@ -1829,7 +1832,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private func sendStreamPayloadAndComplete(_ payload: GhosttyRemoteSessionStatePayload, sessionID: String, to connection: NWConnection) {
             do {
                 let data = try GhosttyRemoteSessionStateCodec.encodeLine(payload)
-                let attributes = streamRelayAttributes(for: data)
+                let attributes = deviceAPIStreamRelayAttributes(for: data)
                 logDeviceAPIPerformance(sessionID: sessionID, name: "stream_relay_read", count: data.count, attributes: attributes)
                 networkShaper.send(
                     content: data, to: connection, on: queue,
@@ -1912,7 +1915,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         ) {
             guard let relay = streamRelays[ObjectIdentifier(connection)] else { return }
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
-            let attributes = performanceLoggingEnabled ? streamRelayAttributes(for: data) : [:]
+            let attributes = performanceLoggingEnabled ? deviceAPIStreamRelayAttributes(for: data) : [:]
             if performanceLoggingEnabled {
                 logDeviceAPIPerformance(
                     sessionID: relay.sessionID, name: "stream_relay_read",
@@ -1948,30 +1951,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
 
-        private func streamRelayAttributes(for data: Data) -> [String: String] {
-            var attributes: [String: String] = [
-                "payload_bytes": String(data.count), "payload_count": String(data.split(separator: 0x0A, omittingEmptySubsequences: true).count),
-            ]
-            guard let firstLine = data.split(separator: 0x0A, maxSplits: 1, omittingEmptySubsequences: true).first,
-                let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(firstLine))
-            else {
-                attributes["render_update"] = "unknown"
-                return attributes
-            }
-            attributes["reason"] = payload.reason
-            attributes["render_update"] = payload.renderUpdate == nil ? "0" : "1"
-            attributes["render_update_bytes"] = String(payload.renderUpdate?.count ?? 0)
-            if let update = payload.decodedRenderUpdate {
-                attributes["frame_kind"] = update.frameKindMetricValue
-                attributes["operation_count"] = String(update.operationCount)
-                attributes["changed_cell_count"] = String(update.changedCellCount)
-                attributes["scroll_operation_count"] = String(update.scrollOperationCount)
-                attributes["base_revision"] = update.baseRevision.map(String.init) ?? "nil"
-                attributes["full_frame_fallback_reason"] = update.fallbackReason ?? "none"
-            }
-            attributes["target_revision"] = payload.screenStateRevision.map(String.init) ?? "nil"
-            return attributes
-        }
 
         private func closeStreamRelay(connection: NWConnection, cancelNetworkConnection: Bool = true) {
             let key = ObjectIdentifier(connection)
