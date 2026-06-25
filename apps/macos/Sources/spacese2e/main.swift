@@ -1337,7 +1337,6 @@ private struct DumpWorkspaceCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
             throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
         }
-        _ = try orchestrator.synchronizeRemoteAgentSignals(workspaceID: workspace.id)
         let payload = WorkspaceDumpPayload(
             workspace: .init(
                 id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,

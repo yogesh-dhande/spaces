@@ -1085,12 +1085,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 reusedExistingWindow = true
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                let remoteRoute: RemoteTerminalSessionRoute?
-                if let remoteRouteOverride {
-                    remoteRoute = remoteRouteOverride
-                } else {
-                    remoteRoute = try remoteTerminalSessionRoute(sessionID: sessionID)
-                }
+                let remoteRoute: RemoteTerminalSessionRoute? = remoteRouteOverride
                 if let remoteRoute { try ensureRemoteTerminalSessionMirror(remoteRoute, paths: paths) }
                 let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
                 if remoteRoute == nil {
@@ -1212,33 +1207,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             showError(error)
             return nil
         }
-    }
-
-    private func remoteTerminalSessionRoute(sessionID: String) throws -> RemoteTerminalSessionRoute? {
-        guard let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID) else { return nil }
-        let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspaceID)
-        guard plan.selection.isRemote else { return nil }
-        let target = plan.daemonTarget
-        let kind = try remoteTerminalSessionKind(sessionID: sessionID, workspaceID: workspaceID)
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: plan.manifest.remotePath ?? plan.manifest.localPath,
-            shell: "/bin/bash", command: nil, createdAt: ISO8601DateFormatter().string(from: Date()), workspaceID: workspaceID, kind: kind)
-        guard let endpoint = target.endpoint, let deviceID = target.deviceID else {
-            throw WorkspaceError.invalidArgument(message: "Remote terminal session is missing its pinned TLS endpoint.")
-        }
-        let authToken = try SpacesDeviceCredentialStore.token(deviceID: deviceID)
-        let requestTimeout: TimeInterval = 5
-        let requestClient = try TerminalServicePinnedTLSRequestSessionClient(
-            host: endpoint.host, port: endpoint.port, authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, timeout: 30)
-        return RemoteTerminalSessionRoute(
-            requestSender: { request in try requestClient.send(request: request, timeout: requestTimeout) },
-            stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
-                let client = TerminalServicePinnedTLSStateStreamClient(
-                    request: TerminalServiceRequest(command: .subscribe(.init(sessionID: sessionID))), host: endpoint.host, port: endpoint.port,
-                    authToken: authToken, certificateFingerprint: endpoint.certificateFingerprint, onEvent: onEvent, onDisconnect: onDisconnect)
-                try client.start()
-                return client
-            }, launchConfiguration: launchConfiguration, initialRuntimeState: nil)
     }
 
     private func deviceRemoteTerminalSessionRoute(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord) throws
