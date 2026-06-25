@@ -5485,9 +5485,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         constrainFormFieldToFillWidth(dirField, in: stack)
 
         // --- Fields ---
-        let setupScriptSection = SetupScriptSection(
+        let setupScriptSection = ScriptSection(
+            title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script",
             value: projectSettings.setupScript ?? "", subtitle: "Runs when each new workspace is created or revived from archive.")
-        let stopScriptSection = StopScriptSection(
+        let stopScriptSection = ScriptSection(
+            title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
             value: projectSettings.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
         let portsSection = PortsSection(ports: projectSettings.ports, subtitle: "Per-workspace named ports, exposed as env vars.")
         let processesSection = ProcessesSection(
@@ -5766,8 +5768,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         prepareButton.setAccessibilityIdentifier("add-project-prepare-source")
         Theme.applySecondaryStyle(to: prepareButton)
 
-        let setupScriptSection = SetupScriptSection(value: "", subtitle: "Runs when each new workspace is created or revived from archive.")
-        let stopScriptSection = StopScriptSection(value: "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
+        let setupScriptSection = ScriptSection(
+            title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: "",
+            subtitle: "Runs when each new workspace is created or revived from archive.")
+        let stopScriptSection = ScriptSection(
+            title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script", value: "",
+            subtitle: "Runs after processes stop — on stop, restart, and archive.")
         let portsSection = PortsSection(subtitle: "Per-workspace named ports, exposed as env vars.")
         let processesSection = ProcessesSection(subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Named URLs that open in Chrome when you focus them.")
@@ -6858,7 +6864,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         if Self.shouldShowWorkspaceSetupScriptEditor(status: setupState.status) {
             let fullProject = (try? orchestrator.project(id: project.id))
             let activeProjectConfig = deviceProjectSummary(projectID: project.id)?.config
-            let setupScriptSection = SetupScriptSection(
+            let setupScriptSection = ScriptSection(
+                title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script",
                 value: activeProjectConfig?.setupScript ?? fullProject?.setupScript ?? "",
                 subtitle: "Edit the project setup script, then run setup again.")
             setupScriptSection.onCommit = { [weak self] value in
@@ -7381,7 +7388,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func workspaceStopScriptSection(workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil) -> NSView? {
         guard let config = providedConfig else { return nil }
-        let section = StopScriptSection(value: config.stopScript ?? "")
+        let section = ScriptSection(
+            title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
+            value: config.stopScript ?? "")
         section.onCommit = { [weak self] value in
             guard let self else { return }
             do {
@@ -8486,7 +8495,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func storeProjectFields(
-        projectID: String, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
+        projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
         importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) -> Int {
@@ -8500,7 +8509,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func storeAddProjectFields(
         sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
-        repoURLField: NSTextField, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
+        repoURLField: NSTextField, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
         prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
     ) -> Int {
@@ -12230,7 +12239,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func registerDirtyTracking(
-        setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
+        setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
         browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
     ) {
         projectHasUnsavedChanges = false
