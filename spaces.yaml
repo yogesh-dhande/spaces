@@ -1,15 +1,15 @@
 version: 1
-setup_script: '(cd apps/web && npm i)
-
+setup_script: |
+  cp $SPACES_PROJECT_DIR/.env .env
   git submodule update --init --recursive
-
-  apps/macos/scripts/setup_ghostty.sh'
+  apps/macos/scripts/setup_ghostty.sh
+  (cd apps/web && npm i)
 stop_script: ''
 ports:
 - name: PORT
 processes:
 - name: npm:dev
-  command: npm run dev
+  command: cd apps/web && npm run dev
   on_exit: none
   execution_mode: direct
 browser_sessions:

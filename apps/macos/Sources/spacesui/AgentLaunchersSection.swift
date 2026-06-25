@@ -161,8 +161,8 @@ import workspacecore
         return entries
     }
 
-
     var currentLaunchers: [AgentLauncher] { launchers }
+
     // MARK: Row lifecycle
 
     private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
