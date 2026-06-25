@@ -961,9 +961,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private nonisolated func handleCloseTerminalSessionWindowIPC(_ notification: Notification) {
         let object = notification.object as? String
         guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
-        let sessionIsTerminating =
-            (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? Bool)
-            ?? ((notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true")
+        let sessionIsTerminating = (notification.userInfo?[IPCNotification.terminalSessionIsTerminatingUserInfoKey] as? String) == "true"
         Task { @MainActor [weak self, object, sessionID, sessionIsTerminating] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             TerminalPerformance.logMetric(

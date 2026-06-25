@@ -699,28 +699,6 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func readWindowState(paths: TerminalSessionPaths) throws -> TerminalSessionWindowState {
-        let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
-            let rows = try database.queryRows(
-                sql: """
-                    SELECT mode, x, y, width, height
-                    FROM terminal_window_frames
-                    WHERE root_directory = ?
-                    """, bindings: [root])
-            var state = TerminalSessionWindowState()
-            for row in rows {
-                guard let mode = TerminalAttachmentMode(rawValue: row[0]) else { continue }
-                let frame = try decodeWindowFrame(row: Array(row[1...4]))
-                switch mode {
-                case .owner: state.ownerFrame = frame
-                case .viewer: state.viewerFrame = frame
-                }
-            }
-            return state
-        }
-    }
-
     public static func writeWindowFrame(_ frame: TerminalSessionWindowFrame, mode: TerminalAttachmentMode, paths: TerminalSessionPaths) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
         try paths.ensureDirectories()

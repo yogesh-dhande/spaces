@@ -2571,7 +2571,8 @@ private func axAttributeValue(_ element: AXUIElement, attribute: String) -> CFTy
 }
 
 private func axElementAttribute(_ element: AXUIElement, attribute: String) -> AXUIElement? {
-    axAttributeValue(element, attribute: attribute) as! AXUIElement?
+    guard let value = axAttributeValue(element, attribute: attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
 }
 
 private func axElementArrayAttribute(_ element: AXUIElement, attribute: String) -> [AXUIElement] {

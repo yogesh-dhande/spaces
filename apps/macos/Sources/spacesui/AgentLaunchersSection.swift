@@ -228,14 +228,6 @@ import workspacecore
         return header
     }
 
-    static func makeDivider() -> NSView {
-        let line = ColoredBackgroundView()
-        line.fillColor = Theme.border
-        line.translatesAutoresizingMaskIntoConstraints = false
-        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        return line
-    }
-
     // MARK: Row lifecycle
 
     private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
