@@ -85,29 +85,17 @@ import workspacecore
         container.addArrangedSubview(rowsStack)
         rowsStack.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
-        // Wrap in a section card so it reads as one unit.
-        let card = ColoredBackgroundView()
-        card.fillColor = .clear
-        card.cornerRadius = 10
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(container)
-        NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: card.leadingAnchor), container.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            container.topAnchor.constraint(equalTo: card.topAnchor), container.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-        ])
-        self.view = card
+        self.view = RowSectionCard.wrap(container)
 
         // Wire up the header add button now that `self` is fully initialized.
         if let addButton = header.arrangedSubviews.compactMap({ $0 as? NSButton }).first {
             addButton.target = self
             addButton.action = #selector(handleAdd(_:))
         }
-        objc_setAssociatedObject(card, &Self.anchorKey, self, .OBJC_ASSOCIATION_RETAIN)
+        RowSectionCard.retain(self, in: view)
 
         refreshRows(animated: false)
     }
-
-    private static var anchorKey: UInt8 = 0
 
     // MARK: Public API
 
