@@ -66,12 +66,15 @@ public struct SpacesClientMigrationStep: Sendable {
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
     public static let currentVersion = 2
+    private static let defaultDatabaseStorage = DefaultDatabaseStorage()
+    private static let timestampFormatter = TimestampFormatterStorage()
 
     private let db: OpaquePointer
     private let databasePath: String
     private let schemaVersion: Int
     private let migrationSteps: [SpacesClientMigrationStep]
     private let backupManager: DatabaseBackupManager
+    private let connectionLock = NSRecursiveLock()
 
     public init(
         path: String? = nil, currentVersion: Int = SpacesClientDatabase.currentVersion,
@@ -117,6 +120,17 @@ public final class SpacesClientDatabase {
             executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: currentDirectoryPath))
         return URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).appendingPathComponent("Client", isDirectory: true)
             .appendingPathComponent("spaces-client.db", isDirectory: false).path
+    }
+
+    public static func defaultDatabase() throws -> SpacesClientDatabase { try defaultDatabaseStorage.database() }
+
+    public static func withDefaultDatabase<T>(_ body: (SpacesClientDatabase) throws -> T) throws -> T {
+        let database = try defaultDatabase()
+        return try database.withConnectionLock { try body(database) }
+    }
+
+    public static func setDefaultSetting(key: String, value: String?) throws {
+        try withDefaultDatabase { database in try database.setSetting(key: key, value: value) }
     }
 
     private static func currentProfileEnvironment() -> [String: String] {
@@ -341,25 +355,26 @@ public final class SpacesClientDatabase {
     }
 
     private func restoreBackup(from backupURL: URL) throws {
-        var sourceHandle: OpaquePointer?
-        guard sqlite3_open_v2(backupURL.path, &sourceHandle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let sourceHandle else {
-            throw SpacesClientError.invalidArgument("Failed opening client database backup at \(backupURL.path).")
-        }
-        defer { sqlite3_close(sourceHandle) }
+        try withConnectionLock {
+            var sourceHandle: OpaquePointer?
+            guard sqlite3_open_v2(backupURL.path, &sourceHandle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let sourceHandle
+            else { throw SpacesClientError.invalidArgument("Failed opening client database backup at \(backupURL.path).") }
+            defer { sqlite3_close(sourceHandle) }
 
-        guard let backup = sqlite3_backup_init(db, "main", sourceHandle, "main") else {
-            throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db)))
-        }
-        defer { sqlite3_backup_finish(backup) }
-
-        while true {
-            let result = sqlite3_backup_step(backup, -1)
-            if result == SQLITE_DONE { break }
-            if result == SQLITE_OK || result == SQLITE_BUSY || result == SQLITE_LOCKED {
-                sqlite3_sleep(20)
-                continue
+            guard let backup = sqlite3_backup_init(db, "main", sourceHandle, "main") else {
+                throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db)))
             }
-            throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db)))
+            defer { sqlite3_backup_finish(backup) }
+
+            while true {
+                let result = sqlite3_backup_step(backup, -1)
+                if result == SQLITE_DONE { break }
+                if result == SQLITE_OK || result == SQLITE_BUSY || result == SQLITE_LOCKED {
+                    sqlite3_sleep(20)
+                    continue
+                }
+                throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db)))
+            }
         }
     }
 
@@ -370,47 +385,55 @@ public final class SpacesClientDatabase {
     }
 
     private func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
-        try executeBatch(sql: "BEGIN IMMEDIATE;")
-        do {
-            let value = try body()
-            try executeBatch(sql: "COMMIT;")
-            return value
-        } catch {
-            try? executeBatch(sql: "ROLLBACK;")
-            throw error
+        try withConnectionLock {
+            try executeBatch(sql: "BEGIN IMMEDIATE;")
+            do {
+                let value = try body()
+                try executeBatch(sql: "COMMIT;")
+                return value
+            } catch {
+                try? executeBatch(sql: "ROLLBACK;")
+                throw error
+            }
         }
     }
 
     private func execute(sql: String, bindings: [Any] = []) throws {
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(bindings, to: statement)
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db))) }
+        try withConnectionLock {
+            let statement = try prepareStatement(sql: sql)
+            defer { sqlite3_finalize(statement) }
+            try bind(bindings, to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db))) }
+        }
     }
 
     private func queryRow(sql: String, bindings: [Any] = []) throws -> [String]? {
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(bindings, to: statement)
-        let result = sqlite3_step(statement)
-        if result == SQLITE_DONE { return nil }
-        guard result == SQLITE_ROW else { throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db))) }
-        return extractRow(statement: statement)
+        try withConnectionLock {
+            let statement = try prepareStatement(sql: sql)
+            defer { sqlite3_finalize(statement) }
+            try bind(bindings, to: statement)
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db))) }
+            return extractRow(statement: statement)
+        }
     }
 
     private func queryRows(sql: String, bindings: [Any] = []) throws -> [[String]] {
-        let statement = try prepareStatement(sql: sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(bindings, to: statement)
-        var rows: [[String]] = []
-        while true {
-            let result = sqlite3_step(statement)
-            if result == SQLITE_ROW {
-                rows.append(extractRow(statement: statement))
-            } else if result == SQLITE_DONE {
-                return rows
-            } else {
-                throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db)))
+        try withConnectionLock {
+            let statement = try prepareStatement(sql: sql)
+            defer { sqlite3_finalize(statement) }
+            try bind(bindings, to: statement)
+            var rows: [[String]] = []
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_ROW {
+                    rows.append(extractRow(statement: statement))
+                } else if result == SQLITE_DONE {
+                    return rows
+                } else {
+                    throw SpacesClientError.invalidArgument(String(cString: sqlite3_errmsg(db)))
+                }
             }
         }
     }
@@ -424,12 +447,20 @@ public final class SpacesClientDatabase {
     }
 
     private func executeBatch(sql: String) throws {
-        var errorMessage: UnsafeMutablePointer<CChar>?
-        if sqlite3_exec(db, sql, nil, nil, &errorMessage) != SQLITE_OK {
-            let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
-            if let errorMessage { sqlite3_free(errorMessage) }
-            throw SpacesClientError.invalidArgument(message)
+        try withConnectionLock {
+            var errorMessage: UnsafeMutablePointer<CChar>?
+            if sqlite3_exec(db, sql, nil, nil, &errorMessage) != SQLITE_OK {
+                let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
+                if let errorMessage { sqlite3_free(errorMessage) }
+                throw SpacesClientError.invalidArgument(message)
+            }
         }
+    }
+
+    private func withConnectionLock<T>(_ body: () throws -> T) throws -> T {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        return try body()
     }
 
     private func bind(_ bindings: [Any], to statement: OpaquePointer) throws {
@@ -570,7 +601,35 @@ public final class SpacesClientDatabase {
         }
     ]
 
-    private static func timestamp() -> String { ISO8601DateFormatter().string(from: Date()) }
+    private static func timestamp() -> String { timestampFormatter.string(from: Date()) }
+}
+
+private final class DefaultDatabaseStorage: @unchecked Sendable {
+    private let lock = NSLock()
+    private var path: String?
+    private var cachedDatabase: SpacesClientDatabase?
+
+    func database() throws -> SpacesClientDatabase {
+        let resolvedPath = try SpacesClientDatabase.defaultPath()
+        lock.lock()
+        defer { lock.unlock() }
+        if let cachedDatabase, path == resolvedPath { return cachedDatabase }
+        let database = try SpacesClientDatabase(path: resolvedPath)
+        path = resolvedPath
+        cachedDatabase = database
+        return database
+    }
+}
+
+private final class TimestampFormatterStorage: @unchecked Sendable {
+    private let lock = NSLock()
+    private let formatter = ISO8601DateFormatter()
+
+    func string(from date: Date) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return formatter.string(from: date)
+    }
 }
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

@@ -343,7 +343,7 @@ public final class WorkspaceOrchestrator {
         self.terminalFocusPulseController = terminalFocusPulseController
         self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
         self.windowFocusPulseEnabledProvider = windowFocusPulseEnabledProvider ?? { SettingsKey.defaultWindowFocusPulseEnabled }
-        self.windowFocusPulseColorProvider = windowFocusPulseColorProvider ?? { Self.defaultWindowFocusPulseColor() }
+        self.windowFocusPulseColorProvider = windowFocusPulseColorProvider ?? { SettingsKey.windowFocusPulseColor(from: nil) }
         #if canImport(Darwin)
             self.builtInTerminalWindowOpener =
                 builtInTerminalWindowOpener ?? { sessionID, mode in
@@ -3291,7 +3291,7 @@ public final class WorkspaceOrchestrator {
 
     private func pulseTerminalWindowIfNeeded(windowID: Int) {
         guard (try? windowFocusPulseEnabledProvider()) ?? SettingsKey.defaultWindowFocusPulseEnabled else { return }
-        let color = (try? windowFocusPulseColorProvider()) ?? Self.defaultWindowFocusPulseColor()
+        let color = (try? windowFocusPulseColorProvider()) ?? SettingsKey.windowFocusPulseColor(from: nil)
         terminalFocusPulseController.pulse(windowID: windowID, color: color, yabai: yabai)
     }
 
@@ -3967,12 +3967,6 @@ public final class WorkspaceOrchestrator {
         }
         let encoded = try JSONEncoder().encode(ids.sorted())
         try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
-    }
-
-    private static func defaultWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
-        let parts = SettingsKey.defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0) }
-        guard parts.count == 3 else { return (r: 0, g: 0, b: 0) }
-        return (r: parts[0], g: parts[1], b: parts[2])
     }
 
     private func normalizeDir(id: String, _ dir: String) throws -> ProjectRecord {

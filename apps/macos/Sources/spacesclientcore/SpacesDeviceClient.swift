@@ -57,7 +57,7 @@ public enum SpacesDeviceClient {
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         now: Date = Date(), bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
     ) throws -> SpacesPairedDeviceRecord {
-        let database = try providedDatabase ?? SpacesClientDatabase()
+        let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
         let response = try bootstrap(clientApp)
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
         guard let bootstrap = response.localClientBootstrap else { throw SpacesDeviceClientError.missingLocalBootstrap }
@@ -87,7 +87,7 @@ public enum SpacesDeviceClient {
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider, requestProvider: DeviceRequestProvider
     ) throws -> SpacesDeviceOverview {
-        let database = try providedDatabase ?? SpacesClientDatabase()
+        let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
         let device = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
         do { return try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
             guard isRetryableLocalDeviceAPIConnectionError(error) else { throw error }

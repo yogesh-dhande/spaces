@@ -141,6 +141,67 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertTrue(try databaseB.pairedDevices().isEmpty)
     }
 
+    func testDefaultDatabaseCacheFollowsResolvedDefaultPath() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let databaseAPath = root.appendingPathComponent("a/spaces-client.db", isDirectory: false).path
+        let databaseBPath = root.appendingPathComponent("b/spaces-client.db", isDirectory: false).path
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        defer {
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseAPath, 1)
+        try SpacesClientDatabase.defaultDatabase().setSetting(key: "active_workspace_id", value: "workspace-a")
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseBPath, 1)
+        XCTAssertNil(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"))
+        try SpacesClientDatabase.defaultDatabase().setSetting(key: "active_workspace_id", value: "workspace-b")
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseAPath, 1)
+        XCTAssertEqual(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"), "workspace-a")
+
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databaseBPath, 1)
+        XCTAssertEqual(try SpacesClientDatabase.defaultDatabase().setting(key: "active_workspace_id"), "workspace-b")
+    }
+
+    func testDefaultDatabaseSerializesConcurrentSharedConnectionOperations() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let databasePath = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false).path
+        let originalClientDatabasePath = currentEnvironmentValue(SpacesClientDatabase.databasePathEnvironmentVariable)
+        setenv(SpacesClientDatabase.databasePathEnvironmentVariable, databasePath, 1)
+        defer {
+            restoreEnvironmentValue(originalClientDatabasePath, name: SpacesClientDatabase.databasePathEnvironmentVariable)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let queue = DispatchQueue(label: "spaces-client-database-concurrency", attributes: .concurrent)
+        let group = DispatchGroup()
+        let errors = ErrorCollector()
+        let records = (0..<50).map { device(id: "device-\($0)") }
+
+        for (index, record) in records.enumerated() {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                do {
+                    let database = try SpacesClientDatabase.defaultDatabase()
+                    let id = record.id
+                    try database.upsert(device: record)
+                    try database.setSetting(key: "setting-\(index)", value: "value-\(index)")
+                    try database.setProjectCollapsed(deviceID: id, projectID: "project-\(index)", isCollapsed: true)
+                    try database.deletePairedDevice(id: id)
+                } catch { errors.append(error) }
+            }
+        }
+
+        group.wait()
+
+        let collectedErrors = errors.values()
+        XCTAssertTrue(collectedErrors.isEmpty, collectedErrors.map(\.localizedDescription).joined(separator: "\n"))
+        XCTAssertTrue(try SpacesClientDatabase.defaultDatabase().pairedDevices().isEmpty)
+    }
+
     func testPairedDeviceMetadataPersistsWithoutToken() throws {
         try withTemporaryProfile { root in
             let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)
@@ -228,4 +289,21 @@ final class SpacesClientDatabaseTests: XCTestCase {
     }
 
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
+}
+
+private final class ErrorCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var errors: [Error] = []
+
+    func append(_ error: Error) {
+        lock.lock()
+        errors.append(error)
+        lock.unlock()
+    }
+
+    func values() -> [Error] {
+        lock.lock()
+        defer { lock.unlock() }
+        return errors
+    }
 }

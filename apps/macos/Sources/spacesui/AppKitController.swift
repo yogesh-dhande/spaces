@@ -205,10 +205,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var localPairedDevice: SpacesPairedDeviceRecord?
     private var localDeviceOverview: SpacesDeviceOverviewPayload?
     private var deviceSections: [DeviceSection] = []
-    /// Long-lived client-database connection reused for the hot paired-device read
-    /// path, so background sidebar polls don't reopen SQLite (and rerun schema
-    /// checks) on every cycle.
-    private var cachedClientDatabase: SpacesClientDatabase?
     /// Per-remote-device timestamp of the last overview fetch, so polls driven by
     /// local events (process monitor, worktree discovery) don't re-request every
     /// remote's overview on every cycle; each device refreshes at most once per
@@ -586,7 +582,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
             builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession,
             windowFocusPulseEnabledProvider: { [weak self] in self?.clientWindowFocusPulseEnabled() ?? SettingsKey.defaultWindowFocusPulseEnabled },
-            windowFocusPulseColorProvider: { [weak self] in self?.clientWindowFocusPulseColor() ?? (r: 72, g: 98, b: 110) })
+            windowFocusPulseColorProvider: { [weak self] in self?.clientWindowFocusPulseColor() ?? SettingsKey.windowFocusPulseColor(from: nil) })
     }
 
     nonisolated static func dispatchBuiltInTerminalWindowActionOnMainThread(
@@ -1183,9 +1179,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     runtimeControlsProvider: { [weak self] sessionID in
                         self?.terminalRuntimeControls(forSessionID: sessionID, cause: "controller_refresh")
                     },
-                    loadWindowFrameAction: { mode in try SpacesClientDatabase().terminalWindowFrame(rootDirectory: paths.rootDirectory, mode: mode) },
+                    loadWindowFrameAction: { [weak self] mode in
+                        guard let self else { return nil }
+                        return try clientDatabase().terminalWindowFrame(rootDirectory: paths.rootDirectory, mode: mode)
+                    },
                     saveWindowFrameAction: { frame, mode in
-                        try SpacesClientDatabase().writeTerminalWindowFrame(
+                        try self.clientDatabase().writeTerminalWindowFrame(
                             frame, rootDirectory: paths.rootDirectory, sessionID: sessionID, mode: mode)
                     },
                     sessionHostProvider: { launchConfiguration, paths in
@@ -2825,9 +2824,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 // always loads the local device first, then remote sections stream in
                 // independently (see loadRemoteDeviceSections).
                 let deviceClientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-                let localDevice = try SpacesDeviceClient.bootstrapLocalDevice(database: SpacesClientDatabase(), clientApp: deviceClientApp)
+                let localDevice = try SpacesDeviceClient.bootstrapLocalDevice(
+                    database: SpacesClientDatabase.defaultDatabase(), clientApp: deviceClientApp)
                 let localOverview = try SpacesDeviceClient.overview(device: localDevice, clientApp: deviceClientApp)
-                let collapseStates = (try? SpacesClientDatabase().projectCollapseStates(deviceID: localOverview.device.id)) ?? [:]
+                let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: localOverview.device.id)) ?? [:]
                 let mapped = deviceSidebarData(from: localOverview.overview, deviceID: localOverview.device.id, projectCollapseStates: collapseStates)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
@@ -4507,7 +4507,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let now = ContinuousClock.now
         let freshnessWindow = Duration.seconds(PollingConstants.sidebarMetadataRefreshInterval)
+        var updatedReconnectSection = false
         for record in remotes {
+            guard Self.pairedDeviceHasRequiredCredentials(deviceID: record.id) else {
+                if let index = deviceSections.firstIndex(where: { $0.deviceID == record.id }) {
+                    updatedReconnectSection = updatedReconnectSection || deviceSections[index].loadState != .offline("Reconnect required")
+                    deviceSections[index].loadState = .offline("Reconnect required")
+                    deviceSections[index].device = record
+                }
+                continue
+            }
             // A snapshot can be applied far more often than the metadata cadence
             // (process monitor, worktree discovery, event-driven reloads). Skip
             // devices fetched within the freshness window so local activity doesn't
@@ -4523,6 +4532,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self?.applyRemoteDeviceSection(deviceID: record.id, result: result)
             }
         }
+        if updatedReconnectSection {
+            rebuildFlatSidebarData()
+            outlineView.reloadData()
+            applySidebarProjectExpansionState()
+            updateAlertsSidebarBadge()
+        }
     }
 
     private func applyRemoteDeviceSection(deviceID: String, result: Result<SpacesDeviceOverview, Error>) {
@@ -4537,7 +4552,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 updateAlertsSidebarBadge()
                 return
             }
-            let collapseStates = (try? SpacesClientDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
+            let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
             let mapped = Self.deviceSidebarData(from: overview.overview, deviceID: deviceID, projectCollapseStates: collapseStates)
             deviceSections[index].projects = mapped.projects
             deviceSections[index].workspacesByProject = mapped.workspacesByProject
@@ -4669,7 +4684,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             preferredWorkspaceID.flatMap { findWorkspace(id: $0)?.0.deviceID } ?? preferredProjectID.flatMap { projectID in
                 projects.first(where: { $0.id == projectID })?.deviceID
             } ?? selectedRowDeviceID() ?? localDeviceID
-        let collapseStates = (try? SpacesClientDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
+        let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
         let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
             deviceSections[index].projects = mapped.projects
@@ -9221,7 +9236,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
-            let database = try SpacesClientDatabase()
+            let database = try clientDatabase()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
             try SpacesDeviceCredentialStore.deleteTransportKey(deviceID: deviceID)
@@ -9248,7 +9263,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         renamingClientDeviceID = nil
         renamingClientDeviceField = nil
         do {
-            let database = try SpacesClientDatabase()
+            let database = try clientDatabase()
             if !trimmed.isEmpty, var record = try database.pairedDevices().first(where: { $0.id == deviceID }), record.name != trimmed {
                 record.name = trimmed
                 record.updatedAt = ISO8601DateFormatter().string(from: Date())
@@ -9270,18 +9285,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do { refreshVisibleDeviceSettings(try SpacesDeviceAPIControlClient.status(timeout: 1)) } catch {}
     }
 
-    /// Reused client-database connection for the hot read path. Opening a fresh
-    /// `SpacesClientDatabase` reruns connection setup and schema checks, so the
-    /// connection is cached for the lifetime of the controller.
-    private func clientDatabase() -> SpacesClientDatabase? {
-        if let cachedClientDatabase { return cachedClientDatabase }
-        let database = try? SpacesClientDatabase()
-        cachedClientDatabase = database
-        return database
-    }
+    private func clientDatabase() throws -> SpacesClientDatabase { try SpacesClientDatabase.defaultDatabase() }
 
     private func macPairedDevices() -> [SpacesPairedDeviceRecord] {
-        guard let database = clientDatabase() else { return [] }
+        guard let database = try? clientDatabase() else { return [] }
         return ((try? database.pairedDevices()) ?? []).filter { $0.id != SpacesPairedDeviceRecord.localDeviceID }
     }
 
@@ -9393,23 +9400,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if configCache?.editor == preference { return }
         do {
-            try SpacesClientDatabase().setSetting(key: SettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
-            configCache = try Self.clientAppConfig(base: orchestrator.appConfig())
+            try clientDatabase().setSetting(key: SettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
+            configCache = try clientAppConfig(base: orchestrator.appConfig())
         } catch { showError(error) }
     }
 
     @objc private func windowPulseEnabledChanged(_ sender: NSButton) {
-        do { try SpacesClientDatabase().setSetting(key: SettingsKey.windowFocusPulseEnabled, value: sender.state == .on ? "1" : "0") } catch {
+        do { try clientDatabase().setSetting(key: SettingsKey.windowFocusPulseEnabled, value: sender.state == .on ? "1" : "0") } catch {
             showError(error)
         }
     }
 
     @objc private func resetWindowPulseColor(_ sender: NSButton) {
-        let parts = SettingsKey.defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0) }
-        guard parts.count == 3 else { return }
+        let color = SettingsKey.windowFocusPulseColor(from: nil)
         do {
-            try SpacesClientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(parts[0]),\(parts[1]),\(parts[2])")
-            pulseColorWell?.color = NSColor(red: CGFloat(parts[0]) / 255, green: CGFloat(parts[1]) / 255, blue: CGFloat(parts[2]) / 255, alpha: 1)
+            try clientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: SettingsKey.defaultWindowFocusPulseColor)
+            pulseColorWell?.color = NSColor(red: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: 1)
         } catch { showError(error) }
     }
 
@@ -9418,7 +9424,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let r = Int((rgb.redComponent * 255).rounded())
         let g = Int((rgb.greenComponent * 255).rounded())
         let b = Int((rgb.blueComponent * 255).rounded())
-        do { try SpacesClientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(r),\(g),\(b)") } catch { showError(error) }
+        do { try clientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(r),\(g),\(b)") } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }
@@ -10478,7 +10484,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func openWorkspaceEditor(workspaceID: String) {
         do {
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
-            let editor = try Self.clientAppConfig(base: orchestrator.appConfig()).editor
+            guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
+            let editor = try clientAppConfig(base: orchestrator.appConfig()).editor
             let deviceID = deviceID(forWorkspaceID: workspaceID)
             if isRemoteDeviceID(deviceID) {
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -11131,32 +11138,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     nonisolated private static func clientAppConfig(base: AppConfig) throws -> AppConfig {
-        let editor = try SpacesClientDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
+        let editor = try SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
+        return AppConfig(editor: editor, portRange: base.portRange)
+    }
+
+    private func clientAppConfig(base: AppConfig) throws -> AppConfig {
+        let editor = try clientDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
         return AppConfig(editor: editor, portRange: base.portRange)
     }
 
     private func clientWindowFocusPulseEnabled() -> Bool {
-        guard let raw = try? SpacesClientDatabase().setting(key: SettingsKey.windowFocusPulseEnabled) else {
+        guard let raw = try? clientDatabase().setting(key: SettingsKey.windowFocusPulseEnabled) else {
             return SettingsKey.defaultWindowFocusPulseEnabled
         }
         return raw != "0"
     }
 
     private func clientWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
-        let raw = (try? SpacesClientDatabase().setting(key: SettingsKey.windowFocusPulseColor)) ?? SettingsKey.defaultWindowFocusPulseColor
-        let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        guard parts.count == 3 else { return (r: 72, g: 98, b: 110) }
-        return (r: parts[0], g: parts[1], b: parts[2])
+        SettingsKey.windowFocusPulseColor(from: try? clientDatabase().setting(key: SettingsKey.windowFocusPulseColor))
     }
 
-    private func clientActiveWorkspaceID() -> String? { try? SpacesClientDatabase().setting(key: SettingsKey.activeWorkspaceID) }
+    private func clientActiveWorkspaceID() -> String? { try? clientDatabase().setting(key: SettingsKey.activeWorkspaceID) }
 
     nonisolated private static func setClientActiveWorkspaceID(_ workspaceID: String?) {
-        try? SpacesClientDatabase().setSetting(key: SettingsKey.activeWorkspaceID, value: workspaceID)
+        try? SpacesClientDatabase.setDefaultSetting(key: SettingsKey.activeWorkspaceID, value: workspaceID)
     }
 
     private func loadShortcutSpecs() {
-        if let leaderRaw = try? shortcutRawValue(for: .guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(leaderRaw) {
+        if let modifiers = try? shortcutSettingResolver().leaderModifiers() {
             shortcutLeaderModifiers = modifiers
         } else {
             shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
@@ -11181,44 +11190,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return try? HotkeySpec.parse(setting.defaultSpec)
     }
 
-    private func shortcutRawValue(for setting: ShortcutSetting) throws -> String {
-        if setting.usesLeader { return try effectiveClientLeaderBackedShortcut(setting: setting) }
-        return try SpacesClientDatabase().setting(key: setting.settingKey) ?? setting.defaultSpec
-    }
+    private func shortcutRawValue(for setting: ShortcutSetting) throws -> String { try shortcutSettingResolver().rawValue(for: setting) }
 
     private func setShortcutSetting(setting: ShortcutSetting, value: String?) throws {
-        let normalized = setting.usesLeader ? try normalizedClientLeaderBackedShortcut(value) : value
-        try SpacesClientDatabase().setSetting(key: setting.settingKey, value: normalized)
+        let normalized = try shortcutSettingResolver().normalizedValue(for: setting, rawValue: value)
+        try clientDatabase().setSetting(key: setting.settingKey, value: normalized)
     }
 
-    private func effectiveClientLeaderBackedShortcut(setting: ShortcutSetting) throws -> String {
-        let leaderModifiers = try clientLeaderModifiers()
-        guard let raw = try SpacesClientDatabase().setting(key: setting.settingKey), let stored = try? HotkeySpec.parse(raw) else {
-            let spec = (try? HotkeySpec.parse(setting.defaultSpec)) ?? HotkeySpec(key: setting.defaultSpec, modifiers: [])
-            return spec.adding(modifiers: leaderModifiers).normalized
-        }
-        if stored.modifiers.isEmpty { return stored.adding(modifiers: leaderModifiers).normalized }
-        if stored.modifiers.isSuperset(of: leaderModifiers) {
-            return stored.removing(modifiers: leaderModifiers).adding(modifiers: leaderModifiers).normalized
-        }
-        return stored.normalized
-    }
-
-    private func normalizedClientLeaderBackedShortcut(_ raw: String?) throws -> String? {
-        guard let raw else { return nil }
-        let spec = try HotkeySpec.parse(raw)
-        let leaderModifiers = try clientLeaderModifiers()
-        if spec.modifiers.isSuperset(of: leaderModifiers) { return spec.removing(modifiers: leaderModifiers).normalized }
-        return spec.normalized
-    }
-
-    private func clientLeaderModifiers() throws -> Set<HotkeyModifier> {
-        if let raw = try SpacesClientDatabase().setting(key: SettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw),
-            !modifiers.isEmpty
-        {
-            return modifiers
-        }
-        return try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
+    private func shortcutSettingResolver() -> ShortcutSettingResolver {
+        ShortcutSettingResolver(value: { key in try self.clientDatabase().setting(key: key) })
     }
 
     private func shortcutSpec(for setting: ShortcutSetting) -> HotkeySpec? {
@@ -12540,7 +12520,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let previousWorkspaceID = selectedWorkspaceID
         do {
             let deviceID = projects.first(where: { $0.id == projectID })?.deviceID ?? localDeviceID
-            try SpacesClientDatabase().setProjectCollapsed(deviceID: deviceID, projectID: projectID, isCollapsed: isCollapsed)
+            try clientDatabase().setProjectCollapsed(deviceID: deviceID, projectID: projectID, isCollapsed: isCollapsed)
             updateProjectCollapsedStateInMemory(projectID: projectID, isCollapsed: isCollapsed)
         } catch {
             showError(error)
@@ -13305,7 +13285,7 @@ extension AppKitController {
         await Task.detached(priority: .userInitiated) {
             do {
                 let localOverview = try SpacesDeviceClient.localOverview(
-                    database: SpacesClientDatabase(), clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    database: SpacesClientDatabase.defaultDatabase(), clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                 return .success(buildCommandPaletteItems(overview: localOverview.overview, alertsGroups: alertsGroups))
             } catch { return .failure(error) }
         }.value

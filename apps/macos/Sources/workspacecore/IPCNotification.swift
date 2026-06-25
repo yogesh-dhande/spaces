@@ -38,7 +38,6 @@ public enum IPCNotification {
             let resolvedProfile = try profile ?? SpacesProfile.current()
             DistributedNotificationCenter.default().postNotificationName(
                 name, object: resolvedProfile.ipcNotificationObject, userInfo: userInfo, options: [.deliverImmediately])
-            Thread.sleep(forTimeInterval: 0.05)
         #else
             throw NSError(
                 domain: "dev.usespaces.ipc", code: 1,

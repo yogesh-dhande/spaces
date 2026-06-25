@@ -3,7 +3,7 @@ import systembridge
 
 public enum EditorLauncher {
     public static func open(editor: EditorPreference?, directory: String) throws {
-        guard let editor, editor != .none else { return }
+        guard let editor, editor != .none else { throw WorkspaceError.configError(message: "Preferred editor is not configured.") }
         switch editor {
         case .vscode: _ = try Shell.run(["open", "-a", "Visual Studio Code", directory])
         case .cursor: _ = try Shell.run(["open", "-a", "Cursor", directory])
@@ -14,7 +14,7 @@ public enum EditorLauncher {
     }
 
     public static func openRemote(editor: EditorPreference?, sshHost: String, sshUser: String?, sshPort: Int?, directory: String) throws {
-        guard let editor, editor != .none else { return }
+        guard let editor, editor != .none else { throw WorkspaceError.configError(message: "Preferred editor is not configured.") }
         let authority = [
             sshUser?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty.map { "\($0)@" } ?? "",
             sshHost.trimmingCharacters(in: .whitespacesAndNewlines), sshPort.map { ":\($0)" } ?? "",

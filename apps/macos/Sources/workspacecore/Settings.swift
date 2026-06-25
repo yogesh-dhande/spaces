@@ -39,4 +39,17 @@ public enum SettingsKey {
     public static let defaultWindowFocusPulseColor = "72,98,110"
     public static let windowFocusPulseEnabled = "window_focus_pulse_enabled"
     public static let defaultWindowFocusPulseEnabled = true
+
+    public static func windowFocusPulseColor(from rawValue: String?) -> (r: Int, g: Int, b: Int) {
+        let raw = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? defaultWindowFocusPulseColor
+        let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 3 else {
+            let defaultParts = defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            guard defaultParts.count == 3 else { return (r: 0, g: 0, b: 0) }
+            return (r: defaultParts[0], g: defaultParts[1], b: defaultParts[2])
+        }
+        return (r: parts[0], g: parts[1], b: parts[2])
+    }
 }
+
+extension String { fileprivate var nilIfEmpty: String? { isEmpty ? nil : self } }

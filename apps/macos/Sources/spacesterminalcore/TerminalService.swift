@@ -314,13 +314,14 @@ import Foundation
             let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
                 "Resources", isDirectory: true)
             let candidates = [
-                environment["SPACESD_EXECUTABLE"], currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(),
-                Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(),
-                bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent("apps/macos/.build/debug/spacesd", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent("apps/macos/.build/release/spacesd", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent(".build/debug/spacesd", isDirectory: false).path(),
-                currentDirectory.appendingPathComponent(".build/release/spacesd", isDirectory: false).path(),
+                environment["SPACESD_EXECUTABLE"],
+                currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
+                Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
+                bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
+                currentDirectory.appendingPathComponent("apps/macos/.build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
+                currentDirectory.appendingPathComponent("apps/macos/.build/release/spacesd", isDirectory: false).path(percentEncoded: false),
+                currentDirectory.appendingPathComponent(".build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
+                currentDirectory.appendingPathComponent(".build/release/spacesd", isDirectory: false).path(percentEncoded: false),
             ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
 
             for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {

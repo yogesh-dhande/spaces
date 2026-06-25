@@ -119,4 +119,46 @@ extension AppKitController {
             }
         }
     }
+
+    struct ShortcutSettingResolver {
+        let value: (String) throws -> String?
+
+        func rawValue(for setting: ShortcutSetting) throws -> String {
+            if setting.usesLeader { return try effectiveLeaderBackedShortcut(setting: setting) }
+            return try value(setting.settingKey) ?? setting.defaultSpec
+        }
+
+        func normalizedValue(for setting: ShortcutSetting, rawValue: String?) throws -> String? {
+            guard setting.usesLeader else { return rawValue }
+            return try normalizedLeaderBackedShortcut(rawValue)
+        }
+
+        func leaderModifiers() throws -> Set<HotkeyModifier> {
+            if let raw = try value(SettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw), !modifiers.isEmpty {
+                return modifiers
+            }
+            return try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
+        }
+
+        private func effectiveLeaderBackedShortcut(setting: ShortcutSetting) throws -> String {
+            let leaderModifiers = try leaderModifiers()
+            guard let raw = try value(setting.settingKey), let stored = try? HotkeySpec.parse(raw) else {
+                let spec = (try? HotkeySpec.parse(setting.defaultSpec)) ?? HotkeySpec(key: setting.defaultSpec, modifiers: [])
+                return spec.adding(modifiers: leaderModifiers).normalized
+            }
+            if stored.modifiers.isEmpty { return stored.adding(modifiers: leaderModifiers).normalized }
+            if stored.modifiers.isSuperset(of: leaderModifiers) {
+                return stored.removing(modifiers: leaderModifiers).adding(modifiers: leaderModifiers).normalized
+            }
+            return stored.normalized
+        }
+
+        private func normalizedLeaderBackedShortcut(_ raw: String?) throws -> String? {
+            guard let raw else { return nil }
+            let spec = try HotkeySpec.parse(raw)
+            let leaderModifiers = try leaderModifiers()
+            if spec.modifiers.isSuperset(of: leaderModifiers) { return spec.removing(modifiers: leaderModifiers).normalized }
+            return spec.normalized
+        }
+    }
 }
