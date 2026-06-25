@@ -235,6 +235,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var commandPalette = CommandPaletteController(host: self)
     lazy var alerts = AlertsController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
+    lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
     private var selectedSettingsSection: SettingsSection = .general
     private var selectedMCPClient: MCPClient = .claudeCode
     private weak var mcpConfigTextView: NSTextView?
@@ -243,11 +244,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
-    private var workspaceVisibilityWindow: NSWindow?
-    private let workspaceVisibilityTable = WorkspaceVisibilityTableController()
-    private weak var workspaceVisibilityTableView: NSTableView?
-    private var workspaceVisibilityQuery = ""
-    private var workspaceVisibilityDeviceFilter: String?
     var projectSettingsProjectID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
     private weak var settingsSectionContentContainer: NSView?
@@ -2055,7 +2051,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return .workspaceWindow(workspaceID: workspaceID, index: windowListIndex)
     }
 
-    nonisolated private static func deviceMutation(
+    nonisolated static func deviceMutation(
         device: SpacesPairedDeviceRecord, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
     ) async -> Result<SpacesDeviceAPIResponse, Error> {
         await Task.detached(priority: .userInitiated) { do { return .success(try operation(device)) } catch { return .failure(error) } }.value
@@ -3828,7 +3824,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The id of the device that owns a workspace/project, falling back to the
     /// local device. These give every action its per-row device context so it
     /// routes to the daemon that actually hosts the workspace.
-    private func deviceID(forWorkspaceID workspaceID: String) -> String {
+    func deviceID(forWorkspaceID workspaceID: String) -> String {
         findWorkspace(id: workspaceID)?.0.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
     }
 
@@ -3884,7 +3880,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             ])
     }
 
-    private func showDeviceNotLoadedError() { showError(Self.deviceNotLoadedError()) }
+    func showDeviceNotLoadedError() { showError(Self.deviceNotLoadedError()) }
 
     private func deviceProjectSummary(projectID: String) -> SpacesDeviceProjectSummary? {
         // Search every device section's overview, not just the local one, so detail
@@ -3942,7 +3938,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if showingAlerts { showAlertsDetail() }
     }
 
-    private func applyDeviceMutationResponse(
+    func applyDeviceMutationResponse(
         _ response: SpacesDeviceAPIResponse, selectedProjectID preferredProjectID: String? = nil,
         selectedWorkspaceID preferredWorkspaceID: String? = nil
     ) {
@@ -4256,7 +4252,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return header
     }
 
-    private func settingsHairlineDivider() -> NSView {
+    func settingsHairlineDivider() -> NSView {
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
@@ -5197,7 +5193,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return window
     }
 
-    private func buildFormWindowHeader(symbol: String, title: String, closeAction: Selector) -> NSView {
+    func buildFormWindowHeader(symbol: String, title: String, closeAction: Selector) -> NSView {
         let header = NSView()
 
         let iconView = NSImageView()
@@ -5234,236 +5230,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         addWorkspaceWindow = presentFormWindow(existing: addWorkspaceWindow, header: header, hosting: stack)
     }
 
-    // MARK: - Workspace visibility dialog
-
-    @objc private func showWorkspaceVisibilityDialog() {
-        clearActiveAddFormStateAndCloseWindows()
-        workspaceVisibilityQuery = ""
-        workspaceVisibilityDeviceFilter = nil
-
-        let searchField = NSSearchField()
-        searchField.placeholderString = "Search workspaces"
-        searchField.target = self
-        searchField.action = #selector(workspaceVisibilitySearchChanged(_:))
-        searchField.sendsWholeSearchString = false
-        searchField.sendsSearchStringImmediately = false
-        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        searchField.setAccessibilityIdentifier("workspace-visibility-search")
-
-        let devicePopUp = NSPopUpButton()
-        devicePopUp.target = self
-        devicePopUp.action = #selector(workspaceVisibilityDeviceFilterChanged(_:))
-        devicePopUp.setContentHuggingPriority(.required, for: .horizontal)
-        populateWorkspaceVisibilityDevicePopUp(devicePopUp)
-
-        let filterRow = NSStackView(views: [searchField, devicePopUp])
-        filterRow.orientation = .horizontal
-        filterRow.spacing = 8
-        filterRow.distribution = .fill
-
-        let tableView = NSTableView()
-        tableView.dataSource = workspaceVisibilityTable
-        tableView.delegate = workspaceVisibilityTable
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.rowHeight = 24
-        tableView.allowsColumnSelection = false
-        tableView.headerView = NSTableHeaderView()
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.visibleColumn, title: "Show", width: 44, fixed: true)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.titleColumn, title: "Workspace", width: 180)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.projectColumn, title: "Project", width: 150)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.deviceColumn, title: "Device", width: 130)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.branchColumn, title: "Branch", width: 130)
-        workspaceVisibilityTableView = tableView
-        workspaceVisibilityTable.onToggleVisible = { [weak self] workspaceID, visible in
-            self?.setWorkspaceHidden(workspaceID: workspaceID, isHidden: !visible) { [weak self] _ in self?.reloadWorkspaceVisibilityRows() }
-        }
-
-        let scroll = NSScrollView()
-        scroll.documentView = tableView
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-
-        reloadWorkspaceVisibilityRows()
-        presentWorkspaceVisibilityWindow(filterRow: filterRow, tableScroll: scroll)
-    }
-
-    private func addWorkspaceVisibilityColumn(
-        _ tableView: NSTableView, id: NSUserInterfaceItemIdentifier, title: String, width: CGFloat, fixed: Bool = false
-    ) {
-        let column = NSTableColumn(identifier: id)
-        column.title = title
-        column.width = width
-        column.minWidth = fixed ? width : 60
-        if fixed { column.maxWidth = width }
-        tableView.addTableColumn(column)
-    }
-
-    private func populateWorkspaceVisibilityDevicePopUp(_ popup: NSPopUpButton) {
-        popup.removeAllItems()
-        popup.addItem(withTitle: "All devices")
-        for section in deviceSections {
-            popup.addItem(withTitle: section.deviceName)
-            popup.lastItem?.representedObject = section.deviceID
-        }
-        if let filter = workspaceVisibilityDeviceFilter, let item = popup.itemArray.first(where: { ($0.representedObject as? String) == filter }) {
-            popup.select(item)
-        } else {
-            popup.selectItem(at: 0)
-        }
-    }
-
-    @objc private func workspaceVisibilitySearchChanged(_ sender: NSSearchField) {
-        workspaceVisibilityQuery = sender.stringValue
-        reloadWorkspaceVisibilityRows()
-    }
-
-    @objc private func workspaceVisibilityDeviceFilterChanged(_ sender: NSPopUpButton) {
-        workspaceVisibilityDeviceFilter = sender.selectedItem?.representedObject as? String
-        reloadWorkspaceVisibilityRows()
-    }
-
-    private func buildWorkspaceVisibilityRows() -> [WorkspaceVisibilityRow] {
-        var rows: [WorkspaceVisibilityRow] = []
-        for project in projects {
-            let deviceName = deviceSection(id: project.deviceID)?.deviceName ?? project.deviceID
-            for workspace in workspacesByProject[project.id] ?? [] where !workspace.isArchived {
-                rows.append(
-                    WorkspaceVisibilityRow(
-                        workspaceID: workspace.id, deviceID: project.deviceID, title: workspace.title, projectName: project.name,
-                        deviceName: deviceName, branch: workspace.branch ?? "", isHidden: workspace.isHidden))
-            }
-        }
-        return rows
-    }
-
-    private func reloadWorkspaceVisibilityRows() {
-        let deviceFiltered =
-            workspaceVisibilityDeviceFilter.map { id in buildWorkspaceVisibilityRows().filter { $0.deviceID == id } }
-            ?? buildWorkspaceVisibilityRows()
-        let candidates = deviceFiltered.enumerated().map { offset, row in
-            CommandPaletteFuzzySearch.Candidate(
-                id: offset,
-                fields: [
-                    .init(text: row.title, weight: 1.0), .init(text: row.projectName, weight: 0.6), .init(text: row.deviceName, weight: 0.4),
-                    .init(text: row.branch, weight: 0.5),
-                ])
-        }
-        let ranked = CommandPaletteFuzzySearch.rank(query: workspaceVisibilityQuery, candidates: candidates)
-        workspaceVisibilityTable.rows = ranked.map { deviceFiltered[$0.id] }
-        workspaceVisibilityTableView?.reloadData()
-    }
-
-    private func presentWorkspaceVisibilityWindow(filterRow: NSView, tableScroll: NSView) {
-        let header = buildFormWindowHeader(
-            symbol: "line.3.horizontal.decrease.circle", title: "Workspaces", closeAction: #selector(closeWorkspaceVisibilityWindow))
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-        let headerDivider = settingsHairlineDivider()
-        for view in [header, headerDivider, filterRow, tableScroll] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(view)
-        }
-        NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor), header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            header.topAnchor.constraint(equalTo: root.topAnchor), header.heightAnchor.constraint(equalToConstant: 52),
-            headerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            headerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor), headerDivider.topAnchor.constraint(equalTo: header.bottomAnchor),
-            headerDivider.heightAnchor.constraint(equalToConstant: 1), filterRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            filterRow.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            filterRow.topAnchor.constraint(equalTo: headerDivider.bottomAnchor, constant: 12),
-            tableScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            tableScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            tableScroll.topAnchor.constraint(equalTo: filterRow.bottomAnchor, constant: 10),
-            tableScroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
-        ])
-        let window: NSWindow
-        if let existing = workspaceVisibilityWindow {
-            window = existing
-        } else {
-            let created = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 720, height: 560), styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
-                backing: .buffered, defer: false)
-            created.titlebarAppearsTransparent = true
-            created.titleVisibility = .hidden
-            created.isMovableByWindowBackground = true
-            created.isReleasedWhenClosed = false
-            created.minSize = NSSize(width: 560, height: 360)
-            created.standardWindowButton(.miniaturizeButton)?.isHidden = true
-            created.standardWindowButton(.zoomButton)?.isHidden = true
-            created.standardWindowButton(.closeButton)?.isHidden = true
-            created.center()
-            workspaceVisibilityWindow = created
-            window = created
-        }
-        window.contentView = root
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    @objc private func closeWorkspaceVisibilityWindow() { workspaceVisibilityWindow?.performClose(nil) }
-
-    /// Sets a workspace's sidebar visibility (persisted as `isHidden`), routing to
-    /// the device that owns the workspace and stopping it first if it is running.
-    private func setWorkspaceHidden(workspaceID: String, isHidden: Bool, completion: @escaping (Bool) -> Void) {
-        guard let (project, workspace) = findWorkspace(id: workspaceID) else { return completion(false) }
-        Task { @MainActor [weak self] in
-            guard let self else { return completion(false) }
-            guard let device = deviceRecord(forDeviceID: deviceID(forWorkspaceID: workspaceID)) else {
-                showDeviceNotLoadedError()
-                return completion(false)
-            }
-            // Decide the "Stop and Hide" prompt and the stop from fresh daemon state,
-            // not a possibly-stale cached snapshot (remote overviews refresh on a
-            // throttled cadence), so a running workspace is never hidden without being
-            // stopped, nor a stopped one prompted about needlessly.
-            var isRunning = workspace.isRunning
-            if isHidden {
-                let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-                let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(device: device, clientApp: clientApp)) } catch { return .failure(error) }
-                }.value
-                switch overviewResult {
-                case .success(let overview): isRunning = overview.overview.workspaces.first(where: { $0.id == workspaceID })?.isRunning ?? false
-                case .failure(let error):
-                    showError(error)
-                    return completion(false)
-                }
-            }
-            if isHidden, isRunning {
-                let alert = NSAlert()
-                alert.alertStyle = .warning
-                alert.messageText = "Hide workspace?"
-                alert.informativeText = "\"\(workspace.title)\" is currently running. Hiding it stops the workspace first."
-                alert.addButton(withTitle: "Stop and Hide")
-                alert.addButton(withTitle: "Cancel")
-                guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
-                let stopResult = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.stopWorkspace(
-                        workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-                if case .failure(let error) = stopResult {
-                    showError(error)
-                    return completion(false)
-                }
-            }
-            let result = await Self.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.updateWorkspaceMetadata(
-                    workspaceID: workspaceID, isHidden: isHidden, updatesHidden: true, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
-            switch result {
-            case .success(let response):
-                if isHidden, selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
-                applyDeviceMutationResponse(response, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
-                completion(true)
-            case .failure(let error):
-                showError(error)
-                completion(false)
-            }
-        }
-    }
+    // MARK: - Workspace visibility forwarders
+    // The dialog-open (sidebar header) and window-close buttons bind their target
+    // to the host, so these stay as @objc host methods; the implementation lives
+    // on `workspaceVisibility` (WorkspaceVisibilityController).
+    @objc func showWorkspaceVisibilityDialog() { workspaceVisibility.showWorkspaceVisibilityDialog() }
+    @objc func closeWorkspaceVisibilityWindow() { workspaceVisibility.closeWorkspaceVisibilityWindow() }
 
     @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
 
