@@ -560,7 +560,7 @@ The YAML schema contains:
 - `setup_script`
 - `stop_script`
 - `ports[].name`
-- `processes[].name`, `processes[].command`, `processes[].on_exit`
+- `processes[].name`, `processes[].command`, `processes[].on_exit` (one of `none`, `restart`, `notify`)
 - `browser_sessions[].name`, `browser_sessions[].url`
 - `agent_launchers[].name`, `agent_launchers[].command`
 
