@@ -43,13 +43,6 @@ private final class InlineWorkspaceEditorTextView: NSTextView {
     }
 }
 
-private final class CommandPaletteSearchField: NSSearchField { override var needsPanelToBecomeKey: Bool { true } }
-
-private final class CommandPalettePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-}
-
 protocol ProcessLifecyclePolicyController {
     func disableAutomaticTermination(_ reason: String)
     func disableSuddenTermination()
@@ -158,7 +151,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case cancel
     }
 
-    private struct HotkeyPerfContext {
+    struct HotkeyPerfContext {
         let startedAt: Date
         let appWasActive: Bool
         let appWasHidden: Bool
@@ -166,7 +159,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let paletteWasVisible: Bool
     }
 
-    private struct PendingCommandPalettePresentation {
+    struct PendingCommandPalettePresentation {
         let perfContext: HotkeyPerfContext?
         let mainWindowWasVisible: Bool
     }
@@ -181,13 +174,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let task: Task<Result<Void, Error>, Never>
     }
 
-    private var window: NSWindow!
+    var window: NSWindow!
     private var splitView: NSSplitView?
     private let outlineView = SidebarOutlineView()
     private let detailContainer = NSView()
     private weak var workspaceShortcutFooterRowView: NSStackView?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
-    private var orchestrator: WorkspaceOrchestrator!
+    var orchestrator: WorkspaceOrchestrator!
     private var projects: [ProjectSummary] = []
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     private var workspacesByProject: [String: [WorkspaceSummary]] = [:] { didSet { visibleWorkspacesCache.removeAll(keepingCapacity: true) } }
@@ -211,11 +204,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// `sidebarMetadataRefreshInterval`.
     private var remoteOverviewFetchInstants: [String: ContinuousClock.Instant] = [:]
     private var alertsGroups: [AlertsGroup] = []
-    private var dismissedAlertsAttentionItemIDs: Set<String> = []
+    var dismissedAlertsAttentionItemIDs: Set<String> = []
     private var visibleDetailWorkspaceID: String?
 
     private var selectedProjectID: String? { didSet { updateOperationProgressOverlayVisibility() } }
-    private var selectedWorkspaceID: String? { didSet { updateOperationProgressOverlayVisibility() } }
+    var selectedWorkspaceID: String? { didSet { updateOperationProgressOverlayVisibility() } }
     private var lastSelectedRow: Int = -1
     private var suppressOutlineSelectionChanges = false
     private var projectHasUnsavedChanges = false
@@ -223,7 +216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [UInt32: EventHotKeyRef] = [:]
-    private var shortcutLeaderModifiers: Set<HotkeyModifier> = []
+    var shortcutLeaderModifiers: Set<HotkeyModifier> = []
     private var pendingLeaderCaptureModifiers: Set<HotkeyModifier> = []
     private var toggleShortcutSpec: HotkeySpec?
     private var commandPaletteShortcutSpec: HotkeySpec?
@@ -252,21 +245,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var workspaceSetupDetailRefreshTimer: Timer?
     private var workspaceSetupDetailRefreshWorkspaceID: String?
     private weak var workspaceSetupLogTextView: NSTextView?
-    private var commandPalettePanel: NSPanel?
-    private var commandPaletteSearchField: NSSearchField?
-    private var commandPaletteTableView: NSTableView?
-    private var commandPaletteLoadingIndicator: NSProgressIndicator?
-    private var commandPaletteEmptyLabel: NSTextField?
-    private var commandPaletteSummaryLabel: NSTextField?
-    private var commandPaletteLoadTask: Task<Void, Never>?
-    private var commandPaletteItems: [CommandPaletteItem] = []
-    private var commandPaletteFilteredItems: [CommandPaletteItem] = []
-    private var commandPaletteContextWorkspaceID: String?
-    private var commandPaletteSelectedIndex = 0
-    private var commandPaletteNeedsReload = true
-    private var isDismissingCommandPalette = false
-    private var pendingCommandPalettePresentation: PendingCommandPalettePresentation?
-    private var commandPaletteMainWindowVisibility: Bool?
+    lazy var commandPalette = CommandPaletteController(host: self)
     private var selectedSettingsSection: SettingsSection = .general
     private var selectedMCPClient: MCPClient = .claudeCode
     private weak var mcpConfigTextView: NSTextView?
@@ -323,7 +302,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
-    private var setupManager: SetupManager?
+    var setupManager: SetupManager?
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
     private var pendingSidebarReloadFailureMessage: String?
@@ -369,14 +348,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// Maps sequential window shortcut numbers (1-9) to focus targets for the current Alerts view.
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var deferredExternalWindowHideTask: Task<Void, Never>?
-    private var recentCommandPaletteFocusIdentities: [String] = []
     private var terminalSessionWindowControllers: [String: TerminalSessionWindowController] = [:]
     private var lastFocusedBuiltInTerminalSessionID: String?
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnTerminalSessionID: String?
     private var appToggleReturnApplicationProcessID: pid_t?
-    private var commandPaletteReturnTerminalSessionID: String?
-    private var commandPaletteReturnApplicationProcessID: pid_t?
     private var terminalRuntimeControlDescriptorsBySessionID: [String: TerminalRuntimeControlDescriptor] = [:]
 
     private struct WindowShortcutProfile {
@@ -636,9 +612,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
             self.terminalAttachmentStateDidChangeObserver = nil
         }
-        commandPaletteLoadTask?.cancel()
-        commandPaletteLoadTask = nil
-        commandPalettePanel?.close()
+        commandPalette.commandPaletteLoadTask?.cancel()
+        commandPalette.commandPaletteLoadTask = nil
+        commandPalette.commandPalettePanel?.close()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
         releaseLaunchLeases()
@@ -714,7 +690,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 if hidesApp {
                     self.hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
                 } else {
-                    self.dismissCommandPaletteForBuiltInWindowNavigation()
+                    self.commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
                 }
             } catch { self.showError(error) }
         }
@@ -1239,7 +1215,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
     }
 
-    private func focusTerminalSessionWindow(sessionID: String, requestID: String? = nil) {
+    func focusTerminalSessionWindow(sessionID: String, requestID: String? = nil) {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1681,7 +1657,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.logHotkeyDebug("app_did_resign_active \(self.hotkeyWindowStateSummary())")
-                if self.commandPalettePanel?.isVisible == true { self.dismissCommandPalette() }
+                if self.commandPalette.commandPalettePanel?.isVisible == true { self.commandPalette.dismissCommandPalette() }
                 guard let profile = self.activeWindowShortcutProfile else { return }
                 let routeElapsedMS = profile.routeCompletedAt.map { self.windowShortcutElapsedMS(since: $0) } ?? -1
                 self.logWindowShortcutProfile(
@@ -2039,7 +2015,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     nonisolated private static func hotkeyDebugLogPath() -> String { NSTemporaryDirectory().appending("/spaces-hotkey-debug.log") }
 
-    private func logHotkeyDebug(_ message: String) {
+    func logHotkeyDebug(_ message: String) {
         guard Self.hotkeyDebugEnabled() else { return }
         let line = "spaces: hotkey_debug \(message)\n"
         fputs(line, stderr)
@@ -2054,19 +2030,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch { try? handle.close() }
     }
 
-    private func hotkeyWindowStateSummary() -> String {
+    func hotkeyWindowStateSummary() -> String {
         let mainVisible = effectiveMainWindowVisibilityForHotkeyState() ? 1 : 0
         let mainMini = window?.isMiniaturized == true ? 1 : 0
         let mainKey = window?.isKeyWindow == true ? 1 : 0
-        let paletteVisible = commandPalettePanel?.isVisible == true ? 1 : 0
-        let paletteKey = commandPalettePanel?.isKeyWindow == true ? 1 : 0
+        let paletteVisible = commandPalette.commandPalettePanel?.isVisible == true ? 1 : 0
+        let paletteKey = commandPalette.commandPalettePanel?.isKeyWindow == true ? 1 : 0
         let auxiliaryVisible = hasVisibleAuxiliaryWindowsForHotkeyState() ? 1 : 0
         let terminalVisible = hasVisibleTerminalSessionWindowsForHotkeyState() ? 1 : 0
         return
-            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey) auxiliary_visible=\(auxiliaryVisible) terminal_visible=\(terminalVisible)"
+            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalette.commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey) auxiliary_visible=\(auxiliaryVisible) terminal_visible=\(terminalVisible)"
     }
 
-    private func rawMainWindowVisibility() -> Bool { window?.isVisible == true && window?.isMiniaturized != true }
+    func rawMainWindowVisibility() -> Bool { window?.isVisible == true && window?.isMiniaturized != true }
 
     private func hasVisibleTerminalSessionWindowsForHotkeyState() -> Bool {
         terminalSessionWindowControllers.values.contains { controller in
@@ -2075,18 +2051,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func hasVisibleAuxiliaryWindowsForHotkeyState() -> Bool {
-        if commandPalettePanel?.isVisible == true { return true }
+        if commandPalette.commandPalettePanel?.isVisible == true { return true }
         return hasVisibleTerminalSessionWindowsForHotkeyState()
     }
 
-    private func focusedTerminalSessionIDForToggle() -> String? {
+    func focusedTerminalSessionIDForToggle() -> String? {
         for (sessionID, controller) in terminalSessionWindowControllers {
             if !controller.didClose && (controller.window?.isKeyWindow == true || controller.window?.isMainWindow == true) { return sessionID }
         }
         return nil
     }
 
-    private func activateReturnApplication(processIdentifier: pid_t) {
+    func activateReturnApplication(processIdentifier: pid_t) {
         guard let application = NSRunningApplication(processIdentifier: processIdentifier) else { return }
         application.activate(options: [])
     }
@@ -2096,7 +2072,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func effectiveMainWindowVisibilityForHotkeyState() -> Bool {
         Self.effectiveMainWindowVisibilityForHotkeyState(
             rawMainWindowIsVisible: rawMainWindowVisibility(),
-            commandPaletteMainWindowVisibility: commandPaletteMainWindowVisibility ?? pendingCommandPalettePresentation?.mainWindowWasVisible)
+            commandPaletteMainWindowVisibility: commandPalette.commandPaletteMainWindowVisibility ?? commandPalette.pendingCommandPalettePresentation?.mainWindowWasVisible)
     }
 
     private static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
@@ -2223,7 +2199,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch { return .failure(error) }
     }
 
-    nonisolated private static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<ExternalWindowAction, Error> {
+    nonisolated static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<ExternalWindowAction, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
                 let db = try DatabaseLocator.defaultPath()
@@ -3872,7 +3848,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         do { try orchestrator.setAlertsDismissedAttentionItemIDs(prunedIDs) } catch { showError(error) }
     }
 
-    private func dismissAlertsAttentionItem(_ attentionID: String) {
+    func dismissAlertsAttentionItem(_ attentionID: String) {
         guard !dismissedAlertsAttentionItemIDs.contains(attentionID) else { return }
         dismissedAlertsAttentionItemIDs.insert(attentionID)
         do {
@@ -3882,21 +3858,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } catch {
             dismissedAlertsAttentionItemIDs.remove(attentionID)
             showError(error)
-        }
-    }
-
-    private func filteredCommandPaletteItems(_ items: [CommandPaletteItem]) -> [CommandPaletteItem] {
-        items.filter { item in
-            guard let attentionID = item.alertsAttentionID else { return true }
-            return !dismissedAlertsAttentionItemIDs.contains(attentionID)
-        }
-    }
-
-    private func rememberRecentCommandPaletteFocusIdentity(_ identity: String) {
-        recentCommandPaletteFocusIdentities.removeAll(where: { $0 == identity })
-        recentCommandPaletteFocusIdentities.insert(identity, at: 0)
-        if recentCommandPaletteFocusIdentities.count > 64 {
-            recentCommandPaletteFocusIdentities.removeLast(recentCommandPaletteFocusIdentities.count - 64)
         }
     }
 
@@ -4084,9 +4045,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return detailContainer
     }
 
-    private func invalidateCommandPaletteCache() { commandPaletteNeedsReload = true }
-
-    private func reloadData(forceRemoteRefresh: Bool = false) { requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh) }
+    func reloadData(forceRemoteRefresh: Bool = false) { requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh) }
 
     private func startBackgroundServicesIfNeeded() {
         guard !didStartBackgroundServices else { return }
@@ -4158,7 +4117,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
+    func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
         guard Self.shouldRouteToDeferredSetup(for: error) else { return false }
         enterSetupFlow(preferredInitialCheckID: .yabaiServiceRunning, entryContext: .deferredRequirement)
         return true
@@ -4256,7 +4215,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         pendingWorktreeDiscoveryReload = false
-        invalidateCommandPaletteCache()
+        commandPalette.invalidateCommandPaletteCache()
         configCache = snapshot.config
         loadShortcutSpecs()
         // Update the local device's section in place and keep already-loaded remote
@@ -4292,7 +4251,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         } else if Self.shouldRefreshVisibleWorkspaceDetail(
             selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, showingSettings: showingSettings,
             workspaceExists: selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil, mainWindowIsFocused: window?.isKeyWindow == true,
-            commandPaletteIsVisible: commandPalettePanel?.isVisible == true)
+            commandPaletteIsVisible: commandPalette.commandPalettePanel?.isVisible == true)
         {
             refreshSelection()
             logStartupProfile("apply_snapshot_selection_preserved_ready")
@@ -4585,7 +4544,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             Self.shouldRefreshVisibleWorkspaceDetail(
                 selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, showingSettings: showingSettings,
                 workspaceExists: findWorkspace(id: workspaceID) != nil, mainWindowIsFocused: window?.isKeyWindow == true,
-                commandPaletteIsVisible: commandPalettePanel?.isVisible == true)
+                commandPaletteIsVisible: commandPalette.commandPalettePanel?.isVisible == true)
         else { return }
         if visibleWorkspaceDetailRefreshWorkspaceID == workspaceID, let task = visibleWorkspaceDetailRefreshTask, !task.isCancelled { return }
 
@@ -4918,10 +4877,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func showWindowIssueModal(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         hideWindowIssueToast()
-        if commandPalettePanel?.isVisible == true {
-            commandPaletteReturnTerminalSessionID = nil
-            commandPaletteReturnApplicationProcessID = nil
-            dismissCommandPalette()
+        if commandPalette.commandPalettePanel?.isVisible == true {
+            commandPalette.commandPaletteReturnTerminalSessionID = nil
+            commandPalette.commandPaletteReturnApplicationProcessID = nil
+            commandPalette.dismissCommandPalette()
         }
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -8197,51 +8156,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         ]
     }
 
-    private func footerShortcutHint(for setting: ShortcutSetting) -> String {
+    func footerShortcutHint(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers, separator: " ") }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
         if setting.usesDigitRangeCapture { return displayShortcut(spec, separator: " ", keyText: "1-9") }
         return displayShortcut(spec, separator: " ")
-    }
-
-    private func commandPaletteFooterRow() -> NSStackView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 5
-
-        func addSep() {
-            let sep = NSTextField(labelWithString: "|")
-            sep.font = .systemFont(ofSize: 10, weight: .thin)
-            sep.textColor = .quaternaryLabelColor
-            row.addArrangedSubview(sep)
-        }
-
-        func addSegment(keys: [String], label: String) {
-            let group = NSStackView()
-            group.orientation = .horizontal
-            group.alignment = .centerY
-            group.spacing = 3
-            for key in keys { group.addArrangedSubview(RowPrimitives.shortcutChip(key)) }
-            let lbl = NSTextField(labelWithString: label)
-            lbl.font = .systemFont(ofSize: 10.5, weight: .regular)
-            lbl.textColor = .secondaryLabelColor
-            group.addArrangedSubview(lbl)
-            row.addArrangedSubview(group)
-        }
-
-        let jumpKey = footerShortcutHint(for: .guiWindowShortcut)
-        addSegment(keys: ["↑", "↓"], label: "Move")
-        addSep()
-        addSegment(keys: ["↵"], label: "Open")
-        addSep()
-        addSegment(keys: ["esc"], label: "Close")
-        addSep()
-        addSegment(keys: [jumpKey], label: "Jump")
-        addSep()
-        addSegment(keys: ["⌘ X"], label: "Dismiss alert")
-        row.addArrangedSubview(NSView())
-        return row
     }
 
     private func displayShortcut(_ spec: HotkeySpec) -> String { displayShortcut(spec, separator: "") }
@@ -9944,9 +9863,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func controlTextDidChange(_ obj: Notification) {
         guard let changedField = obj.object as? NSTextField else { return }
-        if changedField === commandPaletteSearchField {
+        if changedField === commandPalette.commandPaletteSearchField {
             logHotkeyDebug("search_change query=\(changedField.stringValue)")
-            applyCommandPaletteFilter()
+            commandPalette.applyCommandPaletteFilter()
             return
         }
         for refs in AddProjectFieldCache.shared.cache.values {
@@ -9994,21 +9913,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard let textField = control as? NSTextField else { return false }
-        if textField === commandPaletteSearchField {
+        if textField === commandPalette.commandPaletteSearchField {
             if commandSelector == #selector(NSResponder.moveDown(_:)) {
-                moveCommandPaletteSelection(delta: 1)
+                commandPalette.moveCommandPaletteSelection(delta: 1)
                 return true
             }
             if commandSelector == #selector(NSResponder.moveUp(_:)) {
-                moveCommandPaletteSelection(delta: -1)
+                commandPalette.moveCommandPaletteSelection(delta: -1)
                 return true
             }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                executeSelectedCommandPaletteItem()
+                commandPalette.executeSelectedCommandPaletteItem()
                 return true
             }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-                dismissCommandPalette()
+                commandPalette.dismissCommandPalette()
                 return true
             }
         }
@@ -10269,7 +10188,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return bestMatch?.name
     }
 
-    private func showError(_ error: Error) {
+    func showError(_ error: Error) {
         let alert = NSAlert(error: error)
         alert.runModal()
     }
@@ -10608,7 +10527,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 self.showSettings()
                 return nil
             }
-            if self.handleCommandPaletteShortcut(event: event) { return nil }
+            if self.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if self.handleSidebarArrowNavigation(event: event) { return nil }
@@ -10793,7 +10712,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
     private func shortcutCaptureKey(for keyCode: UInt16) -> String? { AppKitController.shortcutCaptureKeyMap[keyCode] }
 
-    private func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
+    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
         let filtered = flags.intersection([.command, .shift, .option, .control])
         var modifiers = Set<HotkeyModifier>()
         if filtered.contains(.command) { modifiers.insert(.cmd) }
@@ -10925,7 +10844,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logHotkeyDebug("handle id=\(id) hotkey=\(hotkey) \(hotkeyWindowStateSummary())")
         switch hotkey {
         case .toggle: toggleWindowFromHotkey()
-        case .openCommandPalette: toggleCommandPaletteFromHotkey()
+        case .openCommandPalette: commandPalette.toggleCommandPaletteFromHotkey()
         case .next: focusGlobalWindowNavigation(direction: 1)
         case .previous: focusGlobalWindowNavigation(direction: -1)
         case .openEditor: openGlobalEditorFromHotkey()
@@ -11084,7 +11003,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .success(.focused(let kind, let recentFocusIdentity, let hidesApp)):
             logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
             activeWindowShortcutProfile?.routeCompletedAt = Date()
-            rememberRecentCommandPaletteFocusIdentity(recentFocusIdentity)
+            commandPalette.rememberRecentCommandPaletteFocusIdentity(recentFocusIdentity)
             logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
             if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) } else { activeWindowShortcutProfile = nil }
@@ -11211,11 +11130,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         fputs("spaces: window_shortcut \(message)\n", stderr)
     }
 
-    private func captureHotkeyPerfContext() -> HotkeyPerfContext {
+    func captureHotkeyPerfContext() -> HotkeyPerfContext {
         HotkeyPerfContext(
             startedAt: Date(), appWasActive: NSApp.isActive, appWasHidden: NSApp.isHidden,
             mainWindowWasVisible: window?.isVisible == true && window?.isMiniaturized != true,
-            paletteWasVisible: commandPalettePanel?.isVisible == true)
+            paletteWasVisible: commandPalette.commandPalettePanel?.isVisible == true)
     }
 
     nonisolated static func commandPalettePresentationIsComplete(panelIsVisible: Bool, panelIsKey: Bool) -> Bool { panelIsVisible && panelIsKey }
@@ -11259,28 +11178,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         -> Bool
     { commandPaletteMainWindowVisibility ?? rawMainWindowIsVisible }
 
-    private func logHotkeyPerfMetric(_ metric: String, action: String, context: HotkeyPerfContext) {
+    func logHotkeyPerfMetric(_ metric: String, action: String, context: HotkeyPerfContext) {
         let target =
             "action=\(action) app_active_before=\(context.appWasActive ? 1 : 0) app_hidden_before=\(context.appWasHidden ? 1 : 0) main_visible_before=\(context.mainWindowWasVisible ? 1 : 0) palette_visible_before=\(context.paletteWasVisible ? 1 : 0)"
         logPerfMetric(metric, target: target, elapsedMS: windowShortcutElapsedMS(since: context.startedAt), success: true)
     }
 
-    private func completePendingCommandPalettePresentationIfNeeded() {
-        guard let pending = pendingCommandPalettePresentation, let panel = commandPalettePanel else { return }
-        guard Self.commandPalettePresentationIsComplete(panelIsVisible: panel.isVisible, panelIsKey: panel.isKeyWindow) else { return }
-        pendingCommandPalettePresentation = nil
-        commandPaletteMainWindowVisibility = pending.mainWindowWasVisible
-        logHotkeyDebug("present_palette end \(hotkeyWindowStateSummary())")
-        if let perfContext = pending.perfContext { logHotkeyPerfMetric("toggle_palette", action: "show", context: perfContext) }
-    }
-
-    private func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {
+    func logPerfMetric(_ metric: String, target: String, elapsedMS: Int, success: Bool, detail: String = "") {
         TerminalPerformance.logMetric(metric, target: target, elapsedMS: elapsedMS, success: success, detail: detail)
     }
 
-    private func windowShortcutElapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
+    func windowShortcutElapsedMS(since start: Date) -> Int { max(Int(Date().timeIntervalSince(start) * 1000), 0) }
 
-    private func windowShortcutIndex(for event: NSEvent) -> Int? {
+    func windowShortcutIndex(for event: NSEvent) -> Int? {
         guard let windowShortcutSpec else { return nil }
         return numberedWindowShortcutIndex(for: event, spec: windowShortcutSpec)
     }
@@ -11357,7 +11267,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             logPerfMetric(
                 "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                 detail: "direction=\(direction > 0 ? "next" : "previous") hides_app=\(hidesApp ? 1 : 0) request_id=\(requestID)")
-            if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) } else { dismissCommandPaletteForBuiltInWindowNavigation() }
+            if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) } else { commandPalette.dismissCommandPaletteForBuiltInWindowNavigation() }
         } catch {
             logPerfMetric(
                 "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
@@ -11366,18 +11276,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }
     }
 
-    private func dismissCommandPaletteForBuiltInWindowNavigation() {
-        if let panel = commandPalettePanel, panel.isVisible {
-            panel.makeFirstResponder(nil)
-            panel.orderOut(nil)
-            commandPaletteContextWorkspaceID = nil
-            commandPaletteMainWindowVisibility = nil
-            commandPaletteReturnTerminalSessionID = nil
-            commandPaletteReturnApplicationProcessID = nil
-        }
-    }
-
-    private func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
+    func hideAfterSuccessfulExternalWindowAction(_ action: ExternalWindowAction) {
         let hideDelay = Self.hideDelayAfterSuccessfulExternalWindowAction(true, action: action)
         guard hideDelay != nil || Self.shouldHideAfterSuccessfulExternalWindowAction(true, action: action) else { return }
         cancelDeferredExternalWindowHide()
@@ -11398,7 +11297,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         deferredExternalWindowHideTask = nil
     }
 
-    private func handleWindowFocusFailure(_ error: Error) async {
+    func handleWindowFocusFailure(_ error: Error) async {
         guard let spacesError = error as? WorkspaceError, case .missingTrackedWindow(let context) = spacesError else {
             handleWindowFocusError(error)
             return
@@ -11551,7 +11450,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard
             Self.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
                 appIsActive: NSApp.isActive, mainWindowIsFocused: window?.isKeyWindow == true,
-                commandPaletteIsFocused: commandPalettePanel?.isKeyWindow == true)
+                commandPaletteIsFocused: commandPalette.commandPalettePanel?.isKeyWindow == true)
         else { return nil }
         if let sessionID = lastFocusedBuiltInTerminalSessionID { return sessionID }
         return nil
@@ -11585,47 +11484,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         -> Bool
     { return returnTerminalSessionID == nil && returnApplicationProcessID != nil }
 
-    private func commandPaletteDefaultWorkspaceID() -> String? {
-        let focusedTerminalWorkspaceID: String?
-        if let terminalSessionID = focusedTerminalSessionIDForToggle() {
-            let lookupStartedAt = Date()
-            focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
-            logPerfMetric(
-                "toggle_palette_terminal_workspace_lookup", target: "session=\(terminalSessionID)",
-                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedTerminalWorkspaceID != nil)
-        } else {
-            focusedTerminalWorkspaceID = nil
-        }
-
-        let focusedWindowWorkspaceID: String?
-        if selectedWorkspaceID == nil, focusedTerminalWorkspaceID == nil {
-            let lookupStartedAt = Date()
-            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
-            logPerfMetric(
-                "toggle_palette_focused_window_workspace_lookup", target: "frontmost_window",
-                elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedWindowWorkspaceID != nil)
-        } else {
-            focusedWindowWorkspaceID = nil
-        }
-
-        return Self.preferredWorkspaceIDForCommandPalette(
-            selectedWorkspaceID: selectedWorkspaceID, focusedTerminalSessionWorkspaceID: focusedTerminalWorkspaceID,
-            focusedWindowWorkspaceID: focusedWindowWorkspaceID)
-    }
-
-    private func handleCommandPaletteShortcut(event: NSEvent) -> Bool {
-        guard commandPalettePanel?.isVisible == true else { return false }
-        if let windowIndex = windowShortcutIndex(for: event) {
-            executeCommandPaletteShortcut(index: windowIndex)
-            return true
-        }
-        if matchesCommandPaletteDismissShortcut(event: event) {
-            dismissSelectedCommandPaletteAlertsItem()
-            return true
-        }
-        return false
-    }
-
     nonisolated static func commandPaletteDismissShortcutMatches(
         charactersIgnoringModifiers: String?, modifiers: Set<HotkeyModifier>, leaderModifiers: Set<HotkeyModifier>
     ) -> Bool {
@@ -11633,41 +11491,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return modifiers == leaderModifiers
     }
 
-    private func matchesCommandPaletteDismissShortcut(event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        return Self.commandPaletteDismissShortcutMatches(
-            charactersIgnoringModifiers: event.charactersIgnoringModifiers, modifiers: shortcutModifiers(from: flags),
-            leaderModifiers: shortcutLeaderModifiers)
-    }
-
-    private func executeCommandPaletteShortcut(index: Int) {
-        let row = index - 1
-        guard commandPaletteFilteredItems.indices.contains(row) else {
-            NSSound.beep()
-            return
-        }
-        commandPaletteSelectedIndex = row
-        commandPaletteTableView?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        commandPaletteTableView?.scrollRowToVisible(row)
-        executeSelectedCommandPaletteItem()
-    }
-
-    private func dismissSelectedCommandPaletteAlertsItem() {
-        guard commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) else {
-            NSSound.beep()
-            return
-        }
-        let item = commandPaletteFilteredItems[commandPaletteSelectedIndex]
-        guard let attentionID = item.alertsAttentionID else {
-            NSSound.beep()
-            return
-        }
-        dismissAlertsAttentionItem(attentionID)
-        commandPaletteItems.removeAll { $0.alertsAttentionID == attentionID }
-        applyCommandPaletteFilter()
-    }
-
-    private func toggleWindowFromHotkey() {
+    func toggleWindowFromHotkey() {
         guard let window else { return }
         let toggleStartedAt = Date()
         let perfContext = captureHotkeyPerfContext()
@@ -11752,7 +11576,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil, source: selectionRefreshSource)
     }
 
-    private func revealTargetedHotkeyWindow(_ window: NSWindow) {
+    func revealTargetedHotkeyWindow(_ window: NSWindow) {
         if window.isMiniaturized { window.deminiaturize(nil) }
         if Self.shouldFocusVisibleTargetedHotkeyWindow(
             appIsActive: NSApp.isActive, windowIsVisible: window.isVisible, windowIsMiniaturized: window.isMiniaturized)
@@ -12432,7 +12256,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func windowDidBecomeKey(_ notification: Notification) {
         if let focusedWindow = notification.object as? NSWindow {
             logHotkeyDebug("window_did_become_key class=\(type(of: focusedWindow)) title=\(focusedWindow.title) \(hotkeyWindowStateSummary())")
-            if focusedWindow === commandPalettePanel { completePendingCommandPalettePresentationIfNeeded() }
+            if focusedWindow === commandPalette.commandPalettePanel { commandPalette.completePendingCommandPalettePresentationIfNeeded() }
         }
         guard !hasAppliedSplitViewWidth else { return }
         hasAppliedSplitViewWidth = true
@@ -12442,17 +12266,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     public func windowDidResignKey(_ notification: Notification) {
         guard let resignedWindow = notification.object as? NSWindow else { return }
         logHotkeyDebug("window_did_resign_key class=\(type(of: resignedWindow)) title=\(resignedWindow.title) \(hotkeyWindowStateSummary())")
-        if resignedWindow === commandPalettePanel, !isDismissingCommandPalette { dismissCommandPalette() }
+        if resignedWindow === commandPalette.commandPalettePanel, !commandPalette.isDismissingCommandPalette { commandPalette.dismissCommandPalette() }
     }
 
     @objc public func numberOfRows(in tableView: NSTableView) -> Int {
-        guard tableView === commandPaletteTableView else { return 0 }
-        return commandPaletteFilteredItems.count
+        guard tableView === commandPalette.commandPaletteTableView else { return 0 }
+        return commandPalette.commandPaletteFilteredItems.count
     }
 
     @objc public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard tableView === commandPaletteTableView else { return nil }
-        guard commandPaletteFilteredItems.indices.contains(row) else { return nil }
+        guard tableView === commandPalette.commandPaletteTableView else { return nil }
+        guard commandPalette.commandPaletteFilteredItems.indices.contains(row) else { return nil }
 
         let identifier = NSUserInterfaceItemIdentifier("command-palette-cell")
         let cell =
@@ -12464,19 +12288,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 return cell
             }()
 
-        let item = commandPaletteFilteredItems[row]
+        let item = commandPalette.commandPaletteFilteredItems[row]
         let shortcutText = row < 10 ? windowShortcutBadgeText(index: row + 1) : nil
-        cell.update(item: item, isSelected: row == commandPaletteSelectedIndex, shortcutText: shortcutText) { [weak self] in
-            self?.commandPaletteSelectedIndex = row
-            self?.executeSelectedCommandPaletteItem()
+        cell.update(item: item, isSelected: row == commandPalette.commandPaletteSelectedIndex, shortcutText: shortcutText) { [weak self] in
+            self?.commandPalette.commandPaletteSelectedIndex = row
+            self?.commandPalette.executeSelectedCommandPaletteItem()
         }
         return cell
     }
 
     @objc public func tableViewSelectionDidChange(_ notification: Notification) {
-        guard let tableView = notification.object as? NSTableView, tableView === commandPaletteTableView else { return }
+        guard let tableView = notification.object as? NSTableView, tableView === commandPalette.commandPaletteTableView else { return }
         guard tableView.selectedRow >= 0 else { return }
-        commandPaletteSelectedIndex = tableView.selectedRow
+        commandPalette.commandPaletteSelectedIndex = tableView.selectedRow
         tableView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<tableView.numberOfRows), columnIndexes: IndexSet(integer: 0))
     }
 
@@ -13093,6 +12917,10 @@ extension AppKitController {
         return items
     }
 
+    func loadCommandPaletteItemsSnapshot() async -> Result<[CommandPaletteItem], Error> {
+        await Self.commandPaletteItemsSnapshot(alertsGroups: alertsGroups)
+    }
+
     nonisolated private static func commandPaletteItemsSnapshot(alertsGroups: [AlertsGroup]) async -> Result<[CommandPaletteItem], Error> {
         await Task.detached(priority: .userInitiated) {
             do {
@@ -13103,425 +12931,6 @@ extension AppKitController {
         }.value
     }
 
-    private func toggleCommandPaletteFromHotkey() {
-        let perfContext = captureHotkeyPerfContext()
-        logHotkeyDebug("toggle_palette begin \(hotkeyWindowStateSummary())")
-        guard setupManager == nil else {
-            logHotkeyDebug("toggle_palette reroute_setup_manager")
-            toggleWindowFromHotkey()
-            return
-        }
-        if let panel = commandPalettePanel,
-            Self.shouldDismissCommandPaletteForToggle(panelIsVisible: panel.isVisible, panelIsFocused: panel.isKeyWindow)
-        {
-            logHotkeyDebug("toggle_palette dismiss_visible_panel")
-            dismissCommandPalette(perfContext: perfContext)
-            return
-        }
-        if let panel = commandPalettePanel, panel.isVisible {
-            logHotkeyDebug("toggle_palette refocus_visible_panel")
-            revealTargetedHotkeyWindow(panel)
-            if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
-            pendingCommandPalettePresentation = PendingCommandPalettePresentation(
-                perfContext: perfContext, mainWindowWasVisible: rawMainWindowVisibility())
-            completePendingCommandPalettePresentationIfNeeded()
-            return
-        }
-        presentCommandPalette(perfContext: perfContext)
-    }
-
-    private func presentCommandPalette(perfContext: HotkeyPerfContext? = nil) {
-        let panel = ensureCommandPalettePanel()
-        let mainWindowWasVisible = rawMainWindowVisibility()
-        logHotkeyDebug("present_palette begin \(hotkeyWindowStateSummary())")
-        let focusedTerminalSessionID = focusedTerminalSessionIDForToggle()
-        let returnApplicationProcessID = Self.returnApplicationProcessIDForAppToggle(
-            frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
-            currentProcessID: ProcessInfo.processInfo.processIdentifier)
-        commandPaletteReturnTerminalSessionID = focusedTerminalSessionID
-        commandPaletteReturnApplicationProcessID = focusedTerminalSessionID == nil ? returnApplicationProcessID : nil
-        let contextLookupStartedAt = Date()
-        commandPaletteContextWorkspaceID = commandPaletteDefaultWorkspaceID()
-        logPerfMetric(
-            "toggle_palette_context_workspace", target: "workspace=\(commandPaletteContextWorkspaceID ?? "nil")",
-            elapsedMS: windowShortcutElapsedMS(since: contextLookupStartedAt), success: true)
-        panel.center()
-        let revealStartedAt = Date()
-        revealTargetedHotkeyWindow(panel)
-        logPerfMetric("toggle_palette_reveal_target", target: "palette", elapsedMS: windowShortcutElapsedMS(since: revealStartedAt), success: true)
-        commandPaletteSearchField?.stringValue = ""
-        commandPaletteSelectedIndex = 0
-        if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
-        let filterStartedAt = Date()
-        applyCommandPaletteFilter()
-        logPerfMetric(
-            "toggle_palette_apply_filter", target: "query=<empty>", elapsedMS: windowShortcutElapsedMS(since: filterStartedAt), success: true)
-        if commandPaletteItems.isEmpty {
-            reloadCommandPaletteItems()
-        } else if commandPaletteNeedsReload, commandPaletteLoadTask == nil {
-            reloadCommandPaletteItems()
-        }
-        pendingCommandPalettePresentation = PendingCommandPalettePresentation(perfContext: perfContext, mainWindowWasVisible: mainWindowWasVisible)
-        completePendingCommandPalettePresentationIfNeeded()
-        Task { @MainActor [weak self] in
-            await Task.yield()
-            self?.completePendingCommandPalettePresentationIfNeeded()
-        }
-    }
-
-    private func dismissCommandPalette(perfContext: HotkeyPerfContext? = nil) {
-        guard let panel = commandPalettePanel else { return }
-        guard !isDismissingCommandPalette else { return }
-        isDismissingCommandPalette = true
-        logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(hotkeyWindowStateSummary())")
-        panel.makeFirstResponder(nil)
-        panel.orderOut(nil)
-        commandPaletteContextWorkspaceID = nil
-        if Self.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: commandPaletteReturnTerminalSessionID),
-            let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
-        {
-            focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
-        } else if Self.shouldRestoreReturnApplicationAfterPaletteHide(
-            returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID),
-            let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
-        {
-            activateReturnApplication(processIdentifier: returnApplicationProcessID)
-        } else if rawMainWindowVisibility(), let window {
-            revealTargetedHotkeyWindow(window)
-        }
-        isDismissingCommandPalette = false
-        logHotkeyDebug("dismiss_palette end \(hotkeyWindowStateSummary())")
-        commandPaletteMainWindowVisibility = nil
-        commandPaletteReturnTerminalSessionID = nil
-        commandPaletteReturnApplicationProcessID = nil
-        if let perfContext { logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
-    }
-
-    private func ensureCommandPalettePanel() -> NSPanel {
-        if let commandPalettePanel { return commandPalettePanel }
-
-        let panel = CommandPalettePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 470), styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.isFloatingPanel = true
-        panel.becomesKeyOnlyIfNeeded = false
-        panel.hidesOnDeactivate = false
-        panel.level = .floating
-        panel.isMovableByWindowBackground = true
-        panel.collectionBehavior = [.moveToActiveSpace]
-        panel.backgroundColor = .clear
-        panel.isReleasedWhenClosed = false
-        panel.delegate = self
-        panel.setAccessibilityIdentifier("spaces-command-palette")
-
-        if let closeButton = panel.standardWindowButton(.closeButton) { closeButton.isHidden = true }
-        if let miniButton = panel.standardWindowButton(.miniaturizeButton) { miniButton.isHidden = true }
-        if let zoomButton = panel.standardWindowButton(.zoomButton) { zoomButton.isHidden = true }
-
-        let root = ColoredBackgroundView()
-        root.fillColor = Theme.paletteSurface
-        root.cornerRadius = 12
-        root.translatesAutoresizingMaskIntoConstraints = false
-        root.wantsLayer = true
-        root.layer?.borderWidth = 1
-        root.layer?.borderColor = Theme.border.cgColor
-
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .vertical
-        headerRow.alignment = .leading
-        headerRow.spacing = 2
-        headerRow.translatesAutoresizingMaskIntoConstraints = false
-        headerRow.setContentHuggingPriority(.required, for: .vertical)
-        headerRow.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let brandRow = NSStackView()
-        brandRow.orientation = .horizontal
-        brandRow.alignment = .centerY
-        brandRow.spacing = 7
-        brandRow.translatesAutoresizingMaskIntoConstraints = false
-
-        let titleIconView = NSImageView()
-        if let appIcon = NSApp.applicationIconImage.copy() as? NSImage {
-            appIcon.size = NSSize(width: 18, height: 18)
-            titleIconView.image = appIcon
-        } else {
-            titleIconView.image = NSImage(systemSymbolName: "square.grid.2x2.fill", accessibilityDescription: "Spaces")
-            titleIconView.contentTintColor = Theme.accentStrong
-        }
-        titleIconView.translatesAutoresizingMaskIntoConstraints = false
-        titleIconView.setContentHuggingPriority(.required, for: .horizontal)
-        titleIconView.setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([
-            titleIconView.widthAnchor.constraint(equalToConstant: 18), titleIconView.heightAnchor.constraint(equalToConstant: 18),
-        ])
-
-        let titleLabel = NSTextField(labelWithString: "Spaces")
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
-        titleLabel.textColor = Theme.text
-        brandRow.addArrangedSubview(titleIconView)
-        brandRow.addArrangedSubview(titleLabel)
-        headerRow.addArrangedSubview(brandRow)
-
-        let searchField = CommandPaletteSearchField()
-        searchField.placeholderString = "fuzzy search workspaces, targets, and details"
-        searchField.font = .systemFont(ofSize: 13)
-        searchField.translatesAutoresizingMaskIntoConstraints = false
-        searchField.delegate = self
-        searchField.focusRingType = .default
-        searchField.setAccessibilityIdentifier("command-palette-search")
-        searchField.controlSize = .large
-        searchField.heightAnchor.constraint(equalToConstant: 30).isActive = true
-        searchField.setContentHuggingPriority(.required, for: .vertical)
-        searchField.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let countBadge = ColoredBackgroundView()
-        countBadge.fillColor = Theme.chipBg
-        countBadge.cornerRadius = 4
-        countBadge.translatesAutoresizingMaskIntoConstraints = false
-
-        let countLabel = NSTextField(labelWithString: "")
-        countLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
-        countLabel.textColor = Theme.muted
-        countLabel.translatesAutoresizingMaskIntoConstraints = false
-        countBadge.addSubview(countLabel)
-        NSLayoutConstraint.activate([
-            countLabel.leadingAnchor.constraint(equalTo: countBadge.leadingAnchor, constant: 5),
-            countLabel.trailingAnchor.constraint(equalTo: countBadge.trailingAnchor, constant: -5),
-            countLabel.topAnchor.constraint(equalTo: countBadge.topAnchor, constant: 2),
-            countLabel.bottomAnchor.constraint(equalTo: countBadge.bottomAnchor, constant: -2),
-        ])
-        searchField.addSubview(countBadge)
-        NSLayoutConstraint.activate([
-            countBadge.trailingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: -8),
-            countBadge.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-        ])
-
-        let divider = NSBox()
-        divider.boxType = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.setContentHuggingPriority(.required, for: .vertical)
-        divider.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let footerSeparator = NSBox()
-        footerSeparator.boxType = .separator
-        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
-        footerSeparator.setContentHuggingPriority(.required, for: .vertical)
-        footerSeparator.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let footerRow = commandPaletteFooterRow()
-        footerRow.translatesAutoresizingMaskIntoConstraints = false
-        footerRow.setContentHuggingPriority(.required, for: .vertical)
-        footerRow.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let tableView = NSTableView()
-        let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("command-palette-column"))
-        tableColumn.resizingMask = .autoresizingMask
-        tableView.addTableColumn(tableColumn)
-        tableView.headerView = nil
-        tableView.usesAlternatingRowBackgroundColors = false
-        tableView.backgroundColor = .clear
-        tableView.selectionHighlightStyle = .none
-        tableView.focusRingType = .none
-        tableView.rowHeight = 42
-        tableView.intercellSpacing = NSSize(width: 0, height: 2)
-        tableView.allowsMultipleSelection = false
-        tableView.allowsEmptySelection = false
-        tableView.delegate = self
-        tableView.dataSource = self
-        tableView.translatesAutoresizingMaskIntoConstraints = false
-
-        let emptyLabel = NSTextField(labelWithString: "No matching targets")
-        emptyLabel.font = .systemFont(ofSize: 12)
-        emptyLabel.textColor = Theme.muted
-        emptyLabel.isHidden = true
-        emptyLabel.alignment = .center
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-        emptyLabel.setContentHuggingPriority(.required, for: .vertical)
-        emptyLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let loadingIndicator = NSProgressIndicator()
-        loadingIndicator.style = .spinning
-        loadingIndicator.controlSize = .regular
-        loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
-        loadingIndicator.isDisplayedWhenStopped = false
-        loadingIndicator.setContentHuggingPriority(.required, for: .vertical)
-        loadingIndicator.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let scrollView = NSScrollView()
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .noBorder
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = tableView
-
-        content.addSubview(headerRow)
-        content.addSubview(searchField)
-        content.addSubview(divider)
-        content.addSubview(scrollView)
-        content.addSubview(emptyLabel)
-        content.addSubview(loadingIndicator)
-        content.addSubview(footerSeparator)
-        content.addSubview(footerRow)
-
-        root.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: root.leadingAnchor), content.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            content.topAnchor.constraint(equalTo: root.topAnchor), content.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            headerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            headerRow.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -14),
-            headerRow.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
-
-            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            searchField.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 10),
-
-            divider.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            divider.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            divider.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
-
-            footerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            footerRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
-
-            footerSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor, constant: -6),
-
-            scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
-            scrollView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor, constant: -8),
-
-            emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-
-            loadingIndicator.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
-            loadingIndicator.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-
-            tableView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
-        ])
-
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(root)
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            root.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            root.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-            root.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
-        ])
-
-        panel.contentView = container
-        commandPalettePanel = panel
-        commandPaletteSearchField = searchField
-        commandPaletteTableView = tableView
-        commandPaletteLoadingIndicator = loadingIndicator
-        commandPaletteEmptyLabel = emptyLabel
-        commandPaletteSummaryLabel = countLabel
-        logHotkeyDebug("ensure_palette_panel created")
-        return panel
-    }
-
-    private func reloadCommandPaletteItems() {
-        commandPaletteLoadTask?.cancel()
-        setCommandPaletteLoading(true)
-        logHotkeyDebug("reload_palette_items begin")
-        commandPaletteLoadTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await Self.commandPaletteItemsSnapshot(alertsGroups: self.alertsGroups)
-            guard !Task.isCancelled else { return }
-            self.commandPaletteLoadTask = nil
-            self.setCommandPaletteLoading(false)
-            switch result {
-            case .success(let items):
-                self.logHotkeyDebug("reload_palette_items success count=\(items.count)")
-                self.commandPaletteNeedsReload = false
-                self.commandPaletteItems = self.filteredCommandPaletteItems(items)
-                self.applyCommandPaletteFilter()
-            case .failure(let error):
-                self.logHotkeyDebug("reload_palette_items failure error=\(error)")
-                if !self.handleDeferredSetupRequirementIfNeeded(error) {
-                    self.dismissCommandPalette()
-                    self.showError(error)
-                }
-            }
-        }
-    }
-
-    private func setCommandPaletteLoading(_ loading: Bool) {
-        logHotkeyDebug("set_palette_loading loading=\(loading ? 1 : 0)")
-        commandPaletteLoadingIndicator?.isHidden = !loading
-        if loading { commandPaletteLoadingIndicator?.startAnimation(nil) } else { commandPaletteLoadingIndicator?.stopAnimation(nil) }
-        commandPaletteEmptyLabel?.isHidden = loading
-        commandPaletteTableView?.isHidden = loading && commandPaletteItems.isEmpty
-    }
-
-    private func applyCommandPaletteFilter() {
-        let query = commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        commandPaletteFilteredItems = Self.visibleCommandPaletteItems(
-            allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
-            recentFocusIdentities: recentCommandPaletteFocusIdentities)
-        commandPaletteSelectedIndex = commandPaletteFilteredItems.isEmpty ? 0 : 0
-        logHotkeyDebug(
-            "apply_palette_filter query=\(query.isEmpty ? "<empty>" : query) all=\(commandPaletteItems.count) filtered=\(commandPaletteFilteredItems.count) context_workspace=\(commandPaletteContextWorkspaceID ?? "nil")"
-        )
-        rebuildCommandPaletteRows()
-    }
-
-    private func rebuildCommandPaletteRows() {
-        guard let tableView = commandPaletteTableView else { return }
-        tableView.isHidden = commandPaletteFilteredItems.isEmpty
-        let showEmptyState =
-            commandPaletteFilteredItems.isEmpty
-            && !(commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-        commandPaletteEmptyLabel?.isHidden = !showEmptyState
-        logHotkeyDebug("rebuild_palette_rows count=\(commandPaletteFilteredItems.count) selected=\(commandPaletteSelectedIndex)")
-        tableView.reloadData()
-        if commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) {
-            tableView.selectRowIndexes(IndexSet(integer: commandPaletteSelectedIndex), byExtendingSelection: false)
-            tableView.scrollRowToVisible(commandPaletteSelectedIndex)
-        } else {
-            tableView.deselectAll(nil)
-        }
-        logHotkeyDebug("rebuild_palette_rows_done rows=\(tableView.numberOfRows) selected_row=\(tableView.selectedRow)")
-        let count = commandPaletteFilteredItems.count
-        commandPaletteSummaryLabel?.stringValue = count > 0 ? "\(count)" : ""
-        commandPaletteSummaryLabel?.superview?.isHidden = count == 0
-    }
-
-    private func moveCommandPaletteSelection(delta: Int) {
-        guard !commandPaletteFilteredItems.isEmpty else { return }
-        let nextIndex = min(max(commandPaletteSelectedIndex + delta, 0), commandPaletteFilteredItems.count - 1)
-        guard nextIndex != commandPaletteSelectedIndex else { return }
-        commandPaletteSelectedIndex = nextIndex
-        commandPaletteTableView?.selectRowIndexes(IndexSet(integer: nextIndex), byExtendingSelection: false)
-        commandPaletteTableView?.scrollRowToVisible(nextIndex)
-    }
-
-    private func executeSelectedCommandPaletteItem() {
-        guard commandPaletteFilteredItems.indices.contains(commandPaletteSelectedIndex) else {
-            NSSound.beep()
-            return
-        }
-        let item = commandPaletteFilteredItems[commandPaletteSelectedIndex]
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await Self.performWindowFocusSnapshot(item.focusRequest)
-            switch result {
-            case .success(let action):
-                if case .focus(_) = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
-                dismissCommandPalette()
-                reloadData()
-                hideAfterSuccessfulExternalWindowAction(action)
-            case .failure(let error): await handleWindowFocusFailure(error)
-            }
-        }
-    }
 }
 
 extension String {
