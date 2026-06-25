@@ -95,7 +95,7 @@ import workspacecore
                     guard row.isEditing else { return nil }
                     return (row.identity(from: ports[safe: index]), row.formSnapshot())
                 }) : [:]
-        clearRowsStack()
+        rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
         for (index, port) in ports.enumerated() {
             let row = PortRowView(port: port, reservedPort: collapsedDisplayPorts[safe: index] ?? nil)
@@ -111,14 +111,6 @@ import workspacecore
         countLabel.stringValue = "\(ports.count)"
         _ = animated
     }
-
-    private func clearRowsStack() {
-        for arrangedSubview in rowsStack.arrangedSubviews {
-            rowsStack.removeArrangedSubview(arrangedSubview)
-            arrangedSubview.removeFromSuperview()
-        }
-    }
-
     // MARK: Row callbacks
 
     private func handleBeginEdit(row: PortRowView) { row.enterEditing(prefill: nil, animated: true) }

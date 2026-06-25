@@ -103,7 +103,7 @@ import workspacecore
                     guard row.isEditing else { return nil }
                     return (row.identity(from: sessions[safe: index]), row.formSnapshot())
                 }) : [:]
-        clearRowsStack()
+        rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
         for (index, session) in sessions.enumerated() {
             let collapsedDisplayURL = collapsedDisplayURLs[safe: index] ?? session.url
@@ -122,14 +122,6 @@ import workspacecore
         countLabel.stringValue = "\(sessions.count)"
         _ = animated
     }
-
-    private func clearRowsStack() {
-        for arrangedSubview in rowsStack.arrangedSubviews {
-            rowsStack.removeArrangedSubview(arrangedSubview)
-            arrangedSubview.removeFromSuperview()
-        }
-    }
-
     // MARK: Row callbacks
 
     private func handleBeginEdit(row: BrowserSessionRowView) { row.enterEditing(prefill: nil, animated: true) }

@@ -185,7 +185,7 @@ import workspacecore
                     return (row.identity(from: launchers[safe: index]), row.formSnapshot())
                 }) : [:]
 
-        clearRowsStack()
+        rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
 
         let entries = displayEntries()
@@ -225,14 +225,6 @@ import workspacecore
         countLabel.stringValue = "\(entries.count)"
         _ = animated
     }
-
-    private func clearRowsStack() {
-        for arrangedSubview in rowsStack.arrangedSubviews {
-            rowsStack.removeArrangedSubview(arrangedSubview)
-            arrangedSubview.removeFromSuperview()
-        }
-    }
-
     // MARK: Row callbacks
 
     private func handleBeginEdit(row: AgentLauncherRowView) { row.enterEditing(prefill: nil, animated: true) }

@@ -153,7 +153,7 @@ import workspacecore
                     return (row.identity(from: processes[safe: index]), row.formSnapshot())
                 }) : [:]
 
-        clearRowsStack()
+        rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
 
         for (_, process) in processes.enumerated() {
@@ -188,14 +188,6 @@ import workspacecore
         countLabel.stringValue = "\(processes.count + supplementalRows.count)"
         _ = animated  // animation polish deferred to 2b.2 — see prototype notes
     }
-
-    private func clearRowsStack() {
-        for arrangedSubview in rowsStack.arrangedSubviews {
-            rowsStack.removeArrangedSubview(arrangedSubview)
-            arrangedSubview.removeFromSuperview()
-        }
-    }
-
     // MARK: Row callbacks
 
     private func handleBeginEdit(row: ProcessRowView) { row.enterEditing(prefill: nil, animated: true) }

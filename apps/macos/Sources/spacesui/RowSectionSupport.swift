@@ -68,3 +68,14 @@ extension Array {
     /// Bounds-checked subscript shared by the row-section views.
     subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }
+
+extension NSStackView {
+    /// Removes and detaches every arranged subview. Shared by the row sections
+    /// when they re-render their rows stack.
+    func removeAllArrangedSubviews() {
+        for arrangedSubview in arrangedSubviews {
+            removeArrangedSubview(arrangedSubview)
+            arrangedSubview.removeFromSuperview()
+        }
+    }
+}
