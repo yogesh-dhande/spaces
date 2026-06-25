@@ -226,7 +226,7 @@ public final class WorkspaceOrchestrator {
         case unavailable
     }
 
-    private struct WorkspaceProcessFocusOutcome {
+    struct WorkspaceProcessFocusOutcome {
         let focused: Bool
         let route: String
         let focusedExistingWindow: Bool
@@ -247,14 +247,14 @@ public final class WorkspaceOrchestrator {
         var lastUsedAt: Date
     }
 
-    private enum WorkspaceNavigationTarget {
+    enum WorkspaceNavigationTarget {
         case agent(AgentWindowRecord)
         case browser(WindowRecord)
         case process(RunningProcessRecord)
         case window(WindowRecord)
     }
 
-    private enum FocusableWorkspaceTarget {
+    enum FocusableWorkspaceTarget {
         case agent(AgentWindowRecord)
         case browserSession(targetURL: String)
         case configuredProcess(name: String)
@@ -268,7 +268,7 @@ public final class WorkspaceOrchestrator {
     let chrome: ChromeAdapter
     let browserWindowScanDebounceInterval: TimeInterval
     let currentDate: () -> Date
-    private let notificationDeliverer: (String, String, String?) -> Void
+    let notificationDeliverer: (String, String, String?) -> Void
     let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
     let builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
@@ -478,26 +478,6 @@ public final class WorkspaceOrchestrator {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
         let appConfig = try store.appConfig()
         _ = try PortAllocator(store: store).syncPorts(workspaceID: workspace.id, definitions: existing.ports, range: appConfig.portRange)
-    }
-
-    public func updateRunningWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate], restartChangedCommands: Bool) throws {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        guard var existing = try loadWorkspaceSettings(project: project, workspace: workspace) else {
-            throw WorkspaceError.missingProject(dir: project.dir)
-        }
-        let normalizedProcesses = normalizeProcessTemplateIDs(previous: existing.processes, updated: processes)
-        try validateProcessTemplates(normalizedProcesses)
-        try validateWorkspaceFocusNames(
-            workspaceID: workspace.id, processes: normalizedProcesses, browserSessions: existing.browserSessions,
-            agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
-        if workspace.isRunning {
-            try applyRunningWorkspaceProcessEdits(
-                project: project, workspace: workspace, previous: existing.processes, updated: normalizedProcesses,
-                restartChangedCommands: restartChangedCommands)
-        }
-        existing.processes = normalizedProcesses
-        try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
-        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
     }
 
     public func updateWorkspaceNotes(workspaceID: String, notes: String?) throws {
@@ -1418,11 +1398,6 @@ public final class WorkspaceOrchestrator {
             missingConfiguredProcessCount: missingConfiguredProcessCount, missingConfiguredBrowserSessionCount: missingConfiguredBrowserSessionCount)
     }
 
-    // Configured-process matching uses the raw configured name directly.
-    private func configuredProcessMatchKey(name: String?) -> String { name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
-
-    private func runningProcessMatchKey(name: String) -> String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
-
     private func missingRuntimeRecordCount(expectedKeys: [String], actualKeys: [String]) -> Int {
         var actualCounts: [String: Int] = [:]
         for key in actualKeys { actualCounts[key, default: 0] += 1 }
@@ -1451,178 +1426,7 @@ public final class WorkspaceOrchestrator {
         return try operation()
     }
 
-    public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] { try store.runningProcesses(workspaceID: workspaceID) }
-    public func checkAndUpdateProcessStatuses() throws -> Bool {
-        var didUpdate = false
-        let allProjects = try store.projects()
-        for project in allProjects {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-            for workspace in workspaces { if try refreshProcessStatuses(workspaceID: workspace.id, project: project) { didUpdate = true } }
-        }
-        if try reconcileTerminalForegroundAgentClassifications() { didUpdate = true }
-        return didUpdate
-    }
 
-    @discardableResult public func reconcileTerminalForegroundAgentClassifications() throws -> Bool {
-        let liveSessions = try TerminalSessionCatalog.listLiveSessions()
-        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
-        var didMutate = false
-        for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
-            let sessionID = session.sessionID
-            let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
-            if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
-            guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
-            if try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) != nil { continue }
-            if let detectedAgent = adHocDetectedForegroundAgent(from: session.runtimeState) {
-                try insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
-                didMutate = true
-            }
-        }
-        if try reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
-        return didMutate
-    }
-
-    private func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (label: String, displayCommand: String?)? {
-        guard let kind = runtimeState.foregroundDetectedAgentKind else { return nil }
-        let label = runtimeState.foregroundDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayCommand = runtimeState.foregroundDisplayCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (label.flatMap { $0.isEmpty ? nil : $0 } ?? kind.displayLabel, displayCommand.flatMap { $0.isEmpty ? nil : $0 })
-    }
-
-    private func insertAdHocDetectedAgent(detectedAgent: (label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String)
-        throws
-    {
-        let terminalWindow = try store.windows(workspaceID: workspace.id).first { window in
-            window.role == "terminal" && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
-        }
-        let terminalTarget = TerminalTargetRecord(runtimeTargetID: terminalWindow?.id, windowID: terminalWindow?.windowID, trackingID: sessionID)
-        let now = nowISO8601()
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label)
-        let record = AgentWindowRecord(
-            id: adHocDetectedAgentID(sessionID: sessionID), workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
-            runtimeTargetID: terminalWindow?.id, terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil,
-            status: .idle, createdAt: now, updatedAt: now)
-        let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id) + [record]
-        try validateWorkspaceFocusNames(
-            workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id), agentWindows: nextAgentWindows)
-
-        try store.upsertAgentWindow(record)
-        _ = try updateAdHocAgentRuntimeTargetDetail(record, displayCommand: detectedAgent.displayCommand)
-    }
-
-    private func adHocDetectedAgentID(sessionID: String) -> String { "terminal-agent-\(sessionID)" }
-
-    @discardableResult private func reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
-        var didMutate = false
-        for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
-                for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
-                    guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
-                    guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID), launchConfiguration.kind == .shell
-                    else { continue }
-                    guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
-                        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
-                    else { continue }
-                    if agent.status != .done {
-                        try store.updateAgentWindowStatus(id: agent.id, status: .done, updatedAt: nowISO8601())
-                        didMutate = true
-                    }
-                }
-            }
-        }
-        return didMutate
-    }
-
-    @discardableResult private func updateAdHocAgentRuntimeTargetDetail(_ agent: AgentWindowRecord, displayCommand: String?) throws -> Bool {
-        let targetID = try store.agentSessionRuntimeTargetID(id: agent.id) ?? agent.runtimeTargetID
-        guard let targetID else { return false }
-        guard let window = try store.windows(workspaceID: agent.workspaceID).first(where: { $0.id == targetID }) else { return false }
-        let nextDetail = adHocAgentRuntimeDetail(label: agent.label, displayCommand: displayCommand)
-        guard window.detail != nextDetail else { return false }
-        try store.upsert(
-            window: WindowRecord(
-                id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: nextDetail, targetURL: window.targetURL,
-                windowID: window.windowID, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
-                role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
-        return true
-    }
-
-    private func adHocAgentRuntimeDetail(label: String?, displayCommand: String?) -> String? {
-        guard let command = displayCommand?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else { return nil }
-        let normalizedCommand = command.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        let normalizedLabel = (label ?? "").trimmingCharacters(in: .whitespacesAndNewlines).folding(
-            options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-        guard normalizedCommand != normalizedLabel else { return nil }
-        return command
-    }
-
-    private func preservesForegroundAgentCommandDetail(_ window: WindowRecord) -> Bool {
-        guard window.role == "terminal", terminalHost(for: window.app) == .spaces, let sessionID = terminalSessionID(for: window) else {
-            return false
-        }
-        guard terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind == .shell else { return false }
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
-            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState.foregroundDetectedAgentKind != nil
-        else { return false }
-        return ((try? store.agentWindows(workspaceID: window.workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
-    }
-
-    @discardableResult private func refreshProcessStatuses(workspaceID: String, ignoreStartupGracePeriod: Bool = false) throws -> Bool {
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        return try refreshProcessStatuses(
-            workspaceID: workspaceID, project: project, workspace: workspace, ignoreStartupGracePeriod: ignoreStartupGracePeriod)
-    }
-
-    @discardableResult private func refreshProcessStatuses(
-        workspaceID: String, project: ProjectRecord, workspace: WorkspaceRecord? = nil, ignoreStartupGracePeriod: Bool = false
-    ) throws -> Bool {
-        let workspace = try workspace ?? resolveWorkspace(id: workspaceID).1
-        let processes = try store.runningProcesses(workspaceID: workspace.id)
-        let now = currentDate()
-        let formatter = ISO8601DateFormatter()
-        var didUpdate = false
-        for process in processes where process.status == .running {
-            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
-                now.timeIntervalSince(startedAt) < 10.0
-            {
-                continue
-            }
-            if let runtimeState = resolvedBuiltInSessionRuntimeState(for: process), runtimeState.state != .running {
-                let updatedProcess = RunningProcessRecord(
-                    id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                    terminalNativeID: process.terminalNativeID, pid: runtimeState.childPID.map(Int.init) ?? process.pid, status: .exited,
-                    logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                    exitedAt: runtimeState.exitedAt ?? nowISO8601())
-                try store.upsert(runningProcess: updatedProcess)
-                didUpdate = true
-                try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
-                continue
-            }
-            guard let pid = resolvedRuntimePID(for: process) else { continue }
-            if process.pid != pid {
-                let updatedProcess = RunningProcessRecord(
-                    id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
-                    terminalNativeID: process.terminalNativeID, pid: pid, status: process.status, logPath: process.logPath,
-                    lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
-                try store.upsert(runningProcess: updatedProcess)
-                didUpdate = true
-            }
-            if !isProcessAlive(pid: pid) {
-                let updatedProcess = RunningProcessRecord(
-                    id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
-                    terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID, pid: process.pid, status: .exited,
-                    logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
-                try store.upsert(runningProcess: updatedProcess)
-                didUpdate = true
-                try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
-            }
-        }
-        return didUpdate
-    }
     #if canImport(UserNotifications)
         private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
             guard NSClassFromString("XCTest") == nil else { return }
@@ -1720,95 +1524,6 @@ public final class WorkspaceOrchestrator {
 
         public static func prepareUserNotificationAuthorization() {}
     #endif
-    private func handleProcessExit(workspaceID: String, process: RunningProcessRecord, project: ProjectRecord, workspace: WorkspaceRecord) throws {
-        // Find the process template to get the on-exit behavior
-        guard let config = try loadWorkspaceSettings(project: project, workspace: workspace) else { return }
-        guard
-            let processTemplate = config.processes.first(where: { template in
-                if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty {
-                    return template.id == templateID
-                }
-                return processKey(for: template) == process.templateName
-            })
-        else { return }
-        switch processTemplate.onExit {
-        case .none:
-            // Do nothing - just log the exit
-            break
-        case .notify: notificationDeliverer("Process Exited", "Process '\(process.templateName)' has exited", nil)
-        case .restart:
-            // Restart the process
-            Self.writeStandardError("spaces: Restarting process '\(process.templateName)' due to exit\n")
-            notificationDeliverer("Process Restarting", "Process '\(process.templateName)' is being restarted", nil)
-            try restartProcessInTerminal(workspaceID: workspaceID, process: process)
-        }
-    }
-    private func restartExitedProcesses(workspaceID: String, background: Bool) throws {
-        let processes = try store.runningProcesses(workspaceID: workspaceID)
-        for process in processes where process.status == .exited {
-            try restartProcessInTerminal(workspaceID: workspaceID, process: process, background: background)
-        }
-    }
-
-    private func restartProcessInTerminal(
-        workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, background: Bool = false
-    ) throws {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        _ = background
-        let previousSessionID = process.terminalNativeID ?? process.terminalTrackingID
-        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
-            Self.writeStandardError(
-                "spaces: restart_process begin workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-")\n")
-        }
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let template = try templateOverride ?? configuredProcessTemplate(for: process, workspace: workspace, project: project)
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        let session: SpacesTerminalSessionHandle
-        if isManagedTerminalApp(process.terminalApp) {
-            terminateBuiltInTerminalSession(for: process)
-        } else {
-            _ = terminateProcessForRestart(process)
-        }
-        let command = try spacesTerminalCommand(template: template, env: env)
-        session = try launchSpacesTerminalSession(
-            title: process.templateName, workingDirectory: workspace.dir, command: command, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
-        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
-            Self.writeStandardError(
-                "spaces: restart_process launched workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-") new_session=\(session.sessionID)\n"
-            )
-        }
-        let now = nowISO8601()
-        let restartedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateID: template.id, templateName: process.templateName, command: template.command,
-            terminalApp: TerminalHost.spaces.appName, windowID: session.windowID, terminalTrackingID: session.sessionID,
-            terminalNativeID: session.sessionID, pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil,
-            startedAt: now, exitedAt: nil)
-        try store.upsert(runningProcess: restartedProcess)
-        let existingWindows = try store.windows(workspaceID: workspace.id)
-        let existingWindow = existingWindows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
-        let restoredWindow = WindowRecord(
-            id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: process.templateName,
-            detail: process.command, targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID,
-            terminalNativeID: session.sessionID, role: "terminal",
-            orderIndex: existingWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
-            lastSeenAt: now)
-        try store.upsert(window: restoredWindow)
-    }
-
-    private func terminateProcessForRestart(_ process: RunningProcessRecord) -> Bool {
-        guard let pid = resolvedRuntimePID(for: process) else { return true }
-        terminateProcessGroup(pid: pid)
-        waitForProcessExit(pid: pid, timeout: 10.0)
-        guard isProcessAlive(pid: pid) else { return true }
-        Self.writeStandardError(
-            "spaces: Process '\(process.templateName)' with pid \(pid) did not exit in time; restart will open a fresh Spaces terminal session\n")
-        return false
-    }
 
     public func windows(workspaceID: String) throws -> [WindowRecord] { try indexedWorkspaceWindows(workspaceID: workspaceID) }
 
@@ -2125,18 +1840,6 @@ public final class WorkspaceOrchestrator {
         logPerfMetric(
             "browser_focus", workspaceID: workspaceID, target: targetURL, detail: "recovered=1", elapsedMS: elapsedMS(since: focusStartedAt),
             success: true)
-    }
-
-    public func focusWorkspaceProcess(workspaceID: String, processID: String, requestID: String? = nil) throws {
-        let focusStartedAt = currentDate()
-        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        let outcome = try focusWorkspaceProcessOutcome(process, workspaceID: workspaceID, requestID: requestID)
-        guard outcome.focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
-        rememberNavigationTarget(.process(process), workspaceID: workspaceID)
-        try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
-        logPerfMetric(
-            "process_focus", workspaceID: workspaceID, target: process.templateName, detail: "route=\(outcome.route)",
-            elapsedMS: elapsedMS(since: focusStartedAt), success: true)
     }
 
     public func focusNextWindow(workspaceID: String) throws {
@@ -2483,7 +2186,7 @@ public final class WorkspaceOrchestrator {
         window.role == "browser" ? .browser(window) : .window(window)
     }
 
-    private func focusableWorkspaceTargets(workspaceID: String) throws -> [(name: String, target: FocusableWorkspaceTarget)] {
+    func focusableWorkspaceTargets(workspaceID: String) throws -> [(name: String, target: FocusableWorkspaceTarget)] {
         try validateWorkspaceFocusNames(workspaceID: workspaceID)
         let runtimeTargets = try workspaceNavigationTargets(workspaceID: workspaceID)
         let runtimeProcessNames = Set(try store.runningProcesses(workspaceID: workspaceID).map { normalizedFocusName($0.templateName) })
@@ -2532,15 +2235,6 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func fallbackAgentFocusName(_ record: AgentWindowRecord) throws -> String? {
-        let trackedWindow = try matchedTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID,
-            yabaiWindowID: record.yabaiWindowID ?? record.windowID)
-        if let title = sanitizedFocusName(trackedWindow?.name) { return sanitizedFocusName("Coding Agent \(title)") ?? title }
-        if let detail = sanitizedFocusName(trackedWindow?.detail) { return sanitizedFocusName("Coding Agent \(detail)") ?? detail }
-        return sanitizedFocusName("Coding Agent")
-    }
-
     private func focusName(for target: WorkspaceNavigationTarget, workspaceID: String) throws -> String? {
         switch target {
         case .agent(let record):
@@ -2587,7 +2281,7 @@ public final class WorkspaceOrchestrator {
         return orderedIndices
     }
 
-    private func rememberNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String, asCycleNavigation: Bool = false) {
+    func rememberNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String, asCycleNavigation: Bool = false) {
         updateWindowNavigationState(navigationCursor(for: target), workspaceID: workspaceID, asCycleNavigation: asCycleNavigation)
     }
 
@@ -2631,35 +2325,6 @@ public final class WorkspaceOrchestrator {
         return trimmed
     }
 
-    private func uniqueAgentFocusLabel(
-        workspaceID: String, preferredLabel: String?, excludingAgentWindowID: String? = nil, claimedLauncherName: String? = nil
-    ) throws -> String? {
-        guard let baseLabel = sanitizedFocusName(preferredLabel) else { return nil }
-        // Configured coding-agent slots reserve their exact names even before a live agent
-        // reports in. Ad-hoc agents that choose the same label get suffixed so the Run tab
-        // and harness focus keep a stable one-name-to-one-row mapping.
-        let usedNames = Set(
-            try focusableWorkspaceTargets(workspaceID: workspaceID).filter { entry in
-                guard case .agent(let record) = entry.target, let excludingAgentWindowID else { return true }
-                return record.id != excludingAgentWindowID
-            }.map(\.name).map(normalizedFocusName))
-        let existingAgentNames = try store.agentWindows(workspaceID: workspaceID).filter { $0.id != excludingAgentWindowID }.compactMap(\.label)
-            .compactMap(sanitizedFocusName).map(normalizedFocusName)
-        let reservedLauncherNames = Set(
-            try store.workspaceAgentLaunchers(workspaceID: workspaceID).map { try requiredConfiguredFocusName($0.name, kind: "Coding agent") }.filter
-            { launcherName in
-                guard let claimedLauncherName else { return true }
-                return normalizedFocusName(launcherName) != normalizedFocusName(claimedLauncherName)
-            }.map(normalizedFocusName))
-        var blockedNames = usedNames
-        blockedNames.formUnion(existingAgentNames)
-        blockedNames.formUnion(reservedLauncherNames)
-        if !blockedNames.contains(normalizedFocusName(baseLabel)) { return baseLabel }
-        var suffix = 2
-        while blockedNames.contains(normalizedFocusName("\(baseLabel)-\(suffix)")) { suffix += 1 }
-        return "\(baseLabel)-\(suffix)"
-    }
-
     func normalizedFocusName(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
@@ -2686,7 +2351,7 @@ public final class WorkspaceOrchestrator {
         try validateUniqueFocusNameEntries(entries)
     }
 
-    private func validateWorkspaceFocusNames(
+    func validateWorkspaceFocusNames(
         workspaceID: String, processes: [ProcessTemplate]? = nil, browserSessions: [BrowserSession]? = nil, agentLaunchers: [AgentLauncher]? = nil,
         agentWindows: [AgentWindowRecord]? = nil
     ) throws {
@@ -2870,55 +2535,13 @@ public final class WorkspaceOrchestrator {
         return "'" + token.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    func processLaunchCommand(template: ProcessTemplate) throws -> String {
-        let trimmed = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw WorkspaceError.invalidArgument(message: "Process command is required.") }
-        return trimmed
-    }
-
     func commandWithPrelude(_ command: String, prelude: String?) -> String {
         guard let prelude = prelude?.trimmingCharacters(in: .whitespacesAndNewlines), !prelude.isEmpty else { return command }
         return "\(prelude); \(command)"
     }
 
-    public func validateProcessTemplate(_ template: ProcessTemplate) throws { _ = try processLaunchCommand(template: template) }
-
-    public func validateProcessTemplates(_ templates: [ProcessTemplate]) throws {
-        for template in templates { try validateProcessTemplate(template) }
-    }
-
-    private func configuredProcessTemplate(for process: RunningProcessRecord, workspace: WorkspaceRecord, project: ProjectRecord) throws
-        -> ProcessTemplate
-    {
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty,
-            let template = settings?.processes.first(where: { $0.id == templateID })
-        {
-            return template
-        }
-        let processKey = process.templateName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let template = settings?.processes.first(where: { self.processKey(for: $0) == processKey }) { return template }
-        return ProcessTemplate(name: process.templateName, command: process.command)
-    }
-
     private func indexedWorkspaceWindows(workspaceID: String) throws -> [WindowRecord] {
         try store.windows(workspaceID: workspaceID).sorted { $0.orderIndex < $1.orderIndex }
-    }
-
-    private func trackedTerminalWindowsForAgents(workspaceID: String, agentWindows: [AgentWindowRecord]) throws -> [WindowRecord] {
-        guard !agentWindows.isEmpty else { return [] }
-        let trackedAgentTerminalKeys = Set(agentWindows.compactMap(\.terminalTrackingKey))
-        let trackedAgentWindowIDs = Set(agentWindows.compactMap { $0.yabaiWindowID ?? $0.windowID })
-        guard !trackedAgentTerminalKeys.isEmpty || !trackedAgentWindowIDs.isEmpty else { return [] }
-        // Auto-launched coding agents register their own tracked terminal rows before the
-        // workspace launch finishes. Preserve those rows when replacing the workspace
-        // window snapshot so stop/restart can still close the actual agent terminals.
-        return try store.windows(workspaceID: workspaceID).filter { window in
-            guard window.role == "terminal" else { return false }
-            if let trackingKey = window.terminalTrackingKey, trackedAgentTerminalKeys.contains(trackingKey) { return true }
-            if let windowID = window.windowID, trackedAgentWindowIDs.contains(windowID) { return true }
-            return false
-        }
     }
 
     func elapsedMS(since startedAt: Date) -> Int { Int(currentDate().timeIntervalSince(startedAt) * 1000) }
@@ -2928,7 +2551,7 @@ public final class WorkspaceOrchestrator {
         Self.writeStandardError("spaces: cycle \(message)\n")
     }
 
-    private func logPerfMetric(_ metric: String, workspaceID: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
+    func logPerfMetric(_ metric: String, workspaceID: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
         // Manual real-system E2E parses these `spaces: perf metric=...` lines for
         // focus/cycle timing summaries. Treat the prefix and key/value shape as a
         // compatibility surface for the shell harness when changing debug logs.
@@ -3167,83 +2790,6 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func normalizeProcessTemplateIDs(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [ProcessTemplate] {
-        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
-        let previousNames = previous.compactMap { template -> String? in
-            let trimmed = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return trimmed.isEmpty ? nil : trimmed
-        }
-        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
-        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
-        var usedIDs = Set<String>()
-
-        return updated.map { template in
-            if previousByID[template.id] != nil {
-                usedIDs.insert(template.id)
-                return template
-            }
-
-            let trimmedName = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmedName.isEmpty, nameCounts[trimmedName] == 1,
-                let match = previous.first(where: {
-                    ($0.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") == trimmedName && !usedIDs.contains($0.id)
-                })
-            {
-                usedIDs.insert(match.id)
-                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
-            }
-
-            let trimmedCommand = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedName.isEmpty, commandCounts[trimmedCommand] == 1,
-                let match = previous.first(where: {
-                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
-                })
-            {
-                usedIDs.insert(match.id)
-                return ProcessTemplate(id: match.id, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
-            }
-
-            return template
-        }
-    }
-
-    private func normalizeAgentLauncherIDs(previous: [AgentLauncher], updated: [AgentLauncher]) -> [AgentLauncher] {
-        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
-        let previousNames = previous.map { normalizedFocusName($0.name) }
-        let previousCommands = previous.map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let nameCounts = Dictionary(previousNames.map { ($0, 1) }, uniquingKeysWith: +)
-        let commandCounts = Dictionary(previousCommands.map { ($0, 1) }, uniquingKeysWith: +)
-        var usedIDs = Set<String>()
-
-        return updated.map { launcher in
-            if previousByID[launcher.id] != nil {
-                usedIDs.insert(launcher.id)
-                return launcher
-            }
-
-            let normalizedName = normalizedFocusName(launcher.name)
-            if nameCounts[normalizedName] == 1,
-                let match = previous.first(where: { normalizedFocusName($0.name) == normalizedName && !usedIDs.contains($0.id) })
-            {
-                usedIDs.insert(match.id)
-                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
-            }
-
-            let trimmedCommand = launcher.command.trimmingCharacters(in: .whitespacesAndNewlines)
-            if commandCounts[trimmedCommand] == 1,
-                let match = previous.first(where: {
-                    $0.command.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedCommand && !usedIDs.contains($0.id)
-                })
-            {
-                usedIDs.insert(match.id)
-                return AgentLauncher(id: match.id, name: launcher.name, command: launcher.command)
-            }
-
-            return launcher
-        }
-    }
-
     private func seedWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions, agentLaunchers: project.agentLaunchers,
@@ -3254,12 +2800,6 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: nowISO8601())
-    }
-
-    private func seededWorkspaceProcesses(from templates: [ProcessTemplate]) -> [ProcessTemplate] {
-        templates.map { template in
-            ProcessTemplate(id: UUID().uuidString, name: template.name, command: template.command, kind: template.kind, onExit: template.onExit)
-        }
     }
 
     public func workspaceSetupState(workspaceID: String) throws -> WorkspaceSetupState {
@@ -3275,7 +2815,7 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws -> WorkspaceSettings? {
+    func loadWorkspaceSettings(project: ProjectRecord, workspace: WorkspaceRecord) throws -> WorkspaceSettings? {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
         if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
@@ -3395,7 +2935,7 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func requireWorkspaceSetupSucceeded(workspaceID: String) throws {
+    func requireWorkspaceSetupSucceeded(workspaceID: String) throws {
         let setupState = try workspaceSetupState(workspaceID: workspaceID)
         guard setupState.status == .succeeded else { throw WorkspaceError.invalidArgument(message: workspaceSetupBlockedMessage(setupState)) }
     }
@@ -3471,13 +3011,7 @@ public final class WorkspaceOrchestrator {
             project: project, workspace: workspace, selection: selection, manifest: manifest, daemonTarget: daemonTarget, remoteSSHURI: nil)
     }
 
-    private func processKey(for template: ProcessTemplate) -> String {
-        let name = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let command = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? command : name
-    }
-
-    private struct RunningWorkspaceProcessEdit {
+    struct RunningWorkspaceProcessEdit {
         let previous: ProcessTemplate
         let updated: ProcessTemplate
         let previousKey: String
@@ -3485,97 +3019,6 @@ public final class WorkspaceOrchestrator {
 
         var commandChanged: Bool { previous.command != updated.command }
         var keyChanged: Bool { previousKey != updatedKey }
-    }
-
-    private func runningWorkspaceProcessEdits(previous: [ProcessTemplate], updated: [ProcessTemplate]) -> [RunningWorkspaceProcessEdit] {
-        let previousByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
-        return updated.compactMap { updatedTemplate in
-            guard let previousTemplate = previousByID[updatedTemplate.id] else { return nil }
-            let previousKey = processKey(for: previousTemplate)
-            let updatedKey = processKey(for: updatedTemplate)
-            let edit = RunningWorkspaceProcessEdit(
-                previous: previousTemplate, updated: updatedTemplate, previousKey: previousKey, updatedKey: updatedKey)
-            guard edit.commandChanged || edit.keyChanged else { return nil }
-            return edit
-        }
-    }
-
-    private func applyRunningWorkspaceProcessEdits(
-        project: ProjectRecord, workspace: WorkspaceRecord, previous: [ProcessTemplate], updated: [ProcessTemplate], restartChangedCommands: Bool
-    ) throws {
-        let edits = runningWorkspaceProcessEdits(previous: previous, updated: updated)
-        let restartRequiringEdits = edits.filter(\.commandChanged)
-        if !restartRequiringEdits.isEmpty, !restartChangedCommands {
-            throw WorkspaceError.invalidArgument(message: "Changing a running process command requires restart confirmation.")
-        }
-
-        let runningProcesses = try store.runningProcesses(workspaceID: workspace.id)
-        let runningByKey = Dictionary(uniqueKeysWithValues: runningProcesses.map { ($0.templateName, $0) })
-
-        if !restartRequiringEdits.isEmpty {
-            for edit in restartRequiringEdits {
-                guard let runningProcess = runningByKey[edit.previousKey] else { continue }
-                try validateRunningProcessRestart(project: project, workspace: workspace, process: runningProcess, updatedTemplate: edit.updated)
-            }
-        }
-
-        for edit in edits {
-            guard let runningProcess = runningByKey[edit.previousKey] else { continue }
-            if edit.commandChanged {
-                let restartedProcess = RunningProcessRecord(
-                    id: runningProcess.id, workspaceID: runningProcess.workspaceID, templateID: edit.updated.id, templateName: edit.updatedKey,
-                    command: edit.updated.command, runtimeTargetID: runningProcess.runtimeTargetID, terminalApp: runningProcess.terminalApp,
-                    windowID: runningProcess.windowID, terminalTrackingID: runningProcess.terminalTrackingID,
-                    terminalNativeID: runningProcess.terminalNativeID, pid: runningProcess.pid, status: runningProcess.status,
-                    logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt, startedAt: runningProcess.startedAt,
-                    exitedAt: runningProcess.exitedAt)
-                try restartProcessInTerminal(workspaceID: workspace.id, process: restartedProcess, templateOverride: edit.updated)
-            } else if edit.keyChanged {
-                try relabelRunningProcess(
-                    workspaceID: workspace.id, process: runningProcess, templateID: edit.updated.id, templateName: edit.updatedKey,
-                    command: runningProcess.command)
-            }
-        }
-    }
-
-    private func validateRunningProcessRestart(
-        project: ProjectRecord, workspace: WorkspaceRecord, process: RunningProcessRecord, updatedTemplate: ProcessTemplate
-    ) throws {
-        _ = project
-        _ = workspace
-        _ = process
-        try validateProcessTemplate(updatedTemplate)
-    }
-
-    private func relabelRunningProcess(
-        workspaceID: String, process: RunningProcessRecord, templateID: String? = nil, templateName: String, command: String
-    ) throws {
-        let updatedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateID: templateID ?? process.templateID, templateName: templateName,
-            command: command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, windowID: process.windowID,
-            terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID, pid: process.pid, status: process.status,
-            logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
-        try store.upsert(runningProcess: updatedProcess)
-        if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
-            $0.role == "terminal" && matchesTrackedTerminalWindow($0, process: process)
-        }) {
-            try store.upsert(
-                window: WindowRecord(
-                    id: terminalWindow.id, workspaceID: terminalWindow.workspaceID, app: terminalWindow.app, name: templateName, detail: command,
-                    targetURL: terminalWindow.targetURL, windowID: terminalWindow.windowID, terminalTrackingID: terminalWindow.terminalTrackingID,
-                    terminalNativeID: terminalWindow.terminalNativeID, role: terminalWindow.role, orderIndex: terminalWindow.orderIndex,
-                    lastSeenAt: nowISO8601()))
-        }
-    }
-
-    private func processRuntimePaths(workspaceID: String, name: String) throws -> (logFile: String, pidFile: String) {
-        let runtimeRoot = try runtimeDirectory()
-        let workspaceRuntime = URL(fileURLWithPath: runtimeRoot).appendingPathComponent(workspaceID, isDirectory: true)
-        try FileManager.default.createDirectory(at: workspaceRuntime, withIntermediateDirectories: true)
-        let safe = safeFilename(name)
-        let logFile = workspaceRuntime.appendingPathComponent("\(safe).log").path
-        let pidFile = workspaceRuntime.appendingPathComponent("\(safe).pid").path
-        return (logFile, pidFile)
     }
 
     @discardableResult private func pruneMissingWindows(workspaceID: String) throws -> Int {
@@ -3616,29 +3059,6 @@ public final class WorkspaceOrchestrator {
         return pruned
     }
 
-    @discardableResult private func pruneOrphanedAgentWindows(
-        workspaceID: String, agents: [AgentWindowRecord], prunedTerminalTrackingKeys: Set<String>, prunedTerminalWindowIDs: Set<Int>
-    ) throws -> Int {
-        guard !prunedTerminalTrackingKeys.isEmpty || !prunedTerminalWindowIDs.isEmpty else { return 0 }
-        let runningProcessTrackingKeys = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.terminalTrackingKey))
-        var pruned = 0
-        for agent in agents where agent.provider == .spaces {
-            let trackingKey = agent.terminalTrackingKey
-            let windowID = agent.yabaiWindowID ?? agent.windowID
-            // Agent rows for ad-hoc terminals depend on the tracked terminal row for liveness.
-            // Once that terminal disappears, the agent row should disappear too unless a managed
-            // workspace process still owns the same terminal identity.
-            let matchesPrunedTerminal =
-                (trackingKey.map(prunedTerminalTrackingKeys.contains) ?? false) || (windowID.map(prunedTerminalWindowIDs.contains) ?? false)
-            guard matchesPrunedTerminal else { continue }
-            if let trackingKey, runningProcessTrackingKeys.contains(trackingKey) { continue }
-            if try spacesAgentRecordIsConfiguredLauncher(workspaceID: workspaceID, record: agent) { continue }
-            try store.deleteAgentWindow(id: agent.id)
-            pruned += 1
-        }
-        return pruned
-    }
-
     private func windowTrackingKey(_ window: WindowRecord) -> String {
         let idPart = window.windowID.map(String.init) ?? "none"
         if window.role == "browser" { return "browser:\(idPart):\(window.targetURL ?? "")" }
@@ -3655,40 +3075,6 @@ public final class WorkspaceOrchestrator {
     static func nextWindowOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
         let maxIndex = existing.filter { $0.role == role }.map(\.orderIndex).max() ?? (orderOffset - 1)
         return max(maxIndex + 1, orderOffset)
-    }
-
-    private func launchProcesses(
-        workspace: WorkspaceRecord, templates: [ProcessTemplate], env: [String: String], background: Bool = false
-    ) throws -> [WindowRecord] {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
-        guard !templates.isEmpty else {
-            try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
-            try store.deleteRunningProcesses(workspaceID: workspace.id)
-            return []
-        }
-        try terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: workspace.id)
-        try store.deleteRunningProcesses(workspaceID: workspace.id)
-        var terminalWindows: [WindowRecord] = []
-        for (index, template) in templates.enumerated() {
-            let name = template.name ?? template.command
-            let sessionCommand = try spacesTerminalCommand(template: template, env: env)
-            let session = try launchSpacesTerminalSession(
-                title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-                readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
-            let now = nowISO8601()
-            let running = RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-                terminalApp: TerminalHost.spaces.appName, windowID: session.windowID, terminalTrackingID: session.sessionID,
-                terminalNativeID: session.sessionID, pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil,
-                startedAt: now, exitedAt: nil)
-            try store.upsert(runningProcess: running)
-            terminalWindows.append(
-                WindowRecord(
-                    id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: name, detail: template.command,
-                    targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
-                    role: "terminal", orderIndex: 200 + index, lastSeenAt: now))
-        }
-        return terminalWindows
     }
 
     private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
@@ -3730,7 +3116,7 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    private func runtimeDirectory() throws -> String { try SpacesProfile.current().runtimeDirectory }
+    func runtimeDirectory() throws -> String { try SpacesProfile.current().runtimeDirectory }
 
     func applyEnvVars(_ input: String, env: [String: String]) -> String {
         var output = input
@@ -3746,58 +3132,7 @@ public final class WorkspaceOrchestrator {
         return applyEnvVars(command, env: env)
     }
 
-    private func currentProcessEnvironment() -> [String: String] {
-        var environment: [String: String] = [:]
-        var cursor = environ
-        while let entry = cursor.pointee {
-            let line = String(cString: entry)
-            if let separator = line.firstIndex(of: "=") {
-                let key = String(line[..<separator])
-                let value = String(line[line.index(after: separator)...])
-                environment[key] = value
-            }
-            cursor = cursor.advanced(by: 1)
-        }
-        return environment
-    }
-
-    private func terminateProcessGroup(pid: Int) {
-        guard pid > 0 else { return }
-        guard pid != Int(getpid()) else { return }
-        let groupTarget = processGroupID(for: pid) ?? pid
-        if debugLoggingEnabled() {
-            Self.writeStandardError(
-                "spaces: terminate_process_group pid=\(pid) group=\(groupTarget) current_group=\(Int(getpgrp())) daemon_pid=\(Int(getpid()))\n")
-        }
-        if groupTarget == Int(getpgrp()) {
-            _ = try? Shell.run(["kill", "-INT", "\(pid)"])
-            waitForProcessExit(pid: pid, timeout: 2.0)
-            guard isProcessAlive(pid: pid) else { return }
-            _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
-            return
-        }
-        let processGroupID = "-\(groupTarget)"
-        // Send interrupt first so interactive commands like `docker compose up` shut down cleanly.
-        _ = try? Shell.run(["kill", "-INT", "--", processGroupID])
-        waitForProcessExit(pid: pid, timeout: 2.0)
-        guard isProcessAlive(pid: pid) else { return }
-        // Follow with TERM only if interrupt did not stop the process.
-        _ = try? Shell.run(["kill", "-TERM", "--", processGroupID])
-        waitForProcessExit(pid: pid, timeout: 2.0)
-        guard isProcessAlive(pid: pid) else { return }
-        // Fallback: target the tracked shell process directly.
-        _ = try? Shell.run(["kill", "-TERM", "\(pid)"])
-    }
-
-    private func processGroupID(for pid: Int) -> Int? {
-        guard pid > 0 else { return nil }
-        guard let output = try? Shell.runAndCapture(["ps", "-o", "pgid=", "-p", "\(pid)"]) else { return nil }
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let groupID = Int(trimmed), groupID > 0 else { return nil }
-        return groupID
-    }
-
-    private func resolvedRuntimePID(for process: RunningProcessRecord) -> Int? {
+    func resolvedRuntimePID(for process: RunningProcessRecord) -> Int? {
         if let pid = process.pid, pid > 0 {
             if isProcessAlive(pid: pid) { return pid }
             guard isManagedTerminalApp(process.terminalApp) else { return pid }
@@ -3821,31 +3156,6 @@ public final class WorkspaceOrchestrator {
         let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pid = Int(trimmed), pid > 0 else { return nil }
         return pid
-    }
-
-    func isProcessAlive(pid: Int) -> Bool {
-        guard pid > 0 else { return false }
-        if let state = processState(pid: pid) {
-            let trimmed = state.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let first = trimmed.first, first == "Z" { return false }
-            return !trimmed.isEmpty
-        }
-        // If the PID is dead, check if any child processes are still alive.
-        // This handles cases where the shell exits but the actual command continues.
-        guard let output = try? Shell.runAndCapture(["pgrep", "-P", "\(pid)"]) else { return false }
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !trimmed.isEmpty
-    }
-
-    private func processState(pid: Int) -> String? {
-        guard pid > 0 else { return nil }
-        if kill(pid_t(pid), 0) != 0, errno != EPERM { return nil }
-        return try? Shell.runAndCapture(["ps", "-p", "\(pid)", "-o", "state="])
-    }
-
-    private func waitForProcessExit(pid: Int, timeout: TimeInterval) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while isProcessAlive(pid: pid), Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
     }
 
     func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
@@ -4316,11 +3626,7 @@ public final class WorkspaceOrchestrator {
         return lastSegment
     }
 
-    // MARK: - Agent Windows
-
-    public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] { try store.agentWindows(workspaceID: workspaceID) }
-
-    private enum RemoteAgentSignalType: String {
+    enum RemoteAgentSignalType: String {
         case `init` = "init"
         case start = "start"
         case waiting = "waiting"
@@ -4343,652 +3649,6 @@ public final class WorkspaceOrchestrator {
             case .`init`, .exit: false
             }
         }
-    }
-
-    @discardableResult public func recordRemoteAgentSignal(_ event: TerminalServiceAgentSignalEvent) throws -> Bool {
-        guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return false }
-        guard let workspaceID = try remoteAgentSignalWorkspaceID(event) else { return false }
-        let terminalTrackingID = sanitizedFocusName(event.terminalTrackingID) ?? sanitizedFocusName(event.sessionID)
-        let terminalNativeID = sanitizedFocusName(event.terminalNativeID) ?? terminalTrackingID
-        let codexThreadID = sanitizedFocusName(event.codexThreadID)
-        let existingAgent = try matchingAgentWindow(
-            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: nil)
-        let signalLabel = sanitizedFocusName(event.label) ?? sanitizedFocusName(existingAgent?.label)
-        let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && signalLabel != nil)
-        guard canRecordSignal else { return true }
-
-        switch type {
-        case .`init`:
-            try registerAgentWindow(
-                workspaceID: workspaceID, provider: provider, label: signalLabel, terminalTrackingID: terminalTrackingID,
-                terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, status: existingAgent?.status ?? .idle, eventType: type.rawValue,
-                eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
-        case .start, .waiting, .done:
-            try updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID,
-                terminalNativeID: terminalNativeID, label: signalLabel, status: type.status, eventType: type.rawValue,
-                eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
-        case .exit:
-            guard let existingAgent else { return true }
-            try handleAgentExit(
-                existingAgent, terminalNativeID: terminalNativeID, eventType: type.rawValue, eventSource: "remote_spaces_signal",
-                environmentKeys: event.environmentKeys)
-        }
-        return true
-    }
-
-    private func remoteAgentSignalWorkspaceID(_ event: TerminalServiceAgentSignalEvent) throws -> String? {
-        if let workspaceID = sanitizedFocusName(event.workspaceID), try store.workspace(id: workspaceID) != nil { return workspaceID }
-        if let workspacePath = sanitizedFocusName(event.workspacePath), let workspace = try store.workspace(dir: workspacePath) {
-            return workspace.id
-        }
-        let candidateSessionIDs = Set(
-            [event.terminalNativeID, event.terminalTrackingID, event.sessionID].compactMap { normalizedTerminalSessionID($0) })
-        guard !candidateSessionIDs.isEmpty else { return nil }
-        for project in try store.projects() {
-            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
-                if try store.agentWindows(workspaceID: workspace.id).contains(where: { agent in
-                    guard let sessionID = builtInTerminalSessionID(for: agent) else { return false }
-                    return candidateSessionIDs.contains(sessionID)
-                }) {
-                    return workspace.id
-                }
-            }
-        }
-        return nil
-    }
-
-    private func matchingAgentWindow(workspaceID: String, terminalTrackingID: String?, codexThreadID: String?, yabaiWindowID: Int?) throws
-        -> AgentWindowRecord?
-    {
-        let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        return terminalTrackingID.flatMap { sessionID in allAgentWindows.first(where: { $0.terminalTrackingID == sessionID }) }
-            ?? yabaiWindowID.flatMap { windowID in allAgentWindows.first(where: { ($0.yabaiWindowID ?? $0.windowID) == windowID }) }
-            ?? allAgentWindows.first(where: { $0.codexThreadID == codexThreadID && codexThreadID != nil })
-    }
-
-    private func agentTerminalTargetID(terminalTrackingID: String?, yabaiWindowID: Int?) -> String? {
-        if let sessionID = terminalTrackingID, !sessionID.isEmpty { return "terminal:\(sessionID)" }
-        if let windowID = yabaiWindowID { return "window:\(windowID)" }
-        return nil
-    }
-
-    private func ignoresUntrustedSpacesAgentYabaiWindowID(provider: AgentProvider, terminalTrackingID: String?, terminalNativeID: String?) -> Bool {
-        func isBuiltInSpacesTerminalIdentity(_ value: String?) -> Bool {
-            guard let value, !value.isEmpty else { return false }
-            return UUID(uuidString: value) != nil
-        }
-
-        return provider == .spaces && [terminalTrackingID, terminalNativeID].contains(where: isBuiltInSpacesTerminalIdentity)
-    }
-
-    private func trustedAgentYabaiWindowID(provider: AgentProvider, terminalTrackingID: String?, terminalNativeID: String?, yabaiWindowID: Int?)
-        -> Int?
-    {
-        ignoresUntrustedSpacesAgentYabaiWindowID(provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID)
-            ? nil : yabaiWindowID
-    }
-
-    private func matchedWorkspaceProcessForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?)
-        throws -> RunningProcessRecord?
-    {
-        let processes = try store.runningProcesses(workspaceID: workspaceID)
-        let targetID = agentTerminalTargetID(terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID)
-        if let targetID, let matched = processes.first(where: { $0.terminalTrackingKey == targetID }) { return matched }
-        return processes.first(where: { process in
-            guard provider == .spaces, process.terminalApp == TerminalHost.spaces.appName else { return false }
-            if let terminalTrackingID, !terminalTrackingID.isEmpty, process.terminalTrackingID == terminalTrackingID { return true }
-            if let terminalTrackingID, !terminalTrackingID.isEmpty {
-                guard process.terminalTrackingID == nil || process.terminalTrackingID?.isEmpty == true else { return false }
-            }
-            if let yabaiWindowID, process.windowID == yabaiWindowID { return true }
-            return false
-        })
-    }
-
-    private func matchedTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?) throws
-        -> WindowRecord?
-    {
-        let windows = try store.windows(workspaceID: workspaceID)
-        if provider == .spaces, let terminalTrackingID, !terminalTrackingID.isEmpty,
-            let trackedWindow = windows.first(where: {
-                $0.role == "terminal" && $0.app == TerminalHost.spaces.appName && $0.terminalTrackingID == terminalTrackingID
-            })
-        {
-            return trackedWindow
-        }
-        if let targetID = agentTerminalTargetID(terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID),
-            let trackedWindow = windows.first(where: { $0.role == "terminal" && $0.terminalTrackingKey == targetID })
-        {
-            return trackedWindow
-        }
-        if let yabaiWindowID,
-            let trackedWindow = windows.first(where: {
-                $0.role == "terminal" && $0.windowID == yabaiWindowID
-                    && (terminalTrackingID == nil || terminalTrackingID?.isEmpty == true || $0.terminalTrackingID == nil
-                        || $0.terminalTrackingID?.isEmpty == true)
-                    && provider == .spaces && $0.app == TerminalHost.spaces.appName
-            })
-        {
-            return trackedWindow
-        }
-        return nil
-    }
-
-    private func ensureTrackedWindowExistsForAgent(
-        workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String?, yabaiWindowID: Int?,
-    ) throws -> WindowRecord? {
-        let trustedYabaiWindowID = trustedAgentYabaiWindowID(
-            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, yabaiWindowID: yabaiWindowID)
-
-        if let trackedWindow = try matchedTrackedWindowForAgent(
-            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: trustedYabaiWindowID, )
-        {
-            let liveWindow = trustedYabaiWindowID.flatMap { (try? yabai.window(id: $0)) ?? nil }
-            let resolvedWindowID = trustedYabaiWindowID ?? trackedWindow.windowID
-            let resolvedSessionID = terminalTrackingID ?? trackedWindow.terminalTrackingID
-            let resolvedNativeID = terminalNativeID ?? trackedWindow.terminalNativeID
-            if resolvedWindowID != trackedWindow.windowID || resolvedSessionID != trackedWindow.terminalTrackingID
-                || resolvedNativeID != trackedWindow.terminalNativeID
-            {
-                let updated = WindowRecord(
-                    id: trackedWindow.id, workspaceID: trackedWindow.workspaceID, app: liveWindow?.app ?? trackedWindow.app, name: trackedWindow.name,
-                    detail: trackedWindow.detail, targetURL: trackedWindow.targetURL, windowID: resolvedWindowID,
-                    terminalTrackingID: resolvedSessionID, terminalNativeID: resolvedNativeID, role: trackedWindow.role,
-                    orderIndex: trackedWindow.orderIndex, lastSeenAt: nowISO8601())
-                try store.upsert(window: updated)
-                return updated
-            }
-            return trackedWindow
-        }
-        guard let yabaiWindowID = trustedYabaiWindowID else { return nil }
-        let liveWindow = (try? yabai.window(id: yabaiWindowID)) ?? nil
-        let existing = try store.windows(workspaceID: workspaceID)
-        let record = WindowRecord(
-            id: UUID().uuidString, workspaceID: workspaceID, app: liveWindow?.app ?? TerminalHost.spaces.appName,
-            name: liveWindow?.title ?? label ?? "Coding Agent CLI", detail: nil, windowID: yabaiWindowID, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: terminalNativeID, role: "terminal",
-            orderIndex: Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200), lastSeenAt: nowISO8601())
-        try store.upsert(window: record)
-        return record
-    }
-
-    private func agentWindowIsOpen(_ windowID: Int?) -> Bool {
-        guard let windowID, let liveWindow = (try? yabai.window(id: windowID)) ?? nil else { return false }
-        return liveWindow.id == windowID
-    }
-
-    private func removeStaleAgentWindow(_ record: AgentWindowRecord) throws {
-        terminateBuiltInTerminalSession(record.terminalNativeID ?? record.terminalTrackingID)
-        try store.deleteAgentWindow(id: record.id)
-        try removeAdHocTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID,
-            yabaiWindowID: record.yabaiWindowID ?? record.windowID)
-    }
-
-    private func removeAdHocTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?)
-        throws
-    {
-        guard
-            let trackedWindow = try matchedTrackedWindowForAgent(
-                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID)
-        else { return }
-        let processUsesWindow = try store.runningProcesses(workspaceID: workspaceID).contains { process in
-            process.terminalTrackingKey == trackedWindow.terminalTrackingKey
-        }
-        if !processUsesWindow { try store.deleteWindow(id: trackedWindow.id) }
-    }
-
-    private func agentSessionEventMessage(
-        provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String?, codexThreadID: String?, yabaiWindowID: Int?,
-        environmentKeys: [String]? = nil
-    ) -> String {
-        func normalizedValue(_ value: String?) -> String {
-            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return "<nil>" }
-            return value
-        }
-
-        let normalizedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let labelValue = (normalizedLabel?.isEmpty == false ? normalizedLabel : nil) ?? "<nil>"
-        let trackingValue = normalizedValue(terminalTrackingID)
-        let nativeValue = normalizedValue(terminalNativeID)
-        let threadValue = normalizedValue(codexThreadID)
-        let windowValue = yabaiWindowID.map(String.init) ?? "<nil>"
-        let envKeysValue = environmentKeys.map { $0.isEmpty ? "<none>" : $0.joined(separator: ",") } ?? "<nil>"
-        return
-            "provider=\(provider.rawValue) label=\(labelValue) tracking_id=\(trackingValue) native_id=\(nativeValue) codex_thread_id=\(threadValue) yabai_window_id=\(windowValue) env_keys=\(envKeysValue)"
-    }
-
-    private func appendAgentSessionEvent(agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String) {
-        let runtimeTargetID = try? store.agentSessionRuntimeTargetID(id: agentSessionID)
-        try? store.appendAgentSessionEvent(
-            agentSessionID: agentSessionID, eventType: eventType, source: source, message: message, runtimeTargetID: runtimeTargetID,
-            createdAt: createdAt)
-    }
-
-    private func spacesAgentRecordIsConfiguredLauncher(workspaceID: String, record: AgentWindowRecord) throws -> Bool {
-        guard record.provider == .spaces else { return false }
-        let launchers = try store.workspaceAgentLaunchers(workspaceID: workspaceID)
-        if let claimedLauncherID = sanitizedFocusName(record.claimedLauncherID) {
-            if launchers.contains(where: { $0.id == claimedLauncherID }) { return true }
-        }
-        if let claimedLauncherName = sanitizedFocusName(record.claimedLauncherName) {
-            return launchers.contains { normalizedFocusName($0.name) == normalizedFocusName(claimedLauncherName) }
-        }
-        return false
-    }
-
-    @discardableResult public func registerAgentWindow(
-        workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, terminalNativeID: String? = nil,
-        codexThreadID: String? = nil, yabaiWindowID: Int? = nil, status: AgentWindowStatus = .idle, claimedLauncherID: String? = nil,
-        claimedLauncherName: String? = nil, eventType: String = "register", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
-    ) throws -> AgentWindowRecord {
-        let now = nowISO8601()
-        let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let trustedYabaiWindowID = trustedAgentYabaiWindowID(
-            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, yabaiWindowID: yabaiWindowID)
-        let matchedProcess = try matchedWorkspaceProcessForAgent(
-            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: trustedYabaiWindowID)
-        let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
-        let resolvedTrustedYabaiWindowID = trustedAgentYabaiWindowID(
-            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: yabaiWindowID)
-        let trackedWindow = try ensureTrackedWindowExistsForAgent(
-            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: resolvedTrustedYabaiWindowID)
-        let resolvedWindowID = trackedWindow?.windowID ?? resolvedTrustedYabaiWindowID
-        let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
-        if let existing = try matchingAgentWindow(
-            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: resolvedWindowID)
-        {
-            let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
-            let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
-                claimedLauncherName: resolvedClaimedLauncherName)
-            let updated = AgentWindowRecord(
-                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
-                terminalTarget: TerminalTargetRecord(
-                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
-                    windowID: resolvedWindowID
-                        ?? (ignoresUntrustedSpacesAgentYabaiWindowID(
-                            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: finalTerminalNativeID)
-                            ? nil : existing.windowID),
-                    trackingID: terminalTrackingID ?? finalTerminalNativeID ?? existing.terminalTrackingID),
-                sessionKey: codexThreadID ?? existing.codexThreadID, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, createdAt: existing.createdAt, updatedAt: now)
-            try validateWorkspaceFocusNames(
-                workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
-                browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
-                agentWindows: existingAgentWindows.map { $0.id == existing.id ? updated : $0 })
-            try store.upsertAgentWindow(updated)
-            appendAgentSessionEvent(
-                agentSessionID: updated.id, eventType: eventType, source: eventSource,
-                message: agentSessionEventMessage(
-                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
-                    terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: updated.yabaiWindowID,
-                    environmentKeys: environmentKeys), createdAt: now)
-            return updated
-        }
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label, claimedLauncherName: claimedLauncherName)
-        let record = AgentWindowRecord(
-            id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
-            terminalTarget: TerminalTargetRecord(
-                runtimeTargetID: trackedWindow?.id, windowID: resolvedWindowID, trackingID: terminalTrackingID ?? finalTerminalNativeID),
-            sessionKey: codexThreadID, claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: status, createdAt: now,
-            updatedAt: now)
-        try validateWorkspaceFocusNames(
-            workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
-            browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
-        try store.upsertAgentWindow(record)
-        appendAgentSessionEvent(
-            agentSessionID: record.id, eventType: eventType, source: eventSource,
-            message: agentSessionEventMessage(
-                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID,
-                terminalNativeID: record.terminalNativeID, codexThreadID: record.codexThreadID, yabaiWindowID: record.yabaiWindowID,
-                environmentKeys: environmentKeys), createdAt: now)
-        return record
-    }
-
-    @discardableResult public func updateAgentWindowStatus(
-        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, codexThreadID: String? = nil,
-        terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, label: String? = nil, status: AgentWindowStatus,
-        claimedLauncherName: String? = nil, eventType: String? = nil, eventSource: String = "orchestrator", environmentKeys: [String]? = nil
-    ) throws -> AgentWindowRecord {
-        let now = nowISO8601()
-        let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let trustedYabaiWindowID = trustedAgentYabaiWindowID(
-            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, yabaiWindowID: yabaiWindowID)
-        let matchedProcess = try matchedWorkspaceProcessForAgent(
-            workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: trustedYabaiWindowID)
-        let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
-        let resolvedTrustedYabaiWindowID = trustedAgentYabaiWindowID(
-            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: yabaiWindowID)
-        let trackedWindow = try ensureTrackedWindowExistsForAgent(
-            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID, yabaiWindowID: resolvedTrustedYabaiWindowID)
-        let resolvedWindowID = trackedWindow?.windowID ?? resolvedTrustedYabaiWindowID
-        let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
-        let existing = try matchingAgentWindow(
-            workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID, yabaiWindowID: resolvedWindowID)
-        if let existing {
-            let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
-            let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
-                claimedLauncherName: resolvedClaimedLauncherName)
-            let updated = AgentWindowRecord(
-                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
-                terminalTarget: TerminalTargetRecord(
-                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
-                    windowID: resolvedWindowID
-                        ?? (ignoresUntrustedSpacesAgentYabaiWindowID(
-                            provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: finalTerminalNativeID)
-                            ? nil : existing.windowID),
-                    trackingID: terminalTrackingID ?? finalTerminalNativeID ?? existing.terminalTrackingID),
-                sessionKey: codexThreadID ?? existing.codexThreadID, claimedLauncherID: existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, createdAt: existing.createdAt, updatedAt: now)
-            try validateWorkspaceFocusNames(
-                workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
-                browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
-                agentWindows: allAgentWindows.map { $0.id == existing.id ? updated : $0 })
-            try store.upsertAgentWindow(updated)
-            appendAgentSessionEvent(
-                agentSessionID: updated.id, eventType: eventType ?? status.rawValue, source: eventSource,
-                message: agentSessionEventMessage(
-                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
-                    terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: updated.yabaiWindowID,
-                    environmentKeys: environmentKeys), createdAt: now)
-            return updated
-        }
-        return try registerAgentWindow(
-            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, yabaiWindowID: resolvedTrustedYabaiWindowID, status: status,
-            claimedLauncherName: claimedLauncherName, eventType: eventType ?? status.rawValue, eventSource: eventSource,
-            environmentKeys: environmentKeys)
-    }
-
-    @discardableResult public func handleAgentExit(
-        _ existing: AgentWindowRecord, terminalNativeID: String? = nil, yabaiWindowID: Int? = nil, eventType: String = "exit",
-        eventSource: String = "orchestrator", environmentKeys: [String]? = nil
-    ) throws -> AgentWindowRecord? {
-        let resolvedWindowID =
-            try matchedTrackedWindowForAgent(
-                workspaceID: existing.workspaceID, provider: existing.provider, terminalTrackingID: existing.terminalTrackingID,
-                yabaiWindowID: yabaiWindowID ?? existing.yabaiWindowID ?? existing.windowID)?.windowID ?? yabaiWindowID ?? existing.yabaiWindowID
-            ?? existing.windowID
-        if try spacesAgentRecordIsConfiguredLauncher(workspaceID: existing.workspaceID, record: existing) {
-            return try recordAgentExitStatus(
-                existing, status: .done, resolvedWindowID: resolvedWindowID, terminalNativeID: terminalNativeID, eventType: eventType,
-                eventSource: eventSource, environmentKeys: environmentKeys)
-        }
-        let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
-        let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
-        if existingSessionIsLive || (!sessionBackedSpacesAgent && agentWindowIsOpen(resolvedWindowID)) {
-            return try recordAgentExitStatus(
-                existing, status: .idle, resolvedWindowID: resolvedWindowID, terminalNativeID: terminalNativeID, eventType: eventType,
-                eventSource: eventSource, environmentKeys: environmentKeys)
-        }
-        appendAgentSessionEvent(
-            agentSessionID: existing.id, eventType: eventType, source: eventSource,
-            message: agentSessionEventMessage(
-                provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID,
-                terminalNativeID: terminalNativeID ?? existing.terminalNativeID, codexThreadID: existing.codexThreadID,
-                yabaiWindowID: resolvedWindowID, environmentKeys: environmentKeys), createdAt: nowISO8601())
-        terminateBuiltInTerminalSession(existing.terminalNativeID ?? existing.terminalTrackingID)
-        try store.deleteAgentWindow(id: existing.id)
-        try removeAdHocTrackedWindowForAgent(
-            workspaceID: existing.workspaceID, provider: existing.provider, terminalTrackingID: existing.terminalTrackingID,
-            yabaiWindowID: resolvedWindowID)
-        return nil
-    }
-
-    private func recordAgentExitStatus(
-        _ existing: AgentWindowRecord, status: AgentWindowStatus, resolvedWindowID: Int?, terminalNativeID: String?, eventType: String,
-        eventSource: String, environmentKeys: [String]?
-    ) throws -> AgentWindowRecord {
-        let now = nowISO8601()
-        // A signal's yabai window ID is just a focused-window snapshot; the Spaces
-        // terminal session ID is the durable ownership and focus identity.
-        let storedWindowID = builtInAgentSessionID(for: existing) == nil ? resolvedWindowID : nil
-        let terminalTarget: TerminalTargetRecord? =
-            if existing.terminalTarget != nil || storedWindowID != nil || existing.terminalTrackingID != nil {
-                TerminalTargetRecord(runtimeTargetID: existing.runtimeTargetID, windowID: storedWindowID, trackingID: existing.terminalTrackingID)
-            } else { nil }
-        let updated = AgentWindowRecord(
-            id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
-            runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
-            claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status,
-            createdAt: existing.createdAt, updatedAt: now)
-        try store.upsertAgentWindow(updated)
-        appendAgentSessionEvent(
-            agentSessionID: updated.id, eventType: eventType, source: eventSource,
-            message: agentSessionEventMessage(
-                provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
-                terminalNativeID: terminalNativeID ?? updated.terminalNativeID, codexThreadID: updated.codexThreadID, yabaiWindowID: resolvedWindowID,
-                environmentKeys: environmentKeys), createdAt: now)
-        return updated
-    }
-
-    public func focusAgentWindow(_ record: AgentWindowRecord) throws {
-        let focused = try focusAgentWindowOrLaunchClaimedLauncher(record, requestID: nil)
-        guard focused else { throw missingTrackedAgentError(record) }
-        rememberNavigationTarget(.agent(record), workspaceID: record.workspaceID)
-        try markWorkspaceRunningIfNeeded(workspaceID: record.workspaceID)
-    }
-
-    public func stopCodingAgent(workspaceID: String, agentID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else { return }
-            try stopCodingAgentRecord(record)
-            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
-        }
-    }
-
-    @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-            guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else {
-                throw WorkspaceError.invalidArgument(message: "Coding agent is not running.")
-            }
-            let launcher = try restartableCodingAgentLauncher(record)
-            try stopCodingAgentRecord(record)
-            return try launchAgentLauncher(workspaceID: workspaceID, launcherID: launcher.id)
-        }
-    }
-
-    private func stopCodingAgentRecord(_ record: AgentWindowRecord) throws {
-        let windowID = try trackedAgentWindowID(record) ?? record.yabaiWindowID ?? record.windowID
-        if let sessionID = record.terminalNativeID ?? record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
-        appendAgentSessionEvent(
-            agentSessionID: record.id, eventType: "stop", source: "orchestrator",
-            message: agentSessionEventMessage(
-                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID,
-                terminalNativeID: record.terminalNativeID, codexThreadID: record.codexThreadID, yabaiWindowID: windowID), createdAt: nowISO8601())
-        try store.deleteAgentWindow(id: record.id)
-        try removeAdHocTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID,
-            yabaiWindowID: record.yabaiWindowID ?? record.windowID)
-    }
-
-    private func restartableCodingAgentLauncher(_ record: AgentWindowRecord) throws -> AgentLauncher {
-        let launchers = try store.workspaceAgentLaunchers(workspaceID: record.workspaceID)
-        if let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherID.isEmpty {
-            guard let launcher = launchers.first(where: { $0.id == claimedLauncherID }) else {
-                throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-            }
-            return launcher
-        }
-        if let claimedLauncherName = record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines), !claimedLauncherName.isEmpty {
-            guard let launcher = launchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(claimedLauncherName) }) else {
-                throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-            }
-            return launcher
-        }
-        if let label = record.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty,
-            let launcher = launchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(label) })
-        {
-            return launcher
-        }
-        throw WorkspaceError.invalidArgument(message: "Unconfigured live coding agents cannot be restarted from Spaces.")
-    }
-
-    public func restartWorkspaceProcess(workspaceID: String, processID: String) throws {
-        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        try restartProcessInTerminal(workspaceID: workspaceID, process: process)
-    }
-
-    public func stopWorkspaceProcess(workspaceID: String, processID: String) throws {
-        try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
-            guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-            try stopRunningProcess(process, workspaceID: workspaceID)
-        }
-    }
-
-    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        let recoverStartedAt = currentDate()
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        let trimmedTemplateID = processTemplateID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let template: ProcessTemplate? =
-            if !trimmedTemplateID.isEmpty { (settings?.processes ?? []).first(where: { $0.id == trimmedTemplateID }) } else {
-                (settings?.processes ?? []).first(where: { configuredProcessMatchesKey($0, key: processKey) })
-            }
-        guard let template else { throw WorkspaceError.invalidArgument(message: "Configured process not found.") }
-
-        let running = try store.runningProcesses(workspaceID: workspaceID)
-        let expectedKey = configuredProcessMatchKey(name: template.name)
-        if let existing = running.first(where: { runningProcessMatchesTemplate($0, template: template, fallbackKey: expectedKey) }) {
-            if existing.status == .exited { try restartProcessInTerminal(workspaceID: workspaceID, process: existing, templateOverride: template) }
-            try markWorkspaceRunningIfNeeded(workspace)
-            return
-        }
-
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env)
-        try markWorkspaceRunningIfNeeded(workspace)
-        logPerfMetric(
-            "process_recover", workspaceID: workspaceID, target: configuredProcessMatchKey(name: template.name),
-            detail: "host=\(TerminalHost.spaces.rawValue)", elapsedMS: elapsedMS(since: recoverStartedAt), success: true)
-    }
-
-    public func runConfiguredProcess(workspaceID: String, processKey: String) throws {
-        try recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-    }
-
-    public func runConfiguredProcess(workspaceID: String, processTemplateID: String, processKey: String) throws {
-        try recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID)
-    }
-
-    @discardableResult public func launchAgentLauncher(workspaceID: String, name: String, background: Bool = false) throws -> AgentWindowRecord {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent name is required.") }
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        guard let launcher = settings?.agentLaunchers.first(where: { normalizedFocusName($0.name) == normalizedFocusName(trimmedName) }) else {
-            throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-        }
-        return try launchAgentLauncher(launcher, project: project, workspace: workspace, background: background)
-    }
-
-    @discardableResult public func launchAgentLauncher(workspaceID: String, launcherID: String, background: Bool = false) throws -> AgentWindowRecord
-    {
-        let trimmedID = launcherID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedID.isEmpty else { throw WorkspaceError.invalidArgument(message: "Coding agent ID is required.") }
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
-        guard let launcher = settings?.agentLaunchers.first(where: { $0.id == trimmedID }) else {
-            throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-        }
-        return try launchAgentLauncher(launcher, project: project, workspace: workspace, background: background)
-    }
-
-    @discardableResult private func launchAgentLauncher(
-        _ launcher: AgentLauncher, project: ProjectRecord, workspace: WorkspaceRecord, background: Bool
-    ) throws -> AgentWindowRecord {
-        let workspaceID = workspace.id
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
-            if $0.claimedLauncherID == launcher.id { return true }
-            guard $0.claimedLauncherID == nil else { return false }
-            return normalizedFocusName($0.label ?? $0.claimedLauncherName ?? "") == normalizedFocusName(launcher.name)
-        }) {
-            if existing.provider == .spaces, !builtInAgentSessionIsStillLive(existing) {
-                try removeStaleAgentWindow(existing)
-            } else {
-                if try focusAgentWindowRecord(existing, requestID: nil) {
-                    try markWorkspaceRunningIfNeeded(workspace)
-                    return existing
-                }
-                let existingWindowID = try trackedAgentWindowID(existing) ?? existing.yabaiWindowID ?? existing.windowID
-                // A failed focus attempt is not enough evidence to destroy the reserved row.
-                // Only evict the existing record when its terminal is actually gone; otherwise
-                // keep the current slot and treat launch as an idempotent no-op.
-                if agentWindowIsOpen(existingWindowID) {
-                    try markWorkspaceRunningIfNeeded(workspace)
-                    return existing
-                }
-                try removeStaleAgentWindow(existing)
-            }
-        }
-
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        var launchEnv = terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: true)
-        _ = background
-        let agentSessionID = UUID().uuidString
-        launchEnv[Self.terminalTrackingIDEnvVar] = agentSessionID
-        let shellPath = terminalShellPathOverride()
-        let sessionCommand = commandPrefixedWithShellEnvironment(
-            wrappedAgentLauncherCommand(
-                name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: nil),
-            env: launchEnv)
-        let session = try launchSpacesTerminalSession(
-            title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady, sessionID: agentSessionID, workspaceID: workspace.id, kind: .agent)
-        let record = try registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: launcher.name, terminalTrackingID: session.sessionID,
-            terminalNativeID: session.sessionID, yabaiWindowID: session.windowID, status: .idle, claimedLauncherID: launcher.id,
-            claimedLauncherName: launcher.name)
-        try markWorkspaceRunningIfNeeded(workspace)
-        return record
-    }
-
-    private func configuredProcessMatchesKey(_ template: ProcessTemplate, key: String) -> Bool {
-        let trimmedName = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return !trimmedName.isEmpty && trimmedName == key
-    }
-
-    private func runningProcessMatchesTemplate(_ process: RunningProcessRecord, template: ProcessTemplate, fallbackKey: String) -> Bool {
-        if let templateID = process.templateID?.trimmingCharacters(in: .whitespacesAndNewlines), !templateID.isEmpty {
-            return templateID == template.id
-        }
-        return !fallbackKey.isEmpty && runningProcessMatchKey(name: process.templateName) == fallbackKey
-    }
-
-    private func wrappedAgentLauncherCommand(name: String, command: String, shellPath: String?, commandPrelude: String? = nil) -> String {
-        let escapedName = name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "'\\''")
-        let wrappedCommand = commandWithPrelude("printf '\\033]0;\(escapedName)\\007'; \(command)", prelude: commandPrelude)
-        let resolvedShell: String
-        if let trimmedShell = shellPath?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedShell.isEmpty {
-            resolvedShell = trimmedShell
-        } else {
-            resolvedShell = defaultInteractiveShellPath()
-        }
-        return "exec \(shellQuoted(resolvedShell)) -ilc \(shellQuoted(wrappedCommand))"
-    }
-
-    public func recoverRunningWorkspaceProcessIfPossible(workspaceID: String, processID: String) throws -> Bool {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return false }
-        return try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process)
     }
 
     public func recoverMissingBrowserSession(workspaceID: String, targetURL: String) throws {
@@ -5039,265 +3699,20 @@ public final class WorkspaceOrchestrator {
         try markWorkspaceRunningIfNeeded(workspace)
     }
 
-    private func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord) throws {
+    func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord) throws {
         guard !workspace.isRunning else { return }
         let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
     }
 
-    private func markWorkspaceRunningIfNeeded(workspaceID: String) throws {
+    func markWorkspaceRunningIfNeeded(workspaceID: String) throws {
         guard let workspace = try store.workspace(id: workspaceID) else { return }
         try markWorkspaceRunningIfNeeded(workspace)
-    }
-
-    private func stopRunningProcess(_ process: RunningProcessRecord, workspaceID: String) throws {
-        let closedManagedTerminalWindowID: Int?
-        if isManagedTerminalApp(process.terminalApp) {
-            terminateBuiltInTerminalSession(for: process)
-            closedManagedTerminalWindowID = process.windowID
-        } else {
-            closedManagedTerminalWindowID = nil
-            if let pid = resolvedRuntimePID(for: process) { terminateProcessGroup(pid: pid) }
-        }
-        if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
-            if terminalWindow.role == "terminal", isManagedTerminalApp(terminalWindow.app) {
-                if terminalWindow.windowID != closedManagedTerminalWindowID,
-                    let sessionID = normalizedTerminalSessionID(terminalWindow.terminalNativeID ?? terminalWindow.terminalTrackingID)
-                {
-                    builtInTerminalWindowCloser(sessionID)
-                }
-            } else if let windowID = terminalWindow.windowID {
-                _ = try? yabai.closeWindow(id: windowID)
-            }
-            try store.deleteWindow(id: terminalWindow.id)
-        }
-
-        try store.deleteRunningProcess(id: process.id)
-
-        try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
     }
 
     func clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: String) throws {
         guard try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) else { return }
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-    }
-
-    private func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        guard terminalHost(for: process.terminalApp) == .spaces else { return false }
-        let sessionID = process.terminalNativeID ?? process.terminalTrackingID
-        guard let sessionID, !sessionID.isEmpty else { return false }
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
-        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
-        guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
-        guard let pid = resolvedRuntimePID(for: process), isProcessAlive(pid: pid) else { return false }
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        let snapshot = bestEffortYabaiWindowSnapshot()
-        builtInTerminalWindowOpener(sessionID, .owner)
-        let capturedWindowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
-        let now = nowISO8601()
-        try store.upsert(
-            runningProcess: RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                terminalApp: process.terminalApp, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: pid,
-                status: .running, logPath: process.logPath ?? paths.outputPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                exitedAt: nil))
-
-        let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
-            window.role == "terminal" && (window.id == process.id || window.windowID == process.windowID || window.terminalTrackingID == sessionID)
-        })
-        try store.upsert(
-            window: WindowRecord(
-                id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: process.templateName,
-                detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                role: "terminal",
-                orderIndex: existingWindow?.orderIndex
-                    ?? Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200),
-                lastSeenAt: now))
-        return true
-    }
-
-    @discardableResult private func launchConfiguredProcess(
-        template: ProcessTemplate, workspace: WorkspaceRecord, env: [String: String], background: Bool = false
-    ) throws -> RunningProcessRecord {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspace.id)
-        _ = background
-        let name = processKey(for: template)
-        let sessionCommand = try spacesTerminalCommand(template: template, env: env)
-        let session = try launchSpacesTerminalSession(
-            title: name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
-            readinessPolicy: .sessionReady, workspaceID: workspace.id, kind: .process)
-        let now = nowISO8601()
-        let record = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-            terminalApp: TerminalHost.spaces.appName, windowID: session.windowID, terminalTrackingID: session.sessionID,
-            terminalNativeID: session.sessionID, pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil,
-            startedAt: now, exitedAt: nil)
-        try store.upsert(runningProcess: record)
-        let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: name, detail: template.command,
-                targetURL: nil, windowID: session.windowID, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
-                role: "terminal", orderIndex: nextOrder, lastSeenAt: now))
-        return record
-    }
-
-    private func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
-        try focusWorkspaceProcessOutcome(process, workspaceID: workspaceID, requestID: nil).focused
-    }
-
-    private func focusWorkspaceProcessOutcome(_ process: RunningProcessRecord, workspaceID: String, requestID: String?) throws
-        -> WorkspaceProcessFocusOutcome
-    {
-        guard isManagedTerminalApp(process.terminalApp) else {
-            return WorkspaceProcessFocusOutcome(focused: false, route: "unavailable", focusedExistingWindow: false)
-        }
-        let target = try resolvedProcessTerminalFocusTarget(process, workspaceID: workspaceID)
-        let focusResult = focusManagedTerminal(
-            terminalApp: process.terminalApp, providerIdentity: target.providerIdentity, windowID: target.windowID, requestID: requestID)
-        let focused: Bool
-        let focusedExistingWindow: Bool
-        let route: String
-        switch focusResult {
-        case .existingWindow:
-            focused = true
-            focusedExistingWindow = true
-            route = "existing_window"
-        case .trackedTerminal:
-            focused = true
-            focusedExistingWindow = target.windowID != nil
-            route = "tracked_terminal"
-        case .sessionRequest:
-            focused = true
-            focusedExistingWindow = false
-            route = "session_request"
-        case .reboundSession(let capturedWindowID):
-            focused = true
-            focusedExistingWindow = false
-            route = "rebound_session"
-            if terminalHost(for: process.terminalApp) == .spaces {
-                if let capturedWindowID {
-                    try persistBuiltInTerminalWindowBinding(process, workspaceID: workspaceID, windowID: capturedWindowID)
-                } else {
-                    try clearStaleBuiltInTerminalWindowBinding(process, workspaceID: workspaceID)
-                }
-            }
-        case .reopenedSession(let capturedWindowID):
-            focused = true
-            focusedExistingWindow = false
-            route = "reopened_session"
-            if terminalHost(for: process.terminalApp) == .spaces {
-                if let capturedWindowID {
-                    try persistBuiltInTerminalWindowBinding(process, workspaceID: workspaceID, windowID: capturedWindowID)
-                } else {
-                    try clearStaleBuiltInTerminalWindowBinding(process, workspaceID: workspaceID)
-                }
-            }
-        case .unavailable:
-            if let trackedWindowID = target.windowID {
-                let fallbackFocused = ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
-                focused = fallbackFocused
-                focusedExistingWindow = fallbackFocused
-                route = fallbackFocused ? "fallback_window" : "unavailable"
-            } else {
-                focused = false
-                focusedExistingWindow = false
-                route = "unavailable"
-            }
-        }
-        if focused, focusedExistingWindow, let trackedWindowID = target.windowID { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
-        return WorkspaceProcessFocusOutcome(focused: focused, route: route, focusedExistingWindow: focusedExistingWindow)
-    }
-
-    private func trackedAgentWindowID(_ record: AgentWindowRecord) throws -> Int? {
-        let terminalApp = TerminalHost.spaces.appName
-        if record.provider == .spaces, let terminalID = record.terminalNativeID, !terminalID.isEmpty {
-            if let windowID = try store.windows(workspaceID: record.workspaceID).first(where: {
-                $0.app == terminalApp && $0.role == "terminal" && $0.terminalNativeID == terminalID
-            })?.windowID {
-                return windowID
-            }
-            // Partially reconciled Spaces rows may still only carry the hook token on their
-            // tracked terminal window. If native-ID lookup misses, use that persisted session token.
-        }
-        // If native-ID lookup misses, reconcile through the persisted Spaces session identity.
-        guard let sessionID = record.terminalTrackingID, !sessionID.isEmpty else { return record.yabaiWindowID ?? record.windowID }
-        return try store.windows(workspaceID: record.workspaceID).first(where: {
-            $0.app == terminalApp && $0.role == "terminal" && $0.terminalTrackingID == sessionID
-        })?.windowID
-    }
-
-    private func focusAgentWindowRecord(_ record: AgentWindowRecord, requestID: String?) throws -> Bool {
-        let windowID = try trackedAgentWindowID(record) ?? record.yabaiWindowID ?? record.windowID
-        let terminalApp = record.provider == .spaces ? TerminalHost.spaces.appName : nil
-        let focusResult = focusManagedTerminal(
-            terminalApp: terminalApp, providerIdentity: record.terminalFocusIdentity, windowID: windowID, requestID: requestID)
-        let focused: Bool
-        let focusedExistingWindow: Bool
-        switch focusResult {
-        case .existingWindow:
-            focused = true
-            focusedExistingWindow = true
-        case .trackedTerminal:
-            focused = true
-            focusedExistingWindow = windowID != nil
-        case .sessionRequest:
-            focused = true
-            focusedExistingWindow = false
-        case .reboundSession(let capturedWindowID):
-            focused = true
-            focusedExistingWindow = false
-            if record.provider == .spaces {
-                if let capturedWindowID {
-                    try persistBuiltInTerminalWindowBinding(record, windowID: capturedWindowID)
-                } else {
-                    try clearStaleBuiltInTerminalWindowBinding(record)
-                }
-            }
-        case .reopenedSession(let capturedWindowID):
-            focused = true
-            focusedExistingWindow = false
-            if record.provider == .spaces {
-                if let capturedWindowID {
-                    try persistBuiltInTerminalWindowBinding(record, windowID: capturedWindowID)
-                } else {
-                    try clearStaleBuiltInTerminalWindowBinding(record)
-                }
-            }
-        case .unavailable:
-            if let windowID {
-                let fallbackFocused = (try? yabai.focusWindow(id: windowID)) ?? false
-                focused = fallbackFocused
-                focusedExistingWindow = fallbackFocused
-            } else {
-                focused = false
-                focusedExistingWindow = false
-            }
-        }
-        if focused, focusedExistingWindow, let windowID { pulseTerminalWindowIfNeeded(windowID: windowID) }
-        return focused
-    }
-
-    private func focusAgentWindowOrLaunchClaimedLauncher(_ record: AgentWindowRecord, requestID: String?) throws -> Bool {
-        let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let claimedLauncherName = record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard claimedLauncherID?.isEmpty == false || claimedLauncherName?.isEmpty == false else {
-            return try focusAgentWindowRecord(record, requestID: requestID)
-        }
-        if record.provider == .spaces, !builtInAgentSessionIsStillLive(record), builtInAgentSessionID(for: record) != nil {
-            return try focusAgentWindowRecord(record, requestID: requestID)
-        }
-        if try focusAgentWindowRecord(record, requestID: requestID) { return true }
-        if let claimedLauncherID, !claimedLauncherID.isEmpty {
-            _ = try launchAgentLauncher(workspaceID: record.workspaceID, launcherID: claimedLauncherID)
-        } else if let claimedLauncherName, !claimedLauncherName.isEmpty {
-            _ = try launchAgentLauncher(workspaceID: record.workspaceID, name: claimedLauncherName)
-        } else {
-            return false
-        }
-        return true
     }
 
     private func missingTrackedWindowError(for window: WindowRecord, workspaceID: String) -> WorkspaceError {
@@ -5311,20 +3726,7 @@ public final class WorkspaceOrchestrator {
             MissingTrackedWindowContext(kind: .window, workspaceID: workspaceID, windowID: window.windowID, title: window.name ?? window.app))
     }
 
-    private func missingTrackedProcessError(_ process: RunningProcessRecord, workspaceID: String) -> WorkspaceError {
-        .missingTrackedWindow(
-            MissingTrackedWindowContext(
-                kind: .process, workspaceID: workspaceID, windowID: process.windowID, processID: process.id, title: process.templateName))
-    }
-
-    private func missingTrackedAgentError(_ record: AgentWindowRecord) -> WorkspaceError {
-        .missingTrackedWindow(
-            MissingTrackedWindowContext(
-                kind: .codingAgent, workspaceID: record.workspaceID, windowID: record.windowID ?? record.yabaiWindowID,
-                title: record.label ?? "Coding Agent CLI"))
-    }
-
-    private func safeFilename(_ raw: String) -> String {
+    func safeFilename(_ raw: String) -> String {
         raw.map { char in
             if char.isLetter || char.isNumber { return char }
             return "_"
