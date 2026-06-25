@@ -148,22 +148,10 @@ import workspacecore
             self.refreshRows(animated: true)
             if commitAfterRemove { self.onCommit?(self.sessions) }
         }
-        if isDraft {
-            confirm(true)
-            return
-        }
-        if let presenter = presentRemoveConfirmation {
-            presenter(target, confirm)
-            return
-        }
-        let alert = NSAlert()
         let displayName = target.name ?? target.url ?? "this session"
-        alert.messageText = "Remove \(displayName)?"
-        alert.informativeText = "This removes the browser session from the workspace."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        confirm(alert.runModal() == .alertFirstButtonReturn)
+        RowSectionRemoveConfirmation.confirm(
+            messageText: "Remove \(displayName)?", informativeText: "This removes the browser session from the workspace.", isDraft: isDraft,
+            presenter: presentRemoveConfirmation.map { presenter in { presenter(target, $0) } }, onDecision: confirm)
     }
 
     @objc func handleAdd(_ sender: NSButton) {
@@ -412,7 +400,7 @@ import workspacecore
         form.spacing = 6
         form.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
         form.translatesAutoresizingMaskIntoConstraints = false
-        objc_setAssociatedObject(form, &Self.targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: form)
         return (form, (nameField, urlField))
     }
 
@@ -427,11 +415,10 @@ import workspacecore
         target.onCancel = { onClick(button) }
         button.target = target
         button.action = #selector(BrowserSessionFormTarget.triggerCancel)
-        objc_setAssociatedObject(button, &targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: button)
         return button
     }
 
-    private static var targetKey: UInt8 = 0
 }
 
 extension BrowserSessionRowView {

@@ -64,16 +64,49 @@ enum RowSectionHeader {
     }
 }
 
+/// The destructive-remove confirmation shared by the row sections: drafts are
+/// removed silently, an injected presenter (used by tests) overrides the modal,
+/// and otherwise a standard warning alert is shown.
+@MainActor enum RowSectionRemoveConfirmation {
+    /// Calls `onDecision(true)` when the removal should proceed.
+    static func confirm(
+        messageText: String, informativeText: String, isDraft: Bool, presenter: ((@escaping (Bool) -> Void) -> Void)?,
+        onDecision: @escaping (Bool) -> Void
+    ) {
+        if isDraft {
+            onDecision(true)
+            return
+        }
+        if let presenter {
+            presenter(onDecision)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = messageText
+        alert.informativeText = informativeText
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        onDecision(alert.runModal() == .alertFirstButtonReturn)
+    }
+}
+
 extension Array {
     /// Bounds-checked subscript shared by the row-section views.
     subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }
 
+private nonisolated(unsafe) var rowSectionRetainKey: UInt8 = 0
+
+/// Retains `object` for the lifetime of `host` via an associated object. Used to
+/// anchor section owners and inline-form targets to the views they drive.
+@MainActor func retainAssociatedObject(_ object: AnyObject, on host: AnyObject) {
+    objc_setAssociatedObject(host, &rowSectionRetainKey, object, .OBJC_ASSOCIATION_RETAIN)
+}
+
 /// Wraps a section's content in the standard transparent rounded "card" used
 /// across the workspace-detail sections.
 @MainActor enum RowSectionCard {
-    private static var ownerKey: UInt8 = 0
-
     /// Pins `content` to the edges of a fresh card view and returns the card.
     static func wrap(_ content: NSView) -> NSView {
         let card = ColoredBackgroundView()
@@ -90,9 +123,7 @@ extension Array {
 
     /// Associates `owner` with `card` so the section object stays alive while
     /// its view is in the hierarchy. Call once the section is fully initialized.
-    static func retain(_ owner: AnyObject, in card: NSView) {
-        objc_setAssociatedObject(card, &ownerKey, owner, .OBJC_ASSOCIATION_RETAIN)
-    }
+    static func retain(_ owner: AnyObject, in card: NSView) { retainAssociatedObject(owner, on: card) }
 }
 
 extension NSStackView {

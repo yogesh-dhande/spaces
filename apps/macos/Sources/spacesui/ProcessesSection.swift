@@ -233,23 +233,11 @@ import workspacecore
             self.refreshRows(animated: true)
             if commitAfterRemove { self.onCommit?(self.processes) }
         }
-        // Drafts have nothing committed; delete silently.
-        if isDraft {
-            confirm(true)
-            return
-        }
-        if let presenter = presentRemoveConfirmation {
-            presenter(target, confirm)
-            return
-        }
-        let alert = NSAlert()
         let displayName = target.name?.isEmpty == false ? (target.name ?? "") : "this process"
-        alert.messageText = "Remove \(displayName)?"
-        alert.informativeText = "This removes the process from the workspace. You can add it again later."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        confirm(alert.runModal() == .alertFirstButtonReturn)
+        RowSectionRemoveConfirmation.confirm(
+            messageText: "Remove \(displayName)?",
+            informativeText: "This removes the process from the workspace. You can add it again later.", isDraft: isDraft,
+            presenter: presentRemoveConfirmation.map { presenter in { presenter(target, $0) } }, onDecision: confirm)
     }
 
     @objc func handleAdd(_ sender: NSButton) {
@@ -647,7 +635,7 @@ import workspacecore
         form.translatesAutoresizingMaskIntoConstraints = false
 
         // Anchor the target to the form so it lives as long as the form does.
-        objc_setAssociatedObject(form, &Self.targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: form)
 
         return (form, (nameField, commandField, onExitSegmented))
     }
@@ -663,11 +651,10 @@ import workspacecore
         target.onCancel = { onClick(button) }
         button.target = target
         button.action = #selector(ClosureTarget.triggerCancel)
-        objc_setAssociatedObject(button, &targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: button)
         return button
     }
 
-    private static var targetKey: UInt8 = 0
 }
 
 // MARK: - ClosureTarget
