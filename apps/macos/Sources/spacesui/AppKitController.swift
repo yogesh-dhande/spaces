@@ -178,7 +178,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var splitView: NSSplitView?
     let outlineView = SidebarOutlineView()
     lazy var sidebar = SidebarController(host: self)
-    private let detailContainer = NSView()
+    let detailContainer = NSView()
     private weak var workspaceShortcutFooterRowView: NSStackView?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
     var orchestrator: WorkspaceOrchestrator!
@@ -194,8 +194,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localDeviceOverview: SpacesDeviceOverviewPayload?
     var deviceSections: [DeviceSection] = []
     var alertsGroups: [AlertsGroup] = []
-    var dismissedAlertsAttentionItemIDs: Set<String> = []
-    private var visibleDetailWorkspaceID: String?
+    var visibleDetailWorkspaceID: String?
 
     var selectedProjectID: String? { didSet { updateOperationProgressOverlayVisibility() } }
     var selectedWorkspaceID: String? { didSet { updateOperationProgressOverlayVisibility() } }
@@ -210,7 +209,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var pendingLeaderCaptureModifiers: Set<HotkeyModifier> = []
     private var toggleShortcutSpec: HotkeySpec?
     private var commandPaletteShortcutSpec: HotkeySpec?
-    private var alertsShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
@@ -235,6 +233,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceSetupDetailRefreshWorkspaceID: String?
     private weak var workspaceSetupLogTextView: NSTextView?
     lazy var commandPalette = CommandPaletteController(host: self)
+    lazy var alerts = AlertsController(host: self)
     private var selectedSettingsSection: SettingsSection = .general
     private var selectedMCPClient: MCPClient = .claudeCode
     private weak var mcpConfigTextView: NSTextView?
@@ -326,8 +325,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     var showingAlerts = false
-    /// Maps sequential window shortcut numbers (1-9) to focus targets for the current Alerts view.
-    private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var terminalSessionWindowControllers: [String: TerminalSessionWindowController] = [:]
     private var lastFocusedBuiltInTerminalSessionID: String?
@@ -2035,7 +2032,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             commandPaletteMainWindowVisibility: commandPalette.commandPaletteMainWindowVisibility ?? commandPalette.pendingCommandPalettePresentation?.mainWindowWasVisible)
     }
 
-    private static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
+    static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
         switch tint {
         case .browser: .systemBlue
         case .terminal: .systemGreen
@@ -3664,225 +3661,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
 
 
-    @objc func alertsRowClicked() { showAlertsDetail() }
+    @objc func alertsRowClicked() { alerts.showAlertsDetail() }
 
-
-    // MARK: - Alerts content
-
-    private func buildAlertsGroups() -> [AlertsGroup] {
-        alertsGroups.compactMap { group -> AlertsGroup? in
-            let items = group.items.filter { !dismissedAlertsAttentionItemIDs.contains($0.attentionID) }
-            guard !items.isEmpty else { return nil }
-            return AlertsGroup(
-                projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName,
-                workspaceBranch: group.workspaceBranch, items: items)
-        }
-    }
-
-    func alertsAttentionCount() -> Int {
-        buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count }
-    }
-
-    func loadAlertsDismissedAttentionItemIDs() {
-        dismissedAlertsAttentionItemIDs = (try? orchestrator.alertsDismissedAttentionItemIDs()) ?? []
-    }
-
-    func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
-        let activeIDs = Set(alertsGroups.flatMap { $0.items.map(\.attentionID) })
-        let prunedIDs = dismissedAlertsAttentionItemIDs.intersection(activeIDs)
-        guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
-        dismissedAlertsAttentionItemIDs = prunedIDs
-        do { try orchestrator.setAlertsDismissedAttentionItemIDs(prunedIDs) } catch { showError(error) }
-    }
-
-    func dismissAlertsAttentionItem(_ attentionID: String) {
-        guard !dismissedAlertsAttentionItemIDs.contains(attentionID) else { return }
-        dismissedAlertsAttentionItemIDs.insert(attentionID)
-        do {
-            try orchestrator.setAlertsDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs)
-            updateAlertsSidebarBadge()
-            if showingAlerts { showAlertsDetail() }
-        } catch {
-            dismissedAlertsAttentionItemIDs.remove(attentionID)
-            showError(error)
-        }
-    }
-
-    func showAlertsDetail() {
-        clearActiveAddFormStateAndCloseWindows()
-        stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
-        showingSettings = false
-        showingAlerts = true
-        let previousProjectID = selectedProjectID
-        let previousWorkspaceID = selectedWorkspaceID
-        selectedProjectID = nil
-        selectedWorkspaceID = nil
-        alertsFocusRequestMap = [:]
-        outlineView.deselectAll(nil)
-        // Reload only the previously-selected workspace row to clear its selection styling;
-        // avoid full reloadData() which would reset expand/collapse state.
-        refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
-        updateAlertsRowAppearance()
-
-        for view in detailContainer.subviews { view.removeFromSuperview() }
-        detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-
-        let groups = buildAlertsGroups()
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        // Header
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let headerTitle = NSTextField(labelWithString: "Alerts")
-        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
-        headerRow.addArrangedSubview(headerTitle)
-
-        stack.addArrangedSubview(headerRow)
-        constrainFormFieldToFillWidth(headerRow, in: stack)
-
-        if groups.isEmpty {
-            let sep = NSView()
-            sep.translatesAutoresizingMaskIntoConstraints = false
-            sep.wantsLayer = true
-            sep.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).cgColor
-            sep.heightAnchor.constraint(equalToConstant: 1).isActive = true
-            stack.addArrangedSubview(sep)
-            constrainFormFieldToFillWidth(sep, in: stack)
-
-            let icon = NSImageView()
-            icon.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "All clear")
-            icon.contentTintColor = sidebarRunningIndicatorColor()
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28), icon.heightAnchor.constraint(equalToConstant: 28)])
-            let emptyTitle = NSTextField(labelWithString: "No attention required")
-            emptyTitle.font = .systemFont(ofSize: 13, weight: .medium)
-            emptyTitle.textColor = .labelColor
-            let emptyDetail = NSTextField(labelWithString: "All running workspaces are healthy.")
-            emptyDetail.font = .systemFont(ofSize: 11)
-            emptyDetail.textColor = .secondaryLabelColor
-            let emptyStack = NSStackView()
-            emptyStack.orientation = .vertical
-            emptyStack.alignment = .centerX
-            emptyStack.spacing = 6
-            emptyStack.translatesAutoresizingMaskIntoConstraints = false
-            emptyStack.addArrangedSubview(icon)
-            emptyStack.addArrangedSubview(emptyTitle)
-            emptyStack.addArrangedSubview(emptyDetail)
-            stack.addArrangedSubview(emptyStack)
-            constrainFormFieldToFillWidth(emptyStack, in: stack)
-        } else {
-            // Sequential window shortcut counter across all groups and items.
-            var shortcutCounter = 1
-
-            for group in groups {
-                // Workspace group header
-                let groupHeaderStack = NSStackView()
-                groupHeaderStack.orientation = .horizontal
-                groupHeaderStack.alignment = .centerY
-                groupHeaderStack.spacing = 4
-                groupHeaderStack.translatesAutoresizingMaskIntoConstraints = false
-
-                let projectLabel = NSTextField(labelWithString: group.projectName)
-                projectLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-                projectLabel.textColor = .secondaryLabelColor
-                projectLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-                let slashLabel = NSTextField(labelWithString: "/")
-                slashLabel.font = .systemFont(ofSize: 12)
-                slashLabel.textColor = .tertiaryLabelColor
-                slashLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-                let workspaceLabel = NSTextField(labelWithString: group.workspaceName)
-                workspaceLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-                workspaceLabel.textColor = accentColor
-                workspaceLabel.lineBreakMode = .byTruncatingTail
-                workspaceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-                groupHeaderStack.addArrangedSubview(projectLabel)
-                groupHeaderStack.addArrangedSubview(slashLabel)
-                groupHeaderStack.addArrangedSubview(workspaceLabel)
-                stack.addArrangedSubview(groupHeaderStack)
-                constrainFormFieldToFillWidth(groupHeaderStack, in: stack)
-
-                let itemsStack = NSStackView()
-                itemsStack.orientation = .vertical
-                itemsStack.spacing = 4
-                itemsStack.translatesAutoresizingMaskIntoConstraints = false
-
-                for entry in group.items {
-                    let shortcut = shortcutCounter <= 10 ? windowShortcutBadgeText(index: shortcutCounter) : ""
-                    if shortcutCounter <= 10, let focusRequest = entry.focusRequest { alertsFocusRequestMap[shortcutCounter] = focusRequest }
-                    shortcutCounter += 1
-                    let cardAction: (() async -> Void)?
-                    if let focusRequest = entry.focusRequest {
-                        cardAction = { [weak self] in
-                            guard let self else { return }
-                            await self.performWindowFocus(focusRequest)
-                        }
-                    } else {
-                        cardAction = nil
-                    }
-                    let card = alertsWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
-                    itemsStack.addArrangedSubview(card)
-                    constrainFormFieldToFillWidth(card, in: itemsStack)
-                }
-
-                stack.addArrangedSubview(itemsStack)
-                constrainFormFieldToFillWidth(itemsStack, in: stack)
-            }
-        }
-
-        showScrollableDetailStack(stack)
-    }
-
-    /// Builds an alerts card with focus and dismiss affordances while preserving the workspace Run tab rows.
-    private func alertsWindowCard(entry: AlertsAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
-        let dismissButton = NSButton()
-        dismissButton.title = ""
-        dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
-        dismissButton.imagePosition = .imageOnly
-        dismissButton.setButtonType(.momentaryPushIn)
-        dismissButton.isBordered = false
-        dismissButton.contentTintColor = .secondaryLabelColor
-        dismissButton.bezelStyle = .regularSquare
-        dismissButton.target = self
-        dismissButton.action = #selector(dismissAlertsAttentionItemAction(_:))
-        dismissButton.identifier = NSUserInterfaceItemIdentifier(entry.attentionID)
-        dismissButton.toolTip = "Dismiss from alerts"
-
-        let mainRow = windowRow(
-            icon: entry.icon, iconColor: Self.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
-            processStatus: entry.processStatus, agentStatus: entry.agentStatus,
-            automationID: entry.agentStatus == nil ? nil : "alerts-agent-\(Self.automationIdentifierSlug(entry.label))",
-            trailingAccessory: dismissButton, action: action)
-
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.spacing = 4
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        container.addArrangedSubview(mainRow)
-        constrainFormFieldToFillWidth(mainRow, in: container)
-
-        return container
-    }
-
-    @objc private func dismissAlertsAttentionItemAction(_ sender: NSButton) {
-        guard let attentionID = sender.identifier?.rawValue, !attentionID.isEmpty else { return }
-        dismissAlertsAttentionItem(attentionID)
-    }
+    // MARK: - Alerts forwarders
+    // Thin pass-throughs that keep widely-used alerts entry points callable from
+    // host and sidebar code. The implementations live on `alerts` (AlertsController).
+    func alertsAttentionCount() -> Int { alerts.alertsAttentionCount() }
+    func loadAlertsDismissedAttentionItemIDs() { alerts.loadAlertsDismissedAttentionItemIDs() }
+    func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
+    func showAlertsDetail() { alerts.showAlertsDetail() }
 
     private func makeRightPane() -> NSView {
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -4250,7 +4037,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func stopWorkspaceSetupDetailRefreshTimer() {
+    func stopWorkspaceSetupDetailRefreshTimer() {
         workspaceSetupDetailRefreshTimer?.invalidate()
         workspaceSetupDetailRefreshTimer = nil
         workspaceSetupDetailRefreshWorkspaceID = nil
@@ -7091,7 +6878,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         activeAddWorkspaceFormTag = nil
     }
 
-    private func clearActiveAddFormStateAndCloseWindows() {
+    func clearActiveAddFormStateAndCloseWindows() {
         clearActiveAddProjectFormState()
         clearInlineWorkspaceFieldRefs()
         clearActiveAddWorkspaceFormState()
@@ -7463,7 +7250,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return (cleanedName?.isEmpty == false ? cleanedName! : "Terminal", cleanedDetail?.isEmpty == false ? cleanedDetail : nil)
     }
 
-    private func windowRow(
+    func windowRow(
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
         agentStatus: AgentWindowStatus? = nil, automationID: String? = nil, trailingAccessory: NSView? = nil, action: (() async -> Void)? = nil
     ) -> NSView {
@@ -8045,7 +7832,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let image = button.image { button.image = image.withSymbolConfiguration(.init(paletteColors: [Theme.primaryButtonText])) }
     }
 
-    private func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
+    func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
         view.translatesAutoresizingMaskIntoConstraints = false
         view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
@@ -8069,7 +7856,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return row
     }
 
-    private func showScrollableDetailStack(_ stack: NSStackView, in host: NSView? = nil) {
+    func showScrollableDetailStack(_ stack: NSStackView, in host: NSView? = nil) {
         let container = host ?? detailContainer
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -10174,7 +9961,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleReloadShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }
-            if self.handleAlertsShortcut(event: event) { return nil }
+            if self.alerts.handleAlertsShortcut(event: event) { return nil }
             if let openSettingsShortcutSpec, matches(event: event, spec: openSettingsShortcutSpec) {
                 self.showSettings()
                 return nil
@@ -10282,12 +10069,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return true
         }
         return false
-    }
-
-    private func handleAlertsShortcut(event: NSEvent) -> Bool {
-        guard let alertsShortcutSpec, matches(event: event, spec: alertsShortcutSpec) else { return false }
-        showAlertsDetail()
-        return true
     }
 
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
@@ -10526,7 +10307,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
         commandPaletteShortcutSpec = loadShortcutSpec(setting: .guiCommandPaletteHotkey)
-        alertsShortcutSpec = loadShortcutSpec(setting: .guiAlertsShortcut)
+        alerts.alertsShortcutSpec = loadShortcutSpec(setting: .guiAlertsShortcut)
         addWorkspaceShortcutSpec = loadShortcutSpec(setting: .guiAddWorkspaceShortcut)
         reloadShortcutSpec = loadShortcutSpec(setting: .guiReloadShortcut)
         nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
@@ -10560,7 +10341,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiHotkey: return toggleShortcutSpec
         case .guiCommandPaletteHotkey: return commandPaletteShortcutSpec
         case .guiLeaderHotkey: return nil
-        case .guiAlertsShortcut: return alertsShortcutSpec
+        case .guiAlertsShortcut: return alerts.alertsShortcutSpec
         case .guiAddWorkspaceShortcut: return addWorkspaceShortcutSpec
         case .guiReloadShortcut: return reloadShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec
@@ -10573,7 +10354,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func matches(event: NSEvent, spec: HotkeySpec) -> Bool {
+    func matches(event: NSEvent, spec: HotkeySpec) -> Bool {
         guard UInt32(event.keyCode) == spec.keyCode else { return false }
         let flags = eventModifierCarbonFlags(event)
         return flags == spec.modifiersCarbon
@@ -10589,7 +10370,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return result
     }
 
-    private func performWindowFocus(_ request: WindowFocusRequest) async {
+    func performWindowFocus(_ request: WindowFocusRequest) async {
         let result = await Self.performWindowFocusSnapshot(request)
         switch result {
         case .success(let action):
@@ -10618,7 +10399,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             await runDeviceWindowShortcut(index: index, startedAt: startedAt)
             return
         }
-        let alertsFocusRequest = showingAlerts ? alertsFocusRequestMap[index] : nil
+        let alertsFocusRequest = showingAlerts ? alerts.alertsFocusRequest(for: index) : nil
         let routeStartedAt = Date()
         let result = await Self.focusWindowShortcutSnapshot(
             index: index, selectedWorkspaceID: selectedWorkspaceID, alertsFocusRequest: alertsFocusRequest)
@@ -10827,7 +10608,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return keyMap[event.keyCode]
     }
 
-    private func windowShortcutBadgeText(index: Int) -> String {
+    func windowShortcutBadgeText(index: Int) -> String {
         let keyText = index == 10 ? "0" : String(index)
         guard let windowShortcutSpec else { return "⌘\(keyText)" }
         return displayShortcut(windowShortcutSpec, keyText: keyText)
