@@ -16,9 +16,9 @@ export default function IOSDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• On your Mac, open the Devices panel or run <code>spaces pair</code> to show a pairing QR code.</li>
-          <li>• Scan it with the Spaces iOS app, or open the link on your phone.</li>
-          <li>• Pair more than one Mac and switch between them from the app.</li>
+          <li>• On your Mac, open the Devices panel to show a pairing QR code, or run <code>spaces pair</code> to print a <code>spaces://pair</code> link.</li>
+          <li>• Scan the QR code with the Spaces iOS app, or open the printed link on your phone.</li>
+          <li>• The iOS app pairs with any Mac or Linux device running Spaces. Pair more than one and switch between them from the app.</li>
         </ul>
       </article>
 
@@ -28,7 +28,9 @@ export default function IOSDocsPage() {
           <li>• Browse the live terminal sessions running across your workspaces.</li>
           <li>• Open a session to watch its output and type into it from your phone.</li>
           <li>• Check on a coding agent that&apos;s working or waiting on you while you&apos;re away from your desk.</li>
-          <li>• Relaunch the Mac app remotely if it quit or crashed.</li>
+          <li>• Create a workspace in any existing project, and open or stop workspace terminals.</li>
+          <li>• Run, stop, or restart configured processes and coding agents.</li>
+          <li>• Keep working even if the Mac app quit or crashed &mdash; as long as the Spaces daemon is reachable, acting from your phone brings the Mac app back automatically.</li>
         </ul>
       </article>
     </DocsShell>

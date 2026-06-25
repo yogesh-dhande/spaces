@@ -14,12 +14,17 @@ export default function WorkspaceLifecycleDocsPage() {
       pagePath="/docs/workspace-lifecycle"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">States</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Runtime State</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          A workspace is always in one of two runtime states. Runtime health (a failed process, a stale window) surfaces as a warning on top of these states rather than as a separate state.
+        </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <strong>Stopped</strong> &mdash; the workspace exists but nothing is running.</li>
+          <li>• <strong>Stopped</strong> &mdash; the workspace exists but nothing is running. This covers both a workspace Spaces has never launched and one it explicitly stopped; either way it is directly launchable.</li>
           <li>• <strong>Running</strong> &mdash; Spaces has started its processes. Browser sessions stay configured but open on demand when you focus them.</li>
-          <li>• <strong>Archived</strong> &mdash; hidden from the sidebar. For Git projects the worktree is removed; for non-Git projects the project directory is left alone. The default workspace can&apos;t be archived.</li>
         </ul>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Visibility is separate from runtime state. Independently of being running or stopped, a workspace can be <strong>hidden</strong> (collapsed into the Hidden section at the bottom of the sidebar) or <strong>archived</strong> (retired from the sidebar &mdash; see below).
+        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

@@ -79,7 +79,7 @@ const navigateShortcuts: Shortcut[] = [
 
 const actShortcuts: Shortcut[] = [
   { keys: "⌘N", label: "New workspace for the selected project" },
-  { keys: "⌘⇧T", label: "Open a terminal for the selected workspace" },
+  { keys: "⌘⌥T", label: "Open a terminal for the selected workspace" },
   { keys: "⌘⌥E", label: "Open the workspace in your editor" },
   { keys: "⌘⌥A", label: "Open Alerts" },
   { keys: "⌘⌥F", label: "Reveal the workspace in Finder" },
@@ -135,7 +135,7 @@ const faqItems: FaqItem[] = [
     question: "Can I use it with CLI coding agents like Claude Code or Codex CLI?",
     answer: (
       <>
-        Yes. Open a terminal inside any workspace with <Key>⌘⇧T</Key> and start
+        Yes. Open a terminal inside any workspace with <Key>⌘⌥T</Key> and start
         your agent as normal. The terminal window is automatically
         attached to the workspace so you can jump back to it with keyboard
         shortcuts at any time. To let the agent set workspace notes and
@@ -185,7 +185,7 @@ const faqItems: FaqItem[] = [
               If you keep your window count low.
             </span>{" "}
             Spaces opens a dedicated window for every tab, terminal, and
-            editor instance so it can lay them out across your screens and
+            editor instance so you can lay them out across your screens and
             recall them on demand. The upside is speed and flexibility —
             focusing a window takes 20–30 ms, versus 200 ms to a full second
             to reconcile and focus a specific tab in Chrome as you add or

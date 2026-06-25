@@ -48,7 +48,7 @@ export default function WorkspacesDocsPage() {
           <li>• Add, remove, or rename named ports per workspace.</li>
           <li>• Edit a process command while the workspace is running and Spaces asks to confirm, then restarts just that process.</li>
           <li>• Add a browser session and it opens in Chrome when you focus it.</li>
-          <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on import, launch, and agent events.</li>
+          <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on workspace creation, launch, and agent events.</li>
         </ul>
       </article>
 
@@ -64,8 +64,8 @@ export default function WorkspacesDocsPage() {
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: bugfix/login-timeout
-FRONTEND_PORT=21001
-API_PORT=21002`}</code>
+FRONTEND_PORT=20001
+API_PORT=20002`}</code>
         </pre>
       </article>
 

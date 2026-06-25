@@ -61,9 +61,7 @@ spaces agent signal --workspace <id> --session <terminal-session-id> waiting`}</
 spaces workspace list --project <project-id> --include-archived
 spaces workspace create --project <project-id> --branch <branch>
 spaces workspace start --workspace <workspace-id>
-spaces workspace restart --workspace <workspace-id>
-spaces pair
-spaces pair --json`}</CodeBlock>
+spaces workspace restart --workspace <workspace-id>`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--project <id>" description="Project ID for listing or workspace creation." />
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
@@ -72,6 +70,29 @@ spaces pair --json`}</CodeBlock>
           <Flag name="--base-branch <branch>" description="Optional base branch for new branch creation." />
           <Flag name="--existing-branch" description="Use an existing branch instead of creating one." />
           <Flag name="--include-archived" description="Include archived workspaces in list output." />
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Terminals</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Terminal commands inspect and drive Spaces-owned terminal sessions on the same-machine daemon. Sessions survive app quit, so commands started here stay discoverable through <Cmd>spaces terminal list</Cmd>.
+        </p>
+        <CodeBlock>{`spaces terminal list
+spaces terminal command --command "npm run dev" --cwd <path>
+spaces terminal send <session-id> "echo hello" --newline
+spaces terminal key <session-id> ctrl+c
+spaces terminal tail <session-id> --lines 40
+spaces terminal show <session-id>
+spaces terminal takeover <session-id> <client-id>`}</CodeBlock>
+        <ul className="mt-3 space-y-1">
+          <Flag name="list" description="List available terminal sessions by ID, runtime state, and working directory." />
+          <Flag name="command" description="Start a persistent background terminal session. Omit --command for a login shell." />
+          <Flag name="send <session> <text>" description="Send text to a session. Add --newline to submit it." />
+          <Flag name="key <session> <key>" description="Send a named key or chord such as enter, esc, up, ctrl+c, or cmd+k." />
+          <Flag name="tail <session>" description="Print recent output. --lines defaults to 20." />
+          <Flag name="show <session>" description="Open a native Spaces window for the session in owner-seeking mode (macOS)." />
+          <Flag name="takeover <session> <client>" description="Transfer input ownership to another attached client." />
         </ul>
       </article>
 
@@ -96,6 +117,15 @@ spaces agent signal --workspace <workspace-id> --session <terminal-session-id> e
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent labels come from configured launcher names or the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
         </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          <Cmd>spaces pair</Cmd> opens a short-lived pairing window on the same-machine daemon and prints a <code>spaces://pair</code> link for connecting an iOS client from the terminal. Add <Cmd>--json</Cmd> for machine-readable output.
+        </p>
+        <CodeBlock>{`spaces pair
+spaces pair --json`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

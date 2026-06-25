@@ -47,7 +47,7 @@ export default function InstallationDocsPage() {
             3. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install Spaces</code> in the DMG.
           </li>
           <li>
-            4. The installer copies <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code> and installs the required <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> command together.
+            4. The installer copies <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code>, installs the required <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> CLI and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spacesd</code> daemon, and sets up the per-user background service (LaunchAgent) that keeps your terminal sessions alive.
           </li>
           <li>
             5. Eject the DMG.
@@ -110,7 +110,7 @@ open -a Spaces`}
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Updates</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaces checks GitHub Releases on its own. When a new version is available, you can install it from inside the app or open the release page directly.
+          Spaces checks for updates automatically through its built-in updater, and you can also check manually from the app menu. New versions install in place. Manual DMG downloads stay available on the releases page if you prefer to update by hand.
         </p>
       </article>
 
@@ -120,8 +120,10 @@ open -a Spaces`}
           To remove Spaces completely:
         </p>
         <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
-{`rm -rf /Applications/Spaces.app
-rm -f /usr/local/bin/spaces ~/.local/bin/spaces
+{`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.usespaces.spacesd.plist
+rm -f ~/Library/LaunchAgents/dev.usespaces.spacesd.plist
+rm -rf /Applications/Spaces.app
+rm -f /usr/local/bin/spaces /usr/local/bin/spacesd
 rm -rf ~/.spaces ~/spaces`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">

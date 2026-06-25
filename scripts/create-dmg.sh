@@ -80,18 +80,20 @@ copy_ghostty_vt_dylibs() {
 install_user_state_paths() {
   local user_home="$1"
   local state_root="$user_home/.spaces"
+  local data_root="$user_home/spaces"
   local bin_dir="$state_root/bin"
   local runtime_dir="$state_root/runtime"
-  local workspaces_dir="$state_root/workspaces"
+  local workspaces_dir="$data_root/workspaces"
+  local repos_dir="$data_root/repos"
   local install_user
   install_user="$(/usr/bin/stat -f %Su "$user_home" 2>/dev/null || true)"
 
-  /bin/mkdir -p "$bin_dir" "$runtime_dir" "$workspaces_dir"
+  /bin/mkdir -p "$bin_dir" "$runtime_dir" "$workspaces_dir" "$repos_dir"
   /bin/ln -sfn "$CLI_PATH" "$bin_dir/spaces"
   /bin/ln -sfn "$SERVICE_PATH" "$bin_dir/spacesd"
 
   if [[ -n "$install_user" ]]; then
-    /usr/sbin/chown "$install_user" "$state_root" "$bin_dir" "$runtime_dir" "$workspaces_dir" 2>/dev/null || true
+    /usr/sbin/chown "$install_user" "$state_root" "$data_root" "$bin_dir" "$runtime_dir" "$workspaces_dir" "$repos_dir" 2>/dev/null || true
     /usr/sbin/chown -h "$install_user" "$bin_dir/spaces" "$bin_dir/spacesd" 2>/dev/null || true
   fi
 }

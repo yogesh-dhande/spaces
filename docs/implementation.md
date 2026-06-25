@@ -47,7 +47,7 @@ flowchart TD
     core["workspacecore"]
     db[("~/.spaces/spaces.db")]
     runtimeFiles[("~/.spaces/runtime")]
-    workspaces[("~/.spaces/workspaces")]
+    workspaces[("~/spaces/workspaces")]
     tlsIdentity["TLS identity"]
     pairedClients["paired-client token hashes"]
     terminal["Ghostty session core\nper terminal session"]
@@ -186,8 +186,10 @@ flowchart TD
 - `SPACES_DB_PATH` wins when it is set for the current process.
 - Otherwise repo-local development binaries derive one profile root from the current git branch plus the canonical worktree path.
 - Installed binaries and non-dev fall back to `~/.spaces/`.
-- The default runtime root is `<profile-root>/runtime`, unless `SPACES_RUNTIME_DIR` overrides it explicitly.
+- The default runtime root is `<profile-root>/runtime`, unless `SPACES_RUNTIME_DIR` overrides it explicitly. Workspaces and app-managed git clones live under `~/spaces/workspaces` and `~/spaces/repos`, separate from the `~/.spaces` state root.
+- Mac client paired-device metadata follows the resolved profile root, so separate profiles do not share paired remote devices.
 - Distributed notification IPC uses one profile-scoped object token derived from the resolved profile root so app, CLI, and E2E helpers only talk to the matching profile instance.
+- Startup command lookup may enrich the search path from the user's login-shell PATH, but the lookup stays bounded and falls back to the inherited `PATH` plus standard package-manager locations so shell startup files cannot stall app launch. The inherited `PATH` stays authoritative; login-shell entries only fill gaps missing from the launch environment, and package-manager fallbacks remain last.
 
 ### App Ownership and Desktop Control
 - App launch acquires one per-profile owner lease before the store, IPC observers, hotkeys, or windows are created.
@@ -662,7 +664,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Core external dependencies that the GUI invokes directly, such as `yabai` and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
-- Each `ProcessTemplate` stores name, command, kind, and on-exit behavior. Legacy persisted `execution_mode` data is ignored.
+- Each `ProcessTemplate` stores name, command, kind, and on-exit behavior. Persisted `execution_mode` values are ignored.
 - Process commands are validated as non-empty shell command strings.
 - Process launch exports the workspace environment, including named ports and `SPACES_*` directory variables, then executes the command through the user's resolved login shell.
 - Project and workspace editors, workspace launch, running-process restart validation, JSON import/export, and CLI text output all preserve shell-string process semantics.

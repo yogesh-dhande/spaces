@@ -60,7 +60,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Lifecycle Events</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Agents report their own state through <code>spaces agent signal --workspace &lt;id&gt; --session &lt;terminal-session-id&gt; &lt;event&gt;</code>. Spaces uses each event to update the agent row and, for <code>waiting</code> and <code>done</code>, to raise Alerts and dock attention until you dismiss it.
+          Agents report their own state through <code>spaces agent signal --workspace &lt;id&gt; --session &lt;terminal-session-id&gt; &lt;event&gt;</code>. Spaces uses each event to update the agent row. Both <code>waiting</code> and <code>done</code> raise Alerts and dock attention; <code>waiting</code> clears when the agent&apos;s state changes, while <code>done</code> stays in Alerts until you dismiss it.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>init</strong> &mdash; identify the terminal and attach it to a tracked row.</li>
@@ -95,7 +95,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Setup Prompt for Codex</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Paste this into Codex from any directory. It edits <code>~/.codex/hooks.json</code> and <code>~/.codex/config.toml</code>, enables hooks with <code>[features].hooks</code>, and leaves unrelated settings untouched.
+          Paste this into Codex from any directory. It edits <code>~/.codex/config.toml</code>, enabling hooks with <code>[features].hooks</code> and adding the lifecycle entries as inline <code>[hooks]</code> tables, and leaves unrelated settings untouched. Codex has no session-end event, so the Codex setup omits <code>exit</code>.
         </p>
         <CopyablePrompt label="Prompt for Codex" text={CODEX_PROMPT} />
       </article>
