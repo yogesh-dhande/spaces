@@ -2,8 +2,8 @@ import AppKit
 
 @MainActor final class ProjectFieldRefs {
     let projectID: String
-    let setupScriptSection: SetupScriptSection
-    let stopScriptSection: StopScriptSection
+    let setupScriptSection: ScriptSection
+    let stopScriptSection: ScriptSection
     let portsSection: PortsSection
     let processesSection: ProcessesSection
     let browserSessionsSection: BrowserSessionsSection
@@ -15,7 +15,7 @@ import AppKit
     var pendingImportUpdateAllWorkspaces = false
 
     init(
-        projectID: String, setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection,
+        projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
         importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) {

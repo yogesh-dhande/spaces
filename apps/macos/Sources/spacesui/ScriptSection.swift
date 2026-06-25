@@ -1,6 +1,9 @@
 import AppKit
 
-@MainActor final class SetupScriptSection {
+/// A single-script card with an inline editor, used for both the project setup
+/// script and the workspace stop script. The two differ only in their title and
+/// accessibility identifiers, supplied at construction.
+@MainActor final class ScriptSection {
     // MARK: Public surface
 
     let view: NSView
@@ -11,14 +14,16 @@ import AppKit
     private(set) var currentValue: String
     private let container: NSStackView
     private let editButton: NSButton
+    private let formAccessibilityPrefix: String
     private(set) var isEditing = false
 
     // MARK: Init
 
-    init(value: String, subtitle: String? = nil) {
+    init(title: String, editAccessibilityIdentifier: String, formAccessibilityPrefix: String, value: String, subtitle: String? = nil) {
         self.currentValue = value
+        self.formAccessibilityPrefix = formAccessibilityPrefix
 
-        let titleLabel = NSTextField(labelWithString: "Setup Script")
+        let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = Theme.text
 
@@ -46,7 +51,7 @@ import AppKit
         editButton.toolTip = "Edit"
         editButton.contentTintColor = Theme.muted
         editButton.alphaValue = 0.6
-        editButton.setAccessibilityIdentifier("setup-script-edit")
+        editButton.setAccessibilityIdentifier(editAccessibilityIdentifier)
 
         let headerSpacer = NSView()
         headerSpacer.translatesAutoresizingMaskIntoConstraints = false
@@ -79,10 +84,10 @@ import AppKit
         ])
         self.view = card
 
-        let editTarget = SetupScriptSectionTarget()
+        let editTarget = ScriptSectionTarget()
         editTarget.onAction = { [weak self] in self?.enterEditing() }
         editButton.target = editTarget
-        editButton.action = #selector(SetupScriptSectionTarget.triggerAction)
+        editButton.action = #selector(ScriptSectionTarget.triggerAction)
         objc_setAssociatedObject(editButton, &Self.editButtonTargetKey, editTarget, .OBJC_ASSOCIATION_RETAIN)
 
         objc_setAssociatedObject(card, &Self.anchorKey, self, .OBJC_ASSOCIATION_RETAIN)
@@ -143,7 +148,7 @@ import AppKit
         editButton.isHidden = true
 
         let (form, textView) = Self.makeEditingForm(
-            value: currentValue,
+            value: currentValue, accessibilityPrefix: formAccessibilityPrefix,
             onCancel: { [weak self] in
                 guard let self else { return }
                 isEditing = false
@@ -170,9 +175,9 @@ import AppKit
 
     // MARK: Editing form builder
 
-    private static func makeEditingForm(value: String, onCancel: @escaping () -> Void, onSave: @escaping (String) -> Void) -> (
-        NSStackView, NSTextView
-    ) {
+    private static func makeEditingForm(
+        value: String, accessibilityPrefix: String, onCancel: @escaping () -> Void, onSave: @escaping (String) -> Void
+    ) -> (NSStackView, NSTextView) {
         let textView = NSTextView()
         textView.isRichText = false
         textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -187,7 +192,7 @@ import AppKit
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.string = value
-        textView.setAccessibilityIdentifier("project-setup-script-field")
+        textView.setAccessibilityIdentifier("\(accessibilityPrefix)-field")
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -212,22 +217,22 @@ import AppKit
 
         let cancelButton = NSButton(title: "Cancel (Esc)", target: nil, action: nil)
         cancelButton.keyEquivalent = "\u{1b}"
-        cancelButton.setAccessibilityIdentifier("project-setup-script-cancel")
+        cancelButton.setAccessibilityIdentifier("\(accessibilityPrefix)-cancel")
         Theme.applySecondaryStyle(to: cancelButton)
 
         let saveButton = NSButton(title: "Save (⌘↩)", target: nil, action: nil)
         saveButton.keyEquivalent = "\r"
         saveButton.keyEquivalentModifierMask = [.command]
-        saveButton.setAccessibilityIdentifier("project-setup-script-save")
+        saveButton.setAccessibilityIdentifier("\(accessibilityPrefix)-save")
         Theme.applyPrimaryStyle(to: saveButton)
 
-        let target = SetupScriptSectionTarget()
+        let target = ScriptSectionTarget()
         target.onCancel = onCancel
         target.onSave = { [weak textView] in onSave(textView?.string ?? "") }
         cancelButton.target = target
-        cancelButton.action = #selector(SetupScriptSectionTarget.triggerCancel)
+        cancelButton.action = #selector(ScriptSectionTarget.triggerCancel)
         saveButton.target = target
-        saveButton.action = #selector(SetupScriptSectionTarget.triggerSave)
+        saveButton.action = #selector(ScriptSectionTarget.triggerSave)
 
         let buttonRow = NSStackView(views: [cancelButton, saveButton, NSView()])
         buttonRow.orientation = .horizontal
@@ -253,7 +258,7 @@ import AppKit
 
 // MARK: - Target
 
-@MainActor private final class SetupScriptSectionTarget: NSObject {
+@MainActor private final class ScriptSectionTarget: NSObject {
     var onAction: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSave: (() -> Void)?

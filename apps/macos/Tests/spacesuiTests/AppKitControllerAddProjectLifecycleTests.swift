@@ -60,7 +60,8 @@ import Testing
     }
 
     @MainActor @Test func setupScriptReplaceCancelsOpenEditorAndAppliesHydratedValue() {
-        let section = SetupScriptSection(value: "old")
+        let section = ScriptSection(
+            title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: "old")
         section.editButtonForLifecycleTests?.performClick(nil)
         #expect(section.isEditing)
 
@@ -73,7 +74,8 @@ import Testing
     }
 
     @MainActor @Test func stopScriptReplaceCancelsOpenEditorAndAppliesHydratedValue() {
-        let section = StopScriptSection(value: "old")
+        let section = ScriptSection(
+            title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script", value: "old")
         section.editButtonForLifecycleTests?.performClick(nil)
         #expect(section.isEditing)
 
@@ -134,22 +136,20 @@ import Testing
 
     @MainActor private func makeProjectFieldRefs() -> ProjectFieldRefs {
         ProjectFieldRefs(
-            projectID: "project", setupScriptSection: SetupScriptSection(value: ""), stopScriptSection: StopScriptSection(value: ""),
+            projectID: "project",
+            setupScriptSection: ScriptSection(
+                title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: ""),
+            stopScriptSection: ScriptSection(
+                title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script", value: ""),
             portsSection: PortsSection(), processesSection: ProcessesSection(showsRuntimeControls: false),
             browserSessionsSection: BrowserSessionsSection(), agentLaunchersSection: AgentLaunchersSection(), importButton: NSButton(),
             exportButton: NSButton(), discardImportedConfigButton: NSButton())
     }
 }
 
-extension SetupScriptSection {
+extension ScriptSection {
     fileprivate var editButtonForLifecycleTests: NSButton? {
-        view.addProjectLifecycleSubviewsRecursive().compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "setup-script-edit" }
-    }
-}
-
-extension StopScriptSection {
-    fileprivate var editButtonForLifecycleTests: NSButton? {
-        view.addProjectLifecycleSubviewsRecursive().compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "stop-script-edit" }
+        view.addProjectLifecycleSubviewsRecursive().compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier().hasSuffix("-script-edit") }
     }
 }
 

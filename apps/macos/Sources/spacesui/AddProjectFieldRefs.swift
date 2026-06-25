@@ -10,8 +10,8 @@ import workspacecore
     let prepareButton: NSButton
     let progressiveInputViews: [NSView]
     let createButton: NSButton
-    let setupScriptSection: SetupScriptSection
-    let stopScriptSection: StopScriptSection
+    let setupScriptSection: ScriptSection
+    let stopScriptSection: ScriptSection
     let portsSection: PortsSection
     let processesSection: ProcessesSection
     let browserSessionsSection: BrowserSessionsSection
@@ -30,7 +30,7 @@ import workspacecore
     init(
         sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
         repoURLField: NSTextField, prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton,
-        setupScriptSection: SetupScriptSection, stopScriptSection: StopScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
+        setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
         browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
     ) {
         self.sourceSegmented = sourceSegmented
