@@ -29,7 +29,8 @@ import workspacecore
         container.spacing = 0
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = Self.makeHeader(countLabel: countLabel, subtitle: subtitle)
+        let header = RowSectionHeader.make(
+            title: "Ports", addButtonAccessibilityIdentifier: "ports-section-add", countLabel: countLabel, subtitle: subtitle)
         container.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
@@ -83,59 +84,6 @@ import workspacecore
     var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
     func row(at index: Int) -> PortRowView? { index >= 0 && index < rows.count ? rows[index] : nil }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
-
-    // MARK: Header
-
-    private static func makeHeader(countLabel: NSTextField, subtitle: String? = nil) -> NSStackView {
-        let titleLabel = NSTextField(labelWithString: "Ports")
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = Theme.text
-
-        countLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        countLabel.textColor = Theme.muted
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let addButton = NSButton(title: "+ add", target: nil, action: nil)
-        addButton.bezelStyle = .inline
-        addButton.isBordered = false
-        addButton.contentTintColor = Theme.muted
-        addButton.font = .systemFont(ofSize: 11.5, weight: .medium)
-        addButton.setAccessibilityIdentifier("ports-section-add")
-
-        if let subtitle {
-            let titleRow = NSStackView(views: [titleLabel, countLabel])
-            titleRow.orientation = .horizontal
-            titleRow.alignment = .firstBaseline
-            titleRow.spacing = 6
-            titleRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let subtitleLabel = NSTextField(labelWithString: subtitle)
-            subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            subtitleLabel.textColor = Theme.muted
-            subtitleLabel.lineBreakMode = .byTruncatingTail
-            subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let titleStack = NSStackView(views: [titleRow, subtitleLabel])
-            titleStack.orientation = .vertical
-            titleStack.alignment = .leading
-            titleStack.spacing = 2
-            titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let header = NSStackView(views: [titleStack, spacer, addButton])
-            header.orientation = .horizontal
-            header.alignment = .centerY
-            header.spacing = 8
-            header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
-            header.translatesAutoresizingMaskIntoConstraints = false
-            return header
-        }
-
-        let header = NSStackView(views: [titleLabel, countLabel, spacer, addButton])
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 8
-        header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
-        header.translatesAutoresizingMaskIntoConstraints = false
-        return header
-    }
 
     // MARK: Row lifecycle
 
@@ -453,5 +401,3 @@ import workspacecore
         return false
     }
 }
-
-extension Array { fileprivate subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil } }
