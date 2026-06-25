@@ -11,6 +11,7 @@ BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
 SPACES_E2E="$BUILD_DIR/spacese2e"
+SPACESD_EXECUTABLE="$BUILD_DIR/spacesd"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-edit-shortcuts.XXXXXX")}"
@@ -52,7 +53,7 @@ require_binary() {
 
 extract_session_id() {
   local output="$1"
-  printf '%s\n' "$output" | grep -Eo '[0-9A-F-]{36}' | tail -n 1
+  printf '%s\n' "$output" | sed -nE 's/^Started terminal session ([0-9A-F-]{36})([[:space:]].*)?$/\1/p' | tail -n 1
 }
 
 terminal_service_pid() {
@@ -254,6 +255,8 @@ wait_for_pbpaste_contains() {
 
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
+require_binary "$SPACESD_EXECUTABLE"
+export SPACESD_EXECUTABLE
 require_binary "$SPACES_E2E"
 
 mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR"

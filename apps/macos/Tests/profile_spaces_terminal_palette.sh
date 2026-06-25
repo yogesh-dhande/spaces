@@ -9,6 +9,7 @@ BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
 SPACES_E2E_CLI="$BUILD_DIR/spacese2e"
+SPACESD_EXECUTABLE="$BUILD_DIR/spacesd"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 
 ITERATIONS="${ITERATIONS:-5}"
@@ -148,6 +149,8 @@ PY
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
 require_binary "$SPACES_E2E_CLI"
+require_binary "$SPACESD_EXECUTABLE"
+export SPACESD_EXECUTABLE
 
 mkdir -p "$(dirname "$DB_PATH")"
 touch "$APP_LOG"

@@ -49,6 +49,8 @@ run_ios_tests() {
   ios_derived_data="${SPACES_IOS_DERIVED_DATA:-$root/.build/ios-derived-data}"
   destination="$(ios_test_destination)"
 
+  rm -rf "$ios_derived_data"
+  unset $(git rev-parse --local-env-vars)
   printf 'Running iOS unit tests on %s...\n' "$destination"
   xcodebuild \
     -project "$ios_root/SpacesMobile.xcodeproj" \

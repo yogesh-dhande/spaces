@@ -1195,8 +1195,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
         let projects = try store.projects().map {
-            SpacesDeviceProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
+            SpacesDeviceProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let selectedProjectID = normalizedString(request.projectID) ?? projects.first?.id
         let branchOptions: [String]

@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 3
+    public static let currentVersion = 4
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -15,6 +15,46 @@ public enum DatabaseSchema {
         },
         DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "Rename target_branch to base_branch", requiresBackup: false) { database in
             try executeBatch(database: database, sql: "ALTER TABLE workspaces RENAME COLUMN target_branch TO base_branch")
+        },
+        DatabaseMigrationStep(fromVersion: 3, toVersion: 4, description: "Remove daemon project collapse state", requiresBackup: true) { database in
+            try executeBatch(
+                database: database,
+                sql: """
+                    CREATE TABLE projects_v4 (
+                      id TEXT PRIMARY KEY,
+                      name TEXT NOT NULL,
+                      dir TEXT NOT NULL UNIQUE,
+                      is_git INTEGER NOT NULL,
+                      default_branch TEXT,
+                      setup_script TEXT,
+                      stop_script TEXT
+                    );
+                    INSERT INTO projects_v4(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                    SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects;
+                    DROP TABLE projects;
+                    ALTER TABLE projects_v4 RENAME TO projects;
+                    DELETE FROM settings
+                    WHERE key IN (
+                      'app_editor',
+                      'gui_hotkey',
+                      'gui_command_palette_hotkey',
+                      'gui_leader_hotkey',
+                      'gui_alerts_shortcut',
+                      'gui_add_project_shortcut',
+                      'gui_add_workspace_shortcut',
+                      'gui_reload_shortcut',
+                      'gui_open_editor_shortcut',
+                      'gui_open_terminal_shortcut',
+                      'gui_open_finder_shortcut',
+                      'gui_open_settings_shortcut',
+                      'gui_next_shortcut',
+                      'gui_previous_shortcut',
+                      'gui_window_shortcut',
+                      'active_workspace_id',
+                      'window_focus_pulse_color',
+                      'window_focus_pulse_enabled'
+                    );
+                    """)
         },
     ]
 
@@ -153,7 +193,6 @@ public enum DatabaseSchema {
               dir TEXT NOT NULL UNIQUE,
               is_git INTEGER NOT NULL,
               default_branch TEXT,
-              is_collapsed INTEGER NOT NULL DEFAULT 0,
               setup_script TEXT,
               stop_script TEXT
             );

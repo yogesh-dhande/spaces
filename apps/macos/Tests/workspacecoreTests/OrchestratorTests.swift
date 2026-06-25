@@ -117,18 +117,6 @@ final class OrchestratorTests: XCTestCase {
     // Tests worktree discovery interval is positive by arranging representative inputs and asserting the expected result.
     func testWorktreeDiscoveryIntervalIsPositive() { XCTAssertGreaterThan(PollingConstants.worktreeDiscoveryInterval, 0) }
 
-    // Tests update editor preference persists to db by arranging representative inputs and asserting the expected result.
-    func testUpdateEditorPreferencePersistsToDB() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        _ = try orchestrator.updateEditorPreference(.cursor)
-        XCTAssertEqual(try store.appConfig().editor, .cursor)
-
-        _ = try orchestrator.updateEditorPreference(nil)
-        XCTAssertNil(try store.appConfig().editor)
-    }
-
     func testValidateProcessTemplateAcceptsShellVariableSyntax() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
@@ -1521,57 +1509,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(outcome.notice?.contains("Failed to delete remote branch 'remote-archive': Git command failed: remote lookup failed") == true)
     }
 
-    // Tests spacesui shortcuts and active workspace round trip by arranging representative inputs and asserting the expected result.
-    func testGUIShortcutsAndActiveWorkspaceRoundTrip() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        XCTAssertEqual(try orchestrator.guiHotkey(), SettingsKey.defaultGUIHotkey)
-        XCTAssertEqual(try orchestrator.guiLeaderHotkey(), SettingsKey.defaultGUILeaderHotkey)
-        XCTAssertEqual(try orchestrator.guiNextShortcut(), "cmd+alt+]")
-        XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "cmd+alt+[")
-        XCTAssertEqual(try orchestrator.guiAlertsShortcut(), "cmd+alt+a")
-        XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), SettingsKey.defaultGUIAddWorkspaceShortcut)
-        XCTAssertEqual(try orchestrator.guiReloadShortcut(), "cmd+alt+r")
-        XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "cmd+alt+e")
-        XCTAssertEqual(try orchestrator.guiOpenTerminalShortcut(), "cmd+alt+t")
-        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "cmd+alt+f")
-        XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), SettingsKey.defaultGUIOpenSettingsShortcut)
-        XCTAssertEqual(try orchestrator.guiWindowShortcut(), SettingsKey.defaultGUIWindowShortcut)
-        try orchestrator.setGUIHotkey("ctrl+alt+h")
-        try orchestrator.setGUILeaderHotkey("ctrl+alt")
-        try orchestrator.setGUINextShortcut("n")
-        try orchestrator.setGUIPreviousShortcut("p")
-        try orchestrator.setGUIAlertsShortcut("d")
-        try orchestrator.setGUIAddWorkspaceShortcut("ctrl+alt+w")
-        try orchestrator.setGUIReloadShortcut("r")
-        try orchestrator.setGUIOpenEditorShortcut("e")
-        try orchestrator.setGUIOpenTerminalShortcut("t")
-        try orchestrator.setGUIOpenFinderShortcut("f")
-        try orchestrator.setGUIOpenSettingsShortcut("ctrl+alt+,")
-        try orchestrator.setGUIWindowShortcut("cmd+1")
-        try orchestrator.setActiveWorkspace(id: "workspace-123")
-        try orchestrator.setAlertsDismissedAttentionItemIDs(Set(["attention-2", "attention-1"]))
-
-        XCTAssertEqual(try orchestrator.guiHotkey(), "ctrl+alt+h")
-        XCTAssertEqual(try orchestrator.guiLeaderHotkey(), "alt+ctrl")
-        XCTAssertEqual(try orchestrator.guiNextShortcut(), "alt+ctrl+n")
-        XCTAssertEqual(try orchestrator.guiPreviousShortcut(), "alt+ctrl+p")
-        XCTAssertEqual(try orchestrator.guiAlertsShortcut(), "alt+ctrl+d")
-        XCTAssertEqual(try orchestrator.guiAddWorkspaceShortcut(), "ctrl+alt+w")
-        XCTAssertEqual(try orchestrator.guiReloadShortcut(), "alt+ctrl+r")
-        XCTAssertEqual(try orchestrator.guiOpenEditorShortcut(), "alt+ctrl+e")
-        XCTAssertEqual(try orchestrator.guiOpenTerminalShortcut(), "alt+ctrl+t")
-        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "alt+ctrl+f")
-        XCTAssertEqual(try orchestrator.guiOpenSettingsShortcut(), "ctrl+alt+,")
-        XCTAssertEqual(try orchestrator.guiWindowShortcut(), "cmd+1")
-        XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-123")
-        XCTAssertEqual(try orchestrator.alertsDismissedAttentionItemIDs(), Set(["attention-1", "attention-2"]))
-
-        try orchestrator.setActiveWorkspace(id: nil)
-        XCTAssertNil(try orchestrator.activeWorkspaceID())
-    }
-
     func testAlertsDismissedAttentionItemIDsClearsWhenEmpty() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
@@ -1582,16 +1519,6 @@ final class OrchestratorTests: XCTestCase {
         try orchestrator.setAlertsDismissedAttentionItemIDs([])
         XCTAssertTrue(try orchestrator.alertsDismissedAttentionItemIDs().isEmpty)
         XCTAssertNil(try store.setting(key: SettingsKey.alertsDismissedAttentionItems))
-    }
-
-    func testLeaderBackedShortcutsStayStoredAsSuffixesWhenLeaderChanges() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        try orchestrator.setGUIOpenFinderShortcut("cmd+alt+shift+f")
-        try orchestrator.setGUILeaderHotkey("cmd+ctrl")
-
-        XCTAssertEqual(try orchestrator.guiOpenFinderShortcut(), "shift+f")
     }
 
     // Tests check and update process statuses marks dead process as exited by arranging representative inputs and asserting the expected result.
@@ -1941,51 +1868,6 @@ final class OrchestratorTests: XCTestCase {
             "master")
     }
 
-    // Tests open workspace editor throws when editor is not configured by arranging representative inputs and asserting the expected result.
-    func testOpenWorkspaceEditorThrowsWhenEditorIsNotConfigured() throws {
-        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
-
-        XCTAssertThrowsError(try orchestrator.openWorkspaceEditor(workspaceID: workspace.id))
-    }
-
-    // Tests open workspace editor does not track editor windows by arranging representative inputs and asserting the expected result.
-    func testOpenWorkspaceEditorDoesNotTrackEditorWindows() throws {
-        let (orchestrator, _, _, workspace, root) = try makeOrchestratorWithWorkspace(editor: .vscode)
-        let openLog = root.appendingPathComponent("open.log")
-
-        // Mocked dependency: `open`.
-        // Why: verify editor launch call without touching real GUI apps.
-        // Remaining risk: real editor startup behavior is outside this unit test.
-        try withMockCommands(["open": Self.openMockScript]) {
-            try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.openWorkspaceEditor(workspaceID: workspace.id) }
-        }
-
-        let windows = try orchestrator.windows(workspaceID: workspace.id)
-        let editorWindows = windows.filter { $0.role == "editor" }
-        XCTAssertEqual(editorWindows.count, 0)
-
-        let openArgs = try String(contentsOf: openLog)
-        XCTAssertTrue(openArgs.contains("-a Visual Studio Code"))
-        XCTAssertTrue(openArgs.contains(workspace.dir))
-    }
-
-    // Tests open workspace editor does not require yabai by arranging representative inputs and asserting the expected result.
-    func testOpenWorkspaceEditorDoesNotRequireYabai() throws {
-        let (orchestrator, _, _, workspace, root) = try makeOrchestratorWithWorkspace(editor: .vscode)
-        let openLog = root.appendingPathComponent("open-no-yabai.log")
-
-        try withMockCommands(["open": Self.openMockScript]) {
-            try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.openWorkspaceEditor(workspaceID: workspace.id) }
-        }
-
-        let windows = try orchestrator.windows(workspaceID: workspace.id)
-        let editorWindows = windows.filter { $0.role == "editor" }
-        XCTAssertEqual(editorWindows.count, 0)
-
-        let openArgs = try String(contentsOf: openLog)
-        XCTAssertTrue(openArgs.contains("-a Visual Studio Code"))
-    }
-
     // Tests open workspace terminal creates a dedicated workspace terminal and tracks the new built-in terminal shell window.
 
     // Tests that opening a terminal for a not-running workspace marks it as running so the UI shows Restart instead of Launch.
@@ -2204,8 +2086,8 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
-    // Tests focus workspace skips failed window and sets active workspace by arranging representative inputs and asserting the expected result.
-    func testFocusWorkspaceSkipsFailedWindowAndSetsActiveWorkspace() throws {
+    // Tests focus workspace skips failed window by arranging representative inputs and asserting the expected result.
+    func testFocusWorkspaceSkipsFailedWindow() throws {
         let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
         let focusLog = root.appendingPathComponent("focus.log")
 
@@ -2225,7 +2107,6 @@ final class OrchestratorTests: XCTestCase {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) { try orchestrator.focusWorkspace(workspaceID: workspace.id) }
         }
 
-        XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
         let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
         XCTAssertEqual(focusedIDs, ["101"])
     }
@@ -2295,7 +2176,6 @@ final class OrchestratorTests: XCTestCase {
 
         let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
         XCTAssertEqual(focusedIDs, ["303", "303", "202"])
-        XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
     }
 
     func testFocusWindowNavigationFreezesRecencyOrderAcrossCycleSession() throws {
@@ -2342,7 +2222,7 @@ final class OrchestratorTests: XCTestCase {
                 windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
 
         // Mocked dependency: direct yabai focus for the tracked dedicated Chrome window.
-        // Why: ensure browser rows with target URLs still focus their tracked window and set the workspace active.
+        // Why: ensure browser rows with target URLs still focus their tracked window.
         // Remaining risk: real Chrome window lifecycle races are not represented.
         try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
@@ -2350,7 +2230,6 @@ final class OrchestratorTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(try orchestrator.activeWorkspaceID(), workspace.id)
         let focusedIDs = try String(contentsOf: focusLog).trimmingCharacters(in: .whitespacesAndNewlines)
         XCTAssertEqual(focusedIDs, "202")
     }
@@ -4089,7 +3968,7 @@ final class OrchestratorTests: XCTestCase {
 
     // Tests launch workspace does not auto open editor by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceDoesNotAutoOpenEditor() throws {
-        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace(editor: .vscode)
+        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
         let root = try makeTempDirectory()
         let openLog = root.appendingPathComponent("launch-open.log")
 
@@ -4454,17 +4333,6 @@ final class OrchestratorTests: XCTestCase {
 
         XCTAssertEqual(projects.map(\.name), ["alpha", "beta"])
         XCTAssertEqual(projects.map(\.isGitRepo), [false, false])
-        XCTAssertEqual(projects.map(\.isCollapsed), [false, false])
-    }
-
-    // Tests project collapsed state updates through orchestrator and is exposed in summaries by arranging representative inputs and asserting the expected result.
-    func testSetProjectCollapsedPersistsToProjectAndSummary() throws {
-        let (orchestrator, _, project, _, _) = try makeOrchestratorWithWorkspace()
-
-        try orchestrator.setProjectCollapsed(projectID: project.id, isCollapsed: true)
-
-        XCTAssertEqual(try orchestrator.project(id: project.id)?.isCollapsed, true)
-        XCTAssertEqual(try orchestrator.listProjects().first(where: { $0.id == project.id })?.isCollapsed, true)
     }
 
     // Tests update project config and read back project config by arranging representative inputs and asserting the expected result.
@@ -6274,7 +6142,7 @@ final class OrchestratorTests: XCTestCase {
     }
 
     private func makeOrchestratorWithWorkspace(
-        editor: EditorPreference? = nil, browserWindowScanDebounceInterval: TimeInterval = 10,
+        browserWindowScanDebounceInterval: TimeInterval = 10,
         terminalFocusPulseController: TerminalFocusPulseControlling = MockTerminalFocusPulseController(),
         currentDate: @escaping () -> Date = Date.init
     ) throws -> (WorkspaceOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL) {
@@ -6319,8 +6187,6 @@ final class OrchestratorTests: XCTestCase {
                         childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath)
                 }
             }, currentDate: currentDate)
-        if let editor { _ = try orchestrator.updateEditorPreference(editor) }
-
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
         return (orchestrator, store, project, workspace, root)
@@ -7114,35 +6980,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertEqual(project2Workspaces.count, 2)
     }
 
-    // Tests window focus pulse color returns the configured default when not set.
-    func testWindowFocusPulseColorReturnsDefaultWhenNotSet() throws {
-        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        let (r, g, b) = try orchestrator.windowFocusPulseColor()
-        XCTAssertEqual(r, 72)
-        XCTAssertEqual(g, 98)
-        XCTAssertEqual(b, 110)
-    }
-
-    // Tests window focus pulse color round trips through the store.
-    func testWindowFocusPulseColorRoundTrip() throws {
-        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        try orchestrator.setWindowFocusPulseColor(r: 10, g: 128, b: 200)
-        let (r, g, b) = try orchestrator.windowFocusPulseColor()
-        XCTAssertEqual(r, 10)
-        XCTAssertEqual(g, 128)
-        XCTAssertEqual(b, 200)
-    }
-
-    // Tests window focus pulse color clamps values to 0-255.
-    func testWindowFocusPulseColorClampsValues() throws {
-        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        try orchestrator.setWindowFocusPulseColor(r: -10, g: 300, b: 128)
-        let (r, g, b) = try orchestrator.windowFocusPulseColor()
-        XCTAssertEqual(r, 0)
-        XCTAssertEqual(g, 255)
-        XCTAssertEqual(b, 128)
-    }
-
     func testStopWorkspaceProcessRemovesTrackedRuntimeAndClearsRunningFlagWhenLastProcessStops() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         let processID = UUID().uuidString
@@ -7200,22 +7037,6 @@ final class OrchestratorTests: XCTestCase {
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertFalse(try store.workspace(id: workspace.id)?.isRunning ?? true)
-    }
-
-    // Tests focus terminal window triggers overlay pulse for Spaces by arranging representative inputs and asserting the expected result.
-    // Tests window focus pulse enabled returns true by default when not set.
-    func testWindowFocusPulseEnabledDefaultsToTrue() throws {
-        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        let enabled = try orchestrator.windowFocusPulseEnabled()
-        XCTAssertTrue(enabled)
-    }
-
-    // Tests window focus pulse enabled round-trips false.
-    func testWindowFocusPulseEnabledRoundTripFalse() throws {
-        let (orchestrator, _, _, _, _) = try makeOrchestratorWithWorkspace()
-        try orchestrator.setWindowFocusPulseEnabled(false)
-        let enabled = try orchestrator.windowFocusPulseEnabled()
-        XCTAssertFalse(enabled)
     }
 
     // MARK: - resolveEnvVars
@@ -7305,33 +7126,6 @@ final class OrchestratorTests: XCTestCase {
 
         let resolved = try orchestrator.resolveEnvVars(in: "cd $SPACES_WORKSPACE_DIR && npm start", workspaceID: workspace.id)
         XCTAssertEqual(resolved, "cd /workspaces/myapp/dev && npm start")
-    }
-
-    // Tests setWindowFocusPulseColor clamps values to 0–255.
-    func testWindowFocusPulseColorClamps() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        try orchestrator.setWindowFocusPulseColor(r: -10, g: 300, b: 128)
-        let clamped = try orchestrator.windowFocusPulseColor()
-        XCTAssertEqual(clamped.r, 0)
-        XCTAssertEqual(clamped.g, 255)
-        XCTAssertEqual(clamped.b, 128)
-    }
-
-    // Tests windowFocusPulseEnabled round-trips through store.
-    func testWindowFocusPulseEnabledRoundTrip() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        // Default is enabled.
-        XCTAssertTrue(try orchestrator.windowFocusPulseEnabled())
-
-        try orchestrator.setWindowFocusPulseEnabled(false)
-        XCTAssertFalse(try orchestrator.windowFocusPulseEnabled())
-
-        try orchestrator.setWindowFocusPulseEnabled(true)
-        XCTAssertTrue(try orchestrator.windowFocusPulseEnabled())
     }
 
     // MARK: - updatePortRange
@@ -7625,18 +7419,6 @@ final class OrchestratorTests: XCTestCase {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let options = try orchestrator.gitBranchOptions(projectID: project.id)
         XCTAssertTrue(options.isEmpty)
-    }
-
-    // Tests setActiveWorkspace and activeWorkspaceID persist by arranging representative inputs and asserting the expected result.
-    func testActiveWorkspaceRoundTrip() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        XCTAssertNil(try orchestrator.activeWorkspaceID())
-        try orchestrator.setActiveWorkspace(id: "workspace-xyz")
-        XCTAssertEqual(try orchestrator.activeWorkspaceID(), "workspace-xyz")
-        try orchestrator.setActiveWorkspace(id: nil)
-        XCTAssertNil(try orchestrator.activeWorkspaceID())
     }
 
     // Tests updateWorkspaceHidden persists isHidden state by arranging representative inputs and asserting the expected result.
@@ -8919,24 +8701,6 @@ final class OrchestratorTests: XCTestCase {
         }
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, name: "   ")) { error in
             XCTAssertTrue(error.localizedDescription.contains("Workspace name is required"))
-        }
-    }
-
-    // Tests openWorkspaceEditor throws invalidArgument when the workspace is archived.
-    func testOpenWorkspaceEditorThrowsForArchivedWorkspace() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-
-        // Archive the workspace directly via the store.
-        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
-
-        XCTAssertThrowsError(try orchestrator.openWorkspaceEditor(workspaceID: workspace.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("archived"))
         }
     }
 

@@ -62,7 +62,7 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(workspaceColumns.contains("host_id"))
         XCTAssertTrue(workspaceColumns.contains("runtime_path"))
         XCTAssertFalse(workspaceColumns.contains("compute_host_override_id"))
-        XCTAssertTrue(projectColumns.contains("is_collapsed"))
+        XCTAssertFalse(projectColumns.contains("is_collapsed"))
         XCTAssertFalse(projectColumns.contains("default_compute_host_id"))
         XCTAssertFalse(workspaceProcessColumns.contains("execution_mode"))
         XCTAssertFalse(projectProcessColumns.contains("execution_mode"))
@@ -161,7 +161,7 @@ final class StoreTests: XCTestCase {
         try runSQLiteExec(
             dbURL: dbURL,
             sql: """
-                INSERT INTO projects(id, name, dir, is_git, is_collapsed) VALUES ('project-1', 'Project', '/tmp/project', 0, 0);
+                INSERT INTO projects(id, name, dir, is_git) VALUES ('project-1', 'Project', '/tmp/project', 0);
                 INSERT INTO workspaces(id, project_id, title, dir, runtime_path, is_default, is_archived, is_hidden, is_running)
                 VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', '/tmp/project/feature', 0, 0, 0, 0);
                 """)
@@ -464,19 +464,16 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(persisted.map(\.command), ["npm run api", "npm run web"])
     }
 
-    // Tests project collapsed state persists on the current schema by arranging a current-store project and asserting round-trip behavior.
-    func testProjectCollapsedStatePersists() throws {
+    // Tests project records remain daemon-owned data without client sidebar state.
+    func testProjectRoundTripDoesNotRequireSidebarState() throws {
         let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("project-collapsed-state.db")
+        let dbURL = root.appendingPathComponent("project-round-trip.db")
         let store = try SQLiteStore(path: dbURL.path)
         let project = makeProjectRecord(id: "p1", dir: "/tmp/project")
         try store.upsert(project: project)
 
-        XCTAssertEqual(try store.project(id: "p1")?.isCollapsed, false)
-
-        try store.updateProjectCollapsed(id: "p1", isCollapsed: true)
-        XCTAssertEqual(try store.project(id: "p1")?.isCollapsed, true)
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT is_collapsed FROM projects WHERE id = 'p1'"), 1)
+        XCTAssertEqual(try store.project(id: "p1")?.name, "Project")
+        XCTAssertEqual(try store.project(id: "p1")?.dir, "/tmp/project")
     }
 
     // Tests store write waits for transient database lock and succeeds by arranging an external immediate transaction and asserting write completion.
@@ -1203,12 +1200,11 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(config.portRange.end, 30000)
     }
 
-    // Tests setAppConfig round-trips a valid port range and editor preference through the settings store.
-    func testSetAppConfigRoundTripsPortRangeAndEditor() throws {
+    // Tests setAppConfig round-trips a valid port range through the settings store.
+    func testSetAppConfigRoundTripsPortRange() throws {
         let store = try makeTemporaryStore()
-        try store.setAppConfig(AppConfig(editor: .cursor, portRange: PortRange(start: 10000, end: 15000)))
+        try store.setAppConfig(AppConfig(portRange: PortRange(start: 10000, end: 15000)))
         let config = try store.appConfig()
-        XCTAssertEqual(config.editor, .cursor)
         XCTAssertEqual(config.portRange.start, 10000)
         XCTAssertEqual(config.portRange.end, 15000)
     }

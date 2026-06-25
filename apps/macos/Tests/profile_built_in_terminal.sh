@@ -9,6 +9,8 @@ source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
+SPACES_E2E="$BUILD_DIR/spacese2e"
+SPACESD_EXECUTABLE="$BUILD_DIR/spacesd"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 
 ITERATIONS="${ITERATIONS:-3}"
@@ -54,9 +56,40 @@ wait_for_log_pattern_count_greater_than() {
   done
 }
 
+wait_for_owner_window_summon() {
+  local session_id="$1"
+  local baseline="$2"
+  local timeout="${3:-30}"
+  local pattern="spaces: perf metric=terminal_window_summon target=session=${session_id} success=1 .*mode=owner"
+  local start
+  local next_request_at=0
+  start="$(date +%s)"
+  while true; do
+    local count
+    count="$(grep -Ec "$pattern" "$PERF_LOG" 2>/dev/null || true)"
+    if (( count > baseline )); then
+      return 0
+    fi
+
+    local now
+    now="$(date +%s)"
+    if (( now >= next_request_at )); then
+      env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+        focus-terminal-session-window --session-id "$session_id" >/dev/null
+      next_request_at=$((now + 1))
+    fi
+
+    if (( now - start >= timeout )); then
+      echo "Timed out waiting for log count increase: $pattern (baseline $baseline)" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
 extract_session_id() {
   local output="$1"
-  printf '%s\n' "$output" | grep -Eo '[0-9A-F-]{36}' | tail -n 1
+  printf '%s\n' "$output" | sed -nE 's/^Started terminal session ([0-9A-F-]{36})([[:space:]].*)?$/\1/p' | tail -n 1
 }
 
 ms_since() {
@@ -100,7 +133,9 @@ PY
 
 attach_remote_viewer_client() {
   local session_id="$1"
-  local socket_path="$RUNTIME_DIR/terminal/sessions/$session_id/control.sock"
+  local socket_path
+  socket_path="$(spaces_profile_terminal_session_control_socket_path "$SPACES_CLI" "$session_id")"
+  wait_for_socket_path "$socket_path" 10
   python3 - "$socket_path" <<'PY'
 import json
 import socket
@@ -138,6 +173,48 @@ print(client_id)
 PY
 }
 
+send_terminal_text() {
+  local session_id="$1"
+  local text="$2"
+  local socket_path
+  socket_path="$(spaces_profile_terminal_session_control_socket_path "$SPACES_CLI" "$session_id")"
+  wait_for_socket_path "$socket_path" 10
+  python3 - "$socket_path" "$text" <<'PY'
+import json
+import socket
+import sys
+
+socket_path = sys.argv[1]
+text = sys.argv[2]
+request = {"command": "send", "text": text, "appendNewline": True}
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(5)
+client.connect(socket_path)
+client.sendall(json.dumps(request).encode("utf-8"))
+client.shutdown(socket.SHUT_WR)
+response = json.loads(client.recv(65536).decode("utf-8"))
+client.close()
+if not response.get("ok"):
+    raise SystemExit(response.get("message") or response)
+PY
+}
+
+wait_for_socket_path() {
+  local socket_path="$1"
+  local timeout="${2:-10}"
+  local start
+  start="$(date +%s)"
+  while true; do
+    [[ -S "$socket_path" ]] && return 0
+    if (( "$(date +%s)" - start >= timeout )); then
+      echo "Timed out waiting for socket: $socket_path" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
 require_binary() {
   local path="$1"
   [[ -x "$path" ]] || { echo "Missing binary: $path" >&2; exit 1; }
@@ -148,9 +225,14 @@ touch "$APP_LOG" "$PERF_LOG"
 : >"$COMMAND_WALL_SAMPLES"
 : >"$VIEWER_SHOW_WALL_SAMPLES"
 : >"$VIEWER_UPDATE_WALL_SAMPLES"
+export SPACES_DB_PATH="$DB_PATH"
+export SPACES_RUNTIME_DIR="$RUNTIME_DIR"
 
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
+require_binary "$SPACES_E2E"
+require_binary "$SPACESD_EXECUTABLE"
+export SPACESD_EXECUTABLE
 
 cd "$REPO_ROOT"
 acquire_terminal_harness_lock
@@ -164,9 +246,27 @@ echo "Using work root: $WORK_ROOT"
 echo "Using DB path:  $DB_PATH"
 echo "Using runtime:  $RUNTIME_DIR"
 
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERF_LOG" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
-sleep 3
+spaces_profile_wait_for_owner_pid "$SPACES_CLI" "$APP_PID" 20
+
+ipc_probe_output="$WORK_ROOT/ipc-ready-$(uuidgen).json"
+ipc_probe_deadline=$((SECONDS + 20))
+ipc_probe_ready=0
+while (( SECONDS < ipc_probe_deadline )); do
+  rm -f "$ipc_probe_output"
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" \
+    dump-terminal-session-window-state --session-id "__ipc_ready_probe__" --output-path "$ipc_probe_output" --any-mode >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    if [[ -s "$ipc_probe_output" ]]; then
+      ipc_probe_ready=1
+      rm -f "$ipc_probe_output"
+      break 2
+    fi
+    sleep 0.1
+  done
+done
+[[ "$ipc_probe_ready" == "1" ]] || { echo "Timed out waiting for SpacesApp terminal IPC observers." >&2; exit 1; }
 
 for iteration in $(seq 1 "$ITERATIONS"); do
   title="terminal-profile-$iteration"
@@ -177,22 +277,17 @@ PY
 )"
   command_output="$(
     env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 \
-      "$SPACES_CLI" terminal command --backend ghostty-embedded --command cat --title "$title"
+      "$SPACES_CLI" terminal command --backend ghostty-embedded --title "$title"
   )"
   command_wall_ms="$(ms_since "$command_started_at")"
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
   printf '%s\t%s\n' "$session_id" "$command_wall_ms" >>"$COMMAND_WALL_SAMPLES"
 
-  wait_for_log_pattern_count_greater_than \
-    "$PERF_LOG" \
-    "spaces: perf metric=terminal_window_summon target=session=${session_id} success=1 .*mode=owner" \
-    0 \
-    30
+  wait_for_owner_window_summon "$session_id" 0 30
 
   payload="profile-ping-$iteration"
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 \
-    "$SPACES_CLI" terminal send "$session_id" "$payload" --newline >/dev/null
+  send_terminal_text "$session_id" "$payload"
   wait_for_log_pattern_count_greater_than \
     "$PERF_LOG" \
     "spaces: perf metric=terminal_control_send target=session=${session_id} success=1" \

@@ -5,6 +5,37 @@ import XCTest
 @testable import spacesterminalcore
 
 final class SpacesClientDatabaseTests: XCTestCase {
+    func testClientSettingsRoundTripAndClear() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setSetting(key: "app_editor", value: "cursor")
+        XCTAssertEqual(try database.setting(key: "app_editor"), "cursor")
+
+        try database.setSetting(key: "app_editor", value: nil)
+        XCTAssertNil(try database.setting(key: "app_editor"))
+    }
+
+    func testProjectCollapseStateIsScopedByDeviceAndProject() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
+        try database.setProjectCollapsed(deviceID: "remote", projectID: "project-1", isCollapsed: false)
+
+        XCTAssertTrue(try database.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
+        XCTAssertFalse(try database.isProjectCollapsed(deviceID: "remote", projectID: "project-1"))
+        XCTAssertEqual(try database.projectCollapseStates(deviceID: "local"), ["project-1": true])
+    }
+
+    func testTerminalWindowFrameIsClientLocal() throws {
+        let database = try makeTemporaryClientDatabase()
+        let frame = TerminalSessionWindowFrame(x: 10, y: 20, width: 900, height: 600)
+
+        try database.writeTerminalWindowFrame(frame, rootDirectory: "/tmp/workspace", sessionID: "session-1", mode: .owner)
+
+        XCTAssertEqual(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .owner), frame)
+        XCTAssertNil(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .viewer))
+    }
+
     func testDefaultPathUsesEnvironmentOverride() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -138,10 +169,10 @@ final class SpacesClientDatabaseTests: XCTestCase {
             try SpacesDeviceCredentialStore.saveToken("SECRET-TOKEN", deviceID: record.id)
             defer { try? SpacesDeviceCredentialStore.deleteToken(deviceID: record.id) }
 
-            let failingStep = SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Intentional failure") { _ in
+            let failingStep = SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Intentional failure") { _ in
                 throw NSError(domain: "SpacesClientDatabaseTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "boom"])
             }
-            XCTAssertThrowsError(try SpacesClientDatabase(path: databaseURL.path, currentVersion: 2, migrationSteps: [failingStep]))
+            XCTAssertThrowsError(try SpacesClientDatabase(path: databaseURL.path, currentVersion: 3, migrationSteps: [failingStep]))
 
             let restored = try SpacesClientDatabase(path: databaseURL.path)
             XCTAssertEqual(try restored.pairedDevice(id: record.id), record)
@@ -158,6 +189,13 @@ final class SpacesClientDatabaseTests: XCTestCase {
             id: id, name: "Studio Mac", platform: "macos", host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc",
             sshHost: "studio.local", sshUser: "yogesh", sshPort: 22, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z",
             lastSelectedAt: "2026-06-17T00:01:00Z")
+    }
+
+    private func makeTemporaryClientDatabase() throws -> SpacesClientDatabase {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return try SpacesClientDatabase(path: root.appendingPathComponent("spaces-client.db").path)
     }
 
     private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {

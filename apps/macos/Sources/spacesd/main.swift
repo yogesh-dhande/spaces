@@ -532,8 +532,7 @@ import workspacecore
 
     private func profileProjectSummary(_ value: ProjectSummary) -> TerminalServiceProfileProjectSummary {
         TerminalServiceProfileProjectSummary(
-            id: value.id, name: value.name, dir: value.dir, isGitRepo: value.isGitRepo, defaultBranch: value.defaultBranch,
-            isCollapsed: value.isCollapsed)
+            id: value.id, name: value.name, dir: value.dir, isGitRepo: value.isGitRepo, defaultBranch: value.defaultBranch)
     }
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {

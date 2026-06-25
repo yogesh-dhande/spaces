@@ -584,7 +584,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     self?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
                 }
             }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
-            builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession)
+            builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession,
+            windowFocusPulseEnabledProvider: { [weak self] in self?.clientWindowFocusPulseEnabled() ?? SettingsKey.defaultWindowFocusPulseEnabled },
+            windowFocusPulseColorProvider: { [weak self] in self?.clientWindowFocusPulseColor() ?? (r: 72, g: 98, b: 110) })
     }
 
     nonisolated static func dispatchBuiltInTerminalWindowActionOnMainThread(
@@ -953,6 +955,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         Task { @MainActor [weak self, object, sessionID, mode, requestID] in
             guard let self else { return }
             guard self.matchesProfileIPCObject(object) else { return }
+            TerminalPerformance.logMetric(
+                "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
+                detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
             self.openTerminalSessionWindow(sessionID: sessionID, mode: mode, requestID: requestID)
         }
     }
@@ -990,6 +995,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let requestID = notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String
         Task { @MainActor [weak self, object, sessionID, requestID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
+            TerminalPerformance.logMetric(
+                "terminal_window_focus_ipc_received", target: "session=\(sessionID)", elapsedMS: 0, success: true,
+                detail: requestID.map { "request_id=\($0)" } ?? "")
             self.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID)
         }
     }
@@ -1174,6 +1182,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     },
                     runtimeControlsProvider: { [weak self] sessionID in
                         self?.terminalRuntimeControls(forSessionID: sessionID, cause: "controller_refresh")
+                    },
+                    loadWindowFrameAction: { mode in try SpacesClientDatabase().terminalWindowFrame(rootDirectory: paths.rootDirectory, mode: mode) },
+                    saveWindowFrameAction: { frame, mode in
+                        try SpacesClientDatabase().writeTerminalWindowFrame(
+                            frame, rootDirectory: paths.rootDirectory, sessionID: sessionID, mode: mode)
                     },
                     sessionHostProvider: { launchConfiguration, paths in
                         Self.terminalSessionHost(
@@ -2408,23 +2421,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 switch request {
                 case .workspaceBrowserSession(let workspaceID, let targetURL):
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+                    Self.setClientActiveWorkspaceID(workspaceID)
                     return .success(.focus(hidesApp: true))
                 case .workspaceWindow(let workspaceID, let index):
                     let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
                     let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
                     try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
+                    Self.setClientActiveWorkspaceID(workspaceID)
                     return .success(.focus(hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                 case .workspaceProcess(let workspaceID, let processID):
                     try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+                    Self.setClientActiveWorkspaceID(workspaceID)
                     return .success(.focus(hidesApp: false))
                 case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
+                    Self.setClientActiveWorkspaceID(workspaceID)
                     return .success(.open(hidesApp: false))
                 case .workspaceAgentLauncher(let workspaceID, let name):
                     _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
+                    Self.setClientActiveWorkspaceID(workspaceID)
                     return .success(.open(hidesApp: false))
                 case .agentWindow(let record):
                     try orchestrator.focusAgentWindow(record)
+                    Self.setClientActiveWorkspaceID(record.workspaceID)
                     return .success(.focus(hidesApp: false))
                 }
             } catch { return .failure(error) }
@@ -2514,6 +2533,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     switch alertsFocusRequest {
                     case .workspaceBrowserSession(let workspaceID, let targetURL):
                         try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
+                        Self.setClientActiveWorkspaceID(workspaceID)
                         return .success(
                             .focused(
                                 kind: "alerts_browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
@@ -2522,24 +2542,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                         let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
                         let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
                         try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
+                        Self.setClientActiveWorkspaceID(workspaceID)
                         return .success(
                             .focused(
                                 kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
                                 hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
                     case .workspaceProcess(let workspaceID, let processID):
                         try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+                        Self.setClientActiveWorkspaceID(workspaceID)
                         return .success(
                             .focused(
                                 kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
                                 hidesApp: false))
                     case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
                         try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
+                        Self.setClientActiveWorkspaceID(workspaceID)
                         return .success(.opened(kind: "alerts_process", hidesApp: false))
                     case .workspaceAgentLauncher(let workspaceID, let name):
                         _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
+                        Self.setClientActiveWorkspaceID(workspaceID)
                         return .success(.opened(kind: "alerts_agent_launcher", hidesApp: false))
                     case .agentWindow(let record):
                         try orchestrator.focusAgentWindow(record)
+                        Self.setClientActiveWorkspaceID(record.workspaceID)
                         return .success(
                             .focused(
                                 kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
@@ -2570,12 +2595,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     guard let targetURL = target.targetURL else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
+                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
                     return .success(
                         .focused(kind: "browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: true))
                 case .process:
                     guard let processID = target.processID else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.workspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
                     try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
+                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
                     return .success(
                         .focused(kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: false))
                 case .window:
@@ -2583,6 +2610,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                     let focusRequest = WindowFocusRequest.workspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
                     let targetWindow = windowListIndex < windows.count ? windows[windowListIndex] : nil
                     try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
+                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
                     return .success(
                         .focused(
                             kind: "window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
@@ -2590,15 +2618,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 case .missingConfiguredProcess:
                     guard let processKey = target.processKey else { return .success(.noMatch) }
                     try orchestrator.recoverMissingConfiguredProcess(workspaceID: selectedWorkspaceID, processKey: processKey)
+                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
                     return .success(.opened(kind: "process", hidesApp: false))
                 case .agentLauncher:
                     guard let launcherName = target.launcherName else { return .success(.noMatch) }
                     _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
+                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
                     return .success(.opened(kind: "agent_launcher", hidesApp: false))
                 case .agent:
                     guard let record = target.agentWindow else { return .success(.noMatch) }
                     let focusRequest = WindowFocusRequest.agentWindow(record)
                     try orchestrator.focusAgentWindow(record)
+                    Self.setClientActiveWorkspaceID(record.workspaceID)
                     return .success(
                         .focused(kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: false))
                 }
@@ -2788,7 +2819,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
                 logStartupSnapshotProfile("sidebar_snapshot_store_ready")
-                let config = try orchestrator.syncConfig()
+                let config = try clientAppConfig(base: orchestrator.syncConfig())
                 logStartupSnapshotProfile("sidebar_snapshot_config_ready")
                 // The sidebar shows every paired device at once; the initial snapshot
                 // always loads the local device first, then remote sections stream in
@@ -2796,7 +2827,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 let deviceClientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
                 let localDevice = try SpacesDeviceClient.bootstrapLocalDevice(database: SpacesClientDatabase(), clientApp: deviceClientApp)
                 let localOverview = try SpacesDeviceClient.overview(device: localDevice, clientApp: deviceClientApp)
-                let mapped = deviceSidebarData(from: localOverview.overview, deviceID: localOverview.device.id)
+                let collapseStates = (try? SpacesClientDatabase().projectCollapseStates(deviceID: localOverview.device.id)) ?? [:]
+                let mapped = deviceSidebarData(from: localOverview.overview, deviceID: localOverview.device.id, projectCollapseStates: collapseStates)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_local_device_ready",
@@ -2818,14 +2850,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         }.value
     }
 
-    nonisolated static func deviceSidebarData(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> (
-        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus]
-    ) {
+    nonisolated static func deviceSidebarData(
+        from overview: SpacesDeviceOverviewPayload, deviceID: String, projectCollapseStates: [String: Bool] = [:]
+    ) -> (projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]], workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus])
+    {
         let model = SpacesDeviceOverviewViewModel(overview: overview)
         let projects = model.projects.map {
             ProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed,
-                deviceID: deviceID)
+                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch,
+                isCollapsed: projectCollapseStates[$0.id] ?? false, deviceID: deviceID)
         }
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
@@ -4462,16 +4495,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     /// independently so a slow or unreachable device never blocks the sidebar.
     private func loadRemoteDeviceSections(forceRefresh: Bool = false) {
         let remotes = macPairedDevices()
-        // Each keychain lookup is two reads, so resolve availability once per device
-        // and reuse it for both the section-add loop and the fetch loop.
-        let credentialsByDevice = Dictionary(uniqueKeysWithValues: remotes.map { ($0.id, Self.pairedDeviceHasRequiredCredentials(deviceID: $0.id)) })
         var addedSection = false
         for record in remotes where !deviceSections.contains(where: { $0.deviceID == record.id }) {
-            let available = credentialsByDevice[record.id] ?? false
-            deviceSections.append(
-                DeviceSection(
-                    deviceID: record.id, deviceName: record.name, isLocal: false, loadState: available ? .loading : .offline("Reconnect required"),
-                    device: record))
+            deviceSections.append(DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
             addedSection = true
         }
         if addedSection {
@@ -4481,7 +4507,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let now = ContinuousClock.now
         let freshnessWindow = Duration.seconds(PollingConstants.sidebarMetadataRefreshInterval)
-        for record in remotes where credentialsByDevice[record.id] == true {
+        for record in remotes {
             // A snapshot can be applied far more often than the metadata cadence
             // (process monitor, worktree discovery, event-driven reloads). Skip
             // devices fetched within the freshness window so local activity doesn't
@@ -4511,7 +4537,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
                 updateAlertsSidebarBadge()
                 return
             }
-            let mapped = Self.deviceSidebarData(from: overview.overview, deviceID: deviceID)
+            let collapseStates = (try? SpacesClientDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
+            let mapped = Self.deviceSidebarData(from: overview.overview, deviceID: deviceID, projectCollapseStates: collapseStates)
             deviceSections[index].projects = mapped.projects
             deviceSections[index].workspacesByProject = mapped.workspacesByProject
             deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
@@ -4642,7 +4669,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             preferredWorkspaceID.flatMap { findWorkspace(id: $0)?.0.deviceID } ?? preferredProjectID.flatMap { projectID in
                 projects.first(where: { $0.id == projectID })?.deviceID
             } ?? selectedRowDeviceID() ?? localDeviceID
-        let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID)
+        let collapseStates = (try? SpacesClientDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
+        let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
             deviceSections[index].projects = mapped.projects
             deviceSections[index].workspacesByProject = mapped.workspacesByProject
@@ -4658,6 +4686,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         rebuildFlatSidebarData()
         if let preferredWorkspaceID, findWorkspace(id: preferredWorkspaceID) != nil {
             selectedWorkspaceID = preferredWorkspaceID
+            Self.setClientActiveWorkspaceID(preferredWorkspaceID)
             selectedProjectID = findWorkspace(id: preferredWorkspaceID)?.0.id ?? preferredProjectID
         } else if let preferredProjectID, projects.contains(where: { $0.id == preferredProjectID }) {
             selectedProjectID = preferredProjectID
@@ -4678,6 +4707,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
             applyDeviceOverview(overview, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID, preserveDetailPane: false)
         } else {
             if let preferredWorkspaceID { selectedWorkspaceID = preferredWorkspaceID }
+            if let preferredWorkspaceID { Self.setClientActiveWorkspaceID(preferredWorkspaceID) }
             if let preferredProjectID { selectedProjectID = preferredProjectID }
             requestSidebarReload()
         }
@@ -5416,9 +5446,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
 
         let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(windowPulseEnabledChanged(_:)))
-        pulseEnabledCheckbox.state = ((try? orchestrator.windowFocusPulseEnabled()) ?? SettingsKey.defaultWindowFocusPulseEnabled) ? .on : .off
+        pulseEnabledCheckbox.state = clientWindowFocusPulseEnabled() ? .on : .off
 
-        let (pulseR, pulseG, pulseB) = (try? orchestrator.windowFocusPulseColor()) ?? (r: 72, g: 98, b: 110)
+        let (pulseR, pulseG, pulseB) = clientWindowFocusPulseColor()
         let colorWell = NSColorWell()
         colorWell.color = NSColor(red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
         colorWell.translatesAutoresizingMaskIntoConstraints = false
@@ -9362,18 +9392,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     @objc private func editorPreferenceChanged(_ sender: NSPopUpButton) {
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if configCache?.editor == preference { return }
-        do { configCache = try orchestrator.updateEditorPreference(preference) } catch { showError(error) }
+        do {
+            try SpacesClientDatabase().setSetting(key: SettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
+            configCache = try Self.clientAppConfig(base: orchestrator.appConfig())
+        } catch { showError(error) }
     }
 
     @objc private func windowPulseEnabledChanged(_ sender: NSButton) {
-        do { try orchestrator.setWindowFocusPulseEnabled(sender.state == .on) } catch { showError(error) }
+        do { try SpacesClientDatabase().setSetting(key: SettingsKey.windowFocusPulseEnabled, value: sender.state == .on ? "1" : "0") } catch {
+            showError(error)
+        }
     }
 
     @objc private func resetWindowPulseColor(_ sender: NSButton) {
         let parts = SettingsKey.defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0) }
         guard parts.count == 3 else { return }
         do {
-            try orchestrator.setWindowFocusPulseColor(r: parts[0], g: parts[1], b: parts[2])
+            try SpacesClientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(parts[0]),\(parts[1]),\(parts[2])")
             pulseColorWell?.color = NSColor(red: CGFloat(parts[0]) / 255, green: CGFloat(parts[1]) / 255, blue: CGFloat(parts[2]) / 255, alpha: 1)
         } catch { showError(error) }
     }
@@ -9383,7 +9418,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let r = Int((rgb.redComponent * 255).rounded())
         let g = Int((rgb.greenComponent * 255).rounded())
         let b = Int((rgb.blueComponent * 255).rounded())
-        do { try orchestrator.setWindowFocusPulseColor(r: r, g: g, b: b) } catch { showError(error) }
+        do { try SpacesClientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(r),\(g),\(b)") } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }
@@ -10441,9 +10476,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func openWorkspaceEditor(workspaceID: String) {
-        if showRemoteWorkspacePathActionErrorIfNeeded(.openEditor, workspaceID: workspaceID) { return }
         do {
-            try orchestrator.openWorkspaceEditor(workspaceID: workspaceID)
+            guard let (_, workspace) = findWorkspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
+            let editor = try Self.clientAppConfig(base: orchestrator.appConfig()).editor
+            let deviceID = deviceID(forWorkspaceID: workspaceID)
+            if isRemoteDeviceID(deviceID) {
+                guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    !sshHost.isEmpty
+                else { throw WorkspaceError.invalidArgument(message: "Remote editor launch requires SSH settings for the paired device.") }
+                try EditorLauncher.openRemote(
+                    editor: editor, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort, directory: workspace.dir)
+            } else {
+                try EditorLauncher.open(editor: editor, directory: workspace.dir)
+            }
             reloadData()
             hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
         } catch { showError(error) }
@@ -11076,7 +11121,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     private func globalEditorWorkspaceID() -> String? {
         if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() { return workspaceID }
         if NSApp.isActive, let selectedWorkspaceID { return selectedWorkspaceID }
-        if let workspaceID = try? orchestrator.activeWorkspaceID() { return workspaceID }
+        if let workspaceID = clientActiveWorkspaceID() { return workspaceID }
         return nil
     }
 
@@ -11085,8 +11130,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         return .alerts
     }
 
+    nonisolated private static func clientAppConfig(base: AppConfig) throws -> AppConfig {
+        let editor = try SpacesClientDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
+        return AppConfig(editor: editor, portRange: base.portRange)
+    }
+
+    private func clientWindowFocusPulseEnabled() -> Bool {
+        guard let raw = try? SpacesClientDatabase().setting(key: SettingsKey.windowFocusPulseEnabled) else {
+            return SettingsKey.defaultWindowFocusPulseEnabled
+        }
+        return raw != "0"
+    }
+
+    private func clientWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
+        let raw = (try? SpacesClientDatabase().setting(key: SettingsKey.windowFocusPulseColor)) ?? SettingsKey.defaultWindowFocusPulseColor
+        let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 3 else { return (r: 72, g: 98, b: 110) }
+        return (r: parts[0], g: parts[1], b: parts[2])
+    }
+
+    private func clientActiveWorkspaceID() -> String? { try? SpacesClientDatabase().setting(key: SettingsKey.activeWorkspaceID) }
+
+    nonisolated private static func setClientActiveWorkspaceID(_ workspaceID: String?) {
+        try? SpacesClientDatabase().setSetting(key: SettingsKey.activeWorkspaceID, value: workspaceID)
+    }
+
     private func loadShortcutSpecs() {
-        if let leaderRaw = try? orchestrator.guiLeaderHotkey(), let modifiers = try? HotkeySpec.parseModifierSet(leaderRaw) {
+        if let leaderRaw = try? shortcutRawValue(for: .guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(leaderRaw) {
             shortcutLeaderModifiers = modifiers
         } else {
             shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
@@ -11112,39 +11182,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
     }
 
     private func shortcutRawValue(for setting: ShortcutSetting) throws -> String {
-        switch setting {
-        case .guiHotkey: return try orchestrator.guiHotkey()
-        case .guiCommandPaletteHotkey: return try orchestrator.guiCommandPaletteHotkey()
-        case .guiLeaderHotkey: return try orchestrator.guiLeaderHotkey()
-        case .guiAlertsShortcut: return try orchestrator.guiAlertsShortcut()
-        case .guiAddWorkspaceShortcut: return try orchestrator.guiAddWorkspaceShortcut()
-        case .guiReloadShortcut: return try orchestrator.guiReloadShortcut()
-        case .guiNextShortcut: return try orchestrator.guiNextShortcut()
-        case .guiPreviousShortcut: return try orchestrator.guiPreviousShortcut()
-        case .guiOpenEditorShortcut: return try orchestrator.guiOpenEditorShortcut()
-        case .guiOpenTerminalShortcut: return try orchestrator.guiOpenTerminalShortcut()
-        case .guiOpenFinderShortcut: return try orchestrator.guiOpenFinderShortcut()
-        case .guiOpenSettingsShortcut: return try orchestrator.guiOpenSettingsShortcut()
-        case .guiWindowShortcut: return try orchestrator.guiWindowShortcut()
-        }
+        if setting.usesLeader { return try effectiveClientLeaderBackedShortcut(setting: setting) }
+        return try SpacesClientDatabase().setting(key: setting.settingKey) ?? setting.defaultSpec
     }
 
     private func setShortcutSetting(setting: ShortcutSetting, value: String?) throws {
-        switch setting {
-        case .guiHotkey: try orchestrator.setGUIHotkey(value)
-        case .guiCommandPaletteHotkey: try orchestrator.setGUICommandPaletteHotkey(value)
-        case .guiLeaderHotkey: try orchestrator.setGUILeaderHotkey(value)
-        case .guiAlertsShortcut: try orchestrator.setGUIAlertsShortcut(value)
-        case .guiAddWorkspaceShortcut: try orchestrator.setGUIAddWorkspaceShortcut(value)
-        case .guiReloadShortcut: try orchestrator.setGUIReloadShortcut(value)
-        case .guiNextShortcut: try orchestrator.setGUINextShortcut(value)
-        case .guiPreviousShortcut: try orchestrator.setGUIPreviousShortcut(value)
-        case .guiOpenEditorShortcut: try orchestrator.setGUIOpenEditorShortcut(value)
-        case .guiOpenTerminalShortcut: try orchestrator.setGUIOpenTerminalShortcut(value)
-        case .guiOpenFinderShortcut: try orchestrator.setGUIOpenFinderShortcut(value)
-        case .guiOpenSettingsShortcut: try orchestrator.setGUIOpenSettingsShortcut(value)
-        case .guiWindowShortcut: try orchestrator.setGUIWindowShortcut(value)
+        let normalized = setting.usesLeader ? try normalizedClientLeaderBackedShortcut(value) : value
+        try SpacesClientDatabase().setSetting(key: setting.settingKey, value: normalized)
+    }
+
+    private func effectiveClientLeaderBackedShortcut(setting: ShortcutSetting) throws -> String {
+        let leaderModifiers = try clientLeaderModifiers()
+        guard let raw = try SpacesClientDatabase().setting(key: setting.settingKey), let stored = try? HotkeySpec.parse(raw) else {
+            let spec = (try? HotkeySpec.parse(setting.defaultSpec)) ?? HotkeySpec(key: setting.defaultSpec, modifiers: [])
+            return spec.adding(modifiers: leaderModifiers).normalized
         }
+        if stored.modifiers.isEmpty { return stored.adding(modifiers: leaderModifiers).normalized }
+        if stored.modifiers.isSuperset(of: leaderModifiers) {
+            return stored.removing(modifiers: leaderModifiers).adding(modifiers: leaderModifiers).normalized
+        }
+        return stored.normalized
+    }
+
+    private func normalizedClientLeaderBackedShortcut(_ raw: String?) throws -> String? {
+        guard let raw else { return nil }
+        let spec = try HotkeySpec.parse(raw)
+        let leaderModifiers = try clientLeaderModifiers()
+        if spec.modifiers.isSuperset(of: leaderModifiers) { return spec.removing(modifiers: leaderModifiers).normalized }
+        return spec.normalized
+    }
+
+    private func clientLeaderModifiers() throws -> Set<HotkeyModifier> {
+        if let raw = try SpacesClientDatabase().setting(key: SettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw),
+            !modifiers.isEmpty
+        {
+            return modifiers
+        }
+        return try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
     }
 
     private func shortcutSpec(for setting: ShortcutSetting) -> HotkeySpec? {
@@ -11651,7 +11725,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
 
         if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil, rememberedTerminalSessionWorkspaceID == nil {
             let lookupStartedAt = Date()
-            activeWorkspaceID = try? orchestrator.activeWorkspaceID()
+            activeWorkspaceID = clientActiveWorkspaceID()
             activeWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
             activeWorkspaceStatus = activeWorkspaceID == nil ? "miss" : "hit"
         }
@@ -12411,6 +12485,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         case .workspace(let project, let workspace):
             selectedProjectID = project.id
             selectedWorkspaceID = workspace.id
+            Self.setClientActiveWorkspaceID(workspace.id)
             showingSettings = false
             showWorkspaceDetail(project: project, workspace: workspace)
         }
@@ -12464,7 +12539,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
         do {
-            try orchestrator.setProjectCollapsed(projectID: projectID, isCollapsed: isCollapsed)
+            let deviceID = projects.first(where: { $0.id == projectID })?.deviceID ?? localDeviceID
+            try SpacesClientDatabase().setProjectCollapsed(deviceID: deviceID, projectID: projectID, isCollapsed: isCollapsed)
             updateProjectCollapsedStateInMemory(projectID: projectID, isCollapsed: isCollapsed)
         } catch {
             showError(error)
@@ -12503,7 +12579,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         let project = projects[index]
         projects[index] = ProjectSummary(
             id: project.id, name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
-            isCollapsed: isCollapsed)
+            isCollapsed: isCollapsed, deviceID: project.deviceID)
     }
 
     @objc private func showProjectSettings(_ sender: NSButton) {

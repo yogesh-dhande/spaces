@@ -33,6 +33,7 @@ public enum SettingsKey {
     public static let guiWindowShortcut = "gui_window_shortcut"
     public static let defaultGUIWindowShortcut = "cmd+1"
     public static let alertsDismissedAttentionItems = "alerts_dismissed_attention_items"
+    public static let activeWorkspaceID = "active_workspace_id"
     public static let windowFocusPulseColor = "window_focus_pulse_color"
     /// Default window focus pulse overlay color (8-bit RGB).
     public static let defaultWindowFocusPulseColor = "72,98,110"

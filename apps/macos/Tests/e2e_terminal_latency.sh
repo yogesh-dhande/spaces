@@ -11,6 +11,7 @@ BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="${SPACES_APP:-$BUILD_DIR/SpacesApp}"
 SPACES_CLI="${SPACES_CLI:-$BUILD_DIR/spaces}"
 SPACES_E2E="${SPACES_E2E:-$BUILD_DIR/spacese2e}"
+SPACESD_EXECUTABLE="${SPACESD_EXECUTABLE:-$BUILD_DIR/spacesd}"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 
 WORK_ROOT="${WORK_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/spaces-terminal-latency.XXXXXX")}"
@@ -124,11 +125,13 @@ parse_args "$@"
 [[ -x "$SPACES_APP" ]] || fail "SpacesApp not found at $SPACES_APP"
 [[ -x "$SPACES_CLI" ]] || fail "spaces CLI not found at $SPACES_CLI"
 [[ -x "$SPACES_E2E" ]] || fail "spacese2e not found at $SPACES_E2E"
+[[ -x "$SPACESD_EXECUTABLE" ]] || fail "spacesd not found at $SPACESD_EXECUTABLE"
 
 mkdir -p "$(dirname "$DB_PATH")" "$RUNTIME_DIR" "$(dirname "$CLIENT_DB_PATH")" "$CLIENT_SECRET_DIR"
 touch "$APP_LOG" "$PERF_JSONL"
 export SPACES_DB_PATH="$DB_PATH"
 export SPACES_RUNTIME_DIR="$RUNTIME_DIR"
+export SPACESD_EXECUTABLE
 export SPACES_CLIENT_DB_PATH="$CLIENT_DB_PATH"
 export SPACES_CLIENT_SECRET_DIR="$CLIENT_SECRET_DIR"
 export SPACES_DEVICE_API_PORT="${SPACES_DEVICE_API_PORT:-0}"
@@ -357,10 +360,10 @@ def first_mac_frame_apply_after_submit(session_id: str, submit_ns: int) -> tuple
 
 
 def extract_session_id(output: str) -> str:
-    match = re.findall(r"[0-9A-Fa-f-]{36}", output)
+    match = re.search(r"^Started terminal session ([0-9A-Fa-f-]{36})(?:\s|$)", output, re.MULTILINE)
     if not match:
         raise RuntimeError(f"failed to parse session id from: {output}")
-    return match[-1].upper()
+    return match.group(1).upper()
 
 
 def control_socket_path(session_id: str) -> Path:

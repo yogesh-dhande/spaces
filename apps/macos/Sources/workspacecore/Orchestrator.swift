@@ -303,6 +303,8 @@ public final class WorkspaceOrchestrator {
     private let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     private let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
     private let remoteTerminalServiceClient: RemoteTerminalServiceClient
+    private let windowFocusPulseEnabledProvider: () throws -> Bool
+    private let windowFocusPulseColorProvider: () throws -> (r: Int, g: Int, b: Int)
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleLock = NSLock()
@@ -328,6 +330,7 @@ public final class WorkspaceOrchestrator {
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, remoteTerminalServiceClient: RemoteTerminalServiceClient? = nil,
+        windowFocusPulseEnabledProvider: (() throws -> Bool)? = nil, windowFocusPulseColorProvider: (() throws -> (r: Int, g: Int, b: Int))? = nil,
         currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
@@ -339,6 +342,8 @@ public final class WorkspaceOrchestrator {
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
         self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
+        self.windowFocusPulseEnabledProvider = windowFocusPulseEnabledProvider ?? { SettingsKey.defaultWindowFocusPulseEnabled }
+        self.windowFocusPulseColorProvider = windowFocusPulseColorProvider ?? { Self.defaultWindowFocusPulseColor() }
         #if canImport(Darwin)
             self.builtInTerminalWindowOpener =
                 builtInTerminalWindowOpener ?? { sessionID, mode in
@@ -452,25 +457,13 @@ public final class WorkspaceOrchestrator {
 
     public func listProjects() throws -> [ProjectSummary] {
         return try store.projects().map {
-            ProjectSummary(
-                id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch, isCollapsed: $0.isCollapsed)
+            ProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
         }
     }
 
     public func project(id: String) throws -> ProjectRecord? { try store.project(id: id) }
 
     public func project(dir: String) throws -> ProjectRecord? { try store.project(dir: dir) }
-
-    public func setProjectCollapsed(projectID: String, isCollapsed: Bool) throws {
-        try store.updateProjectCollapsed(id: projectID, isCollapsed: isCollapsed)
-    }
-
-    @discardableResult public func updateEditorPreference(_ editor: EditorPreference?) throws -> AppConfig {
-        var config = try store.appConfig()
-        config.editor = editor
-        try store.setAppConfig(config)
-        return config
-    }
 
     public func listWorkspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceSummary] {
         let records = try store.workspaces(projectID: projectID, includeArchived: includeArchived)
@@ -2016,15 +2009,6 @@ public final class WorkspaceOrchestrator {
         try store.workspacePortsNamed(workspaceID: workspaceID)
     }
 
-    public func openWorkspaceEditor(workspaceID: String) throws {
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
-        guard let editor = try store.appConfig().editor, editor != .none else {
-            throw WorkspaceError.configError(message: "Preferred editor is not configured.")
-        }
-        try EditorLauncher.open(editor: editor, directory: workspace.dir)
-    }
-
     @discardableResult public func openWorkspaceTerminal(workspaceID: String) throws -> String {
         let reservation = try reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
         try finishReservedWorkspaceTerminalLaunch(reservation)
@@ -2233,16 +2217,13 @@ public final class WorkspaceOrchestrator {
 
     public func focusWorkspace(workspaceID: String) throws {
         let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
-        var focused = false
         for window in windows {
             let ok = focusTrackedWindow(window, workspaceID: workspaceID, requestID: nil)
             if ok {
-                focused = true
                 rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
                 break
             }
         }
-        if focused { try setActiveWorkspace(id: workspaceID) }
     }
 
     public func workspaceFocusableWindowNames(workspaceID: String) throws -> [String] {
@@ -2266,10 +2247,7 @@ public final class WorkspaceOrchestrator {
             "workspace=\(workspaceID) stage=direct_focus_target index=\(index) target=\(navigationTargetDebugName(navigationTarget(for: windows[targetIndex]))) success=\(ok ? 1 : 0) elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
         )
         guard ok else { throw missingTrackedWindowError(for: windows[targetIndex], workspaceID: workspaceID) }
-        if ok {
-            rememberNavigationTarget(navigationTarget(for: windows[targetIndex]), workspaceID: workspaceID)
-            try setActiveWorkspace(id: workspaceID)
-        }
+        if ok { rememberNavigationTarget(navigationTarget(for: windows[targetIndex]), workspaceID: workspaceID) }
         logCycleProfile(
             "workspace=\(workspaceID) stage=direct_focus_total index=\(index) target=\(navigationTargetDebugName(navigationTarget(for: windows[targetIndex]))) success=\(ok ? 1 : 0) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
         )
@@ -2305,7 +2283,6 @@ public final class WorkspaceOrchestrator {
             rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
         }
 
-        try setActiveWorkspace(id: workspaceID)
         logCycleProfile(
             "workspace=\(workspaceID) stage=direct_focus_total name=\(trimmedName) success=1 elapsed_ms=\(elapsedMS(since: focusStartedAt))")
         logPerfMetric("named_window_focus", workspaceID: workspaceID, target: trimmedName, elapsedMS: elapsedMS(since: focusStartedAt), success: true)
@@ -2319,7 +2296,6 @@ public final class WorkspaceOrchestrator {
             guard focused else { throw missingTrackedWindowError(for: window, workspaceID: workspaceID) }
             rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
             try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
-            try setActiveWorkspace(id: workspaceID)
             logPerfMetric(
                 "browser_focus", workspaceID: workspaceID, target: targetURL, detail: "recovered=0", elapsedMS: elapsedMS(since: focusStartedAt),
                 success: true)
@@ -2332,7 +2308,6 @@ public final class WorkspaceOrchestrator {
         }) {
             rememberNavigationTarget(navigationTarget(for: recoveredWindow), workspaceID: workspaceID)
         }
-        try setActiveWorkspace(id: workspaceID)
         logPerfMetric(
             "browser_focus", workspaceID: workspaceID, target: targetURL, detail: "recovered=1", elapsedMS: elapsedMS(since: focusStartedAt),
             success: true)
@@ -2345,7 +2320,6 @@ public final class WorkspaceOrchestrator {
         guard outcome.focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
         rememberNavigationTarget(.process(process), workspaceID: workspaceID)
         try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
-        try setActiveWorkspace(id: workspaceID)
         logPerfMetric(
             "process_focus", workspaceID: workspaceID, target: process.templateName, detail: "route=\(outcome.route)",
             elapsedMS: elapsedMS(since: focusStartedAt), success: true)
@@ -2467,7 +2441,6 @@ public final class WorkspaceOrchestrator {
                     if prefixes.contains(where: { activeURL.hasPrefix($0) }) { matchingWorkspaceIDs.append(workspace.id) }
                 }
             }
-            if let activeWorkspaceID = try activeWorkspaceID(), matchingWorkspaceIDs.contains(activeWorkspaceID) { return activeWorkspaceID }
             if let firstMatch = matchingWorkspaceIDs.first { return firstMatch }
         }
 
@@ -2475,7 +2448,6 @@ public final class WorkspaceOrchestrator {
         guard !candidates.isEmpty else { return nil }
         let candidateWorkspaceIDs = Array(Set(candidates.map(\.workspaceID)))
         if candidateWorkspaceIDs.count == 1 { return candidateWorkspaceIDs[0] }
-        if let activeWorkspaceID = try activeWorkspaceID(), candidateWorkspaceIDs.contains(activeWorkspaceID) { return activeWorkspaceID }
         return candidates.max(by: { lhs, rhs in lhs.lastSeenAt < rhs.lastSeenAt })?.workspaceID
     }
 
@@ -2539,7 +2511,6 @@ public final class WorkspaceOrchestrator {
             rememberNavigationTarget(orderedTargets[resolvedTargetIndex], workspaceID: workspaceID, asCycleNavigation: true)
             setWindowNavigationCycleSession(
                 workspaceID: workspaceID, orderedCursors: orderedTargets.compactMap(navigationCursor(for:)), currentIndex: resolvedTargetIndex)
-            try setActiveWorkspace(id: workspaceID)
             logCycleProfile(
                 "workspace=\(workspaceID) stage=set_active direction=\(direction) elapsed_ms=\(elapsedMS(since: activeWorkspaceStartedAt))")
         }
@@ -3319,8 +3290,8 @@ public final class WorkspaceOrchestrator {
     }
 
     private func pulseTerminalWindowIfNeeded(windowID: Int) {
-        guard (try? windowFocusPulseEnabled()) ?? SettingsKey.defaultWindowFocusPulseEnabled else { return }
-        let color = (try? windowFocusPulseColor()) ?? defaultWindowFocusPulseColor()
+        guard (try? windowFocusPulseEnabledProvider()) ?? SettingsKey.defaultWindowFocusPulseEnabled else { return }
+        let color = (try? windowFocusPulseColorProvider()) ?? Self.defaultWindowFocusPulseColor()
         terminalFocusPulseController.pulse(windowID: windowID, color: color, yabai: yabai)
     }
 
@@ -3982,98 +3953,6 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    public func guiHotkey() throws -> String { try store.setting(key: SettingsKey.guiHotkey) ?? SettingsKey.defaultGUIHotkey }
-
-    public func setGUIHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiHotkey, value: raw) }
-
-    public func guiCommandPaletteHotkey() throws -> String {
-        try store.setting(key: SettingsKey.guiCommandPaletteHotkey) ?? SettingsKey.defaultGUICommandPaletteHotkey
-    }
-
-    public func setGUICommandPaletteHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiCommandPaletteHotkey, value: raw) }
-
-    public func guiLeaderHotkey() throws -> String { HotkeySpec.normalizedModifierSet(try guiLeaderModifiers()) }
-
-    public func setGUILeaderHotkey(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiLeaderHotkey, value: raw) }
-
-    public func guiAlertsShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiAlertsShortcut, defaultValue: SettingsKey.defaultGUIAlertsShortcut)
-    }
-
-    public func setGUIAlertsShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiAlertsShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func guiAddProjectShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiAddProjectShortcut) ?? SettingsKey.defaultGUIAddProjectShortcut
-    }
-
-    public func setGUIAddProjectShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiAddProjectShortcut, value: raw) }
-
-    public func guiAddWorkspaceShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiAddWorkspaceShortcut) ?? SettingsKey.defaultGUIAddWorkspaceShortcut
-    }
-
-    public func setGUIAddWorkspaceShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiAddWorkspaceShortcut, value: raw) }
-
-    public func guiReloadShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiReloadShortcut, defaultValue: SettingsKey.defaultGUIReloadShortcut)
-    }
-
-    public func setGUIReloadShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiReloadShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func guiOpenEditorShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenEditorShortcut, defaultValue: SettingsKey.defaultGUIOpenEditorShortcut)
-    }
-
-    public func setGUIOpenEditorShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiOpenEditorShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func guiOpenTerminalShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenTerminalShortcut, defaultValue: SettingsKey.defaultGUIOpenTerminalShortcut)
-    }
-
-    public func setGUIOpenTerminalShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiOpenTerminalShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func guiOpenFinderShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiOpenFinderShortcut, defaultValue: SettingsKey.defaultGUIOpenFinderShortcut)
-    }
-
-    public func setGUIOpenFinderShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiOpenFinderShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func guiOpenSettingsShortcut() throws -> String {
-        try store.setting(key: SettingsKey.guiOpenSettingsShortcut) ?? SettingsKey.defaultGUIOpenSettingsShortcut
-    }
-
-    public func setGUIOpenSettingsShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiOpenSettingsShortcut, value: raw) }
-
-    public func guiNextShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiNextShortcut, defaultValue: SettingsKey.defaultGUINextShortcut)
-    }
-
-    public func setGUINextShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiNextShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func guiPreviousShortcut() throws -> String {
-        try effectiveLeaderBackedShortcut(settingKey: SettingsKey.guiPreviousShortcut, defaultValue: SettingsKey.defaultGUIPreviousShortcut)
-    }
-
-    public func setGUIPreviousShortcut(_ raw: String?) throws {
-        try store.setSetting(key: SettingsKey.guiPreviousShortcut, value: try normalizeLeaderBackedShortcut(raw))
-    }
-
-    public func guiWindowShortcut() throws -> String { try store.setting(key: SettingsKey.guiWindowShortcut) ?? SettingsKey.defaultGUIWindowShortcut }
-
-    public func setGUIWindowShortcut(_ raw: String?) throws { try store.setSetting(key: SettingsKey.guiWindowShortcut, value: raw) }
-
     public func alertsDismissedAttentionItemIDs() throws -> Set<String> {
         guard let raw = try store.setting(key: SettingsKey.alertsDismissedAttentionItems), !raw.isEmpty else { return [] }
         guard let data = raw.data(using: .utf8) else { return [] }
@@ -4090,65 +3969,11 @@ public final class WorkspaceOrchestrator {
         try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
     }
 
-    private func guiLeaderModifiers() throws -> Set<HotkeyModifier> {
-        if let raw = try store.setting(key: SettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw), !modifiers.isEmpty {
-            return modifiers
-        }
-        return try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
-    }
-
-    private func effectiveLeaderBackedShortcut(settingKey: String, defaultValue: String) throws -> String {
-        let leaderModifiers = try guiLeaderModifiers()
-        guard let raw = try store.setting(key: settingKey), let stored = try? HotkeySpec.parse(raw) else {
-            let spec = (try? HotkeySpec.parse(defaultValue)) ?? HotkeySpec(key: defaultValue, modifiers: [])
-            return spec.adding(modifiers: leaderModifiers).normalized
-        }
-        if stored.modifiers.isEmpty { return stored.adding(modifiers: leaderModifiers).normalized }
-        if stored.modifiers.isSuperset(of: leaderModifiers) {
-            return stored.removing(modifiers: leaderModifiers).adding(modifiers: leaderModifiers).normalized
-        }
-        return stored.normalized
-    }
-
-    private func normalizeLeaderBackedShortcut(_ raw: String?) throws -> String? {
-        guard let raw else { return nil }
-        let spec = try HotkeySpec.parse(raw)
-        let leaderModifiers = try guiLeaderModifiers()
-        if spec.modifiers.isSuperset(of: leaderModifiers) { return spec.removing(modifiers: leaderModifiers).normalized }
-        return spec.normalized
-    }
-
-    public func windowFocusPulseColor() throws -> (r: Int, g: Int, b: Int) {
-        let raw = (try? store.setting(key: SettingsKey.windowFocusPulseColor)) ?? SettingsKey.defaultWindowFocusPulseColor
-        let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        guard parts.count == 3 else { return (r: 0, g: 0, b: 0) }
-        return (r: parts[0], g: parts[1], b: parts[2])
-    }
-
-    public func setWindowFocusPulseColor(r: Int, g: Int, b: Int) throws {
-        let clamped = (r: max(0, min(255, r)), g: max(0, min(255, g)), b: max(0, min(255, b)))
-        try store.setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(clamped.r),\(clamped.g),\(clamped.b)")
-    }
-
-    public func windowFocusPulseEnabled() throws -> Bool {
-        let raw = try? store.setting(key: SettingsKey.windowFocusPulseEnabled)
-        guard let raw else { return SettingsKey.defaultWindowFocusPulseEnabled }
-        return raw != "0"
-    }
-
-    public func setWindowFocusPulseEnabled(_ enabled: Bool) throws {
-        try store.setSetting(key: SettingsKey.windowFocusPulseEnabled, value: enabled ? "1" : "0")
-    }
-
-    private func defaultWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
+    private static func defaultWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
         let parts = SettingsKey.defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0) }
         guard parts.count == 3 else { return (r: 0, g: 0, b: 0) }
         return (r: parts[0], g: parts[1], b: parts[2])
     }
-
-    public func activeWorkspaceID() throws -> String? { try store.setting(key: "active_workspace_id") }
-
-    public func setActiveWorkspace(id: String?) throws { try store.setSetting(key: "active_workspace_id", value: id) }
 
     private func normalizeDir(id: String, _ dir: String) throws -> ProjectRecord {
         var isDir: ObjCBool = false
@@ -4169,8 +3994,8 @@ public final class WorkspaceOrchestrator {
         let previousAgentLaunchers = baseRecord.agentLaunchers
         record = ProjectRecord(
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
-            isCollapsed: baseRecord.isCollapsed, setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports,
-            processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
+            setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
+            browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
         record.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
         record.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: record.agentLaunchers)
@@ -6399,7 +6224,6 @@ public final class WorkspaceOrchestrator {
         guard focused else { throw missingTrackedAgentError(record) }
         rememberNavigationTarget(.agent(record), workspaceID: record.workspaceID)
         try markWorkspaceRunningIfNeeded(workspaceID: record.workspaceID)
-        try setActiveWorkspace(id: record.workspaceID)
     }
 
     public func stopCodingAgent(workspaceID: String, agentID: String) throws {

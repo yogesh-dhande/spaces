@@ -163,7 +163,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
 
     func testBuildIncludesProjectAndWorkspaceConfigForClientParity() {
         let project = ProjectRecord(
-            id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", isCollapsed: true, setupScript: "make setup",
+            id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", setupScript: "make setup",
             stopScript: "make stop-project", ports: [PortDefinition(id: "project-web-port", name: "WEB")],
             processes: [ProcessTemplate(id: "project-web-process", name: "web", command: "npm run dev", kind: "server", onExit: .restart)],
             browserSessions: [BrowserSession(name: "web", url: "http://localhost:$WEB")],
@@ -191,7 +191,6 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
 
         let projectSummary = overview.projects.first
         XCTAssertEqual(projectSummary?.id, project.id)
-        XCTAssertEqual(projectSummary?.isCollapsed, true)
         XCTAssertEqual(projectSummary?.config.setupScript, "make setup")
         XCTAssertEqual(projectSummary?.config.stopScript, "make stop-project")
         XCTAssertEqual(projectSummary?.config.ports.first?.id, "project-web-port")

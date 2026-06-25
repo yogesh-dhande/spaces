@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     private let db: OpaquePointer
     private let databasePath: String
@@ -73,9 +73,10 @@ public final class SpacesClientDatabase {
     private let migrationSteps: [SpacesClientMigrationStep]
     private let backupManager: DatabaseBackupManager
 
-    public init(path: String? = nil, currentVersion: Int = SpacesClientDatabase.currentVersion, migrationSteps: [SpacesClientMigrationStep] = [])
-        throws
-    {
+    public init(
+        path: String? = nil, currentVersion: Int = SpacesClientDatabase.currentVersion,
+        migrationSteps: [SpacesClientMigrationStep] = SpacesClientDatabase.defaultMigrationSteps
+    ) throws {
         let path = try path ?? SpacesClientDatabase.defaultPath()
         databasePath = path
         schemaVersion = currentVersion
@@ -180,6 +181,83 @@ public final class SpacesClientDatabase {
 
     public func deletePairedDevice(id: String) throws {
         try withImmediateTransaction { try execute(sql: "DELETE FROM paired_devices WHERE id = ?", bindings: [id]) }
+    }
+
+    public func setting(key: String) throws -> String? {
+        try queryRow(sql: "SELECT value FROM client_settings WHERE key = ?", bindings: [key])?.first.flatMap(normalized)
+    }
+
+    public func setSetting(key: String, value: String?) throws {
+        if let value {
+            try execute(
+                sql: """
+                    INSERT INTO client_settings(key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                      value = excluded.value,
+                      updated_at = excluded.updated_at
+                    """, bindings: [key, value, Self.timestamp()])
+        } else {
+            try execute(sql: "DELETE FROM client_settings WHERE key = ?", bindings: [key])
+        }
+    }
+
+    public func isProjectCollapsed(deviceID: String, projectID: String) throws -> Bool {
+        guard
+            let raw = try queryRow(
+                sql: "SELECT is_collapsed FROM project_sidebar_state WHERE device_id = ? AND project_id = ?", bindings: [deviceID, projectID])?.first
+        else { return false }
+        return raw == "1"
+    }
+
+    public func setProjectCollapsed(deviceID: String, projectID: String, isCollapsed: Bool) throws {
+        try execute(
+            sql: """
+                INSERT INTO project_sidebar_state(device_id, project_id, is_collapsed, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(device_id, project_id) DO UPDATE SET
+                  is_collapsed = excluded.is_collapsed,
+                  updated_at = excluded.updated_at
+                """, bindings: [deviceID, projectID, isCollapsed ? "1" : "0", Self.timestamp()])
+    }
+
+    public func projectCollapseStates(deviceID: String) throws -> [String: Bool] {
+        let rows = try queryRows(sql: "SELECT project_id, is_collapsed FROM project_sidebar_state WHERE device_id = ?", bindings: [deviceID])
+        return Dictionary(
+            uniqueKeysWithValues: rows.compactMap { row in
+                guard row.count >= 2 else { return nil }
+                return (row[0], row[1] == "1")
+            })
+    }
+
+    public func writeTerminalWindowFrame(_ frame: TerminalSessionWindowFrame, rootDirectory: String, sessionID: String, mode: TerminalAttachmentMode)
+        throws
+    {
+        try execute(
+            sql: """
+                INSERT INTO terminal_window_frames(root_directory, session_id, mode, x, y, width, height, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(root_directory, mode) DO UPDATE SET
+                  session_id = excluded.session_id,
+                  x = excluded.x,
+                  y = excluded.y,
+                  width = excluded.width,
+                  height = excluded.height,
+                  updated_at = excluded.updated_at
+                """, bindings: [rootDirectory, sessionID, mode.rawValue, frame.x, frame.y, frame.width, frame.height, Self.timestamp()])
+    }
+
+    public func terminalWindowFrame(rootDirectory: String, mode: TerminalAttachmentMode) throws -> TerminalSessionWindowFrame? {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT x, y, width, height
+                    FROM terminal_window_frames
+                    WHERE root_directory = ? AND mode = ?
+                    """, bindings: [rootDirectory, mode.rawValue]), row.count >= 4, let x = Double(row[0]), let y = Double(row[1]),
+            let width = Double(row[2]), let height = Double(row[3])
+        else { return nil }
+        return TerminalSessionWindowFrame(x: x, y: y, width: width, height: height)
     }
 
     public func backupURLs() throws -> [URL] { try backupManager.existingBackups() }
@@ -360,6 +438,7 @@ public final class SpacesClientDatabase {
             switch value {
             case let value as String: sqlite3_bind_text(statement, slot, value, -1, sqliteTransient)
             case let value as Int: sqlite3_bind_int64(statement, slot, sqlite3_int64(value))
+            case let value as Double: sqlite3_bind_double(statement, slot, value)
             case _ as NSNull: sqlite3_bind_null(statement, slot)
             default: throw SpacesClientError.invalidArgument("Unsupported client database binding type \(type(of: value)).")
             }
@@ -398,15 +477,109 @@ public final class SpacesClientDatabase {
               last_selected_at TEXT
             );
 
+            \(clientStateSchemaSQL)
+
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
             );
         """
 
     private static let dropSchemaSQL = """
+            DROP TABLE IF EXISTS local_window_focus_state;
+            DROP TABLE IF EXISTS runtime_target_events;
+            DROP TABLE IF EXISTS browser_targets;
+            DROP TABLE IF EXISTS runtime_targets;
+            DROP TABLE IF EXISTS terminal_window_frames;
+            DROP TABLE IF EXISTS project_sidebar_state;
+            DROP TABLE IF EXISTS client_settings;
             DROP TABLE IF EXISTS paired_devices;
             DROP TABLE IF EXISTS migration_state;
         """
+
+    private static let clientStateSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS client_settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS project_sidebar_state (
+              device_id TEXT NOT NULL,
+              project_id TEXT NOT NULL,
+              is_collapsed INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (device_id, project_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS terminal_window_frames (
+              root_directory TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              x REAL NOT NULL,
+              y REAL NOT NULL,
+              width REAL NOT NULL,
+              height REAL NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (root_directory, mode)
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_targets (
+              id TEXT PRIMARY KEY,
+              device_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              type TEXT NOT NULL,
+              name TEXT,
+              detail TEXT,
+              app TEXT NOT NULL,
+              window_id INTEGER,
+              tracking_id TEXT,
+              order_index INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS browser_targets (
+              runtime_target_id TEXT PRIMARY KEY,
+              target_url TEXT,
+              resolved_url TEXT,
+              FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_target_events (
+              id TEXT PRIMARY KEY,
+              runtime_target_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              source TEXT NOT NULL,
+              message TEXT,
+              window_id INTEGER,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS local_window_focus_state (
+              key TEXT PRIMARY KEY,
+              workspace_id TEXT,
+              window_id INTEGER,
+              updated_at TEXT NOT NULL
+            );
+        """
+
+    public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
+        SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
+            try executeClientBatch(database: database, sql: clientStateSchemaSQL)
+        }
+    ]
+
+    private static func timestamp() -> String { ISO8601DateFormatter().string(from: Date()) }
 }
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+private func executeClientBatch(database: OpaquePointer, sql: String) throws {
+    var errorMessage: UnsafeMutablePointer<CChar>?
+    if sqlite3_exec(database, sql, nil, nil, &errorMessage) != SQLITE_OK {
+        let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(database))
+        if let errorMessage { sqlite3_free(errorMessage) }
+        throw SpacesClientError.invalidArgument(message)
+    }
+}
