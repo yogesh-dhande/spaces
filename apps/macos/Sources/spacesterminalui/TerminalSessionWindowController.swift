@@ -102,7 +102,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 }
 
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
-    private static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
+    static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
     private static let takeoverAttemptTimeout: TimeInterval = 10
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
@@ -132,41 +132,41 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         let selectedRange: NSRange
     }
 
-    private let sessionID: String
+    let sessionID: String
     private let paths: TerminalSessionPaths
     private var launchConfiguration: TerminalSessionLaunchConfiguration?
-    private let client: TerminalClient
+    let client: TerminalClient
     private var rendererMode: TerminalRendererMode
     private var backend: TerminalSessionBackendKind
-    private var preferredAttachmentMode: TerminalAttachmentMode
+    var preferredAttachmentMode: TerminalAttachmentMode
     private var ownerAttachmentRequested: Bool
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let summaryLabel = NSTextField(labelWithString: "")
-    private let stateLabel = NSTextField(labelWithString: "")
-    private let rendererLabel = NSTextField(labelWithString: "")
-    private let runtimeToolbarStackView = NSStackView()
-    private let runtimeToolbarTitleLabel = NSTextField(labelWithString: "")
-    private let runtimeToolbarRunButton = NSButton()
-    private let runtimeToolbarStopButton = NSButton()
-    private let runtimeToolbarRestartButton = NSButton()
-    private let runtimeToolbarButtonStackView = NSStackView()
+    let titleLabel = NSTextField(labelWithString: "")
+    let summaryLabel = NSTextField(labelWithString: "")
+    let stateLabel = NSTextField(labelWithString: "")
+    let rendererLabel = NSTextField(labelWithString: "")
+    let runtimeToolbarStackView = NSStackView()
+    let runtimeToolbarTitleLabel = NSTextField(labelWithString: "")
+    let runtimeToolbarRunButton = NSButton()
+    let runtimeToolbarStopButton = NSButton()
+    let runtimeToolbarRestartButton = NSButton()
+    let runtimeToolbarButtonStackView = NSStackView()
     private let runtimeToolbarSpacerView = NSView()
-    private let inputField = NSTextField(string: "")
-    private let inputStatusLabel = NSTextField(labelWithString: "")
+    let inputField = NSTextField(string: "")
+    let inputStatusLabel = NSTextField(labelWithString: "")
     private let sendButton = NSButton(title: "Send", target: nil, action: nil)
     private let interruptButton = NSButton(title: "Ctrl+C", target: nil, action: nil)
     private let newlineButton = NSButton(title: "Enter", target: nil, action: nil)
-    private let takeoverButton = NSButton(title: "Take Over", target: nil, action: nil)
-    private let takeoverMessageLabel = NSTextField(labelWithString: "")
-    private let inputRowStackView = NSStackView()
+    let takeoverButton = NSButton(title: "Take Over", target: nil, action: nil)
+    let takeoverMessageLabel = NSTextField(labelWithString: "")
+    let inputRowStackView = NSStackView()
     private let actionButtonStackView = NSStackView()
     private let takeoverRowStackView = NSStackView()
-    private let takeoverContainerView = NSView()
-    private let outputView = NSTextView(frame: NSRect(x: 0, y: 0, width: 880, height: 400))
-    private let outputScrollView = NSScrollView()
-    private let terminalContainer = NSView()
-    private let headerStackView = NSStackView()
-    private let bodyStackView = NSStackView()
+    let takeoverContainerView = NSView()
+    let outputView = NSTextView(frame: NSRect(x: 0, y: 0, width: 880, height: 400))
+    let outputScrollView = NSScrollView()
+    let terminalContainer = NSView()
+    let headerStackView = NSStackView()
+    let bodyStackView = NSStackView()
     private var bodyTopToHeaderConstraint: NSLayoutConstraint?
     private var bodyTopToContentConstraint: NSLayoutConstraint?
     private var bodyBottomToContentConstraint: NSLayoutConstraint?
@@ -203,17 +203,17 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var pendingGhosttyHostAttachment: PendingGhosttyHostAttachment?
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var refreshTask: Task<Void, Never>?
-    private var takeoverTask: Task<Void, Never>?
-    private var takeoverTaskStartedAt: Date?
+    var takeoverTask: Task<Void, Never>?
+    var takeoverTaskStartedAt: Date?
     private var takeoverAttemptID: UUID?
-    private var pendingWindowFramePersistTask: Task<Void, Never>?
+    var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
     private var isClientAttached = false
     private var lastRequestedAttachmentMode: TerminalAttachmentMode?
     private var closesForSessionTermination = false
-    private var didCloseWindow = false
+    var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
-    private var ghosttyRendererHost: (any TerminalGhosttyRendererHosting)?
+    var ghosttyRendererHost: (any TerminalGhosttyRendererHosting)?
     private var ghosttySessionInfoProvider: (any TerminalGhosttySessionInfoProviding)?
     private var visibleRenderer: VisibleRenderer = .textView
     private var lastObservedOwnerClientID: String?
@@ -409,11 +409,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         return ownerClient.id == client.id ? .owner : .viewer
     }
 
-    private func shouldDeferInitialOwnerPresentation(wasVisible: Bool) -> Bool {
+    func shouldDeferInitialOwnerPresentation(wasVisible: Bool) -> Bool {
         shouldDeferInitialOwnerPresentation(wasVisible: wasVisible, runningUnderXCTest: Self.isRunningUnderXCTest)
     }
 
-    private func shouldDeferInitialOwnerPresentation(wasVisible: Bool, runningUnderXCTest: Bool) -> Bool {
+    func shouldDeferInitialOwnerPresentation(wasVisible: Bool, runningUnderXCTest: Bool) -> Bool {
         guard !isStartingRuntimeState(lastObservedRuntimeState) else { return false }
         return !runningUnderXCTest && !wasVisible && launchConfiguration != nil && backend == .ghosttyEmbedded && preferredAttachmentMode == .owner
             && !ownerRendererReadyForInitialPresentation()
@@ -1281,7 +1281,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         }
     }
 
-    private func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
+    func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
         do {
             refreshRuntimeControlsIfNeeded()
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
@@ -1448,9 +1448,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     @objc private func sendInterrupt() { sendKey("ctrl+c") }
     @objc private func sendNewline() { sendKey("enter") }
     @objc private func takeoverOwnershipAction() { takeOverOwnership() }
-    @objc private func runRuntimeFromToolbar() { runtimeControls?.onRun?() }
-    @objc private func stopRuntimeFromToolbar() { runtimeControls?.onStop?() }
-    @objc private func restartRuntimeFromToolbar() { runtimeControls?.onRestart?() }
+    @objc func runRuntimeFromToolbar() { runtimeControls?.onRun?() }
+    @objc func stopRuntimeFromToolbar() { runtimeControls?.onStop?() }
+    @objc func restartRuntimeFromToolbar() { runtimeControls?.onRestart?() }
 
     private func refreshRuntimeControlsIfNeeded(force: Bool = false) {
         guard force || runtimeControlsDirty else { return }
@@ -1484,7 +1484,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         updateHeaderLayoutVisibility()
     }
 
-    private func submitInput() {
+    func submitInput() {
         guard !inputRowStackView.isHidden else { return }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else {
             updateInputStatus(message: "Session is not running.", isError: true)
@@ -1533,7 +1533,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         updateHeaderLayoutVisibility()
     }
 
-    private func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil, force: Bool = false) {
+    func attachLocalClientIfNeeded(mode: TerminalAttachmentMode? = nil, force: Bool = false) {
         guard backend != .ghosttyEmbedded || canAttachToGhosttyRuntime(lastObservedRuntimeState) else { return }
         var attachmentMode = mode ?? (ownerAttachmentRequested ? .owner : preferredAttachmentMode)
         if backend == .ghosttyEmbedded, attachmentMode == .owner, !force {
@@ -1928,7 +1928,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         return .ghosttyTakeoverStatus
     }
 
-    private func currentRefreshInterval() -> Duration {
+    func currentRefreshInterval() -> Duration {
         visibleRenderer == .ghosttyOwner && !shouldShowOwnerStateLabel ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
     }
 
@@ -2169,158 +2169,4 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         return "\(cleaned.prefix(72))…\(cleaned.suffix(48))"
     }
 
-    public func debugRefreshStateForTesting(skipOwnerAttach: Bool = false) {
-        if skipOwnerAttach { debugForceRefreshSkippingOwnerAttach() } else { debugForceRefresh() }
-    }
-
-    public func debugStateDump() -> TerminalSessionWindowDebugState {
-        let renderedOutput: String
-        let visibleSurfaceOutput = !terminalContainer.isHidden ? ghosttyRendererHost?.debugVisibleSurfaceText() : nil
-        if !terminalContainer.isHidden { ghosttyRendererHost?.prepareRenderStateExport() }
-        let surfaceSnapshot = ghosttyRendererHost?.snapshot() ?? ghosttyRendererHost?.sessionSnapshot()
-        if !terminalContainer.isHidden, let surfaceSnapshot,
-            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: surfaceSnapshot, snapshotText: nil)
-        {
-            renderedOutput = GhosttyTerminalSnapshotGrid.fullPlainText(for: surfaceSnapshot)
-        } else if !terminalContainer.isHidden, let visibleText = visibleSurfaceOutput, !visibleText.isEmpty {
-            renderedOutput = visibleText
-        } else if !terminalContainer.isHidden, let sessionSnapshotText = ghosttyRendererHost?.sessionSnapshotText(), !sessionSnapshotText.isEmpty {
-            renderedOutput = sessionSnapshotText
-        } else {
-            renderedOutput = outputView.string
-        }
-        let searchState = debugTerminalSearchState
-        return .init(
-            renderedOutput: renderedOutput, visibleSurfaceOutput: visibleSurfaceOutput, showsTerminalSurface: !terminalContainer.isHidden,
-            showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue,
-            state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
-            surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
-            searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total,
-            searchSelected: searchState.selected, attachmentMode: preferredAttachmentMode.rawValue, takeoverPending: takeoverTask != nil,
-            takeoverButtonVisible: !takeoverButton.isHidden, takeoverButtonEnabled: takeoverButton.isEnabled,
-            takeoverMessage: takeoverMessageLabel.stringValue)
-    }
-
-    var debugRenderedOutput: String { outputView.string }
-    var debugShowsTerminalSurface: Bool { !terminalContainer.isHidden }
-    var debugShowsTextRenderer: Bool { !outputScrollView.isHidden }
-    var debugRendererSummary: String { rendererLabel.stringValue }
-    var debugSummary: String { summaryLabel.stringValue }
-    var debugState: String { stateLabel.stringValue }
-    var debugWindowTitle: String { window?.title ?? "" }
-    var debugWindowRepresentedPath: String? { window?.representedURL?.path }
-    var debugWindowFrame: NSRect { window?.frame ?? .zero }
-    func debugShouldDeferInitialOwnerPresentationInProduction(wasVisible: Bool = false) -> Bool {
-        shouldDeferInitialOwnerPresentation(wasVisible: wasVisible, runningUnderXCTest: false)
-    }
-    public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
-    public var didClose: Bool { didCloseWindow }
-    public var terminalSessionID: String { sessionID }
-    var debugDidCloseWindow: Bool { didCloseWindow }
-    func debugForceRefresh() { refreshNow() }
-    func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
-    func debugAttachLocalClientIfNeeded() { attachLocalClientIfNeeded() }
-    func debugFlushPendingWindowFramePersistence() async { await pendingWindowFramePersistTask?.value }
-    public var clientID: String { client.id }
-    var debugTakeoverPending: Bool { takeoverTask != nil }
-    func debugSetTakeoverTaskStartedAt(_ date: Date?) { takeoverTaskStartedAt = date }
-    var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
-    var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
-    var debugInlineInputEnabled: Bool { inputField.isEnabled }
-    var debugTakeoverEnabled: Bool { takeoverButton.isEnabled }
-    var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
-    var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
-    var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
-    var debugShowsStateLabel: Bool { !stateLabel.isHidden }
-    var debugShowsHeader: Bool { !headerStackView.isHidden }
-    var debugRuntimeToolbarTitle: String { runtimeToolbarTitleLabel.stringValue }
-    var debugShowsRuntimeToolbarTitle: Bool { !runtimeToolbarTitleLabel.isHidden }
-    var debugShowsRuntimeToolbar: Bool { !runtimeToolbarStackView.isHidden }
-    var debugShowsRuntimeRunButton: Bool { !runtimeToolbarRunButton.isHidden }
-    var debugShowsRuntimeStopButton: Bool { !runtimeToolbarStopButton.isHidden }
-    var debugShowsRuntimeRestartButton: Bool { !runtimeToolbarRestartButton.isHidden }
-    var debugRuntimeToolbarTrailingGap: CGFloat {
-        runtimeToolbarStackView.layoutSubtreeIfNeeded()
-        return runtimeToolbarStackView.bounds.maxX - runtimeToolbarButtonStackView.frame.maxX
-    }
-    func debugRunRuntimeToolbarAction() { runRuntimeFromToolbar() }
-    func debugStopRuntimeToolbarAction() { stopRuntimeFromToolbar() }
-    func debugRestartRuntimeToolbarAction() { restartRuntimeFromToolbar() }
-    var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
-    var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
-    var debugInputStatus: String { inputStatusLabel.stringValue }
-    var debugShowsInputStatus: Bool { !inputStatusLabel.isHidden }
-    func debugSubmitInput() { submitInput() }
-    var debugInputFieldValue: String { inputField.stringValue }
-    func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
-    func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
-    func debugSimulateAttachmentStateDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-    }
-    func debugSimulateSessionMetadataDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": sessionID])
-    }
-    func debugSimulateRuntimeStateDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-    }
-    func debugSimulateOutputDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": sessionID, "byteCount": 1])
-        refreshNow()
-    }
-    func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
-    var debugSelectedRange: NSRange { outputView.selectedRange() }
-    func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) {
-        guard let documentView = outputScrollView.documentView else { return }
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
-        let targetOriginY = max(0, maxOriginY - offset)
-        outputScrollView.contentView.scroll(to: NSPoint(x: 0, y: min(targetOriginY, maxOriginY)))
-        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
-    }
-    var debugOutputOffsetFromBottom: CGFloat {
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        return max(0, outputView.bounds.height - visibleRect.maxY)
-    }
-    func debugScrollOutputHorizontally(to offset: CGFloat) {
-        guard let documentView = outputScrollView.documentView else { return }
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        let maxOriginX = max(0, documentView.bounds.width - visibleRect.width)
-        outputScrollView.contentView.scroll(to: NSPoint(x: max(0, min(offset, maxOriginX)), y: visibleRect.minY))
-        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
-    }
-    var debugOutputHorizontalOffset: CGFloat { outputScrollView.contentView.documentVisibleRect.minX }
-    var debugContentWidth: CGFloat { window?.contentView?.frame.width ?? 0 }
-    var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
-    var debugBodyWidth: CGFloat { bodyStackView.frame.width }
-    var debugTakeoverContainerWidth: CGFloat { takeoverContainerView.frame.width }
-    var debugFirstResponderTypeName: String? {
-        guard let firstResponder = window?.firstResponder else { return nil }
-        return String(describing: type(of: firstResponder))
-    }
-    var debugFirstResponderTargetsInputField: Bool {
-        guard let fieldEditor = inputField.currentEditor() else { return false }
-        return window?.firstResponder === fieldEditor
-    }
-    var debugFirstResponderTargetsOutputView: Bool { window?.firstResponder === outputView }
-    var debugRefreshIntervalMS: Int {
-        switch currentRefreshInterval() {
-        case Self.ownerGhosttyRefreshInterval: 2000
-        default: 500
-        }
-    }
-    @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
-        ghosttyRendererHost?.sendScroll(horizontal: horizontal, vertical: vertical) ?? false
-    }
-    var debugGhosttyHasRenderableSurface: Bool { ghosttyRendererHost?.hasRenderableSurface() ?? false }
-    var debugGhosttySurfaceRefreshRequestCount: Int { ghosttyRendererHost?.debugSurfaceRefreshRequestCount ?? 0 }
-    var debugTerminalSearchState: GhosttyTerminalSearchDebugState {
-        ghosttyRendererHost?.debugSearchState ?? .init(isVisible: false, query: "", total: nil, selected: nil)
-    }
-    var debugTerminalSearchVisible: Bool { debugTerminalSearchState.isVisible }
-    var debugTerminalSearchQuery: String { debugTerminalSearchState.query }
-    var debugOutputDisablesSmartSubstitutions: Bool {
-        !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
-            && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled
-            && !outputView.isContinuousSpellCheckingEnabled && !outputView.isGrammarCheckingEnabled && !outputView.isAutomaticTextCompletionEnabled
-    }
 }
