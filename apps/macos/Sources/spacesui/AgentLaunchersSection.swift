@@ -60,7 +60,8 @@ import workspacecore
         container.spacing = 0
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = Self.makeHeader(countLabel: countLabel, subtitle: subtitle)
+        let header = RowSectionHeader.make(
+            title: "Coding Agents", addButtonAccessibilityIdentifier: "agent-launchers-section-add", countLabel: countLabel, subtitle: subtitle)
         container.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
@@ -71,27 +72,16 @@ import workspacecore
         container.addArrangedSubview(rowsStack)
         rowsStack.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
-        let card = ColoredBackgroundView()
-        card.fillColor = .clear
-        card.cornerRadius = 10
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(container)
-        NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: card.leadingAnchor), container.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            container.topAnchor.constraint(equalTo: card.topAnchor), container.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-        ])
-        self.view = card
+        self.view = RowSectionCard.wrap(container)
 
         if let addButton = header.arrangedSubviews.compactMap({ $0 as? NSButton }).first {
             addButton.target = self
             addButton.action = #selector(handleAdd(_:))
         }
-        objc_setAssociatedObject(card, &Self.anchorKey, self, .OBJC_ASSOCIATION_RETAIN)
+        RowSectionCard.retain(self, in: view)
 
         refreshRows(animated: false)
     }
-
-    private static var anchorKey: UInt8 = 0
 
     // MARK: Public API
 
@@ -171,62 +161,7 @@ import workspacecore
         return entries
     }
 
-    // MARK: Header
-
     var currentLaunchers: [AgentLauncher] { launchers }
-
-    private static func makeHeader(countLabel: NSTextField, subtitle: String? = nil) -> NSStackView {
-        let titleLabel = NSTextField(labelWithString: "Coding Agents")
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = Theme.text
-
-        countLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        countLabel.textColor = Theme.muted
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let addButton = NSButton(title: "+ add", target: nil, action: nil)
-        addButton.bezelStyle = .inline
-        addButton.isBordered = false
-        addButton.contentTintColor = Theme.muted
-        addButton.font = .systemFont(ofSize: 11.5, weight: .medium)
-        addButton.setAccessibilityIdentifier("agent-launchers-section-add")
-
-        if let subtitle {
-            let titleRow = NSStackView(views: [titleLabel, countLabel])
-            titleRow.orientation = .horizontal
-            titleRow.alignment = .firstBaseline
-            titleRow.spacing = 6
-            titleRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let subtitleLabel = NSTextField(labelWithString: subtitle)
-            subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            subtitleLabel.textColor = Theme.muted
-            subtitleLabel.lineBreakMode = .byTruncatingTail
-            subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let titleStack = NSStackView(views: [titleRow, subtitleLabel])
-            titleStack.orientation = .vertical
-            titleStack.alignment = .leading
-            titleStack.spacing = 2
-            titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let header = NSStackView(views: [titleStack, spacer, addButton])
-            header.orientation = .horizontal
-            header.alignment = .centerY
-            header.spacing = 8
-            header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
-            header.translatesAutoresizingMaskIntoConstraints = false
-            return header
-        }
-
-        let header = NSStackView(views: [titleLabel, countLabel, spacer, addButton])
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 8
-        header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
-        header.translatesAutoresizingMaskIntoConstraints = false
-        return header
-    }
 
     // MARK: Row lifecycle
 
@@ -239,7 +174,7 @@ import workspacecore
                     return (row.identity(from: launchers[safe: index]), row.formSnapshot())
                 }) : [:]
 
-        clearRowsStack()
+        rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
 
         let entries = displayEntries()
@@ -279,14 +214,6 @@ import workspacecore
         countLabel.stringValue = "\(entries.count)"
         _ = animated
     }
-
-    private func clearRowsStack() {
-        for arrangedSubview in rowsStack.arrangedSubviews {
-            rowsStack.removeArrangedSubview(arrangedSubview)
-            arrangedSubview.removeFromSuperview()
-        }
-    }
-
     // MARK: Row callbacks
 
     private func handleBeginEdit(row: AgentLauncherRowView) { row.enterEditing(prefill: nil, animated: true) }
@@ -324,22 +251,10 @@ import workspacecore
             self.refreshRows(animated: true)
             if commitAfterRemove { self.onCommit?(self.launchers) }
         }
-        if isDraft {
-            confirm(true)
-            return
-        }
-        if let presenter = presentRemoveConfirmation {
-            presenter(target, confirm)
-            return
-        }
-        let alert = NSAlert()
         let displayName = target.name.isEmpty ? "this agent" : target.name
-        alert.messageText = "Remove \(displayName)?"
-        alert.informativeText = "This removes the coding agent from the workspace."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        confirm(alert.runModal() == .alertFirstButtonReturn)
+        RowSectionRemoveConfirmation.confirm(
+            messageText: "Remove \(displayName)?", informativeText: "This removes the coding agent from the workspace.", isDraft: isDraft,
+            presenter: presentRemoveConfirmation.map { presenter in { presenter(target, $0) } }, onDecision: confirm)
     }
 
     @objc func handleAdd(_ sender: NSButton) {
@@ -700,9 +615,9 @@ import workspacecore
         form.orientation = .vertical
         form.alignment = .leading
         form.spacing = 6
-        form.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        form.edgeInsets = Theme.cardContentInsets
         form.translatesAutoresizingMaskIntoConstraints = false
-        objc_setAssociatedObject(form, &Self.targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: form)
         return (form, (nameField, commandField))
     }
 
@@ -717,11 +632,10 @@ import workspacecore
         target.onCancel = { onClick(button) }
         button.target = target
         button.action = #selector(AgentLauncherFormTarget.triggerCancel)
-        objc_setAssociatedObject(button, &targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: button)
         return button
     }
 
-    private static var targetKey: UInt8 = 0
 }
 
 @MainActor private final class AgentLauncherFormTarget: NSObject, NSTextFieldDelegate {
@@ -732,5 +646,3 @@ import workspacecore
     @objc func triggerSave() { onSave?() }
     func controlTextDidChange(_ obj: Notification) { onTextChange?() }
 }
-
-extension Array { fileprivate subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil } }

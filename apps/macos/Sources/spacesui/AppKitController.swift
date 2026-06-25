@@ -298,22 +298,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         guard Self.isRunningFromAppBundle else { return nil }
         return SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
     }()
-    private var agentEventIPCObserver: NSObjectProtocol?
-    private var selectWorkspaceDetailIPCObserver: NSObjectProtocol?
-    private var showMainWindowIPCObserver: NSObjectProtocol?
-    private var hideMainWindowIPCObserver: NSObjectProtocol?
-    private var showWindowIssueModalIPCObserver: NSObjectProtocol?
-    private var cycleWorkspaceWindowIPCObserver: NSObjectProtocol?
-    private var openWorkspaceTerminalIPCObserver: NSObjectProtocol?
-    private var runWorkspaceProcessIPCObserver: NSObjectProtocol?
-    private var stopWorkspaceProcessIPCObserver: NSObjectProtocol?
-    private var restartWorkspaceProcessIPCObserver: NSObjectProtocol?
-    private var launchWorkspaceAgentIPCObserver: NSObjectProtocol?
-    private var openTerminalSessionWindowIPCObserver: NSObjectProtocol?
-    private var focusTerminalSessionWindowIPCObserver: NSObjectProtocol?
-    private var closeTerminalSessionWindowIPCObserver: NSObjectProtocol?
-    private var dumpTerminalSessionWindowStateIPCObserver: NSObjectProtocol?
-    private var performTerminalSessionWindowShortcutIPCObserver: NSObjectProtocol?
+    /// Distributed IPC notifications observed while the app is running, paired with their `@objc` handlers.
+    /// `self` is the observer for every one, so registration and teardown are uniform loops.
+    private static let distributedIPCObservers: [(name: Notification.Name, selector: Selector)] = [
+        (IPCNotification.agentEventFired, #selector(handleAgentEventIPC(_:))),
+        (IPCNotification.showMainWindow, #selector(handleShowMainWindowIPC(_:))),
+        (IPCNotification.hideMainWindow, #selector(handleHideMainWindowIPC(_:))),
+        (IPCNotification.showWindowIssueModal, #selector(handleShowWindowIssueModalIPC(_:))),
+        (IPCNotification.cycleWorkspaceWindow, #selector(handleCycleWorkspaceWindowIPC(_:))),
+        (IPCNotification.selectWorkspaceDetail, #selector(handleSelectWorkspaceDetailIPC(_:))),
+        (IPCNotification.openWorkspaceTerminal, #selector(handleOpenWorkspaceTerminalIPC(_:))),
+        (IPCNotification.runWorkspaceProcess, #selector(handleRunWorkspaceProcessIPC(_:))),
+        (IPCNotification.stopWorkspaceProcess, #selector(handleStopWorkspaceProcessIPC(_:))),
+        (IPCNotification.restartWorkspaceProcess, #selector(handleRestartWorkspaceProcessIPC(_:))),
+        (IPCNotification.launchWorkspaceAgent, #selector(handleLaunchWorkspaceAgentIPC(_:))),
+        (IPCNotification.openTerminalSessionWindow, #selector(handleOpenTerminalSessionWindowIPC(_:))),
+        (IPCNotification.closeTerminalSessionWindow, #selector(handleCloseTerminalSessionWindowIPC(_:))),
+        (IPCNotification.dumpTerminalSessionWindowState, #selector(handleDumpTerminalSessionWindowStateIPC(_:))),
+        (IPCNotification.performTerminalSessionWindowShortcut, #selector(handlePerformTerminalSessionWindowShortcutIPC(_:))),
+        (IPCNotification.focusTerminalSessionWindow, #selector(handleFocusTerminalSessionWindowIPC(_:))),
+    ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
@@ -521,22 +525,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         logStartupProfile("global_hotkeys_ready", details: "desktop_control=\(desktopControlLease == nil ? "passive" : "active")")
         setupShortcutMonitor()
         logStartupProfile("shortcut_monitor_ready")
-        setupAgentEventIPCObserver()
-        setupShowMainWindowIPCObserver()
-        setupHideMainWindowIPCObserver()
-        setupShowWindowIssueModalIPCObserver()
-        setupCycleWorkspaceWindowIPCObserver()
-        setupSelectWorkspaceDetailIPCObserver()
-        setupOpenWorkspaceTerminalIPCObserver()
-        setupRunWorkspaceProcessIPCObserver()
-        setupStopWorkspaceProcessIPCObserver()
-        setupRestartWorkspaceProcessIPCObserver()
-        setupLaunchWorkspaceAgentIPCObserver()
-        setupOpenTerminalSessionWindowIPCObserver()
-        setupFocusTerminalSessionWindowIPCObserver()
-        setupCloseTerminalSessionWindowIPCObserver()
-        setupDumpTerminalSessionWindowStateIPCObserver()
-        setupPerformTerminalSessionWindowShortcutIPCObserver()
+        for observer in Self.distributedIPCObservers {
+            DistributedNotificationCenter.default().addObserver(
+                self, selector: observer.selector, name: observer.name, object: nil, suspensionBehavior: .deliverImmediately)
+        }
         setupAppActivationObservers()
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
@@ -627,70 +619,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
-        if let agentEventIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(agentEventIPCObserver)
-            self.agentEventIPCObserver = nil
-        }
-        if let selectWorkspaceDetailIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(selectWorkspaceDetailIPCObserver)
-            self.selectWorkspaceDetailIPCObserver = nil
-        }
-        if let showMainWindowIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(showMainWindowIPCObserver)
-            self.showMainWindowIPCObserver = nil
-        }
-        if let hideMainWindowIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(hideMainWindowIPCObserver)
-            self.hideMainWindowIPCObserver = nil
-        }
-        if let showWindowIssueModalIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(showWindowIssueModalIPCObserver)
-            self.showWindowIssueModalIPCObserver = nil
-        }
-        if let cycleWorkspaceWindowIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(cycleWorkspaceWindowIPCObserver)
-            self.cycleWorkspaceWindowIPCObserver = nil
-        }
-        if let openWorkspaceTerminalIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(openWorkspaceTerminalIPCObserver)
-            self.openWorkspaceTerminalIPCObserver = nil
-        }
-        if let runWorkspaceProcessIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(runWorkspaceProcessIPCObserver)
-            self.runWorkspaceProcessIPCObserver = nil
-        }
-        if let stopWorkspaceProcessIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(stopWorkspaceProcessIPCObserver)
-            self.stopWorkspaceProcessIPCObserver = nil
-        }
-        if let restartWorkspaceProcessIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(restartWorkspaceProcessIPCObserver)
-            self.restartWorkspaceProcessIPCObserver = nil
-        }
-        if let launchWorkspaceAgentIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(launchWorkspaceAgentIPCObserver)
-            self.launchWorkspaceAgentIPCObserver = nil
-        }
-        if let openTerminalSessionWindowIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(openTerminalSessionWindowIPCObserver)
-            self.openTerminalSessionWindowIPCObserver = nil
-        }
-        if let focusTerminalSessionWindowIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(focusTerminalSessionWindowIPCObserver)
-            self.focusTerminalSessionWindowIPCObserver = nil
-        }
-        if let closeTerminalSessionWindowIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(closeTerminalSessionWindowIPCObserver)
-            self.closeTerminalSessionWindowIPCObserver = nil
-        }
-        if let dumpTerminalSessionWindowStateIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(dumpTerminalSessionWindowStateIPCObserver)
-            self.dumpTerminalSessionWindowStateIPCObserver = nil
-        }
-        if let performTerminalSessionWindowShortcutIPCObserver {
-            DistributedNotificationCenter.default().removeObserver(performTerminalSessionWindowShortcutIPCObserver)
-            self.performTerminalSessionWindowShortcutIPCObserver = nil
-        }
+        DistributedNotificationCenter.default().removeObserver(self)
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
             self.appDidBecomeActiveObserver = nil
@@ -713,89 +642,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
         releaseLaunchLeases()
-    }
-
-    private func addDistributedIPCObserver(name: Notification.Name, selector: Selector) -> NSObjectProtocol {
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: selector, name: name, object: nil, suspensionBehavior: .deliverImmediately)
-        return self
-    }
-
-    private func setupAgentEventIPCObserver() {
-        agentEventIPCObserver = addDistributedIPCObserver(name: IPCNotification.agentEventFired, selector: #selector(handleAgentEventIPC(_:)))
-    }
-
-    private func setupShowMainWindowIPCObserver() {
-        showMainWindowIPCObserver = addDistributedIPCObserver(name: IPCNotification.showMainWindow, selector: #selector(handleShowMainWindowIPC(_:)))
-    }
-
-    private func setupHideMainWindowIPCObserver() {
-        hideMainWindowIPCObserver = addDistributedIPCObserver(name: IPCNotification.hideMainWindow, selector: #selector(handleHideMainWindowIPC(_:)))
-    }
-
-    private func setupShowWindowIssueModalIPCObserver() {
-        showWindowIssueModalIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.showWindowIssueModal, selector: #selector(handleShowWindowIssueModalIPC(_:)))
-    }
-
-    private func setupCycleWorkspaceWindowIPCObserver() {
-        cycleWorkspaceWindowIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.cycleWorkspaceWindow, selector: #selector(handleCycleWorkspaceWindowIPC(_:)))
-    }
-
-    private func setupSelectWorkspaceDetailIPCObserver() {
-        selectWorkspaceDetailIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.selectWorkspaceDetail, selector: #selector(handleSelectWorkspaceDetailIPC(_:)))
-    }
-
-    private func setupOpenWorkspaceTerminalIPCObserver() {
-        openWorkspaceTerminalIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.openWorkspaceTerminal, selector: #selector(handleOpenWorkspaceTerminalIPC(_:)))
-    }
-
-    private func setupRunWorkspaceProcessIPCObserver() {
-        runWorkspaceProcessIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.runWorkspaceProcess, selector: #selector(handleRunWorkspaceProcessIPC(_:)))
-    }
-
-    private func setupStopWorkspaceProcessIPCObserver() {
-        stopWorkspaceProcessIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.stopWorkspaceProcess, selector: #selector(handleStopWorkspaceProcessIPC(_:)))
-    }
-
-    private func setupRestartWorkspaceProcessIPCObserver() {
-        restartWorkspaceProcessIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.restartWorkspaceProcess, selector: #selector(handleRestartWorkspaceProcessIPC(_:)))
-    }
-
-    private func setupLaunchWorkspaceAgentIPCObserver() {
-        launchWorkspaceAgentIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.launchWorkspaceAgent, selector: #selector(handleLaunchWorkspaceAgentIPC(_:)))
-    }
-
-    private func setupOpenTerminalSessionWindowIPCObserver() {
-        openTerminalSessionWindowIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.openTerminalSessionWindow, selector: #selector(handleOpenTerminalSessionWindowIPC(_:)))
-    }
-
-    private func setupCloseTerminalSessionWindowIPCObserver() {
-        closeTerminalSessionWindowIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.closeTerminalSessionWindow, selector: #selector(handleCloseTerminalSessionWindowIPC(_:)))
-    }
-
-    private func setupDumpTerminalSessionWindowStateIPCObserver() {
-        dumpTerminalSessionWindowStateIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.dumpTerminalSessionWindowState, selector: #selector(handleDumpTerminalSessionWindowStateIPC(_:)))
-    }
-
-    private func setupPerformTerminalSessionWindowShortcutIPCObserver() {
-        performTerminalSessionWindowShortcutIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.performTerminalSessionWindowShortcut, selector: #selector(handlePerformTerminalSessionWindowShortcutIPC(_:)))
-    }
-
-    private func setupFocusTerminalSessionWindowIPCObserver() {
-        focusTerminalSessionWindowIPCObserver = addDistributedIPCObserver(
-            name: IPCNotification.focusTerminalSessionWindow, selector: #selector(handleFocusTerminalSessionWindowIPC(_:)))
     }
 
     @objc private nonisolated func handleAgentEventIPC(_ notification: Notification) {
@@ -5900,7 +5746,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSOutlineV
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
         headerRow.spacing = 8
-        headerRow.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        headerRow.edgeInsets = Theme.cardContentInsets
         headerRow.translatesAutoresizingMaskIntoConstraints = false
 
         let innerStack = NSStackView()

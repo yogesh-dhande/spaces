@@ -29,7 +29,8 @@ import workspacecore
         container.spacing = 0
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let header = Self.makeHeader(countLabel: countLabel, subtitle: subtitle)
+        let header = RowSectionHeader.make(
+            title: "Ports", addButtonAccessibilityIdentifier: "ports-section-add", countLabel: countLabel, subtitle: subtitle)
         container.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
@@ -40,27 +41,16 @@ import workspacecore
         container.addArrangedSubview(rowsStack)
         rowsStack.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
-        let card = ColoredBackgroundView()
-        card.fillColor = .clear
-        card.cornerRadius = 10
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(container)
-        NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: card.leadingAnchor), container.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            container.topAnchor.constraint(equalTo: card.topAnchor), container.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-        ])
-        self.view = card
+        self.view = RowSectionCard.wrap(container)
 
         if let addButton = header.arrangedSubviews.compactMap({ $0 as? NSButton }).first {
             addButton.target = self
             addButton.action = #selector(handleAdd(_:))
         }
-        objc_setAssociatedObject(card, &Self.anchorKey, self, .OBJC_ASSOCIATION_RETAIN)
+        RowSectionCard.retain(self, in: view)
 
         refreshRows(animated: false)
     }
-
-    private static var anchorKey: UInt8 = 0
 
     // MARK: Public API
 
@@ -84,59 +74,6 @@ import workspacecore
     func row(at index: Int) -> PortRowView? { index >= 0 && index < rows.count ? rows[index] : nil }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
 
-    // MARK: Header
-
-    private static func makeHeader(countLabel: NSTextField, subtitle: String? = nil) -> NSStackView {
-        let titleLabel = NSTextField(labelWithString: "Ports")
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = Theme.text
-
-        countLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        countLabel.textColor = Theme.muted
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let addButton = NSButton(title: "+ add", target: nil, action: nil)
-        addButton.bezelStyle = .inline
-        addButton.isBordered = false
-        addButton.contentTintColor = Theme.muted
-        addButton.font = .systemFont(ofSize: 11.5, weight: .medium)
-        addButton.setAccessibilityIdentifier("ports-section-add")
-
-        if let subtitle {
-            let titleRow = NSStackView(views: [titleLabel, countLabel])
-            titleRow.orientation = .horizontal
-            titleRow.alignment = .firstBaseline
-            titleRow.spacing = 6
-            titleRow.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let subtitleLabel = NSTextField(labelWithString: subtitle)
-            subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            subtitleLabel.textColor = Theme.muted
-            subtitleLabel.lineBreakMode = .byTruncatingTail
-            subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            let titleStack = NSStackView(views: [titleRow, subtitleLabel])
-            titleStack.orientation = .vertical
-            titleStack.alignment = .leading
-            titleStack.spacing = 2
-            titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let header = NSStackView(views: [titleStack, spacer, addButton])
-            header.orientation = .horizontal
-            header.alignment = .centerY
-            header.spacing = 8
-            header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
-            header.translatesAutoresizingMaskIntoConstraints = false
-            return header
-        }
-
-        let header = NSStackView(views: [titleLabel, countLabel, spacer, addButton])
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 8
-        header.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
-        header.translatesAutoresizingMaskIntoConstraints = false
-        return header
-    }
-
     // MARK: Row lifecycle
 
     private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
@@ -147,7 +84,7 @@ import workspacecore
                     guard row.isEditing else { return nil }
                     return (row.identity(from: ports[safe: index]), row.formSnapshot())
                 }) : [:]
-        clearRowsStack()
+        rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
         for (index, port) in ports.enumerated() {
             let row = PortRowView(port: port, reservedPort: collapsedDisplayPorts[safe: index] ?? nil)
@@ -163,14 +100,6 @@ import workspacecore
         countLabel.stringValue = "\(ports.count)"
         _ = animated
     }
-
-    private func clearRowsStack() {
-        for arrangedSubview in rowsStack.arrangedSubviews {
-            rowsStack.removeArrangedSubview(arrangedSubview)
-            arrangedSubview.removeFromSuperview()
-        }
-    }
-
     // MARK: Row callbacks
 
     private func handleBeginEdit(row: PortRowView) { row.enterEditing(prefill: nil, animated: true) }
@@ -208,21 +137,9 @@ import workspacecore
             self.refreshRows(animated: true)
             if commitAfterRemove { self.onCommit?(self.ports) }
         }
-        if isDraft {
-            confirm(true)
-            return
-        }
-        if let presenter = presentRemoveConfirmation {
-            presenter(target, confirm)
-            return
-        }
-        let alert = NSAlert()
-        alert.messageText = "Remove port \"\(target.name)\"?"
-        alert.informativeText = "This removes the port definition from the workspace."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        confirm(alert.runModal() == .alertFirstButtonReturn)
+        RowSectionRemoveConfirmation.confirm(
+            messageText: "Remove port \"\(target.name)\"?", informativeText: "This removes the port definition from the workspace.", isDraft: isDraft,
+            presenter: presentRemoveConfirmation.map { presenter in { presenter(target, $0) } }, onDecision: confirm)
     }
 
     @objc func handleAdd(_ sender: NSButton) {
@@ -412,7 +329,7 @@ import workspacecore
         form.spacing = 10
         form.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         form.translatesAutoresizingMaskIntoConstraints = false
-        objc_setAssociatedObject(form, &Self.targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: form)
         return (form, nameField)
     }
 
@@ -427,11 +344,10 @@ import workspacecore
         target.onCancel = { onClick(button) }
         button.target = target
         button.action = #selector(PortFormTarget.triggerCancel)
-        objc_setAssociatedObject(button, &targetKey, target, .OBJC_ASSOCIATION_RETAIN)
+        retainAssociatedObject(target, on: button)
         return button
     }
 
-    private static var targetKey: UInt8 = 0
 }
 
 @MainActor private final class PortFormTarget: NSObject, NSTextFieldDelegate {
@@ -453,5 +369,3 @@ import workspacecore
         return false
     }
 }
-
-extension Array { fileprivate subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil } }

@@ -70,7 +70,7 @@ import AppKit
 
         let card = ColoredBackgroundView()
         card.fillColor = .clear
-        card.cornerRadius = 10
+        card.cornerRadius = Theme.cardCornerRadius
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
         NSLayoutConstraint.activate([
