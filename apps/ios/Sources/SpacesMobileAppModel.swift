@@ -455,7 +455,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             guard let firstSession = sessions.first else { return nil }
             let workspace = firstSession.workspaceID.flatMap { workspaceByID[$0] }
             let projectName = workspace?.projectName ?? firstSession.projectName ?? "Unassigned"
-            let workspaceTitle = workspace?.title ?? firstSession.workspaceTitle ?? "Unassigned"
+            let workspaceTitle = workspace?.displayName ?? firstSession.workspaceTitle ?? "Unassigned"
             let workspaceDirectory = workspace?.dir ?? firstSession.workingDirectory
             let orderedSessions = sessions.sorted(by: sessionSort)
 
@@ -613,7 +613,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     func createWorkspace(
         projectID: String,
-        title: String,
         branch: String?,
         baseBranch: String?,
         directoryName: String?,
@@ -624,7 +623,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         defer { isMutating = false }
         do {
             let response = try await bridgeClient.createWorkspace(
-                projectID: projectID, title: title, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
+                projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
             applyMutationResponse(response)
             isShowingWorkspaceCreateSheet = false
@@ -737,14 +736,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
         guard visibleRowTypes.contains(row.type), visibleRunStates.contains(row.runState) else { return false }
         guard !query.isEmpty else { return true }
-        return [workspace.projectName, workspace.title, workspace.dir, row.title, row.detail].contains { value in
+        return [workspace.projectName, workspace.displayName, workspace.dir, row.title, row.detail].contains { value in
             value.localizedStandardContains(query)
         }
     }
 
     private func workspaceMatchesSearch(_ workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
         guard !query.isEmpty else { return true }
-        return [workspace.projectName, workspace.title, workspace.dir].contains { $0.localizedStandardContains(query) }
+        return [workspace.projectName, workspace.displayName, workspace.dir].contains { $0.localizedStandardContains(query) }
     }
 
     private func terminalSessionMatchesFilters(_ session: SpacesDeviceTerminalSessionSummary, query: String) -> Bool {
@@ -792,7 +791,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             servicePID: 0,
             childPID: nil,
             workspaceID: row.workspaceID,
-            workspaceTitle: workspace?.title,
+            workspaceTitle: workspace?.displayName,
             projectID: workspace?.projectID,
             projectName: workspace?.projectName,
             createdAt: timestamp,

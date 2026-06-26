@@ -218,12 +218,24 @@ public struct SpacesDeviceWorkspaceSetupState: Codable, Sendable, Equatable {
     public let errorMessage: String?
     public let startedAt: String?
     public let finishedAt: String?
+    public let exitCode: Int?
+    public let logPath: String?
+    /// Recent setup-log output, captured by the owning daemon. Carried in the overview so a client
+    /// (including a remote one that cannot read the daemon's log file by path) can render live setup
+    /// progress. Populated only while setup is running or after it failed.
+    public let logTail: String?
 
-    public init(status: SpacesDeviceWorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil) {
+    public init(
+        status: SpacesDeviceWorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil,
+        exitCode: Int? = nil, logPath: String? = nil, logTail: String? = nil
+    ) {
         self.status = status
         self.errorMessage = errorMessage
         self.startedAt = startedAt
         self.finishedAt = finishedAt
+        self.exitCode = exitCode
+        self.logPath = logPath
+        self.logTail = logTail
     }
 }
 
@@ -407,7 +419,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let id: String
     public let projectID: String
     public let projectName: String
-    public let title: String
     public let branch: String?
     public let baseBranch: String?
     public let dir: String
@@ -425,8 +436,8 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
     public init(
-        id: String, projectID: String, projectName: String, title: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool,
-        isArchived: Bool, isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
+        id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isArchived: Bool,
+        isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
         setupState: SpacesDeviceWorkspaceSetupState? = nil, config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
         processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
         terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
@@ -434,7 +445,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.id = id
         self.projectID = projectID
         self.projectName = projectName
-        self.title = title
         self.branch = branch
         self.baseBranch = baseBranch
         self.dir = dir
@@ -456,7 +466,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case id
         case projectID
         case projectName
-        case title
         case branch
         case baseBranch
         case dir
@@ -479,7 +488,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         id = try container.decode(String.self, forKey: .id)
         projectID = try container.decode(String.self, forKey: .projectID)
         projectName = try container.decode(String.self, forKey: .projectName)
-        title = try container.decode(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         dir = try container.decode(String.self, forKey: .dir)
@@ -495,6 +503,13 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         processRows = try container.decodeIfPresent([SpacesDeviceWorkspaceProcessRow].self, forKey: .processRows) ?? []
         codingAgentRows = try container.decodeIfPresent([SpacesDeviceWorkspaceCodingAgentRow].self, forKey: .codingAgentRows) ?? []
         terminalRows = try container.decodeIfPresent([SpacesDeviceWorkspaceTerminalRow].self, forKey: .terminalRows) ?? []
+    }
+
+    /// Name shown to users. Git workspaces show their branch; non-git workspaces
+    /// (whose `dir` is the project directory) show the folder name.
+    public var displayName: String {
+        if let branch, !branch.isEmpty { return branch }
+        return (dir as NSString).lastPathComponent
     }
 }
 
@@ -876,7 +891,6 @@ public struct SpacesDeviceDirectoryListRequest: Codable, Sendable, Equatable {
 
 public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
     public let projectID: String
-    public let title: String
     public let branch: String?
     public let baseBranch: String?
     public let directoryName: String?
@@ -884,11 +898,9 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
     public let allowExistingBranchReuse: Bool
 
     public init(
-        projectID: String, title: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil,
-        allowExistingBranchReuse: Bool = false
+        projectID: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil, allowExistingBranchReuse: Bool = false
     ) {
         self.projectID = projectID
-        self.title = title
         self.branch = branch
         self.baseBranch = baseBranch
         self.directoryName = directoryName
@@ -898,7 +910,6 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case projectID
-        case title
         case branch
         case baseBranch
         case directoryName
@@ -909,7 +920,6 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         projectID = try container.decode(String.self, forKey: .projectID)
-        title = try container.decode(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         directoryName = try container.decodeIfPresent(String.self, forKey: .directoryName)
@@ -966,25 +976,21 @@ public struct SpacesDeviceWorkspaceConfigUpdateRequest: Codable, Sendable, Equat
 
 public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
-    public let title: String?
     public let branch: String?
     public let notes: String?
     public let isHidden: Bool?
-    public let updatesTitle: Bool
     public let updatesBranch: Bool
     public let updatesNotes: Bool
     public let updatesHidden: Bool
 
     public init(
-        workspaceID: String, title: String? = nil, branch: String? = nil, notes: String? = nil, updatesTitle: Bool = false,
-        updatesBranch: Bool = false, updatesNotes: Bool = false, isHidden: Bool? = nil, updatesHidden: Bool = false
+        workspaceID: String, branch: String? = nil, notes: String? = nil, updatesBranch: Bool = false, updatesNotes: Bool = false,
+        isHidden: Bool? = nil, updatesHidden: Bool = false
     ) {
         self.workspaceID = workspaceID
-        self.title = title
         self.branch = branch
         self.notes = notes
         self.isHidden = isHidden
-        self.updatesTitle = updatesTitle
         self.updatesBranch = updatesBranch
         self.updatesNotes = updatesNotes
         self.updatesHidden = updatesHidden
@@ -992,11 +998,9 @@ public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equ
 
     private enum CodingKeys: String, CodingKey {
         case workspaceID
-        case title
         case branch
         case notes
         case isHidden
-        case updatesTitle
         case updatesBranch
         case updatesNotes
         case updatesHidden
@@ -1005,11 +1009,9 @@ public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equ
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         workspaceID = try container.decode(String.self, forKey: .workspaceID)
-        title = try container.decodeIfPresent(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden)
-        updatesTitle = try container.decodeIfPresent(Bool.self, forKey: .updatesTitle) ?? false
         updatesBranch = try container.decodeIfPresent(Bool.self, forKey: .updatesBranch) ?? false
         updatesNotes = try container.decodeIfPresent(Bool.self, forKey: .updatesNotes) ?? false
         updatesHidden = try container.decodeIfPresent(Bool.self, forKey: .updatesHidden) ?? false

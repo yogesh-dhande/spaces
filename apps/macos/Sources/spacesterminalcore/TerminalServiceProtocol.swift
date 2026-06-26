@@ -324,7 +324,6 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
     public let includeArchived: Bool?
     public let workspaceID: String?
     public let branch: String?
-    public let title: String?
     public let baseBranch: String?
     public let existingBranch: Bool?
     public let terminalSessionID: String?
@@ -336,15 +335,14 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
 
     public init(
         operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
-        branch: String? = nil, title: String? = nil, baseBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil,
-        agentEvent: String? = nil, terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
+        branch: String? = nil, baseBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil, agentEvent: String? = nil,
+        terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
     ) {
         self.operation = operation
         self.projectID = projectID
         self.includeArchived = includeArchived
         self.workspaceID = workspaceID
         self.branch = branch
-        self.title = title
         self.baseBranch = baseBranch
         self.existingBranch = existingBranch
         self.terminalSessionID = terminalSessionID
@@ -375,7 +373,6 @@ public struct TerminalServiceProfileProjectSummary: Codable, Sendable, Equatable
 public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let projectID: String
-    public let title: String
     public let dir: String
     public let runtimePath: String
     public let dirname: String?
@@ -389,12 +386,11 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let notes: String?
 
     public init(
-        id: String, projectID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?, baseBranch: String?,
-        isDefault: Bool, isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        id: String, projectID: String, dir: String, runtimePath: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool,
+        isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
         self.projectID = projectID
-        self.title = title
         self.dir = dir
         self.runtimePath = runtimePath
         self.dirname = dirname
@@ -406,6 +402,12 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
         self.isRunning = isRunning
         self.lastLaunchedAt = lastLaunchedAt
         self.notes = notes
+    }
+
+    /// Name shown to users. Git workspaces show their branch; non-git workspaces show the folder name.
+    public var displayName: String {
+        if let branch, !branch.isEmpty { return branch }
+        return (dir as NSString).lastPathComponent
     }
 }
 

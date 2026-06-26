@@ -21,7 +21,7 @@
             XCTAssertEqual(model.workspaceGroups.first?.rows.count, 2)
 
             model.visibleRowTypes = [.codingAgents]
-            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.title }, ["Feature"])
+            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["feature"])
             XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["Codex"])
 
             model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases)
@@ -30,7 +30,7 @@
 
             model.visibleRunStates = Set([.notStarted, .running, .exited])
             model.searchText = "docs"
-            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.title }, ["Docs"])
+            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["docs"])
             XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["shell"])
         }
 
@@ -305,14 +305,14 @@
                         canStop: true, canRestart: true)
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
-                id: "workspace-feature", projectID: project.id, projectName: project.name, title: "Feature", branch: "feature",
+                id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature",
                 baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
                 sessionCount: 1,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
                 terminalRows: [])
             let docs = SpacesDeviceWorkspaceSummary(
-                id: "workspace-docs", projectID: project.id, projectName: project.name, title: "Docs", branch: "docs", baseBranch: "main",
+                id: "workspace-docs", projectID: project.id, projectName: project.name, branch: "docs", baseBranch: "main",
                 dir: "/repo/docs", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
                 processRows: [],
                 codingAgentRows: [],

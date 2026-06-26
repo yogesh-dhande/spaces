@@ -169,7 +169,7 @@ final class OrchestratorTests: XCTestCase {
                 }
             }, currentDate: currentDate)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         return (orchestrator, store, project, workspace, root)
     }
 

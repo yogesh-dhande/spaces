@@ -192,7 +192,7 @@ private struct SelectWorkspaceDetailCommand: ParsableCommand {
         try IPCNotification.post(IPCNotification.selectWorkspaceDetail, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id])
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
     }
 }
@@ -215,7 +215,7 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
         try IPCNotification.post(IPCNotification.openWorkspaceTerminal, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id])
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
     }
 }
@@ -1070,7 +1070,7 @@ private struct StopWorkspaceCommand: ParsableCommand {
         }
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
+                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
                 notes: updated.notes))
     }
 }
@@ -1126,7 +1126,6 @@ private struct SeedFixtureCommand: ParsableCommand {
     @Option(name: .long) var projectDir: String
     @Option(name: .long) var docsURL: String
     @Option(name: .long) var adminURL: String
-    @Option(name: .long) var workspaceTitle: String?
 
     /// Registers a local git repo as a Spaces project and seeds deterministic
     /// browser/process defaults that the manual E2E script can assert against.
@@ -1161,13 +1160,6 @@ private struct SeedFixtureCommand: ParsableCommand {
             config.agentLaunchers = fixtureAgentLaunchers
         }
 
-        if let workspaceTitle {
-            let trimmedWorkspaceTitle = workspaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedWorkspaceTitle.isEmpty, let workspace = try orchestrator.store.workspace(dir: project.dir) {
-                try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: trimmedWorkspaceTitle)
-            }
-        }
-
         // The default workspace inherits project port definitions lazily, but
         // the manual shell harness needs the concrete reserved port numbers
         // immediately so it can start localhost fixture servers before launch.
@@ -1184,7 +1176,8 @@ private struct SeedFixtureCommand: ParsableCommand {
         let payload = SeedFixturePayload(
             projectID: project.id,
             defaultWorkspace: try orchestrator.store.workspace(dir: project.dir).map {
-                WorkspaceSummaryPayload(id: $0.id, title: $0.title, dir: $0.dir, isArchived: $0.isArchived, isRunning: $0.isRunning, notes: $0.notes)
+                WorkspaceSummaryPayload(
+                    id: $0.id, name: $0.displayName, dir: $0.dir, isArchived: $0.isArchived, isRunning: $0.isRunning, notes: $0.notes)
             })
         try emitJSON(payload)
     }
@@ -1278,14 +1271,16 @@ private struct LookupWorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "lookup-workspace")
 
     @Option(name: .long) var projectDir: String
-    @Option(name: .long) var title: String
+    // The workspace display name (a git workspace's branch, or a non-git workspace's
+    // folder name). When omitted, the project's default workspace is returned.
+    @Option(name: .long) var name: String?
 
-    /// Resolves the workspace created by the GUI flow so the shell harness can
-    /// pivot from user-visible titles to stable workspace directories and IDs.
+    /// Resolves a workspace so the shell harness can pivot from its visible name to
+    /// stable workspace directories and IDs.
     func run() throws {
         let orchestrator = try makeOrchestrator()
-        guard let payload = try workspaceSummary(orchestrator: orchestrator, projectDir: projectDir, title: title) else {
-            throw ValidationError("Workspace not found: \(title)")
+        guard let payload = try workspaceSummary(orchestrator: orchestrator, projectDir: projectDir, name: name) else {
+            throw ValidationError("Workspace not found: \(name ?? "<default>")")
         }
         try emitJSON(payload)
     }
@@ -1295,7 +1290,6 @@ private struct CreateWorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create-workspace")
 
     @Option(name: .long) var projectDir: String
-    @Option(name: .long) var title: String
     @Option(name: .long) var branch: String
     @Option(name: .long) var baseBranch: String?
     @Option(name: .long) var directoryName: String?
@@ -1313,12 +1307,11 @@ private struct CreateWorkspaceCommand: ParsableCommand {
             throw ValidationError("Project not found: \(normalizedProjectDir)")
         }
         let workspace = try orchestrator.createWorkspaceOnDevice(
-            projectID: project.id, name: title, branch: branch, baseBranch: baseBranch,
-            directoryName: directoryName, notes: notes, runSetupScript: false, allowRemoteBranchLookup: false,
-            allowExistingBranchReuse: existingBranch)
+            projectID: project.id, branch: branch, baseBranch: baseBranch, directoryName: directoryName, notes: notes, runSetupScript: false,
+            allowRemoteBranchLookup: false, allowExistingBranchReuse: existingBranch)
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
     }
 }
@@ -1339,7 +1332,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
         }
         let payload = WorkspaceDumpPayload(
             workspace: .init(
-                id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes),
             settings: try orchestrator.workspaceSettings(workspaceID: workspace.id).map {
                 WorkspaceSettingsPayload(
@@ -1667,7 +1660,7 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
         }
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
+                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
                 notes: updated.notes))
     }
 }
@@ -1689,7 +1682,7 @@ private struct HideWorkspaceCommand: ParsableCommand {
         }
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
+                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
                 notes: updated.notes))
     }
 }
@@ -1731,7 +1724,7 @@ private struct SetWorkspaceStopScriptCommand: ParsableCommand {
         }
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
+                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
                 notes: updated.notes))
     }
 }
@@ -1768,7 +1761,7 @@ private struct SetWorkspaceBrowserSessionURLsCommand: ParsableCommand {
         }
         try emitJSON(
             WorkspaceSummaryPayload(
-                id: updated.id, title: updated.title, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
+                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
                 notes: updated.notes))
     }
 }
@@ -1933,7 +1926,7 @@ private struct SpacesDaemonEndpointPayload: Codable {
 
 private struct WorkspaceSummaryPayload: Codable {
     let id: String
-    let title: String
+    let name: String
     let dir: String
     let isArchived: Bool
     let isRunning: Bool
@@ -2129,22 +2122,24 @@ private struct ScrollEventTiming {
     let lastScrollEventUptimeNanoseconds: UInt64
 }
 
-/// Looks up one workspace by project directory and title, matching the GUI's
-/// visible naming semantics rather than internal IDs.
-private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, title: String) throws -> WorkspaceSummaryPayload? {
+/// Looks up one workspace by project directory and display name, matching the GUI's
+/// visible naming semantics rather than internal IDs. When `name` is nil, returns the
+/// project's default workspace.
+private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: String, name: String?) throws -> WorkspaceSummaryPayload? {
     let normalizedProjectDir = normalizePath(projectDir)
     guard let project = try orchestrator.project(dir: normalizedProjectDir) else { return nil }
-    guard let workspace = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.title == title }) else {
-        return nil
-    }
+    let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
+    let match: WorkspaceSummary?
+    if let name { match = workspaces.first(where: { $0.displayName == name }) } else { match = workspaces.first(where: \.isDefault) }
+    guard let workspace = match else { return nil }
     return WorkspaceSummaryPayload(
-        id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
         notes: workspace.notes)
 }
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceRecord) -> WorkspaceSummaryPayload {
     WorkspaceSummaryPayload(
-        id: workspace.id, title: workspace.title, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
         notes: workspace.notes)
 }
 

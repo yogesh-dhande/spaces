@@ -10,10 +10,10 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMatchesNestedWorkspaceByLongestWorkingDirectoryPrefix() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let rootWorkspace = WorkspaceRecord(
-            id: "workspace-root", projectID: project.id, title: "Root", dir: "/repo", dirname: nil, branch: "main", isDefault: true,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-root", projectID: project.id, dir: "/repo", dirname: nil, branch: "main", isDefault: true, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let nestedWorkspace = WorkspaceRecord(
-            id: "workspace-nested", projectID: project.id, title: "Nested", dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
+            id: "workspace-nested", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
             isArchived: false, isRunning: true, lastLaunchedAt: nil)
 
         let matched = SpacesDeviceOverviewBuilder.matchedWorkspace(
@@ -26,10 +26,10 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMetadataWorkspaceMatchBeatsNestedWorkingDirectoryPrefix() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let rootWorkspace = WorkspaceRecord(
-            id: "workspace-root", projectID: project.id, title: "Root", dir: "/repo", dirname: nil, branch: "main", isDefault: true,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-root", projectID: project.id, dir: "/repo", dirname: nil, branch: "main", isDefault: true, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let nestedWorkspace = WorkspaceRecord(
-            id: "workspace-nested", projectID: project.id, title: "Nested", dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
+            id: "workspace-nested", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
             isArchived: false, isRunning: true, lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-metadata", title: "shell", workingDirectory: "/repo/apps/web/src", workspaceID: rootWorkspace.id,
@@ -46,8 +46,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMetadataWorkspaceMissingFromOverviewLeavesSessionUnassigned() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-missing-workspace", title: "shell", workingDirectory: workspace.dir, workspaceID: "workspace-archived",
             attachmentSnapshot: .init())
@@ -62,10 +62,10 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testNilMetadataUsesLongestWorkingDirectoryPrefixFallback() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let rootWorkspace = WorkspaceRecord(
-            id: "workspace-root", projectID: project.id, title: "Root", dir: "/repo", dirname: nil, branch: "main", isDefault: true,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-root", projectID: project.id, dir: "/repo", dirname: nil, branch: "main", isDefault: true, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let nestedWorkspace = WorkspaceRecord(
-            id: "workspace-nested", projectID: project.id, title: "Nested", dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
+            id: "workspace-nested", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature", isDefault: false,
             isArchived: false, isRunning: true, lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-legacy", title: "shell", workingDirectory: "/repo/apps/web/src", attachmentSnapshot: .init())
@@ -81,7 +81,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsWorkspaceCountsAndLeavesUnmatchedSessionsUngrouped() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
             isArchived: false, isRunning: true, lastLaunchedAt: nil)
         let localClient = TerminalClient(
             id: "owner-1", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces"), connectedAt: "2026-05-18T08:00:00Z")
@@ -106,8 +106,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsConfiguredProcessRowsWithLiveAndExitedState() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let runningSession = makeSessionCatalogEntry(
             sessionID: "session-api", title: "api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
@@ -142,8 +142,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testStartingTerminalSessionSummaryKeepsWorkspaceTerminalRowRunning() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let session = makeSessionCatalogEntry(
             sessionID: "session-starting", title: "shell-1", workingDirectory: workspace.dir, state: .starting, workspaceID: workspace.id,
             attachmentSnapshot: .init(), isControlAvailable: false, isSubscriptionAvailable: false)
@@ -169,9 +169,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             browserSessions: [BrowserSession(name: "web", url: "http://localhost:$WEB")],
             agentLaunchers: [AgentLauncher(id: "project-codex-agent", name: "Codex", command: "codex")])
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: "feature", branch: "feature",
-            baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil,
-            notes: "Use this payload for local and remote detail views.")
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: "feature", branch: "feature", baseBranch: "main",
+            isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil, notes: "Use this payload for local and remote detail views.")
         let settings = WorkspaceSettings(
             stopScript: "make stop-workspace", ports: [PortDefinition(id: "workspace-api-port", name: "API")],
             processes: [ProcessTemplate(id: "workspace-api-process", name: "api", command: "npm run api", onExit: .none)],
@@ -215,6 +214,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(workspaceSummary?.setupState?.errorMessage, "missing dependency")
         XCTAssertEqual(workspaceSummary?.setupState?.startedAt, "2026-05-18T08:00:00Z")
         XCTAssertEqual(workspaceSummary?.setupState?.finishedAt, "2026-05-18T08:01:00Z")
+        XCTAssertEqual(workspaceSummary?.setupState?.exitCode, 127)
+        XCTAssertEqual(workspaceSummary?.setupState?.logPath, "/tmp/setup.log")
         XCTAssertEqual(workspaceSummary?.config.stopScript, "make stop-workspace")
         XCTAssertEqual(workspaceSummary?.config.ports.first?.id, "workspace-api-port")
         XCTAssertEqual(workspaceSummary?.config.ports.first?.name, "API")
@@ -230,11 +231,41 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(workspaceSummary?.config.agentLaunchers.first?.command, "codex --review")
     }
 
+    func testOverviewIncludesSetupLogTailWhileRunningSoRemoteClientsCanStreamProgress() throws {
+        let logDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("setup-log-tail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: logDir) }
+        let logURL = logDir.appendingPathComponent("setup.log", isDirectory: false)
+        try "Cloning into 'vendor/ghostty'...\nBuilding artifacts...\n".write(to: logURL, atomically: true, encoding: .utf8)
+
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: "feature", branch: "feature", baseBranch: "main",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+
+        func setupState(status: WorkspaceSetupStatus) -> WorkspaceSetupState {
+            WorkspaceSetupState(status: status, errorMessage: nil, startedAt: "2026-05-18T08:00:00Z", finishedAt: nil, logPath: logURL.path)
+        }
+
+        let running = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, setupState: setupState(status: .running))], sessions: [])
+        let runningTail = running.workspaces.first?.setupState?.logTail
+        XCTAssertEqual(running.workspaces.first?.setupState?.status, .running)
+        XCTAssertTrue(runningTail?.contains("Building artifacts...") == true)
+
+        // Succeeded shows the normal workspace detail rather than the setup screen, so its tail is
+        // omitted to keep the overview snapshot small even when the log file still exists.
+        let succeeded = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, setupState: setupState(status: .succeeded))], sessions: [])
+        XCTAssertNil(succeeded.workspaces.first?.setupState?.logTail)
+    }
+
     func testMatchesRenamedConfiguredProcessByTemplateID() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let processSession = makeSessionCatalogEntry(
             sessionID: "session-api", title: "old-api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
@@ -266,8 +297,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsConfiguredAndAdHocCodingAgentRows() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let codexSession = makeSessionCatalogEntry(
             sessionID: "session-codex", title: "Codex", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
@@ -298,8 +329,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testMatchesRenamedConfiguredAgentByLauncherID() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let codexSession = makeSessionCatalogEntry(
             sessionID: "session-codex", title: "Old Codex", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
@@ -330,8 +361,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildsWorkspaceTerminalRowsWithoutClaimedProcessAndAgentSessions() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let shellSession = makeSessionCatalogEntry(
             sessionID: "session-shell", title: "Shell", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let processSession = makeSessionCatalogEntry(
@@ -363,8 +394,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testTrackedWorkspaceTerminalRequiresLiveSessionIDBeforeStopIsAvailable() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Feature", dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false,
-            isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
         let terminalWindow = WindowRecord(
             id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", windowID: nil, terminalTrackingID: nil,
             terminalNativeID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now")
@@ -381,7 +412,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildIncludesEndedWorkspaceProcessRowsWithoutLiveControl() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
             isArchived: false, isRunning: true, lastLaunchedAt: nil)
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
         let endedSession = makeSessionCatalogEntry(
@@ -410,7 +441,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildIncludesEndedWorkspaceAgentRowsWithoutLiveControl() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
             isArchived: false, isRunning: true, lastLaunchedAt: nil)
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
         let endedSession = makeSessionCatalogEntry(
@@ -438,7 +469,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildKeepsTitleMatchedAdHocLiveSessionWhenSessionIDIsDistinct() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace-1", projectID: project.id, title: "Docs", dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
+            id: "workspace-1", projectID: project.id, dir: "/repo/apps/web", dirname: nil, branch: "feature/docs", isDefault: false,
             isArchived: false, isRunning: true, lastLaunchedAt: nil)
         let descriptor = SpacesDeviceOverviewBuilder.WorkspaceDescriptor(project: project, workspace: workspace)
         let currentAgentSession = makeSessionCatalogEntry(

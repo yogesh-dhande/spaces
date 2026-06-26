@@ -74,7 +74,7 @@ public struct SpacesDeviceOverviewViewModel: Equatable, Sendable {
         }
 
         workspacesByProject = Dictionary(grouping: overview.workspaces, by: \.projectID).mapValues { workspaces in
-            workspaces.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            workspaces.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
         }
 
         workspaceRuntimeStatusByID = Dictionary(

@@ -26,7 +26,7 @@ extension OrchestratorTests {
         XCTAssertEqual(
             try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
-        XCTAssertEqual(defaultWorkspace.title, "main")
+        XCTAssertEqual(defaultWorkspace.displayName, "main")
         XCTAssertEqual(defaultWorkspace.branch, "main")
         XCTAssertTrue(defaultWorkspace.dir.hasPrefix(workspacesRoot.path))
         XCTAssertEqual(URL(fileURLWithPath: defaultWorkspace.dir).lastPathComponent, "main")
@@ -66,7 +66,7 @@ extension OrchestratorTests {
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
 
         XCTAssertEqual(project.defaultBranch, "master")
-        XCTAssertEqual(defaultWorkspace.title, "master")
+        XCTAssertEqual(defaultWorkspace.displayName, "master")
         XCTAssertEqual(defaultWorkspace.branch, "master")
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
     }
@@ -127,7 +127,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
         let projectWorkspaceRoot = URL(fileURLWithPath: workspace.dir).deletingLastPathComponent()
         XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir))
         XCTAssertTrue(workspace.dir.hasPrefix(workspacesRoot.path))

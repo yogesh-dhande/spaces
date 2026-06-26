@@ -127,10 +127,9 @@ mkdir -p "$PROJECT_DIR"
 
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" seed-fixture \
   --project-dir "$PROJECT_DIR" \
-  --workspace-title "workspace-terminal-open-profile" \
   --docs-url 'http://localhost:$APP_PORT/docs/' \
   --admin-url 'http://localhost:$APP_PORT/admin/' >/dev/null
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" lookup-workspace --project-dir "$PROJECT_DIR" --title "workspace-terminal-open-profile" >"$WORKSPACE_INFO_JSON"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" lookup-workspace --project-dir "$PROJECT_DIR" >"$WORKSPACE_INFO_JSON"
 
 WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"
 WORKSPACE_ID="$(json_get "$WORKSPACE_INFO_JSON" "id")"
