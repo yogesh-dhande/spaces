@@ -198,7 +198,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The checkout directory name for a git workspace is generated automatically as a non-conflicting managed directory name, decoupled from the branch name; it is not user-editable.
 - A git workspace's display name is its branch, and a non-git workspace's display name is the project folder name; there is no separate, editable title. Git branch identity determines whether a workspace is revived or conflicts with an existing archived record.
 - Archiving a git workspace should offer optional local-branch and remote-branch deletion checkboxes so the user can clean up branch names when the workspace is no longer needed.
-- Workspace creation should feel fast in the GUI, with visible progress during setup.
+- Workspace creation should feel fast in the GUI: once the workspace record and directory exist, the New Workspace form dismisses and selects the new workspace immediately rather than waiting for the setup script. A long-running setup script then runs in the background and its progress streams in the selected workspace's setup screen.
 - Workspace settings used for launch must remain editable after creation.
 
 ### Discovery

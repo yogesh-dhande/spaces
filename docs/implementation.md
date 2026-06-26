@@ -628,6 +628,8 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 4. Persist the workspace and seed per-workspace settings from project templates.
 5. Allocate named ports.
 6. Run setup logic. Setup executes through `/bin/bash -lc`, writes merged stdout and stderr to `<profile-runtime>/workspace-setup/<workspace-id>/setup.log`, and records setup status, timestamps, exit code, and log path in `workspace_settings`.
+   - Direct orchestrator creation (CLI) runs setup synchronously by default.
+   - The Device API create handler defers setup: it persists the workspace with `pending` setup state, returns the mutation response immediately, and runs the setup script on a background queue (fresh store and orchestrator, mirroring the workspace-terminal reservation path). This keeps a long-running setup script from blocking the create request past the client request timeout; the GUI navigates to the new workspace and streams `setup.log` through the setup detail panel while setup runs.
 
 ### Workspace Launch
 1. Validate that the workspace is launchable.

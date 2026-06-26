@@ -1339,13 +1339,46 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
         let project = try store.project(id: projectID)
+        // Create the workspace record and worktree synchronously, but leave the setup script
+        // deferred (status `.pending`). A long-running setup script (e.g. a full build) would
+        // otherwise block this request well past the client's request timeout, leaving the New
+        // Workspace form stuck on "Creating...". Running setup in the background lets the response
+        // return immediately so the UI can navigate to the workspace and stream its setup log.
         let workspace = try orchestrator.createWorkspace(
             projectID: projectID, branch: normalizedString(request.branch), baseBranch: normalizedString(request.baseBranch),
-            directoryName: normalizedString(request.directoryName), runSetupScript: true, allowRemoteBranchLookup: true,
+            directoryName: normalizedString(request.directoryName), runSetupScript: false, allowRemoteBranchLookup: true,
             allowExistingBranchReuse: request.allowExistingBranchReuse)
         if let notes = normalizedOptionalString(request.notes) { try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes) }
+        runWorkspaceSetupInBackground(workspaceID: workspace.id)
         let message = "Created workspace '\(workspace.displayName)'\(project.map { " in \($0.name)" } ?? "")."
         return try refreshedMutationResponse(message: message, workspaceID: workspace.id)
+    }
+
+    /// Runs a newly created workspace's deferred setup script on a background queue.
+    ///
+    /// Mirrors `finishReservedWorkspaceTerminalLaunchInBackground`: a fresh store and orchestrator
+    /// are created inside the closure so only the `Sendable` workspace ID is captured. The setup
+    /// state machine (`.pending` -> `.running` -> `.succeeded`/`.failed`) and the setup log are
+    /// owned by `runWorkspaceSetup`, so progress and failures remain observable through the normal
+    /// workspace setup detail UI without this request blocking on completion.
+    private func runWorkspaceSetupInBackground(workspaceID: String) {
+        let launcher = builtInTerminalSessionLauncher
+        let terminator = builtInTerminalSessionTerminator
+        let traceEnabled = traceEnabled
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let orchestrator = WorkspaceOrchestrator(
+                    store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: terminator,
+                    builtInTerminalSessionLauncher: launcher)
+                try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
+            } catch {
+                guard traceEnabled else { return }
+                let message = String(describing: error).replacingOccurrences(of: "\n", with: "\\n")
+                FileHandle.standardOutput.write(
+                    Data("spaces-device-api-trace workspace_background_setup_error workspace=\(workspaceID) error=\(message)\n".utf8))
+            }
+        }
     }
 
     private func handleLaunchWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest) throws -> SpacesDeviceAPIResponse {
