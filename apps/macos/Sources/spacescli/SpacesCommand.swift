@@ -465,8 +465,8 @@ func mobileStatusLines(status: SpacesDeviceAPIStatus) -> [String] {
 
 enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
     case `init` = "init"
-    case start = "start"
-    case waiting = "waiting"
+    case working = "working"
+    case blocked = "blocked"
     case done = "done"
     case exit = "exit"
 
@@ -475,8 +475,8 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
     var status: AgentWindowStatus {
         switch self {
         case .`init`: .idle
-        case .start: .spinning
-        case .waiting: .waiting
+        case .working: .spinning
+        case .blocked: .waiting
         case .done: .done
         case .exit: .idle
         }

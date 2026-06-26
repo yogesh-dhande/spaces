@@ -40,7 +40,7 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
 - Never control windows that Spaces does not explicitly track.
   Spaces should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
 - Keep coding-agent events explicit.
-  Workspace creation, start, and restart actions must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is waiting, is done, or exited.
+  Workspace creation, start, and restart actions must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is blocked, is done, or exited.
 - Use explicit names as the stable identity surface for focusable browser sessions, processes, and coding-agent terminals.
   Names express purpose and intent, stay meaningful when URLs or process commands change, and avoid collisions where multiple coding agents may run the same command. Those names must be unique within a workspace's combined focusable set so GUI and harness focus can target one unambiguous window by name.
 
@@ -263,7 +263,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 ## Alerts and Health
 - The app should surface attention items across workspaces in one place.
 - On macOS the Alerts list and badge aggregate attention items across every paired device, so a single combined badge reflects work needing attention on the local Mac and on remote devices together. Remote attention items are derived from each remote device's overview.
-- Attention includes exited processes and coding-agent states such as waiting or done.
+- Attention includes exited processes and coding-agent states such as blocked or done.
 - A stopped workspace can still contribute attention items when that helps the user notice something actionable.
 - Alerts rows should support direct window focus by click and by the numbered window shortcuts.
 - The Alerts sidebar badge and dock badge should reflect the number of visible Alerts attention rows after dismissals are applied.
@@ -321,7 +321,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 ## Coding-Agent Integration
 - Coding agents can explicitly report lifecycle events through `spaces agent signal --workspace <id> --session <terminal-session-id> <event>`.
 - Agent status events are not implied by workspace creation, `start`, or `restart`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
-- `spaces agent signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
+- `spaces agent signal` should support explicit `init`, `working`, `blocked`, `done`, and `exit` events.
 - `spaces agent signal` from a terminal should update the owning daemon database for the workspace that owns the session.
 - Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window.
 - `init` should identify the originating terminal and either attach to an already tracked terminal row or create a new tracked terminal row for that coding agent.
@@ -330,12 +330,12 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Configured and ad-hoc coding agents should share the same `Coding Agents` section rather than rendering as separate launcher and runtime sections.
 - A Spaces-owned ad-hoc built-in terminal can appear in `Coding Agents` when its live foreground process is a known coding-agent command such as `codex`, `claude`, `claude-code`, or `opencode`. Once an agent row exists for that terminal session, foreground process changes do not demote or relabel it.
 - A signal-established ad-hoc agent row should remain in `Coding Agents` for its live terminal session even if the foreground process is a shell, wrapper, unknown command, or another known agent command. A live `spaces agent signal ... exit` records the session as idle instead of demoting it; Stop, terminal-session exit, and terminal cleanup own removal or completion.
-- Foreground process detection should not infer lifecycle state. `spaces agent signal` remains the source for agent status such as spinning, waiting, done, and exit.
+- Foreground process detection should not infer lifecycle state. `spaces agent signal` remains the source for agent status such as spinning, blocked, done, and exit.
 - Every tracked window row should have a unique visible name within its workspace. Two coding-agent rows must not share the same name.
 - Configured coding-agent launcher names are reserved within the workspace. An ad-hoc coding agent detected with the same label should be auto-renamed with a numeric suffix instead of colliding with the configured launcher slot.
 - Launching a configured coding agent is idempotent for its reserved slot: if that coding agent still has a live tracked terminal, Spaces should keep the existing row instead of deleting and recreating it.
 - Focusing an ended configured coding-agent row that still has a Spaces terminal identity should focus the ended session and its final frame instead of launching a duplicate. Launching a replacement belongs to an explicit launcher or restart action.
-- `start` should show a spinner, `waiting` should show a warning indicator and count toward Alerts and dock attention, and `done` should remain in Alerts and dock attention until dismissed while still rendering as a green dot on the workspace row. `idle` should render as a gray dot without creating Alerts attention.
+- `working` should show a spinner, `blocked` should show a warning indicator and count toward Alerts and dock attention, and `done` should remain in Alerts and dock attention until dismissed while still rendering as a green dot on the workspace row. `idle` should render as a gray dot without creating Alerts attention.
 - `exit` should return the row to idle when the terminal is still open; if the terminal is closed, ad-hoc agent rows should be removed immediately, including when background runtime refresh detects the terminal closure after the fact, while rows linked to workspace process terminals should remain idle.
 
 ## Errors and Feedback

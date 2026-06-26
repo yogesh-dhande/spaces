@@ -22,7 +22,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let workspaceCommand = TerminalServiceWorkspaceCommandRequest(command: "true", workingDirectory: "/srv/work")
         let controlRequest = TerminalControlRequest(command: "send", text: "hello", clientID: "ios-client", ownerEpoch: 7)
         let agentSignal = TerminalServiceAgentSignalEvent(
-            id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting", label: "Mock Agent",
+            id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "blocked", label: "Mock Agent",
             terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
             createdAt: "2026-06-11T00:00:00Z")
         let profileCommand = TerminalServiceProfileCommandRequest(
@@ -59,7 +59,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 linkID: "link-1", offset: 0, byteCount: 4, isFinal: true, base64Data: Data([1, 2, 3, 4]).base64EncodedString()),
             agentSignals: [
                 TerminalServiceAgentSignalEvent(
-                    id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "waiting",
+                    id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "blocked",
                     label: "Mock Agent", terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil,
                     environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z")
             ],

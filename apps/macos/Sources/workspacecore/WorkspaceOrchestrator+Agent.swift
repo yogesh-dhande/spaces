@@ -29,9 +29,7 @@ extension WorkspaceOrchestrator {
         return (label.flatMap { $0.isEmpty ? nil : $0 } ?? kind.displayLabel, displayCommand.flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    func insertAdHocDetectedAgent(detectedAgent: (label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String)
-        throws
-    {
+    func insertAdHocDetectedAgent(detectedAgent: (label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String) throws {
         let terminalWindow = try store.windows(workspaceID: workspace.id).first { window in
             window.role == "terminal" && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
         }
@@ -243,7 +241,7 @@ extension WorkspaceOrchestrator {
                 workspaceID: workspaceID, provider: provider, label: signalLabel, terminalTrackingID: terminalTrackingID,
                 terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, status: existingAgent?.status ?? .idle, eventType: type.rawValue,
                 eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
-        case .start, .waiting, .done:
+        case .working, .blocked, .done:
             try updateAgentWindowStatus(
                 workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID,
                 terminalNativeID: terminalNativeID, label: signalLabel, status: type.status, eventType: type.rawValue,
@@ -302,15 +300,13 @@ extension WorkspaceOrchestrator {
         return provider == .spaces && [terminalTrackingID, terminalNativeID].contains(where: isBuiltInSpacesTerminalIdentity)
     }
 
-    func trustedAgentYabaiWindowID(provider: AgentProvider, terminalTrackingID: String?, terminalNativeID: String?, yabaiWindowID: Int?)
-        -> Int?
-    {
+    func trustedAgentYabaiWindowID(provider: AgentProvider, terminalTrackingID: String?, terminalNativeID: String?, yabaiWindowID: Int?) -> Int? {
         ignoresUntrustedSpacesAgentYabaiWindowID(provider: provider, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID)
             ? nil : yabaiWindowID
     }
 
-    func matchedWorkspaceProcessForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?)
-        throws -> RunningProcessRecord?
+    func matchedWorkspaceProcessForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?) throws
+        -> RunningProcessRecord?
     {
         let processes = try store.runningProcesses(workspaceID: workspaceID)
         let targetID = agentTerminalTargetID(terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID)
@@ -406,9 +402,7 @@ extension WorkspaceOrchestrator {
             yabaiWindowID: record.yabaiWindowID ?? record.windowID)
     }
 
-    func removeAdHocTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?)
-        throws
-    {
+    func removeAdHocTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?, yabaiWindowID: Int?) throws {
         guard
             let trackedWindow = try matchedTrackedWindowForAgent(
                 workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, yabaiWindowID: yabaiWindowID)
@@ -735,9 +729,9 @@ extension WorkspaceOrchestrator {
         return try launchAgentLauncher(launcher, project: project, workspace: workspace, background: background)
     }
 
-    @discardableResult func launchAgentLauncher(
-        _ launcher: AgentLauncher, project: ProjectRecord, workspace: WorkspaceRecord, background: Bool
-    ) throws -> AgentWindowRecord {
+    @discardableResult func launchAgentLauncher(_ launcher: AgentLauncher, project: ProjectRecord, workspace: WorkspaceRecord, background: Bool)
+        throws -> AgentWindowRecord
+    {
         let workspaceID = workspace.id
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         if let existing = try store.agentWindows(workspaceID: workspaceID).first(where: {
@@ -776,8 +770,7 @@ extension WorkspaceOrchestrator {
         let shellPath = terminalShellPathOverride()
         let sessionCommand = commandPrefixedWithShellEnvironment(
             wrappedAgentLauncherCommand(
-                name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: nil),
-            env: launchEnv)
+                name: launcher.name, command: applyEnvVars(launcher.command, env: env), shellPath: shellPath, commandPrelude: nil), env: launchEnv)
         let session = try launchSpacesTerminalSession(
             title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
             readinessPolicy: .sessionReady, sessionID: agentSessionID, workspaceID: workspace.id, kind: .agent)

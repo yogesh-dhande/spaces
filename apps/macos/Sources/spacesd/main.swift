@@ -440,8 +440,8 @@ import workspacecore
                 throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(projectID).")
             }
             let workspace = try orchestrator.createWorkspaceOnDevice(
-                projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch,
-                baseBranch: command.baseBranch, allowExistingBranchReuse: command.existingBranch ?? false)
+                projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch, baseBranch: command.baseBranch,
+                allowExistingBranchReuse: command.existingBranch ?? false)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
         case .workspaceStart:
             let orchestrator = try makeProfileOrchestrator()
@@ -562,16 +562,16 @@ import workspacecore
 
     private enum ProfileAgentEventType: String {
         case `init` = "init"
-        case start = "start"
-        case waiting = "waiting"
+        case working = "working"
+        case blocked = "blocked"
         case done = "done"
         case exit = "exit"
 
         var status: AgentWindowStatus {
             switch self {
             case .`init`: .idle
-            case .start: .spinning
-            case .waiting: .waiting
+            case .working: .spinning
+            case .blocked: .waiting
             case .done: .done
             case .exit: .idle
             }
@@ -579,7 +579,7 @@ import workspacecore
 
         var establishesAgentFromEvidence: Bool {
             switch self {
-            case .start, .waiting, .done: true
+            case .working, .blocked, .done: true
             case .`init`, .exit: false
             }
         }
@@ -607,7 +607,7 @@ import workspacecore
                 workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID, terminalNativeID: sessionID,
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
-        case .start, .waiting, .done:
+        case .working, .blocked, .done:
             try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, codexThreadID: nil, terminalNativeID: sessionID,
                 label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal",

@@ -300,9 +300,8 @@ public final class WorkspaceOrchestrator {
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil,
-        windowFocusPulseEnabledProvider: (() throws -> Bool)? = nil, windowFocusPulseColorProvider: (() throws -> (r: Int, g: Int, b: Int))? = nil,
-        currentDate: @escaping () -> Date = Date.init
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, windowFocusPulseEnabledProvider: (() throws -> Bool)? = nil,
+        windowFocusPulseColorProvider: (() throws -> (r: Int, g: Int, b: Int))? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
@@ -720,8 +719,8 @@ public final class WorkspaceOrchestrator {
     }
 
     public func createWorkspaceOnDevice(
-        projectID: String, name: String, branch: String, baseBranch: String? = nil, directoryName: String? = nil,
-        notes: String? = nil, runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
+        projectID: String, name: String, branch: String, baseBranch: String? = nil, directoryName: String? = nil, notes: String? = nil,
+        runSetupScript: Bool = true, allowRemoteBranchLookup: Bool = true, allowExistingBranchReuse: Bool = false
     ) throws -> WorkspaceRecord {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace name is required.") }
@@ -959,9 +958,7 @@ public final class WorkspaceOrchestrator {
         var newWindows: [WindowRecord] = []
 
         if let config {
-            newWindows.append(
-                contentsOf: try launchProcesses(
-                    workspace: workspace, templates: config.processes, env: env, background: background))
+            newWindows.append(contentsOf: try launchProcesses(workspace: workspace, templates: config.processes, env: env, background: background))
         }
 
         if let config {
@@ -1219,7 +1216,6 @@ public final class WorkspaceOrchestrator {
         return try operation()
     }
 
-
     #if canImport(UserNotifications)
         private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
             guard NSClassFromString("XCTest") == nil else { return }
@@ -1391,8 +1387,7 @@ public final class WorkspaceOrchestrator {
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimePlan.manifest
-            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true
-        )
+            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let rawCommand: String
         if let command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1423,8 +1418,7 @@ public final class WorkspaceOrchestrator {
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimePlan.manifest
-            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true
-        )
+            ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true)
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
         let workingDirectory = workspace.dir
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
@@ -1470,9 +1464,8 @@ public final class WorkspaceOrchestrator {
             let session = try launchSpacesTerminalSession(
                 title: reservation.launchConfiguration.title, workingDirectory: reservation.launchConfiguration.workingDirectory,
                 command: reservation.launchConfiguration.command, showMode: .owner, backend: reservation.launchConfiguration.backend,
-                readinessPolicy: .stableChildPID, sessionID: reservation.sessionID,
-                lifetimePolicy: reservation.launchConfiguration.lifetimePolicy, workspaceID: reservation.launchConfiguration.workspaceID,
-                kind: reservation.launchConfiguration.kind)
+                readinessPolicy: .stableChildPID, sessionID: reservation.sessionID, lifetimePolicy: reservation.launchConfiguration.lifetimePolicy,
+                workspaceID: reservation.launchConfiguration.workspaceID, kind: reservation.launchConfiguration.kind)
             if reservation.windowRecordInsertedBeforeLaunch {
                 guard try reservedWorkspaceTerminalWindowExists(reservation) else {
                     builtInTerminalSessionTerminator(reservation.sessionID)
@@ -2124,9 +2117,7 @@ public final class WorkspaceOrchestrator {
         return sanitized
     }
 
-    func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession], agentLaunchers: [AgentLauncher])
-        throws
-    {
+    func validateUniqueConfiguredFocusNames(processes: [ProcessTemplate], browserSessions: [BrowserSession], agentLaunchers: [AgentLauncher]) throws {
         let processEntries = try processes.map { process in (name: try requiredConfiguredFocusName(process.name, kind: "Process"), kind: "process") }
         let browserEntries = try browserSessions.map { session in
             (name: try requiredConfiguredFocusName(session.name, kind: "Browser session"), kind: "browser session")
@@ -2209,9 +2200,7 @@ public final class WorkspaceOrchestrator {
         windowNavigationLock.unlock()
     }
 
-    func focusTrackedWindow(_ window: WindowRecord, workspaceID: String, requestID: String?, sourceBuiltInTerminalSessionID: String? = nil)
-        -> Bool
-    {
+    func focusTrackedWindow(_ window: WindowRecord, workspaceID: String, requestID: String?, sourceBuiltInTerminalSessionID: String? = nil) -> Bool {
         let focusStartedAt = currentDate()
         let focused: Bool
         let focusedExistingWindow: Bool
@@ -2521,7 +2510,6 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-
     func buildWorkspaceEnv(
         project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)], runtimeManifest: WorkspaceRuntimeManifest? = nil
     ) -> [String: String] {
@@ -2545,15 +2533,14 @@ public final class WorkspaceOrchestrator {
         return env
     }
 
-    func workspaceRuntimePlan(
-        project: ProjectRecord, workspace: WorkspaceRecord, assignedPorts: [(definitionID: String, port: Int, name: String)]
-    ) throws -> WorkspaceRuntimePlan {
+    func workspaceRuntimePlan(project: ProjectRecord, workspace: WorkspaceRecord, assignedPorts: [(definitionID: String, port: Int, name: String)])
+        throws -> WorkspaceRuntimePlan
+    {
         let selection = try effectiveSpacesDevice(workspaceID: workspace.id)
         let namedPorts = assignedPorts.map {
             WorkspaceRuntimePortMapping(id: $0.definitionID.isEmpty ? $0.name : $0.definitionID, name: $0.name, port: $0.port)
         }
-        let manifest = SpacesDevicePlanner.runtimeManifest(
-            project: project, workspace: workspace, selection: selection, namedPorts: namedPorts)
+        let manifest = SpacesDevicePlanner.runtimeManifest(project: project, workspace: workspace, selection: selection, namedPorts: namedPorts)
         let daemonTarget = SpacesDevicePlanner.daemonTarget(selection: selection, localSocketPath: try TerminalServicePaths.socketPath())
         return WorkspaceRuntimePlan(
             project: project, workspace: workspace, selection: selection, manifest: manifest, daemonTarget: daemonTarget, remoteSSHURI: nil)
@@ -3088,16 +3075,16 @@ public final class WorkspaceOrchestrator {
 
     enum RemoteAgentSignalType: String {
         case `init` = "init"
-        case start = "start"
-        case waiting = "waiting"
+        case working = "working"
+        case blocked = "blocked"
         case done = "done"
         case exit = "exit"
 
         var status: AgentWindowStatus {
             switch self {
             case .`init`: .idle
-            case .start: .spinning
-            case .waiting: .waiting
+            case .working: .spinning
+            case .blocked: .waiting
             case .done: .done
             case .exit: .idle
             }
@@ -3105,7 +3092,7 @@ public final class WorkspaceOrchestrator {
 
         var establishesAgentFromEvidence: Bool {
             switch self {
-            case .start, .waiting, .done: true
+            case .working, .blocked, .done: true
             case .`init`, .exit: false
             }
         }

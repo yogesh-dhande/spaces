@@ -35,7 +35,7 @@ spaces workspace create --project <id> --branch feature/demo
 spaces workspace start --workspace <id>
 spaces workspace restart --workspace <id>
 spaces pair                                 # open a short-lived same-device pairing window
-spaces agent signal --workspace <id> --session <terminal-session-id> waiting
+spaces agent signal --workspace <id> --session <terminal-session-id> blocked
 spaces terminal command --command "cat"   # start a Spaces terminal session
 spaces terminal list                      # inspect live session IDs and working directories
 spaces terminal send <session> "hello"    # write input to a session
@@ -49,7 +49,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 
 ## Features
 
-- Alerts view aggregating exited processes and waiting/done coding agents across all workspaces.
+- Alerts view aggregating exited processes and blocked/done coding agents across all workspaces.
 - Workspaces backed by Git worktrees or separate clones.
 - Per-workspace named-port reservation surfaced to processes via env vars.
 - Global command palette (`⌘⌥-` by default) for any window across any workspace.
