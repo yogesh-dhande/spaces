@@ -86,7 +86,7 @@ PY
 
 echo "Running swift test with coverage..."
 set -- test --enable-code-coverage --disable-sandbox
-if [ "${SPACES_TEST_PARALLEL:-0}" = "1" ]; then
+if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
     max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-8}"
     if [ -z "$workers" ]; then
@@ -119,7 +119,7 @@ if [ "${SPACES_TEST_PARALLEL:-0}" = "1" ]; then
         set -- "$@" --num-workers "$workers"
     fi
 else
-    echo "Using serial coverage tests. Set SPACES_TEST_PARALLEL=1 to opt into parallel coverage."
+    echo "Using serial coverage tests. Set SPACES_TEST_PARALLEL=1 to opt back into parallel coverage."
 fi
 
 set +e

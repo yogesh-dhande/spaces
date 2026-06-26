@@ -375,18 +375,9 @@ final class GitClientTests: XCTestCase {
         ) { error in guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") } }
     }
 
-    private func initializeGitRepository(at directory: URL, initialBranch: String) throws {
-        try runGit(["init", "-b", initialBranch], cwd: directory.path)
-        let readme = directory.appendingPathComponent("README.md")
-        try "hello".write(to: readme, atomically: true, encoding: .utf8)
-        try runGit(["add", "README.md"], cwd: directory.path)
-        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: directory.path)
-    }
-
     private func makeRemoteFixture() throws -> (root: URL, source: URL, remote: URL, clone: URL) {
         let root = try makeTempDirectory()
         let source = root.appendingPathComponent("source", isDirectory: true)
-        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         try initializeGitRepository(at: source, initialBranch: "main")
 
         try runGit(["checkout", "-b", "remote-feature"], cwd: source.path)
@@ -439,37 +430,6 @@ final class GitClientTests: XCTestCase {
             XCTAssertEqual(block.reason, expectedReason, file: file, line: line)
             XCTAssertTrue(block.localizedDescription.contains("Builder A"), file: file, line: line)
         }
-    }
-
-    @discardableResult private func runGit(_ arguments: [String], cwd: String) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        var environment = ProcessInfo.processInfo.environment
-        // Commit hooks can export GIT_DIR/GIT_WORK_TREE for the repository being committed.
-        // Tests create throwaway repositories and worktrees, so inheriting those values can
-        // incorrectly redirect git operations away from the fixture under test.
-        //
-        // Remaining risk: this does not simulate callers that intentionally rely on these vars.
-        // Those scenarios are still covered by integration behavior in real git environments.
-        environment.removeValue(forKey: "GIT_DIR")
-        environment.removeValue(forKey: "GIT_WORK_TREE")
-        environment.removeValue(forKey: "GIT_INDEX_FILE")
-        process.environment = environment
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-        try process.run()
-        process.waitUntilExit()
-
-        let outputText = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if process.terminationStatus != 0 {
-            let errorText = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw NSError(domain: "spaces.tests", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: errorText])
-        }
-        return outputText
     }
 
     private func setModificationDate(_ date: Date, for fileURL: URL) throws {

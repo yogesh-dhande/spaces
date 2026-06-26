@@ -6537,64 +6537,6 @@ final class OrchestratorTests: XCTestCase {
         exit 0
         """
 
-    private func makeTempGitRepo(name: String, initialBranch: String = "main") throws -> URL {
-        let root = try makeTempDirectory()
-        let repo = root.appendingPathComponent(name, isDirectory: true)
-        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
-        try runGit(["init", "-b", initialBranch], cwd: repo.path)
-        try "hello".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-        try runGit(["add", "README.md"], cwd: repo.path)
-        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: repo.path)
-        return repo
-    }
-
-    private func runGit(_ arguments: [String], cwd: String) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "GIT_DIR")
-        environment.removeValue(forKey: "GIT_WORK_TREE")
-        environment.removeValue(forKey: "GIT_INDEX_FILE")
-        process.environment = environment
-        let stderr = Pipe()
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw NSError(
-                domain: "spaces.tests", code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"])
-        }
-    }
-
-    private func runGitAndCapture(_ arguments: [String], cwd: String) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "GIT_DIR")
-        environment.removeValue(forKey: "GIT_WORK_TREE")
-        environment.removeValue(forKey: "GIT_INDEX_FILE")
-        process.environment = environment
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw NSError(
-                domain: "spaces.tests", code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(message)"])
-        }
-        return String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    }
-
     private func parseWorktreePaths(_ porcelainOutput: String) -> Set<String> {
         Set(
             porcelainOutput.split(separator: "\n").compactMap { rawLine -> String? in
@@ -9050,11 +8992,7 @@ final class OrchestratorTests: XCTestCase {
     private func makeRemoteFixture() throws -> (root: URL, source: URL, remote: URL, clone: URL) {
         let root = try makeTempDirectory()
         let source = root.appendingPathComponent("source", isDirectory: true)
-        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
-        try runGit(["init", "-b", "main"], cwd: source.path)
-        try "hello".write(to: source.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
-        try runGit(["add", "README.md"], cwd: source.path)
-        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: source.path)
+        try initializeGitRepository(at: source, initialBranch: "main")
 
         let remote = root.appendingPathComponent("remote.git", isDirectory: true)
         try runGit(["clone", "--bare", source.path, remote.path], cwd: root.path)

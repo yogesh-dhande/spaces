@@ -49,17 +49,9 @@ import workspacecore
     @Test func adHocSessionTeardownSkipsWhenQuitKeepsSessionsRunning() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
-        let databaseRoot = root.appendingPathComponent("profile", isDirectory: true)
-        setenv(SpacesProfile.databasePathEnvironmentVariable, databaseRoot.appendingPathComponent("spaces.db").path, 1)
-        defer {
-            if let originalDatabasePath {
-                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
-            } else {
-                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
-            }
-            try? FileManager.default.removeItem(at: root)
-        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The teardown decision is driven entirely by the explicit `paths` below, so no process-global
+        // SPACES_DB_PATH override is needed — keeping it out lets this suite run race-free under parallel.
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(

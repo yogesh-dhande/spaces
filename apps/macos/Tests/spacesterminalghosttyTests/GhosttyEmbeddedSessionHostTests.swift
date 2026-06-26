@@ -192,7 +192,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let driver = HostManagedPTYTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "terminate-escalates-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-escalates",
-                workingDirectory: root.path, shell: "/bin/zsh", command: "exec \(scriptPath.path)", createdAt: "2026-06-19T00:00:00Z"))
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec \(scriptPath.path)", createdAt: "2026-06-19T00:00:00Z"),
+            terminationEscalationIntervals: .init(hupGrace: 0.05, termGrace: 2.0, killGrace: 2.0))
 
         try driver.startIfNeeded()
         try waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
