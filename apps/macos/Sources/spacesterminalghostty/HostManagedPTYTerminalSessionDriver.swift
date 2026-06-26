@@ -15,7 +15,18 @@ import spacesterminalcore
 #endif
 
 final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
+    /// Grace periods between escalating termination signals (SIGHUP already sent, then SIGTERM, then SIGKILL).
+    /// Production uses generous waits; tests can shrink them so escalation paths exercise quickly.
+    struct TerminationEscalationIntervals: Sendable {
+        var hupGrace: TimeInterval
+        var termGrace: TimeInterval
+        var killGrace: TimeInterval
+
+        static let `default` = TerminationEscalationIntervals(hupGrace: 0.5, termGrace: 2.0, killGrace: 2.0)
+    }
+
     private let launchConfiguration: TerminalSessionLaunchConfiguration
+    private let terminationEscalationIntervals: TerminationEscalationIntervals
     private let readQueue: DispatchQueue
     private let writeQueue: DispatchQueue
     private let lock = NSLock()
@@ -31,8 +42,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         "SPACESD_LISTEN_PORT", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT", "WATCHDOG_PID", "WATCHDOG_USEC",
     ]
 
-    init(launchConfiguration: TerminalSessionLaunchConfiguration) {
+    init(launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default) {
         self.launchConfiguration = launchConfiguration
+        self.terminationEscalationIntervals = terminationEscalationIntervals
         readQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.read.\(launchConfiguration.sessionID)")
         writeQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.write.\(launchConfiguration.sessionID)")
     }
@@ -262,14 +274,15 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private func reapWhenTerminated(childPID: Int32, processGroupID: Int32) {
         let shouldSignalProcessGroup = Self.shouldSignalProcessGroup(
             childPID: childPID, processGroupID: processGroupID, currentProcessGroupID: getpgrp())
+        let intervals = terminationEscalationIntervals
         Task.detached(priority: .utility) {
-            if Self.waitForTerminatedChild(childPID, timeout: 0.5) { return }
+            if Self.waitForTerminatedChild(childPID, timeout: intervals.hupGrace) { return }
             Self.signalTerminatedPTYProcess(
                 childPID: childPID, processGroupID: processGroupID, signal: SIGTERM, signalProcessGroup: shouldSignalProcessGroup)
-            if Self.waitForTerminatedChild(childPID, timeout: 2.0) { return }
+            if Self.waitForTerminatedChild(childPID, timeout: intervals.termGrace) { return }
             Self.signalTerminatedPTYProcess(
                 childPID: childPID, processGroupID: processGroupID, signal: SIGKILL, signalProcessGroup: shouldSignalProcessGroup)
-            _ = Self.waitForTerminatedChild(childPID, timeout: 2.0)
+            _ = Self.waitForTerminatedChild(childPID, timeout: intervals.killGrace)
         }
     }
 

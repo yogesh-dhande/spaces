@@ -7,6 +7,8 @@ import workspacecore
 @testable import spacesterminalui
 @testable import spacesui
 
+// Some tests resolve the active profile through the process-global SPACES_DB_PATH, so this suite pins an
+// isolated database root for its lifetime and runs serialized to keep that override race-free.
 @Suite(.serialized) final class AppKitControllerWindowSummonTests {
     private let originalDatabasePath: String?
     private let databaseRoot: URL

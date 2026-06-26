@@ -392,16 +392,17 @@ public final class GitClient {
             return
         }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning {
-            if Date() >= deadline {
-                process.terminate()
-                process.waitUntilExit()
-                let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
-                throw WorkspaceError.gitCommandFailed(message: "Git command timed out after \(timeout)s: \(commandDescription)")
-            }
-            Thread.sleep(forTimeInterval: 0.01)
+        let completion = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in completion.signal() }
+        // The process may have already exited before the handler was installed; in that case
+        // it never fires, so skip the wait and reap the status directly below.
+        if process.isRunning, completion.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            process.waitUntilExit()
+            let commandDescription = ([gitExecutable] + arguments).joined(separator: " ")
+            throw WorkspaceError.gitCommandFailed(message: "Git command timed out after \(timeout)s: \(commandDescription)")
         }
+        process.waitUntilExit()
     }
 
 }

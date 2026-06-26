@@ -1,8 +1,8 @@
 import Foundation
 import Testing
-import spacesterminalcore
 import workspacecore
 
+@testable import spacesterminalcore
 @testable import spacesui
 
 @Suite struct AppKitControllerLifecycleTests {
@@ -49,29 +49,25 @@ import workspacecore
     @Test func adHocSessionTeardownSkipsWhenQuitKeepsSessionsRunning() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
-        let databaseRoot = root.appendingPathComponent("profile", isDirectory: true)
-        setenv(SpacesProfile.databasePathEnvironmentVariable, databaseRoot.appendingPathComponent("spaces.db").path, 1)
-        defer {
-            if let originalDatabasePath {
-                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
-            } else {
-                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
-            }
-            try? FileManager.default.removeItem(at: root)
-        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        // `TerminalSessionPersistence` resolves its database through the active profile, not the passed
+        // `paths`. Bind the task-local override to an isolated database so this test never touches the
+        // developer profile and stays deterministic under parallel execution without mutating the process
+        // environment.
         let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            TerminalSessionLaunchConfiguration(
-                sessionID: "ad-hoc-lifecycle-\(UUID().uuidString)", title: "Terminal", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                createdAt: "2026-06-04T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.$databasePathOverrideForTesting.withValue(root.appendingPathComponent("spaces.db").path) {
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: "ad-hoc-lifecycle-\(UUID().uuidString)", title: "Terminal", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                    createdAt: "2026-06-04T00:00:00Z"), paths: paths)
 
-        #expect(
-            AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
-        #expect(
-            !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
+            #expect(
+                AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
+                    paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
+            #expect(
+                !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
+                    paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
+        }
     }
 
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {
