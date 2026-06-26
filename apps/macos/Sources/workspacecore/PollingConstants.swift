@@ -5,11 +5,10 @@ public enum PollingConstants {
 
     public static let workspaceWindowRefreshInterval: TimeInterval = 10
 
-    public static let worktreeDiscoveryInterval: TimeInterval = 30
-
-    public static let processMonitorInterval: TimeInterval = 10
-
-    public static let sidebarMetadataRefreshInterval: TimeInterval = 30
+    /// Freshness window that throttles remote-device overview fetches when the
+    /// sidebar reloads from local activity. Not a poll cadence; the sidebar reloads
+    /// from `IPCNotification.databaseDidChange` posted by database writers.
+    public static let remoteOverviewFreshnessInterval: TimeInterval = 30
 
     public static let statusCheckDefaultInterval: Int = 60
 

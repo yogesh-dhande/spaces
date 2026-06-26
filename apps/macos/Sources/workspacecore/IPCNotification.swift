@@ -18,6 +18,10 @@ public enum IPCNotification {
     public static let closeTerminalSessionWindow = Notification.Name("spaces.ipc.close-terminal-session-window")
     public static let dumpTerminalSessionWindowState = Notification.Name("spaces.ipc.dump-terminal-session-window-state")
     public static let performTerminalSessionWindowShortcut = Notification.Name("spaces.ipc.perform-terminal-session-window-shortcut")
+    /// Posted by any process after it commits a database write, so the app can
+    /// reload sidebar metadata from external CLI/daemon edits without polling or
+    /// watching database files.
+    public static let databaseDidChange = Notification.Name("spaces.ipc.database-did-change")
     public static let workspaceIDUserInfoKey = "workspace_id"
     public static let workspaceTargetNameUserInfoKey = "workspace_target_name"
     public static let titleUserInfoKey = "title"

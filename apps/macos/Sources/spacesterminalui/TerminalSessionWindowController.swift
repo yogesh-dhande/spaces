@@ -102,8 +102,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 }
 
 @MainActor public final class TerminalSessionWindowController: NSWindowController, NSWindowDelegate, NSUserInterfaceValidations {
-    static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
-    private static let fallbackRefreshInterval: Duration = .milliseconds(500)
     private static let takeoverAttemptTimeout: TimeInterval = 10
     static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
@@ -202,7 +200,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var isResolvingGhosttySessionHost = false
     private var pendingGhosttyHostAttachment: PendingGhosttyHostAttachment?
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
-    var refreshTask: Task<Void, Never>?
     var takeoverTask: Task<Void, Never>?
     var takeoverTaskStartedAt: Date?
     private var takeoverAttemptID: UUID?
@@ -392,9 +389,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         let postRefreshStartedAt = Date()
         refreshNow()
         logShowStage(startedAt: postRefreshStartedAt, requestID: requestID, detail: "stage=refresh_after_show")
-        let startRefreshingStartedAt = Date()
-        startRefreshing()
-        logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh")
         let firstResponderStartedAt = Date()
         assignPreferredFirstResponder()
         logShowStage(startedAt: firstResponderStartedAt, requestID: requestID, detail: "stage=assign_first_responder")
@@ -491,9 +485,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             startedAt: presentStartedAt, requestID: requestID,
             detail: "stage=present_window visible=0 deferred=1 activating=\(shouldActivateWindow ? 1 : 0)")
         syncGhosttyOwnerFocus(reason: "deferred_show_present", requestWindowFocus: shouldActivateWindow)
-        let startRefreshingStartedAt = Date()
-        startRefreshing()
-        logShowStage(startedAt: startRefreshingStartedAt, requestID: requestID, detail: "stage=start_refresh deferred=1")
         let firstResponderStartedAt = Date()
         if shouldActivateWindow { assignPreferredFirstResponder() }
         logShowStage(
@@ -753,17 +744,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             success: true, detail: "target=\(target.rawValue) renderer=\(renderer) reason=\(reason)")
     }
 
-    private func startRefreshing() {
-        guard refreshTask == nil else { return }
-        refreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                self.refreshNow()
-                do { try await Task.sleep(for: self.currentRefreshInterval()) } catch { break }
-            }
-        }
-    }
-
     func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
         do {
             refreshRuntimeControlsIfNeeded()
@@ -1013,10 +993,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             return hasGhosttyFinalRenderStateAvailable() ? .ghosttyEndedFinalRender : .unavailable
         }
         return .ghosttyTakeoverStatus
-    }
-
-    func currentRefreshInterval() -> Duration {
-        visibleRenderer == .ghosttyOwner && !shouldShowOwnerStateLabel ? Self.ownerGhosttyRefreshInterval : Self.fallbackRefreshInterval
     }
 
     private func transitionTarget(isOwner: Bool?) -> OwnershipTransitionTarget { isOwner == true ? .owner : .viewer }

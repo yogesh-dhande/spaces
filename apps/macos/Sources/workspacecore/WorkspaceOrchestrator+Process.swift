@@ -30,12 +30,32 @@ extension WorkspaceOrchestrator {
 
     public func runningProcesses(workspaceID: String) throws -> [RunningProcessRecord] { try store.runningProcesses(workspaceID: workspaceID) }
 
-    public func checkAndUpdateProcessStatuses() throws -> Bool {
+    /// Recorded pids of currently-running processes across all active workspaces.
+    /// Used to install per-process exit observers in place of status polling.
+    public func runningOwnedProcessPIDs() throws -> Set<Int> {
+        var pids: Set<Int> = []
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+                for process in try store.runningProcesses(workspaceID: workspace.id) where process.status == .running {
+                    if let pid = process.pid, pid > 0 { pids.insert(pid) }
+                }
+            }
+        }
+        return pids
+    }
+
+    public func checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: Bool = false) throws -> Bool {
         var didUpdate = false
         let allProjects = try store.projects()
         for project in allProjects {
             let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
-            for workspace in workspaces { if try refreshProcessStatuses(workspaceID: workspace.id, project: project) { didUpdate = true } }
+            for workspace in workspaces {
+                if try refreshProcessStatuses(
+                    workspaceID: workspace.id, project: project, ignoreStartupGracePeriod: ignoreStartupGracePeriod)
+                {
+                    didUpdate = true
+                }
+            }
         }
         if try reconcileTerminalForegroundAgentClassifications() { didUpdate = true }
         return didUpdate

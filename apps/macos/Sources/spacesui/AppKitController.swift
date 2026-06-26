@@ -200,7 +200,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var lastSelectedRow: Int = -1
     var suppressOutlineSelectionChanges = false
-    private var projectHasUnsavedChanges = false
+    // Clearing any reload blocker (unsaved project settings, an open add form) can
+    // happen from several paths; flushing here covers them all so a deferred
+    // database/worktree reload is never stranded once the user is idle again.
+    private var projectHasUnsavedChanges = false {
+        didSet { if oldValue, !projectHasUnsavedChanges { flushDeferredSidebarReloadsIfNeeded() } }
+    }
     var showingSettings = false
 
     private var hotkeyHandler: EventHandlerRef?
@@ -222,8 +227,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var shortcutButtonsBySetting: [String: NSButton] = [:]
     var activeShortcutCaptureSetting: ShortcutSetting?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
-    private var periodicProcessMonitorTask: Task<Void, Never>?
-    private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
+    /// Exit observers for owned child processes, keyed by pid. They replace the
+    /// process-monitor poll: a child's exit triggers the existing status reconcile
+    /// immediately instead of on a fixed interval.
+    private var processExitObservers: [Int: DispatchSourceProcess] = [:]
+    /// Recorded-running pids that were already dead when observed (they died before
+    /// an observer was installed, so no exit event is coming). Tracked so they are
+    /// reconciled once; a pid the reconcile keeps running (e.g. a surviving child)
+    /// is not reconciled again, avoiding a loop. Cleared when the pid leaves the
+    /// running set.
+    private var reconciledDeadProcessPIDs: Set<Int> = []
+    /// Per-local-git-project FSEvents watchers on each repo's git common directory.
+    /// They replace worktree-discovery polling: filesystem changes under
+    /// `worktrees/`/`HEAD` trigger the existing reconcile path. Keyed by project id.
+    private var worktreeDiscoveryWatchers: [String: WorktreeDiscoveryWatch] = [:]
     private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
     private var activeSpaceSummonCleanupTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
@@ -267,11 +284,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.dumpTerminalSessionWindowState, #selector(handleDumpTerminalSessionWindowStateIPC(_:))),
         (IPCNotification.performTerminalSessionWindowShortcut, #selector(handlePerformTerminalSessionWindowShortcutIPC(_:))),
         (IPCNotification.focusTerminalSessionWindow, #selector(handleFocusTerminalSessionWindowIPC(_:))),
+        (IPCNotification.databaseDidChange, #selector(handleDatabaseDidChangeIPC(_:))),
     ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
+    private var terminalRuntimeStateDidChangeObserver: NSObjectProtocol?
+    private var textInputDidEndEditingObserver: NSObjectProtocol?
+    /// Coalesces foreground-agent reconciles triggered by terminal runtime-state
+    /// events: guards against overlap and re-runs once if events arrived mid-run.
+    private var terminalForegroundReconcileInFlight = false
+    private var terminalForegroundReconcilePending = false
     private var didStartBackgroundServices = false
     var setupManager: SetupManager?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
@@ -292,8 +316,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var inlineWorkspaceFieldTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceLabelTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceOutsideClickMonitor: Any?
-    var activeAddWorkspaceFormTag: Int?
-    var activeAddProjectFormTag: Int?
+    var activeAddWorkspaceFormTag: Int? {
+        didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } }
+    }
+    var activeAddProjectFormTag: Int? {
+        didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } }
+    }
     private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
@@ -459,6 +487,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         setupAppActivationObservers()
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
+        setupTerminalRuntimeStateObserver()
+        setupTextInputDidEndEditingObserver()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
@@ -538,9 +568,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NSLog("spaces: prepared add-project cleanup failed during termination: \(String(describing: error))")
         }
         periodicWorkspaceRefreshTask?.cancel()
-        periodicProcessMonitorTask?.cancel()
-        periodicWorktreeDiscoveryTask?.cancel()
-        sidebar.cancelPeriodicSidebarMetadataRefresh()
+        stopProcessExitMonitoring()
+        stopWorktreeDiscoveryWatchers()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebar.cancelSidebarReloadTask()
         teardownInlineWorkspaceOutsideClickMonitor()
@@ -563,6 +592,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
             self.terminalAttachmentStateDidChangeObserver = nil
         }
+        if let terminalRuntimeStateDidChangeObserver {
+            NotificationCenter.default.removeObserver(terminalRuntimeStateDidChangeObserver)
+            self.terminalRuntimeStateDidChangeObserver = nil
+        }
+        if let textInputDidEndEditingObserver {
+            NotificationCenter.default.removeObserver(textInputDidEndEditingObserver)
+            self.textInputDidEndEditingObserver = nil
+        }
         commandPalette.commandPaletteLoadTask?.cancel()
         commandPalette.commandPaletteLoadTask = nil
         commandPalette.commandPalettePanel?.close()
@@ -576,6 +613,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self, object] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             self.reloadData()
+        }
+    }
+
+    @objc private nonisolated func handleDatabaseDidChangeIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        Task { @MainActor [weak self, object] in
+            guard let self, self.didStartBackgroundServices, self.matchesProfileIPCObject(object) else { return }
+            self.sidebar.handleDatabaseDidChange()
         }
     }
 
@@ -1600,6 +1645,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     self.activeWindowShortcutProfile = nil
                 }
                 self.requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "app_became_active")
+                self.flushDeferredSidebarReloadsIfNeeded()
+                // Catch up on any database change whose IPC signal was missed while
+                // the app was suspended in the background. Reactivation is the one
+                // point that state could be stale, and the reload no-ops the outline
+                // rebuild when nothing changed, so this stays cheap and flicker-free.
+                if self.didStartBackgroundServices { self.sidebar.handleDatabaseDidChange() }
             }
         }
         appDidResignActiveObserver = NotificationCenter.default.addObserver(
@@ -1653,6 +1704,54 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
+    private func setupTerminalRuntimeStateObserver() {
+        terminalRuntimeStateDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.reconcileTerminalForegroundAgentsFromRuntimeEvent()
+            }
+        }
+    }
+
+    /// Flushes a deferred sidebar reload when text editing ends. The reload guard
+    /// is also false while any text input is focused, and database/worktree
+    /// changes that arrive then are only held; without the removed metadata poll,
+    /// ending editing (tab/click out while staying in the app) must flush so the
+    /// sidebar does not stay stale until an unrelated reload. Runs on the next
+    /// run-loop turn so the first responder has settled before the guard re-checks.
+    private func setupTextInputDidEndEditingObserver() {
+        textInputDidEndEditingObserver = NotificationCenter.default.addObserver(
+            forName: NSText.didEndEditingNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Self.scheduleAfterNextRunLoopTurn { self?.flushDeferredSidebarReloadsIfNeeded() }
+        }
+    }
+
+    /// Reconciles ad-hoc foreground-agent classifications when a terminal's
+    /// runtime state changes (the foreground process is part of runtime state).
+    /// Replaces the periodic reconcile the process-monitor poll used to drive.
+    private func reconcileTerminalForegroundAgentsFromRuntimeEvent() {
+        guard didStartBackgroundServices else { return }
+        guard !terminalForegroundReconcileInFlight else {
+            terminalForegroundReconcilePending = true
+            return
+        }
+        terminalForegroundReconcileInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            repeat {
+                self.terminalForegroundReconcilePending = false
+                let result = await Self.runTerminalForegroundAgentReconcileSnapshot()
+                if case .success(let didMutate) = result, didMutate, self.canReloadAfterBackgroundWorkspaceRefresh() {
+                    self.requestSidebarReload()
+                }
+            } while self.terminalForegroundReconcilePending
+            self.terminalForegroundReconcileInFlight = false
+        }
+    }
+
     private func startPeriodicWorkspaceWindowRefresh() {
         periodicWorkspaceRefreshTask?.cancel()
         periodicWorkspaceRefreshTask = Task { [weak self] in
@@ -1674,47 +1773,205 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func startPeriodicProcessMonitor() {
-        periodicProcessMonitorTask?.cancel()
-        periodicProcessMonitorTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                let result = await Self.runProcessMonitorSnapshot()
-                if Task.isCancelled { break }
-                switch result {
-                case .success(let didUpdate): if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() { self.requestSidebarReload() }
-                case .failure: break
+    private func startProcessExitMonitoring() {
+        // Reconcile once on startup (catching exits that happened while not
+        // observing) and install exit observers for currently-running children.
+        handleProcessMonitorChange()
+    }
+
+    private func stopProcessExitMonitoring() {
+        for source in processExitObservers.values { source.cancel() }
+        processExitObservers.removeAll()
+        reconciledDeadProcessPIDs.removeAll()
+    }
+
+    /// Reconciles the installed exit observers to the set of currently-running
+    /// owned processes. Idempotent and cheap, so it is safe to call after every
+    /// sidebar reload (workspace launches/stops change the running set).
+    func refreshProcessExitObservers() {
+        guard didStartBackgroundServices else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.didStartBackgroundServices else { return }
+            guard let runningPIDs = await Self.runningOwnedProcessPIDsSnapshot() else {
+                // Transient read failure: keep existing observers rather than
+                // dropping them all, which would leave exits undetected.
+                self.handleBackgroundRefreshFailure(
+                    WorkspaceError.invalidArgument(message: "Could not read running processes to refresh exit observers."),
+                    source: "process_exit_observers")
+                return
+            }
+            guard self.didStartBackgroundServices else { return }
+            for (pid, source) in self.processExitObservers where !runningPIDs.contains(pid) {
+                source.cancel()
+                self.processExitObservers[pid] = nil
+            }
+            self.reconciledDeadProcessPIDs.formIntersection(runningPIDs)
+            var hasUnreconciledDeadPID = false
+            for pid in runningPIDs where self.processExitObservers[pid] == nil {
+                if Self.isProcessAlive(pid: pid) {
+                    self.installProcessExitObserver(pid: pid)
+                } else if !self.reconciledDeadProcessPIDs.contains(pid) {
+                    // Recorded running but already dead with no exit event coming
+                    // (it died before its observer was installed). Reconcile once,
+                    // ignoring the startup grace, so it is marked exited and its
+                    // on-exit policy runs.
+                    self.reconciledDeadProcessPIDs.insert(pid)
+                    hasUnreconciledDeadPID = true
                 }
-                do { try await Task.sleep(for: .seconds(PollingConstants.processMonitorInterval)) } catch { break }
+            }
+            if hasUnreconciledDeadPID { self.handleProcessMonitorChange(ignoreStartupGracePeriod: true) }
+        }
+    }
+
+    private func installProcessExitObserver(pid: Int) {
+        let source = DispatchSource.makeProcessSource(identifier: pid_t(pid), eventMask: .exit, queue: .global(qos: .utility))
+        // The handler runs on a background dispatch queue, so it must be a
+        // non-isolated @Sendable closure that hops to the main actor; otherwise
+        // the closure inherits this method's @MainActor isolation and dispatch
+        // trips a `dispatch_assert_queue` SIGTRAP when it invokes it off-main.
+        source.setEventHandler { @Sendable [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.processExitObservers[pid]?.cancel()
+                self.processExitObservers[pid] = nil
+                // The kernel told us this pid exited, so reconcile authoritatively:
+                // ignore the startup grace period that the periodic poll used, which
+                // would otherwise skip a process that exited within its first 10s and
+                // leave it stuck running with no retry now that the poll is gone.
+                self.handleProcessMonitorChange(ignoreStartupGracePeriod: true)
+            }
+        }
+        source.resume()
+        processExitObservers[pid] = source
+    }
+
+    private func handleProcessMonitorChange(ignoreStartupGracePeriod: Bool = false) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.runProcessMonitorSnapshot(ignoreStartupGracePeriod: ignoreStartupGracePeriod)
+            switch result {
+            case .success(let didUpdate): if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() { self.requestSidebarReload() }
+            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "process_monitor")
+            }
+            // The reconcile may have applied restart/exit policies that changed the
+            // running set, so reattach observers to the current children.
+            self.refreshProcessExitObservers()
+        }
+    }
+
+    nonisolated private static func isProcessAlive(pid: Int) -> Bool {
+        guard pid > 0 else { return false }
+        return kill(pid_t(pid), 0) == 0 || errno == EPERM
+    }
+
+    /// Holds the FSEvents watcher for one local git project along with the repo
+    /// directory it was installed for, so `refreshWorktreeDiscoveryWatchers` can
+    /// detect when a project's path changes and reinstall.
+    private struct WorktreeDiscoveryWatch {
+        let projectDir: String
+        let watcher: FileSystemWatcher
+    }
+
+    private func startWorktreeDiscoveryWatchers() {
+        refreshWorktreeDiscoveryWatchers()
+        // Reconcile once on startup to catch worktrees created, removed, or
+        // branch-switched while the app was not watching.
+        handleWorktreeDiscoveryChange(projectID: nil)
+    }
+
+    private func stopWorktreeDiscoveryWatchers() {
+        for watch in worktreeDiscoveryWatchers.values { watch.watcher.stop() }
+        worktreeDiscoveryWatchers.removeAll()
+    }
+
+    /// Reconciles the installed watchers to the current set of local git projects.
+    /// Idempotent and cheap, so it is safe to call after every sidebar reload:
+    /// it only tears down watchers for projects that vanished or moved and only
+    /// resolves git directories (off the main thread) for newly added projects.
+    func refreshWorktreeDiscoveryWatchers() {
+        guard didStartBackgroundServices else { return }
+        let desired = Dictionary(
+            projects.filter { $0.deviceID == localDeviceID && $0.isGitRepo }.map { ($0.id, $0.dir) },
+            uniquingKeysWith: { first, _ in first })
+        for (projectID, watch) in worktreeDiscoveryWatchers where desired[projectID] != watch.projectDir {
+            watch.watcher.stop()
+            worktreeDiscoveryWatchers[projectID] = nil
+        }
+        let missing = desired.filter { worktreeDiscoveryWatchers[$0.key] == nil }
+        guard !missing.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for (projectID, projectDir) in missing {
+                guard self.didStartBackgroundServices, self.worktreeDiscoveryWatchers[projectID] == nil else { continue }
+                let commonDir = await Task.detached(priority: .utility) { GitClient().commonDirectory(path: projectDir) }.value
+                guard self.didStartBackgroundServices, self.worktreeDiscoveryWatchers[projectID] == nil,
+                    self.projects.contains(where: { $0.id == projectID && $0.dir == projectDir })
+                else { continue }
+                guard let commonDir else {
+                    self.handleBackgroundRefreshFailure(
+                        WorkspaceError.invalidArgument(
+                            message: "Live worktree discovery unavailable: could not resolve git directory for \(projectDir)"),
+                        source: "worktree_discovery_watch")
+                    continue
+                }
+                self.installWorktreeDiscoveryWatcher(projectID: projectID, projectDir: projectDir, commonDirectory: commonDir)
             }
         }
     }
 
-    private func startPeriodicWorktreeDiscovery() {
-        periodicWorktreeDiscoveryTask?.cancel()
-        periodicWorktreeDiscoveryTask = Task { [weak self] in
+    private func installWorktreeDiscoveryWatcher(projectID: String, projectDir: String, commonDirectory: String) {
+        let watcher = FileSystemWatcher(paths: [commonDirectory], latency: 1) { [weak self] changedPaths in
+            guard Self.changedPathsAffectWorktrees(changedPaths, commonDirectory: commonDirectory) else { return }
+            Task { @MainActor [weak self] in self?.handleWorktreeDiscoveryChange(projectID: projectID) }
+        }
+        do {
+            try watcher.start()
+            worktreeDiscoveryWatchers[projectID] = WorktreeDiscoveryWatch(projectDir: projectDir, watcher: watcher)
+        } catch {
+            handleBackgroundRefreshFailure(error, source: "worktree_discovery_watch")
+        }
+    }
+
+    /// Only git worktree metadata should trigger a reconcile; object/index/log
+    /// churn from ordinary commits must not. Matches the shared `HEAD` (main
+    /// checkout branch switch) and anything under `worktrees/` (linked worktree
+    /// add, remove, or branch switch).
+    nonisolated static func changedPathsAffectWorktrees(_ paths: [String], commonDirectory: String) -> Bool {
+        let head = commonDirectory + "/HEAD"
+        let worktreesDir = commonDirectory + "/worktrees"
+        return paths.contains { $0 == head || $0 == worktreesDir || $0.hasPrefix(worktreesDir + "/") }
+    }
+
+    private func handleWorktreeDiscoveryChange(projectID: String?) {
+        Task { @MainActor [weak self] in
             guard let self else { return }
-            while !Task.isCancelled {
-                let result = await Self.runWorktreeDiscoverySnapshot()
-                if Task.isCancelled { break }
-                switch result {
-                case .success(let createdCount):
-                    if createdCount > 0 {
-                        if self.canReloadAfterBackgroundWorkspaceRefresh() {
-                            self.pendingWorktreeDiscoveryReload = false
-                            self.requestSidebarReload()
-                        } else {
-                            self.pendingWorktreeDiscoveryReload = true
-                        }
-                    } else if self.pendingWorktreeDiscoveryReload, self.canReloadAfterBackgroundWorkspaceRefresh() {
+            let result = await Self.runWorktreeDiscoverySnapshot(projectID: projectID)
+            switch result {
+            case .success(let createdCount):
+                if createdCount > 0 {
+                    if self.canReloadAfterBackgroundWorkspaceRefresh() {
                         self.pendingWorktreeDiscoveryReload = false
                         self.requestSidebarReload()
+                    } else {
+                        self.pendingWorktreeDiscoveryReload = true
                     }
-                case .failure: break
+                } else if self.pendingWorktreeDiscoveryReload, self.canReloadAfterBackgroundWorkspaceRefresh() {
+                    self.pendingWorktreeDiscoveryReload = false
+                    self.requestSidebarReload()
                 }
-                do { try await Task.sleep(for: .seconds(PollingConstants.worktreeDiscoveryInterval)) } catch { break }
+            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "worktree_discovery_watch")
             }
         }
+    }
+
+    /// Flushes sidebar reloads that were deferred because the user was mid-edit.
+    /// Watcher events are one-shot, so this runs at natural idle points (forms
+    /// closing, app re-activation) in place of the old poll re-check.
+    func flushDeferredSidebarReloadsIfNeeded() {
+        sidebar.flushPendingDatabaseReloadIfNeeded()
+        guard pendingWorktreeDiscoveryReload, canReloadAfterBackgroundWorkspaceRefresh() else { return }
+        pendingWorktreeDiscoveryReload = false
+        requestSidebarReload()
     }
 
 
@@ -2342,25 +2599,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
-    nonisolated private static func runProcessMonitorSnapshot() async -> Result<Bool, Error> {
+    nonisolated private static func runProcessMonitorSnapshot(ignoreStartupGracePeriod: Bool = false) async -> Result<Bool, Error> {
         await Task.detached(priority: .utility) {
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
-                let didUpdateProcessStates = try orchestrator.checkAndUpdateProcessStatuses()
+                let didUpdateProcessStates = try orchestrator.checkAndUpdateProcessStatuses(
+                    ignoreStartupGracePeriod: ignoreStartupGracePeriod)
                 return .success(didUpdateProcessStates)
             } catch { return .failure(error) }
         }.value
     }
 
-    nonisolated private static func runWorktreeDiscoverySnapshot() async -> Result<Int, Error> {
+    nonisolated private static func runTerminalForegroundAgentReconcileSnapshot() async -> Result<Bool, Error> {
         await Task.detached(priority: .utility) {
             do {
                 let db = try DatabaseLocator.defaultPath()
                 let store = try SQLiteStore(path: db)
                 let orchestrator = WorkspaceOrchestrator(store: store)
-                let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: nil)
+                return .success(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            } catch { return .failure(error) }
+        }.value
+    }
+
+    /// Returns nil on a transient store/profile error so callers can distinguish
+    /// "no processes are running" from "could not read", and avoid tearing down
+    /// live exit observers on a failed read.
+    nonisolated private static func runningOwnedProcessPIDsSnapshot() async -> Set<Int>? {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                return try orchestrator.runningOwnedProcessPIDs()
+            } catch { return nil }
+        }.value
+    }
+
+    nonisolated private static func runWorktreeDiscoverySnapshot(projectID: String?) async -> Result<Int, Error> {
+        await Task.detached(priority: .utility) {
+            do {
+                let db = try DatabaseLocator.defaultPath()
+                let store = try SQLiteStore(path: db)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
                 return .success(created.count)
             } catch { return .failure(error) }
         }.value
@@ -3650,18 +3933,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
         startPeriodicWorkspaceWindowRefresh()
-        startPeriodicProcessMonitor()
-        startPeriodicWorktreeDiscovery()
-        sidebar.startPeriodicSidebarMetadataRefresh()
+        startProcessExitMonitoring()
+        startWorktreeDiscoveryWatchers()
     }
 
     private func stopBackgroundServices() {
         periodicWorkspaceRefreshTask?.cancel()
         periodicWorkspaceRefreshTask = nil
-        periodicProcessMonitorTask?.cancel()
-        periodicProcessMonitorTask = nil
-        periodicWorktreeDiscoveryTask?.cancel()
-        periodicWorktreeDiscoveryTask = nil
+        stopProcessExitMonitoring()
+        stopWorktreeDiscoveryWatchers()
         sidebar.stopSidebarTasks()
         didStartBackgroundServices = false
     }
@@ -6007,6 +6287,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         clearInlineWorkspaceFieldRefs()
         clearActiveAddWorkspaceFormState()
         closeVisibleAddFormWindows()
+        flushDeferredSidebarReloadsIfNeeded()
     }
 
     private func closeVisibleAddFormWindows() {

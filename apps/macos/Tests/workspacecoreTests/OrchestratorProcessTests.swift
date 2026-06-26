@@ -93,6 +93,30 @@ extension OrchestratorTests {
         XCTAssertNil(unchanged?.exitedAt)
     }
 
+    // Tests that a process which dies inside the startup grace window is still
+    // reconciled when grace is ignored — the path the DispatchSourceProcess exit
+    // observer uses, since the kernel has authoritatively reported the exit.
+    func testCheckAndUpdateProcessStatusesMarksRecentDeadProcessWhenIgnoringGrace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let recentDeadProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
+        try store.upsert(runningProcess: recentDeadProcess)
+
+        XCTAssertTrue(try orchestrator.checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: true))
+        let updated = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(updated?.status, .exited)
+        XCTAssertNotNil(updated?.exitedAt)
+    }
+
     func testCheckAndUpdateProcessStatusesTreatsZombiePIDAsExited() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)

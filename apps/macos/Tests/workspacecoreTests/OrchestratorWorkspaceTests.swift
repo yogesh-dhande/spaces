@@ -7,9 +7,6 @@ import systembridge
 
 extension OrchestratorTests {
 
-    // Tests worktree discovery interval is positive by arranging representative inputs and asserting the expected result.
-    func testWorktreeDiscoveryIntervalIsPositive() { XCTAssertGreaterThan(PollingConstants.worktreeDiscoveryInterval, 0) }
-
     func testRollbackFailedImportedProjectCreationRemovesManagedRepoAndWorktreeDirectories() throws {
         let root = try makeTempDirectory()
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)

@@ -46,7 +46,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     private var pendingSidebarReloadRequest = false
     private var pendingSidebarReloadFailureMessage: String?
     private var pendingSidebarReloadForceRemoteRefresh = false
-    private var periodicSidebarMetadataRefreshTask: Task<Void, Never>?
+    /// Set when a database-change signal arrives while the user is mid-edit;
+    /// flushed at idle points so a deferred change is not lost.
+    private var pendingDatabaseReload = false
 
     // Alerts sidebar row
     private var alertsRowView: NSView?
@@ -73,33 +75,36 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         outlineView.dataSource = self
     }
 
-    /// Cancels the periodic-refresh and in-flight reload tasks. Called from the
-    /// host's background-service teardown and termination paths.
+    /// Cancels in-flight reload state. Called from the host's background-service
+    /// teardown and termination paths.
     func stopSidebarTasks() {
-        periodicSidebarMetadataRefreshTask?.cancel()
-        periodicSidebarMetadataRefreshTask = nil
+        pendingDatabaseReload = false
         sidebarReloadTask?.cancel()
         sidebarReloadTask = nil
         pendingSidebarReloadRequest = false
         pendingSidebarReloadFailureMessage = nil
     }
 
-    func cancelPeriodicSidebarMetadataRefresh() { periodicSidebarMetadataRefreshTask?.cancel() }
-
     func cancelSidebarReloadTask() { sidebarReloadTask?.cancel() }
 
-    func startPeriodicSidebarMetadataRefresh() {
-        periodicSidebarMetadataRefreshTask?.cancel()
-        periodicSidebarMetadataRefreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(PollingConstants.sidebarMetadataRefreshInterval)) } catch { break }
-                if Task.isCancelled { break }
-                guard self.host.canReloadAfterBackgroundWorkspaceRefresh() else { continue }
-                // Catch external CLI edits (for example title changes) that do not trigger other poller reloads.
-                self.requestSidebarReload()
-            }
+    /// Reloads sidebar metadata after a database write, signaled by whichever
+    /// process committed it (`IPCNotification.databaseDidChange`). Catches external
+    /// CLI/daemon edits (for example title changes) that no other event-driven
+    /// reload would observe. Driven by the writer, so there is no polling and no
+    /// file-watch feedback loop from the app's own reads.
+    func handleDatabaseDidChange() {
+        guard host.canReloadAfterBackgroundWorkspaceRefresh() else {
+            pendingDatabaseReload = true
+            return
         }
+        requestSidebarReload()
+    }
+
+    /// Flushes a database-driven reload deferred while the user was mid-edit.
+    func flushPendingDatabaseReloadIfNeeded() {
+        guard pendingDatabaseReload, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
+        pendingDatabaseReload = false
+        requestSidebarReload()
     }
 
     func canPreserveDetailPaneAfterSidebarReload() -> Bool {
@@ -167,6 +172,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         host.logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         host.pendingWorktreeDiscoveryReload = false
+        pendingDatabaseReload = false
         host.commandPalette.invalidateCommandPaletteCache()
         host.configCache = snapshot.config
         host.loadShortcutSpecs()
@@ -190,6 +196,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         host.localPairedDevice = snapshot.localPairedDevice
         host.localDeviceOverview = snapshot.localDeviceOverview
         rebuildFlatSidebarData()
+        host.refreshWorktreeDiscoveryWatchers()
+        host.refreshProcessExitObservers()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         if !localOutlineUnchanged {
@@ -229,7 +237,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let now = ContinuousClock.now
-        let freshnessWindow = Duration.seconds(PollingConstants.sidebarMetadataRefreshInterval)
+        let freshnessWindow = Duration.seconds(PollingConstants.remoteOverviewFreshnessInterval)
         var updatedReconnectSection = false
         for record in remotes {
             guard AppKitController.pairedDeviceHasRequiredCredentials(deviceID: record.id) else {

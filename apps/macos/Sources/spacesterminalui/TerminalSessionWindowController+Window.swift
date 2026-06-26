@@ -23,8 +23,6 @@ extension TerminalSessionWindowController {
         } else {
             detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose)
         }
-        refreshTask?.cancel()
-        refreshTask = nil
         onWindowClose?(sessionID, client.id, sessionIsTerminating)
     }
 

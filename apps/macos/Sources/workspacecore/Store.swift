@@ -15,6 +15,12 @@ public final class SQLiteStore {
     private let busyTimeoutMS: Int32 = 5000
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
+    /// Depth of open explicit transactions. Autocommit writes (`execute` at depth
+    /// zero) post a change signal immediately; statements inside a transaction
+    /// defer to the single post after `COMMIT`, so a reload never observes
+    /// uncommitted state. One connection serializes its own writes, so a plain
+    /// counter is sufficient.
+    private var openTransactionCount = 0
 
     public init(path: String) throws {
         databasePath = path
@@ -38,14 +44,29 @@ public final class SQLiteStore {
 
     func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
         try executeBatch(sql: "BEGIN IMMEDIATE;")
+        openTransactionCount += 1
         do {
             let value = try body()
             try executeBatch(sql: "COMMIT;")
+            openTransactionCount -= 1
+            Self.postDatabaseDidChange()
             return value
         } catch {
             try? executeBatch(sql: "ROLLBACK;")
+            openTransactionCount -= 1
             throw error
         }
+    }
+
+    /// Announces a committed write so the app reloads sidebar metadata in response
+    /// to the writer (this process — app, CLI, or daemon) rather than by watching
+    /// database files. Posted synchronously so a short-lived CLI delivers the
+    /// signal before it exits. Suppressed under tests to avoid cross-process noise.
+    private static func postDatabaseDidChange() {
+        #if os(macOS)
+            guard NSClassFromString("XCTest") == nil else { return }
+            try? IPCNotification.post(IPCNotification.databaseDidChange)
+        #endif
     }
 
     public func setting(key: String) throws -> String? {
@@ -185,6 +206,9 @@ public final class SQLiteStore {
             let message = String(cString: sqlite3_errmsg(db))
             throw NSError(domain: "spaces.store", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
         }
+        // `execute` only runs mutating statements; reads use `queryRow(s)`. An
+        // autocommit write (no open transaction) is durable now, so signal it.
+        if openTransactionCount == 0 { Self.postDatabaseDidChange() }
     }
 
     func queryRow(sql: String, bindings: [Any] = []) throws -> [String]? {
