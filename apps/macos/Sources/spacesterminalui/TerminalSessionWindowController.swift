@@ -105,7 +105,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     static let ownerGhosttyRefreshInterval: Duration = .seconds(2)
     private static let fallbackRefreshInterval: Duration = .milliseconds(500)
     private static let takeoverAttemptTimeout: TimeInterval = 10
-    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     enum VisibleRenderer {
         case ghosttyOwner
@@ -137,7 +137,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private var launchConfiguration: TerminalSessionLaunchConfiguration?
     let client: TerminalClient
     private var rendererMode: TerminalRendererMode
-    private var backend: TerminalSessionBackendKind
+    var backend: TerminalSessionBackendKind
     var preferredAttachmentMode: TerminalAttachmentMode
     private var ownerAttachmentRequested: Bool
     let titleLabel = NSTextField(labelWithString: "")
@@ -186,31 +186,31 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
-    private let detachClientSynchronouslyOnClose: Bool
+    let detachClientSynchronouslyOnClose: Bool
     private let usesCustomAttachClientAction: Bool
     private let copySelectionAction: (@MainActor () -> Bool)?
     private let pasteClipboardAction: (@MainActor () -> Bool)?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
-    private let onWindowFocus: (@MainActor (String) -> Void)?
-    private let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
+    let onWindowFocus: (@MainActor (String) -> Void)?
+    let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
     let runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)?
-    private let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
-    private let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
+    let loadWindowFrameAction: (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?
+    let saveWindowFrameAction: (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var isResolvingGhosttySessionHost = false
     private var pendingGhosttyHostAttachment: PendingGhosttyHostAttachment?
     private var activeGhosttySessionHost: (any TerminalGhosttySessionHosting)?
-    private var refreshTask: Task<Void, Never>?
+    var refreshTask: Task<Void, Never>?
     var takeoverTask: Task<Void, Never>?
     var takeoverTaskStartedAt: Date?
     private var takeoverAttemptID: UUID?
     var pendingWindowFramePersistTask: Task<Void, Never>?
     private var lastRenderedOutput = ""
-    private var isClientAttached = false
-    private var lastRequestedAttachmentMode: TerminalAttachmentMode?
-    private var closesForSessionTermination = false
+    var isClientAttached = false
+    var lastRequestedAttachmentMode: TerminalAttachmentMode?
+    var closesForSessionTermination = false
     var didCloseWindow = false
     private var lastObservedAttachmentMode: TerminalAttachmentMode?
     var ghosttyRendererHost: (any TerminalGhosttyRendererHosting)?
@@ -222,13 +222,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var runtimeControls: TerminalSessionRuntimeControls?
     var runtimeControlsDirty = true
     private var inputStatusIsError = false
-    private var appDidBecomeActiveObserver: NSObjectProtocol?
-    private var appDidResignActiveObserver: NSObjectProtocol?
-    private var attachmentStateDidChangeObserver: NSObjectProtocol?
-    private var sessionMetadataDidChangeObserver: NSObjectProtocol?
-    private var runtimeStateDidChangeObserver: NSObjectProtocol?
-    private var outputDidChangeObserver: NSObjectProtocol?
-    private var hasTestWindowPresentation = false
+    var appDidBecomeActiveObserver: NSObjectProtocol?
+    var appDidResignActiveObserver: NSObjectProtocol?
+    var attachmentStateDidChangeObserver: NSObjectProtocol?
+    var sessionMetadataDidChangeObserver: NSObjectProtocol?
+    var runtimeStateDidChangeObserver: NSObjectProtocol?
+    var outputDidChangeObserver: NSObjectProtocol?
+    var hasTestWindowPresentation = false
     private var pendingOwnershipTransitionStartedAt: Date?
     private var pendingOwnershipTransitionTarget: OwnershipTransitionTarget?
     private var pendingOwnershipTransitionReason: String?
@@ -576,62 +576,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public func closeForSessionTermination() {
         closesForSessionTermination = true
         window?.close()
-    }
-
-    public func windowWillClose(_ notification: Notification) {
-        let sessionIsTerminating = closesForSessionTermination
-        closesForSessionTermination = false
-        didCloseWindow = true
-        hasTestWindowPresentation = false
-        TerminalPerformance.logMetric(
-            "terminal_window_will_close", target: "session=\(sessionID)", elapsedMS: 0, success: true,
-            detail: "client=\(client.id) terminating=\(sessionIsTerminating ? 1 : 0)")
-        persistCurrentWindowFrame(immediately: true)
-        if backend == .ghosttyEmbedded {
-            syncGhosttyOwnerFocus(reason: "window_close", requestWindowFocus: false, focused: false)
-            if !sessionIsTerminating { ghosttyRendererHost?.releaseRendererSurface() }
-        }
-        if sessionIsTerminating {
-            isClientAttached = false
-            lastRequestedAttachmentMode = nil
-        } else {
-            detachLocalClientIfNeeded(synchronously: detachClientSynchronouslyOnClose)
-        }
-        refreshTask?.cancel()
-        refreshTask = nil
-        onWindowClose?(sessionID, client.id, sessionIsTerminating)
-    }
-
-    public func windowDidBecomeKey(_ notification: Notification) {
-        onWindowFocus?(sessionID)
-        completePendingFocusObservationIfNeeded(reason: "window_key")
-        syncGhosttyOwnerFocus(reason: "window_key", requestWindowFocus: true)
-    }
-
-    public func windowDidResignKey(_ notification: Notification) {
-        syncGhosttyOwnerFocus(reason: "window_key_lost", requestWindowFocus: false, focused: false)
-    }
-
-    public func windowDidBecomeMain(_ notification: Notification) {
-        onWindowFocus?(sessionID)
-        completePendingFocusObservationIfNeeded(reason: "window_main")
-        syncGhosttyOwnerFocus(reason: "window_main", requestWindowFocus: true)
-    }
-
-    public func windowDidResignMain(_ notification: Notification) {
-        syncGhosttyOwnerFocus(reason: "window_main_lost", requestWindowFocus: false, focused: false)
-    }
-
-    public func windowDidMove(_ notification: Notification) { persistCurrentWindowFrame() }
-
-    public func windowDidResize(_ notification: Notification) {
-        persistCurrentWindowFrame()
-        syncGhosttyOwnerFocus(reason: "window_resize", requestWindowFocus: false)
-    }
-
-    public func windowDidEndLiveResize(_ notification: Notification) {
-        persistCurrentWindowFrame(immediately: true)
-        syncGhosttyOwnerFocus(reason: "window_resize_end", requestWindowFocus: true)
     }
 
     public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
@@ -1135,7 +1079,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         pendingFocusObservationRoute = requestID == nil ? nil : route
     }
 
-    private func completePendingFocusObservationIfNeeded(reason: String) {
+    func completePendingFocusObservationIfNeeded(reason: String) {
         guard let startedAt = pendingFocusObservationStartedAt, let requestID = pendingFocusObservationRequestID else { return }
         let route = pendingFocusObservationRoute ?? "focus"
         pendingFocusObservationStartedAt = nil
@@ -1159,48 +1103,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         TerminalPerformance.logMetric(
             "terminal_ownership_transition", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: true, detail: "target=\(target.rawValue) renderer=\(renderer) reason=\(reason)")
-    }
-
-    private func isWindowPresented(_ window: NSWindow) -> Bool {
-        if Self.isRunningUnderXCTest { return hasTestWindowPresentation }
-        return window.isVisible
-    }
-
-    nonisolated static func shouldRetryWindowActivation(
-        forceFrontmost: Bool, appWasActive: Bool, windowIsKeyAfterInitialActivation: Bool, isDeferredOwnerPresentation: Bool, takeoverPending: Bool
-    ) -> Bool {
-        guard forceFrontmost || !appWasActive else { return false }
-        return isDeferredOwnerPresentation || takeoverPending || !windowIsKeyAfterInitialActivation
-    }
-
-    private func presentWindow(_ window: NSWindow, forceFrontmost: Bool = false, isDeferredOwnerPresentation: Bool = false) {
-        if Self.isRunningUnderXCTest {
-            hasTestWindowPresentation = true
-            return
-        }
-        let appWasActive = NSApp.isActive
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        guard
-            Self.shouldRetryWindowActivation(
-                forceFrontmost: forceFrontmost, appWasActive: appWasActive, windowIsKeyAfterInitialActivation: window.isKeyWindow,
-                isDeferredOwnerPresentation: isDeferredOwnerPresentation, takeoverPending: takeoverTask != nil)
-        else { return }
-        window.orderFrontRegardless()
-        Task { @MainActor [weak window] in
-            await Task.yield()
-            guard let window, window.isVisible, !window.isMiniaturized else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-        }
-    }
-
-    private func presentWindowWithoutActivating(_ window: NSWindow) {
-        if Self.isRunningUnderXCTest {
-            hasTestWindowPresentation = true
-            return
-        }
-        window.orderFront(nil)
     }
 
     private func startRefreshing() {
@@ -1449,7 +1351,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
-    private func detachLocalClientIfNeeded(synchronously: Bool = true) {
+    func detachLocalClientIfNeeded(synchronously: Bool = true) {
         guard isClientAttached else { return }
         guard synchronously else {
             let clientID = client.id
@@ -1465,71 +1367,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
-    private func startObservingApplicationActivation() {
-        appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_active", requestWindowFocus: false) } }
-        appDidResignActiveObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_inactive", requestWindowFocus: false, focused: false) }
-        }
-        attachmentStateDidChangeObserver = NotificationCenter.default.addObserver(
-            forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
-        ) { [weak self] notification in
-            let changedSessionID = notification.userInfo?["sessionID"] as? String
-            Task { @MainActor [weak self] in
-                guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                self.refreshNow()
-            }
-        }
-        sessionMetadataDidChangeObserver = NotificationCenter.default.addObserver(
-            forName: .spacesTerminalSessionMetadataDidChange, object: nil, queue: .main
-        ) { [weak self] notification in
-            let changedSessionID = notification.userInfo?["sessionID"] as? String
-            MainActor.assumeIsolated {
-                guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                self.markRuntimeControlsDirty()
-                self.refreshNow()
-            }
-        }
-        runtimeStateDidChangeObserver = NotificationCenter.default.addObserver(
-            forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main
-        ) { [weak self] notification in
-            let changedSessionID = notification.userInfo?["sessionID"] as? String
-            MainActor.assumeIsolated {
-                guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                self.markRuntimeControlsDirty()
-                self.refreshNow()
-            }
-        }
-        outputDidChangeObserver = NotificationCenter.default.addObserver(forName: .spacesTerminalOutputDidChange, object: nil, queue: .main) {
-            [weak self] notification in
-            let changedSessionID = notification.userInfo?["sessionID"] as? String
-            MainActor.assumeIsolated {
-                guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                guard self.visibleRenderer == .ghosttyEndedFinalRender || self.visibleRenderer == .textView else { return }
-                self.refreshNow()
-            }
-        }
-    }
-
-    private func stopObservingApplicationActivation() {
-        appDidBecomeActiveObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        appDidBecomeActiveObserver = nil
-        appDidResignActiveObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        appDidResignActiveObserver = nil
-        attachmentStateDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        attachmentStateDidChangeObserver = nil
-        sessionMetadataDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        sessionMetadataDidChangeObserver = nil
-        runtimeStateDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        runtimeStateDidChangeObserver = nil
-        outputDidChangeObserver.flatMap { NotificationCenter.default.removeObserver($0) }
-        outputDidChangeObserver = nil
-    }
-
-    private func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
+    func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return }
         let startedAt = Date()
@@ -1773,43 +1611,6 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         let targetOriginY = max(0, maxOriginY - state.offsetFromBottom)
         outputScrollView.contentView.scroll(to: NSPoint(x: targetOriginX, y: min(targetOriginY, maxOriginY)))
         outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
-    }
-
-    private func constrainWindowToVisibleFrame(_ window: NSWindow) {
-        guard let screen = window.screen ?? NSScreen.main else { return }
-        let visibleFrame = screen.visibleFrame.insetBy(dx: 24, dy: 24)
-        var frame = window.frame
-        frame.size.width = min(frame.width, visibleFrame.width)
-        frame.size.height = min(frame.height, visibleFrame.height)
-        frame.origin.x = min(max(frame.origin.x, visibleFrame.minX), visibleFrame.maxX - frame.width)
-        frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), visibleFrame.maxY - frame.height)
-        window.setFrame(frame, display: false)
-    }
-
-    private func restorePersistedWindowFrame(_ window: NSWindow) {
-        guard let frame = try? loadWindowFrameAction(preferredAttachmentMode) else { return }
-        let restoredFrame = NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
-        guard restoredFrame.width >= window.minSize.width, restoredFrame.height >= window.minSize.height else { return }
-        window.setFrame(restoredFrame, display: false)
-    }
-
-    private func persistCurrentWindowFrame(immediately: Bool = false) {
-        pendingWindowFramePersistTask?.cancel()
-        if immediately {
-            writeCurrentWindowFrame()
-            return
-        }
-        pendingWindowFramePersistTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
-            self?.writeCurrentWindowFrame()
-        }
-    }
-
-    private func writeCurrentWindowFrame() {
-        guard let window else { return }
-        let frame = window.frame
-        let persistedFrame = TerminalSessionWindowFrame(x: frame.origin.x, y: frame.origin.y, width: frame.size.width, height: frame.size.height)
-        try? saveWindowFrameAction(persistedFrame, preferredAttachmentMode)
     }
 
     private func resolveVisibleRenderer(isOwner: Bool?) -> VisibleRenderer {
