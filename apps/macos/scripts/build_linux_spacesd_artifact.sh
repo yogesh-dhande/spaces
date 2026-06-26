@@ -398,7 +398,7 @@ ensure_user_linger() {
     fi
 }
 
-mkdir -p "$release_parent" "$bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/.spaces/workspaces" "$service_dir"
+mkdir -p "$release_parent" "$bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
 rm -rf "$release_staging_dir" "$previous_release_dir"
 mkdir -p "$release_staging_dir"
 cp -a "$artifact_root/." "$release_staging_dir/"
@@ -491,7 +491,8 @@ manifest = {
     "state": {
         "database": "~/.spaces/spaces.db",
         "runtime": "~/.spaces/runtime/",
-        "workspaces": "~/.spaces/workspaces/"
+        "workspaces": "~/spaces/workspaces/",
+        "repos": "~/spaces/repos/"
     },
     "install_script": "install.sh",
     "cli": "bin/spaces",

@@ -26,8 +26,8 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
   Dedicated process windows keep each terminal focus target stable because Spaces cannot predict which terminals a user will want side by side later.
 - Browser sessions are lazy bookmarks that open into dedicated Chrome windows only when focused.
   Some workspaces may carry many useful URLs, but opening all of them during launch or restart is wasteful when the user may only need a subset in a given session.
-- Focus a browser session by activating its tracked Chrome window and reselecting tab `1`.
-  The first tab is unlikely to be reordered by the user, while additional tabs are much more likely to be appended during normal browsing in that window.
+- Focus a browser session by activating its tracked Chrome window and selecting the tab whose URL matches the session, falling back to the first tab when no match is found.
+  Matching by URL keeps focus on the intended page even when the user reorders tabs or appends new ones during normal browsing in that window. The yabai focus path selects the first tab; terminal-driven focus selects the URL-matching tab.
 - Built-in terminal window close detaches the native window from owned runtimes.
   Closing a process or coding-agent Spaces terminal window leaves the runtime running and recoverable through focus. Closing an ad hoc Spaces terminal window stops that ad hoc session. Explicit Stop and Restart controls own process and coding-agent runtime termination.
 - Keep workspace lifecycle separate from runtime health.
@@ -90,11 +90,8 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 ## Onboarding
 - On launch, the main window should immediately show a neutral loading state while Spaces checks prerequisites and loads workspace data, so startup never presents a blank window.
 - On launch, Spaces blocks only on the cheap prerequisite checks needed for its default runtime path: yabai installed.
-- Installed builds should default to one shared profile rooted at `~/.spaces/`, while repo-local development builds should default to one profile per git worktree under `~/.spaces-dev/profiles/spaces/`.
-- `SPACES_DB_PATH` should override the default database path for the current process, and `SPACES_RUNTIME_DIR` should override the default runtime root for that same resolved profile.
-- Mac client paired-device metadata should follow the resolved profile root, so separate profiles do not share paired remote devices.
-- Startup prerequisite checks may enrich command lookup from the user's login-shell PATH, but that lookup must stay bounded and fall back automatically to the inherited PATH plus standard package-manager locations so shell startup files cannot stall app launch indefinitely.
-- When command lookup is enriched from the login-shell PATH, the app's inherited `PATH` remains authoritative. Login-shell entries should only fill gaps that are missing from the launch environment, and built-in package-manager fallbacks should remain last.
+- Installed builds should default to one shared profile rooted at `~/.spaces/`, while repo-local development builds should default to one profile per git worktree. (Profile and environment-override mechanics live in [implementation.md](implementation.md).)
+- App launch should not stall on the user's shell startup files while resolving command locations.
 - During first-run setup, Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
 - Workspace processes launch, stop, recover, and reopen through Spaces-owned built-in terminal sessions.
 - The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
@@ -140,7 +137,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Creating projects, workspaces, terminals, processes, and coding-agent runs targets the daemon that owns the affected row: on macOS that is the device of the selected project or workspace, and on iOS it is the selected device. Editor and Reveal-in-Finder actions are available only for local-device workspaces. Project creation accepts a daemon-side Git URL or an existing daemon-local path.
 - The `spaces` CLI targets only the same-machine daemon. It does not create or mutate projects, workspaces, or terminals on paired remote devices.
 - Remote terminal attach opens a local terminal window attached to the remote daemon session through SSH. Remote browser sessions that target a daemon-local service open through an SSH local forward. Remote editor actions open the daemon worktree through the configured SSH-capable editor.
-- Each device stores workspaces under its own workspace root by default. The default root is `~/.spaces/workspaces/` for installed macOS and Linux daemons.
+- Each device stores workspaces under its own workspace root by default. The default root is `~/spaces/workspaces/` for installed macOS and Linux daemons, with app-managed git clones under `~/spaces/repos/`.
 
 ## Workspaces
 
@@ -158,11 +155,9 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The Mac user settings open as a floating dialog window with a two-panel layout: a header bar with the Settings title and a close control, a left navigation list of General, Shortcuts, Devices, and MCP sections, and the selected section's content in the right panel. The dialog floats over the main window, leaving the current sidebar selection and detail pane untouched. The General section holds the preferred editor and window focus pulse controls, and the Shortcuts section holds the keyboard shortcut editor. The MCP section shows per-client `spaces mcp` configuration in tabs for Claude Code and Codex, using the resolved CLI path; the configuration is a read-only block the user selects to copy.
 - The Mac sidebar should expose a Devices action next to user settings; it opens the settings dialog on the Devices section. The Devices section lists connected daemons, includes the local Mac daemon when it is available, lets the user choose the active daemon for the home surface, offers a per-device QR pairing window for iPhone and iPad clients, and includes an SSH target form for connecting this Mac to a remote daemon. If the daemon control endpoint is unavailable, the section should show an inline status instead of a system error.
 - A device's default name is its machine name. Connected devices can be renamed from either client: right-click a connected device (long-press on iOS) and choose Rename to edit the name in place, then press Return to save or Esc to cancel. Removing a connected device asks for confirmation before disconnecting and forgetting its pairing.
-- `ghostty-embedded` terminal sessions should remain service-owned at the session boundary for built-in Spaces terminals: the service host owns the PTY, terminal parsing, output capture, attachment leases, and input or resize authority, while windows and other clients attach by stable session ID.
 - Built-in process windows should keep a compact metadata header instead of expanding to fit full exported environment wrappers.
-- Native Spaces terminal windows should attach to an existing service-owned session without restarting the shell. Local-session windows subscribe to the daemon-owned session state stream, and remote-device windows use the owning daemon endpoint over SSH-backed transport for state refreshes and control requests while preserving owner handoff compatibility, final Ghostty renders, and metadata synchronization.
+- Native Spaces terminal windows should attach to an existing terminal session without restarting the shell, including windows for remote-device sessions.
 - Native Spaces terminal windows should not show session metadata chrome such as session ID, cwd, shell, command, renderer, or runtime state during regular use. That information may remain available to diagnostics and tests.
-- Daemon-owned macOS client windows should render directly from service-published Ghostty render frames while the session is live. `output.log`, raw output bytes, and snapshot-to-VT encoding are reserved away from terminal UI rendering and are never used as terminal-rendering fallbacks.
 - Owner macOS terminal windows should support standard terminal edit and find shortcuts: `Cmd+V` pastes, `Cmd+C` copies the Ghostty selection, `Cmd+A` selects terminal content, `Cmd+F` opens terminal find, `Cmd+E` searches from the current selection, `Cmd+G` and `Cmd+Shift+G` navigate matches, and `Esc` closes find while returning focus to the terminal. Terminal-control shortcuts such as `Ctrl+C`, `Cmd+K`, `Cmd+Left`, `Cmd+Right`, and modified Backspace remain terminal input or terminal-owned actions.
 - Owner macOS terminal windows should open Ghostty-detected terminal links through the system. `http` and `https` links open as URLs, while `file://` links and absolute file paths open as files. Hovered terminal links should show the pointer cursor affordance.
 - Attached terminal windows should follow live session metadata where possible, including title and working directory updates emitted by the session backend instead of staying frozen at launch-time values.
@@ -179,7 +174,6 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The iOS client should discover nearby daemons, authenticate once from a `spaces://` pairing link, store the issued credential, transport key, and daemon endpoint fingerprint, reconnect without prompting on later launches, treat bundle identity as policy metadata, and clear the stored credential with a re-pair prompt if the daemon later rejects that client token or endpoint identity.
 - The iOS recovery action should require an existing paired daemon connection. It recovers only the Mac app process after a quit or crash while macOS `spacesd` remains reachable; daemon crashes, network loss, and unpaired clients still require normal recovery or pairing.
 - The iOS client should browse live workspace terminal sessions and ended Spaces-backed process or coding-agent rows that still have a tracked terminal identity. Live rows auto-attempt ownership takeover when opened and render one session at a time through a Ghostty render-frame backed terminal view only after ownership is acquired. Ended rows are read-only, skip attach, takeover, input, resize, and reconnect loops, and show the persisted final Ghostty render when one is available.
-- iOS owner rendering should bootstrap from the live Ghostty render frame and update from service-published render frames. Raw output history and incremental output byte rendering are not used for terminal rendering.
 - The iOS terminal detail chrome should keep a stable height across owner preparation, takeover, and ready states so status changes do not resize the terminal viewport after ownership handoff.
 - The iOS terminal detail chrome should show the selected process, coding-agent, or workspace-terminal row name when the session maps to a workspace runtime row. Runtime lifecycle controls should live behind a compact trailing `...` menu with run, restart, and stop actions when available.
 - The iOS terminal keyboard accessory should use a compact fixed-height toolbar: the scrollable key strip is ordered `tab`, `/`, `~`, `|`, `-`, `_`, `esc`, `ctrl`, `cmd`, `opt`, iPhone uses tighter button widths and spacing than iPad, and a single arrow-key joystick plus the keyboard hide/show control stay pinned on the trailing edge. The joystick is a relative thumbstick: the touch-down point is neutral, so sliding the finger toward a direction sends that arrow key and holding the slide repeats it so the cursor moves many steps, while a stationary tap sends nothing. Modifier keys apply to the next compatible text, arrow, or Backspace input for terminal line-editing chords, and `cmd+k` clears the terminal-owned screen and scrollback.
@@ -195,7 +189,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - A terminal session may have one active owner client and one or more non-owner viewer attachments recorded at the same time.
 - Closing a process or coding-agent built-in terminal window detaches that native window while preserving the runtime and session identity for later focus. Closing an ad hoc workspace terminal window terminates its service-owned terminal session. Stopping a workspace also terminates ad hoc built-in terminal sessions owned by that workspace.
 - Ad hoc built-in terminal sessions should stay alive while any local client or recently active remote/device client remains attached and should clean up once the final live attachment detaches or expires unless the user explicitly closes the terminal window or stops the workspace.
-- Only the active owner client may send input or control PTY size. Owner input and resize requests must carry the accepted owner epoch, and resize requests must carry a monotonically increasing resize serial so stale owners or stale resize events are ignored.
+- Only the active owner client may send input or resize the terminal; stale owners and stale resize events are ignored.
 - The Mac app should remain alive while it coordinates native windows or client-driven terminal ownership changes even if the main window is hidden or the app is backgrounded.
 - Live non-owner terminal windows on macOS and iOS should show takeover and status UI instead of terminal content. The macOS viewer window presents a concise centered status message plus a Take Over action rather than the full session detail stack. If the session has already ended and a final Ghostty render is available, that final render may still be shown with terminal-ended chrome.
 - The New Workspace form opens in its own dialog window with the same header and chrome as the Settings and New Project windows, dismissed with the close button, Cancel, or `Esc`.
@@ -232,7 +226,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Restart performs a stop followed by a fresh launch.
 - `workspace start` is the idempotent "ensure running" path:
   - if stopped, it launches the workspace
-  - if running, it restores failed or exited runtime as defined by the command mode
+  - if running, it restores failed or exited runtime
 - `workspace restart` forces a full restart
 - Launch should wait for setup to finish and should surface setup failures clearly.
 - Workspaces with setup `pending`, `running`, or `failed` show a setup recovery screen instead of normal workspace detail controls.
@@ -252,7 +246,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Workspaces map to captured window sets managed through yabai.
 - Spaces should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
-- When focusing an already-open browser session, Spaces should activate Chrome and select the first tab in that tracked window.
+- When focusing an already-open browser session, Spaces should activate Chrome and select the tab whose URL matches the session, falling back to the first tab in that tracked window when no matching tab is found.
 - Terminal focus should land on the intended dedicated process or agent session.
 - Focusing a tracked external window should flash a short semitransparent overlay on top of the target window.
 - The focus-pulse overlay color should be configured from the GUI settings panel.
@@ -326,7 +320,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 
 ## Coding-Agent Integration
 - Coding agents can explicitly report lifecycle events through `spaces agent signal --workspace <id> --session <terminal-session-id> <event>`.
-- Agent status events are not implied by `import`, `start`, or `restart`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
+- Agent status events are not implied by workspace creation, `start`, or `restart`, but workspace launch should open any configured coding-agent rows so they appear alongside runtime-managed agents under one `Coding Agents` section.
 - `spaces agent signal` should support explicit `init`, `start`, `waiting`, `done`, and `exit` events.
 - `spaces agent signal` from a terminal should update the owning daemon database for the workspace that owns the session.
 - Agent events that cannot be reliably attributed to a terminal must be dropped, not guessed onto the frontmost window.

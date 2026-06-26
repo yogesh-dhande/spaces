@@ -66,7 +66,7 @@ export default function DocsPage() {
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link
-              href="/"
+              href="/docs/getting-started"
               className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
             >
               Getting Started

@@ -1,32 +1,25 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #f8f7f1;
-  --bg-soft: #f1efe6;
-  --surface: #ffffff;
-  --ink: #102028;
-  --ink-soft: #3a4d57;
-  --line: #d5d8d3;
-  --accent: #0f7a76;
-  --accent-strong: #0d5f5d;
-  /* Terminal-styled code blocks stay dark in both color schemes. */
+  /* Always-dark Terminal palette (from v1), applied site-wide. Teal is primary. */
+  --bg: #0a0f10;
+  --bg-soft: #0e1517;
+  --surface: #111b1d;
+  --ink: #eaf0ef;
+  --ink-soft: #adc0c4;
+  --line: #1d2c2d;
+  --accent: #59dbcd;
+  --accent-strong: #3dc6b8;
+  /* Secondary signal — status, focus, and visual variety so the site isn't all-teal. */
+  --accent-2: #ffc24d;
+  /* Semantic signal for the "without Spaces" comparison column. */
+  --negative: #ff8066;
+  /* Terminal-styled code blocks. */
   --code-surface: #0f1820;
   --code-foreground: #98efc7;
   --font-sans: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
-  --font-mono: "SFMono-Regular", "Menlo", "Consolas", monospace;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0f1517;
-    --bg-soft: #172124;
-    --surface: #1d2a2d;
-    --ink: #eaf0ef;
-    --ink-soft: #adc0c4;
-    --line: #304346;
-    --accent: #59dbcd;
-    --accent-strong: #3dc6b8;
-  }
+  --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @theme inline {
@@ -38,6 +31,8 @@
   --color-line: var(--line);
   --color-accent: var(--accent);
   --color-accent-strong: var(--accent-strong);
+  --color-accent-2: var(--accent-2);
+  --color-negative: var(--negative);
   --color-code-surface: var(--code-surface);
   --color-code-foreground: var(--code-foreground);
   --font-sans: var(--font-sans);
@@ -56,11 +51,12 @@ body {
 body {
   margin: 0;
   color: var(--ink);
-  background:
-    radial-gradient(circle at 90% -20%, color-mix(in oklab, var(--accent) 28%, transparent), transparent 38%),
-    radial-gradient(circle at -10% 25%, color-mix(in oklab, var(--accent) 12%, transparent), transparent 32%),
-    linear-gradient(155deg, var(--bg) 0%, var(--bg-soft) 70%);
-  font-family: var(--font-sans), sans-serif;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(58% 42% at 88% -10%, color-mix(in oklab, var(--accent) 10%, transparent), transparent 70%);
+  font-family: var(--font-mono), monospace;
+  font-size: 15px;
+  line-height: 1.6;
 }
 
 @layer base {
@@ -68,6 +64,40 @@ body {
     color: inherit;
     text-decoration: none;
   }
+
+  /* Focus rings appear instantly — never transitioned. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+}
+
+/* The base theme (mono type + dark Terminal palette) is now global, in :root and body.
+   `.lp` adds only the landing hero's scanline texture and the large display heading sizes. */
+.lp {
+  background-image:
+    linear-gradient(transparent 0 calc(2.2rem - 1px), color-mix(in oklab, var(--line) 38%, transparent) calc(2.2rem - 1px) 2.2rem);
+  background-size: 100% 2.2rem;
+}
+
+.lp h1 {
+  font-size: clamp(2.1rem, 6.5vw, 4.3rem);
+  font-weight: 600;
+  line-height: 1.04;
+  letter-spacing: -0.01em;
+}
+
+.lp h2 {
+  font-size: clamp(1.5rem, 3.5vw, 2.3rem);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+.lp h3 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .btn-primary {

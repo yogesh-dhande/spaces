@@ -14,7 +14,7 @@ const shortcutRows = [
   { shortcut: "cmd+alt+a", action: "Open Alerts", scope: "App" },
   { shortcut: "cmd+n", action: "New workspace for the selected project", scope: "App" },
   { shortcut: "cmd+alt+e", action: "Open the selected workspace in your configured editor", scope: "Global + App" },
-  { shortcut: "cmd+t", action: "Open a terminal for the selected workspace", scope: "App" },
+  { shortcut: "cmd+alt+t", action: "Open a terminal for the selected workspace", scope: "App" },
   { shortcut: "cmd+alt+f", action: "Reveal the selected workspace in Finder", scope: "App" },
   { shortcut: "cmd+1 … cmd+9", action: "Focus workspace window by number", scope: "App" },
 ];
@@ -53,7 +53,7 @@ export default function ShortcutsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">The Leader</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          The leader is the shared modifier — <code>cmd+alt</code> by default — used for workspace and app shortcuts like next/previous workspace, Alerts, editor, and Finder. Change the leader once and all of those move with it.
+          The leader is the shared modifier — <code>cmd+alt</code> by default — used for workspace and app shortcuts like next/previous window, Alerts, editor, new terminal, and Finder. Change the leader once and all of those move with it.
         </p>
       </article>
 

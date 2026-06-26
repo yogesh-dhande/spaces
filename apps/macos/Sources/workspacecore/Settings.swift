@@ -12,8 +12,6 @@ public enum SettingsKey {
     public static let defaultGUILeaderHotkey = "cmd+alt"
     public static let guiAlertsShortcut = "gui_alerts_shortcut"
     public static let defaultGUIAlertsShortcut = "a"
-    public static let guiAddProjectShortcut = "gui_add_project_shortcut"
-    public static let defaultGUIAddProjectShortcut = "cmd+shift+n"
     public static let guiAddWorkspaceShortcut = "gui_add_workspace_shortcut"
     public static let defaultGUIAddWorkspaceShortcut = "cmd+n"
     public static let guiReloadShortcut = "gui_reload_shortcut"
