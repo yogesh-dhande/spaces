@@ -69,10 +69,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             SpacesDeviceAPIRequest(command: .exportProject(.init(projectID: "project-1")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
                 command: .createWorkspace(
-                    .init(
-                        projectID: "project-1", title: "Feature", branch: "feature", baseBranch: "main", directoryName: "feature-dir",
-                        allowExistingBranchReuse: true)), authToken: "SECRET"),
-            SpacesDeviceAPIRequest(command: .runWorkspaceSetup(.init(workspaceID: "workspace-1")), authToken: "SECRET"),
+                    .init(projectID: "project-1", branch: "feature", baseBranch: "main", directoryName: "feature-dir", allowExistingBranchReuse: true)
+                ), authToken: "SECRET"), SpacesDeviceAPIRequest(command: .runWorkspaceSetup(.init(workspaceID: "workspace-1")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
                 command: .updateWorkspaceMetadata(.init(workspaceID: "workspace-1", isHidden: true, updatesHidden: true)), authToken: "SECRET"),
             SpacesDeviceAPIRequest(
@@ -138,9 +136,9 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
-                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, baseBranch: nil, dir: "/repo",
-                    isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, processRows: [processRow],
-                    codingAgentRows: [agentRow], terminalRows: [terminalRow])
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
+                    isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, processRows: [processRow], codingAgentRows: [agentRow],
+                    terminalRows: [terminalRow])
             ], sessions: [session])
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(
@@ -235,8 +233,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
-                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: nil, baseBranch: nil, dir: "/repo",
-                    isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, terminalRows: [row])
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: nil, baseBranch: nil, dir: "/repo", isRunning: true,
+                    isArchived: false, isHidden: false, isDefault: false, sessionCount: 1, terminalRows: [row])
             ], sessions: [])
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(

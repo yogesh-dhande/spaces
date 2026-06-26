@@ -45,7 +45,7 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
         id = workspace.id
         projectID = workspace.projectID
         projectName = workspace.projectName
-        title = workspace.title
+        title = workspace.displayName
         branch = workspace.branch
         baseBranch = workspace.baseBranch
         dir = workspace.dir

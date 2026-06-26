@@ -286,8 +286,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-restart", name: "Restart Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-restart", projectID: project.id, title: "Restart Workspace", dir: projectDir.path, dirname: nil, branch: nil,
-                isDefault: true, isArchived: false, isRunning: true, lastLaunchedAt: "2026-06-18T12:00:00Z")
+                id: "workspace-restart", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+                isRunning: true, lastLaunchedAt: "2026-06-18T12:00:00Z")
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -370,8 +370,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
             let project = ProjectRecord(id: "project-terminal", name: "Terminal Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-terminal", projectID: project.id, title: "Terminal Workspace", dir: projectDir.path, dirname: nil, branch: nil,
-                isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                id: "workspace-terminal", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+                isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -428,8 +428,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let project = ProjectRecord(
                 id: "project-terminal-failure", name: "Terminal Failure Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-terminal-failure", projectID: project.id, title: "Terminal Failure Workspace", dir: projectDir.path, dirname: nil,
-                branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                id: "workspace-terminal-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
+                isArchived: false, isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -490,8 +490,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 id: "project-terminal-overview-failure", name: "Terminal Overview Failure Project", dir: projectDir.path, isGitRepo: false,
                 defaultBranch: nil)
             let workspace = WorkspaceRecord(
-                id: "workspace-terminal-overview-failure", projectID: project.id, title: "Terminal Overview Failure Workspace", dir: projectDir.path,
-                dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+                id: "workspace-terminal-overview-failure", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true,
+                isArchived: false, isRunning: false, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
             let clientApp = SpacesDeviceClientApp(
@@ -950,8 +950,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
         let project = ProjectRecord(id: "project-\(sessionID)", name: "Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
         let workspace = WorkspaceRecord(
-            id: "workspace-\(sessionID)", projectID: project.id, title: "Workspace", dir: workspaceDir.path, dirname: nil, branch: nil,
-            isDefault: true, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-\(sessionID)", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: nil, isDefault: true,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         let paths = try TerminalSessionPaths.forSession(id: sessionID)

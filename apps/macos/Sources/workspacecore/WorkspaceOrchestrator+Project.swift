@@ -127,10 +127,9 @@ extension WorkspaceOrchestrator {
         }
         let record = try configuredProjectRecord(baseRecord: prepared.project, update: configure)
         let defaultWorkspace = WorkspaceRecord(
-            id: prepared.defaultWorkspace.id, projectID: record.id, title: prepared.defaultWorkspace.title, dir: prepared.defaultWorkspace.dir,
-            dirname: prepared.defaultWorkspace.dirname, branch: prepared.defaultWorkspace.branch, baseBranch: prepared.defaultWorkspace.baseBranch,
-            isDefault: true, isArchived: false, isHidden: prepared.defaultWorkspace.isHidden, isRunning: false, lastLaunchedAt: nil,
-            notes: prepared.defaultWorkspace.notes)
+            id: prepared.defaultWorkspace.id, projectID: record.id, dir: prepared.defaultWorkspace.dir, dirname: prepared.defaultWorkspace.dirname,
+            branch: prepared.defaultWorkspace.branch, baseBranch: prepared.defaultWorkspace.baseBranch, isDefault: true, isArchived: false,
+            isHidden: prepared.defaultWorkspace.isHidden, isRunning: false, lastLaunchedAt: nil, notes: prepared.defaultWorkspace.notes)
         try store.upsert(project: record)
         do {
             try store.upsert(workspace: defaultWorkspace)
@@ -220,8 +219,8 @@ extension WorkspaceOrchestrator {
         let workspaceDir = worktreeRoot.appendingPathComponent(branch, isDirectory: true).path
         try git.createWorktree(path: project.dir, worktreePath: workspaceDir, branch: branch, baseBranch: branch)
         return WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, title: branch, dir: workspaceDir, dirname: branch, branch: branch, baseBranch: branch,
-            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: UUID().uuidString, projectID: project.id, dir: workspaceDir, dirname: branch, branch: branch, baseBranch: branch, isDefault: true,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
     }
 
     func applyProjectTemplateToAllWorkspaces(project: ProjectRecord) throws {

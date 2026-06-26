@@ -428,8 +428,8 @@ final class AgentHookTests: XCTestCase {
             browserSessions: [])
         try store.upsert(project: project)
         let workspace = WorkspaceRecord(
-            id: UUID().uuidString, projectID: project.id, title: workspaceName, dir: dir + "/\(workspaceName)", dirname: nil, branch: nil,
-            isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: UUID().uuidString, projectID: project.id, dir: dir + "/\(workspaceName)", dirname: nil, branch: nil, isDefault: true,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         return (project, workspace)
     }

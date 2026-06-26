@@ -70,14 +70,14 @@ struct SpacesDeviceOverviewBuilder {
 
         let workspaceSummaries = workspaces.sorted { lhs, rhs in
             if lhs.project.name != rhs.project.name { return lhs.project.name.localizedStandardCompare(rhs.project.name) == .orderedAscending }
-            return lhs.workspace.title.localizedStandardCompare(rhs.workspace.title) == .orderedAscending
+            return lhs.workspace.displayName.localizedStandardCompare(rhs.workspace.displayName) == .orderedAscending
         }.map { descriptor in
             let runtimeRows = runtimeRows(for: descriptor, availableSessionIDs: availableSessionIDs, sessionsByID: sessionEntriesByID)
             return SpacesDeviceWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
-                title: descriptor.workspace.title, branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch,
-                dir: descriptor.workspace.dir, isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived,
-                isHidden: descriptor.workspace.isHidden, isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
+                branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch, dir: descriptor.workspace.dir,
+                isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived, isHidden: descriptor.workspace.isHidden,
+                isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
                 sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,
                 setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
@@ -88,8 +88,8 @@ struct SpacesDeviceOverviewBuilder {
             if lhs.workspace.project.name != rhs.workspace.project.name {
                 return lhs.workspace.project.name.localizedStandardCompare(rhs.workspace.project.name) == .orderedAscending
             }
-            if lhs.workspace.workspace.title != rhs.workspace.workspace.title {
-                return lhs.workspace.workspace.title.localizedStandardCompare(rhs.workspace.workspace.title) == .orderedAscending
+            if lhs.workspace.workspace.displayName != rhs.workspace.workspace.displayName {
+                return lhs.workspace.workspace.displayName.localizedStandardCompare(rhs.workspace.workspace.displayName) == .orderedAscending
             }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }.map { row in
@@ -136,8 +136,8 @@ struct SpacesDeviceOverviewBuilder {
             id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, state: session.runtimeState.state,
             backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
             servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
-            workspaceTitle: matchedWorkspace?.workspace.title, projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name,
-            createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
+            workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
+            projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
             isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender, daemonEndpoint: matchedWorkspace?.terminalDaemonEndpoint)

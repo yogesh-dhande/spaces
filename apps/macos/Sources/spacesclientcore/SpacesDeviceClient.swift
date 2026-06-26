@@ -174,7 +174,7 @@ public enum SpacesDeviceClient {
     }
 
     public static func createWorkspace(
-        projectID: String, title: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil,
+        projectID: String, branch: String?, baseBranch: String?, directoryName: String? = nil, notes: String? = nil,
         allowExistingBranchReuse: Bool = false, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
@@ -182,7 +182,7 @@ public enum SpacesDeviceClient {
             .init(
                 command: .createWorkspace(
                     .init(
-                        projectID: projectID, title: title, branch: branch, baseBranch: baseBranch, directoryName: directoryName, notes: notes,
+                        projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName, notes: notes,
                         allowExistingBranchReuse: allowExistingBranchReuse))), device: device, clientApp: clientApp, profile: profile)
     }
 
@@ -240,17 +240,16 @@ public enum SpacesDeviceClient {
     }
 
     public static func updateWorkspaceMetadata(
-        workspaceID: String, title: String? = nil, branch: String? = nil, notes: String? = nil, updatesTitle: Bool = false,
-        updatesBranch: Bool = false, updatesNotes: Bool = false, isHidden: Bool? = nil, updatesHidden: Bool = false, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String, branch: String? = nil, notes: String? = nil, updatesBranch: Bool = false, updatesNotes: Bool = false,
+        isHidden: Bool? = nil, updatesHidden: Bool = false, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
             .init(
                 command: .updateWorkspaceMetadata(
                     .init(
-                        workspaceID: workspaceID, title: title, branch: branch, notes: notes, updatesTitle: updatesTitle,
-                        updatesBranch: updatesBranch, updatesNotes: updatesNotes, isHidden: isHidden, updatesHidden: updatesHidden))), device: device,
-            clientApp: clientApp, profile: profile)
+                        workspaceID: workspaceID, branch: branch, notes: notes, updatesBranch: updatesBranch, updatesNotes: updatesNotes,
+                        isHidden: isHidden, updatesHidden: updatesHidden))), device: device, clientApp: clientApp, profile: profile)
     }
 
     public static func openWorkspaceTerminal(

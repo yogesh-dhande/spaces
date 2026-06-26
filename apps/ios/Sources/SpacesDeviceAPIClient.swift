@@ -140,7 +140,6 @@ struct SpacesDeviceAPIClient: Sendable {
 
     func createWorkspace(
         projectID: String,
-        title: String,
         branch: String?,
         baseBranch: String?,
         directoryName: String?,
@@ -152,7 +151,6 @@ struct SpacesDeviceAPIClient: Sendable {
                 command: .createWorkspace(
                     .init(
                         projectID: projectID,
-                        title: title,
                         branch: branch,
                         baseBranch: baseBranch,
                         directoryName: directoryName,

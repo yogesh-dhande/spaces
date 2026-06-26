@@ -1336,16 +1336,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func handleCreateWorkspaceRequest(_ request: SpacesDeviceWorkspaceCreateRequest) throws -> SpacesDeviceAPIResponse {
         let projectID = request.projectID
-        let title = request.title
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
         let project = try store.project(id: projectID)
         let workspace = try orchestrator.createWorkspace(
-            projectID: projectID, name: title, branch: normalizedString(request.branch), baseBranch: normalizedString(request.baseBranch),
+            projectID: projectID, branch: normalizedString(request.branch), baseBranch: normalizedString(request.baseBranch),
             directoryName: normalizedString(request.directoryName), runSetupScript: true, allowRemoteBranchLookup: true,
             allowExistingBranchReuse: request.allowExistingBranchReuse)
         if let notes = normalizedOptionalString(request.notes) { try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes) }
-        let message = "Created workspace '\(workspace.title)'\(project.map { " in \($0.name)" } ?? "")."
+        let message = "Created workspace '\(workspace.displayName)'\(project.map { " in \($0.name)" } ?? "")."
         return try refreshedMutationResponse(message: message, workspaceID: workspace.id)
     }
 
@@ -1409,12 +1408,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleUpdateWorkspaceMetadataRequest(_ request: SpacesDeviceWorkspaceMetadataUpdateRequest) throws -> SpacesDeviceAPIResponse {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
-        if request.updatesTitle {
-            guard let title = normalizedString(request.title) else {
-                return SpacesDeviceAPIResponse(ok: false, message: "Workspace title is required.")
-            }
-            try orchestrator.updateWorkspaceName(workspaceID: request.workspaceID, name: title)
-        }
         if request.updatesBranch {
             try orchestrator.updateWorkspaceMetadata(workspaceID: request.workspaceID, branch: normalizedString(request.branch) ?? "")
         }
@@ -1950,7 +1943,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 }
             }
         }
-
 
         private func closeStreamRelay(connection: NWConnection, cancelNetworkConnection: Bool = true) {
             let key = ObjectIdentifier(connection)

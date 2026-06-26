@@ -49,7 +49,7 @@ apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces --help
 apps/macos/.build/debug/spacese2e --help
 apps/macos/.build/debug/spaces project list
-apps/macos/.build/debug/spaces workspace create --project <project-id> --branch debug --title "debug"
+apps/macos/.build/debug/spaces workspace create --project <project-id> --branch debug
 apps/macos/.build/debug/spaces workspace restart --workspace <workspace-id>
 ```
 

@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -55,6 +55,9 @@ public enum DatabaseSchema {
                       'window_focus_pulse_enabled'
                     );
                     """)
+        },
+        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop workspace title column", requiresBackup: true) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE workspaces DROP COLUMN title")
         },
     ]
 
@@ -238,7 +241,6 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
-              title TEXT NOT NULL,
               dir TEXT NOT NULL,
               runtime_path TEXT NOT NULL,
               dirname TEXT,

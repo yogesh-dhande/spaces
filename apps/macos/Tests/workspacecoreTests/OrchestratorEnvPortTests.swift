@@ -70,8 +70,8 @@ extension OrchestratorTests {
         try store.upsert(project: importedProject)
         try store.upsert(
             workspace: WorkspaceRecord(
-                id: UUID().uuidString, projectID: importedProject.id, title: "main", dir: importedWorkspaceDir, dirname: "main", branch: "main",
-                baseBranch: "main", isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+                id: UUID().uuidString, projectID: importedProject.id, dir: importedWorkspaceDir, dirname: "main", branch: "main", baseBranch: "main",
+                isDefault: true, isArchived: false, isRunning: false, lastLaunchedAt: nil))
 
         try orchestrator.rollbackFailedImportedProjectCreation(project: importedProject, workspaceDirectory: importedWorkspaceDir)
 
@@ -129,7 +129,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "setupcmd" }
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, runSetupScript: false)
 
         try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)
 
@@ -290,14 +290,14 @@ extension OrchestratorTests {
     }
 
     func testImportSpacesYAMLUpdatesActiveAndArchivedWorkspacesWhenWorkspaceSyncIsOn() throws {
+        let repo = try makeTempGitRepo(name: "import-sync-archived")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "active")
-        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "archived")
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
+        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "active")
+        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "archived")
         _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
         try spacesYAMLFixture(stopScript: "echo synced-stop").write(
             to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
@@ -328,7 +328,7 @@ extension OrchestratorTests {
             config.agentLaunchers = [AgentLauncher(name: "Old Codex", command: "old-codex")]
         }
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
-        let conflictWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "conflict")
+        let conflictWorkspace = try orchestrator.createWorkspace(projectID: project.id)
         defer {
             PortReserver.shared.releasePorts(workspaceID: defaultWorkspace.id)
             PortReserver.shared.releasePorts(workspaceID: conflictWorkspace.id)
@@ -399,7 +399,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
         XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], "/tmp/project/ws")
     }
@@ -409,7 +409,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
         XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/tmp/project")
     }
@@ -419,7 +419,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
         let scopedKeys = env.keys.filter { $0.hasPrefix("spaces_") || $0.hasPrefix("SPACES_PROJECT_") && $0.hasSuffix("_WORKSPACE_DIR") }
         XCTAssertTrue(scopedKeys.isEmpty, "Expected no scoped cross-project keys, found: \(scopedKeys)")
@@ -430,7 +430,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let ports: [(port: Int, name: String)] = [(port: 3000, name: "FRONTEND_PORT"), (port: 8080, name: "API_PORT")]
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: ports)
         XCTAssertEqual(env["FRONTEND_PORT"], "3000")
@@ -443,7 +443,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
 
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
 
@@ -454,7 +454,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/tmp/project/ws")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let ports: [(port: Int, name: String)] = [(port: 3000, name: " "), (port: 8080, name: "API_PORT")]
 
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: ports)
@@ -502,7 +502,7 @@ extension OrchestratorTests {
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/workspaces/myapp/dev")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/workspaces/myapp/dev")
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20002], names: ["FRONTEND_PORT"])
 
@@ -517,7 +517,7 @@ extension OrchestratorTests {
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/workspaces/myapp/dev")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/workspaces/myapp/dev")
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["FRONTEND_PORT", "BACKEND_PORT"])
 
@@ -532,7 +532,7 @@ extension OrchestratorTests {
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/workspaces/myapp/dev")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/workspaces/myapp/dev")
         try store.upsert(workspace: workspace)
 
         let resolved = try orchestrator.resolveEnvVars(in: "npm start", workspaceID: workspace.id)
@@ -546,7 +546,7 @@ extension OrchestratorTests {
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/workspaces/myapp/dev")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/workspaces/myapp/dev")
         try store.upsert(workspace: workspace)
 
         let resolved = try orchestrator.resolveEnvVars(in: "cd $SPACES_WORKSPACE_DIR && npm start", workspaceID: workspace.id)
@@ -574,7 +574,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/projects/myapp")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/myapp")
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["FRONTEND", "BACKEND"])
 
@@ -615,7 +615,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/projects/app")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["PORT", "API_PORT"])
         try store.setWorkspaceBrowserSessions(

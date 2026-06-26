@@ -8,10 +8,9 @@ extension SQLiteStore {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO workspaces(id, project_id, title, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO workspaces(id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
-                      title = excluded.title,
                       dir = excluded.dir,
                       runtime_path = excluded.runtime_path,
                       dirname = excluded.dirname,
@@ -25,9 +24,9 @@ extension SQLiteStore {
                       notes = excluded.notes
                     """,
                 bindings: [
-                    workspace.id, workspace.projectID, workspace.title, workspace.dir, workspace.runtimePath, workspace.dirname ?? "",
-                    workspace.branch ?? "", workspace.baseBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0",
-                    workspace.isHidden ? "1" : "0", workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.notes ?? "",
+                    workspace.id, workspace.projectID, workspace.dir, workspace.runtimePath, workspace.dirname ?? "", workspace.branch ?? "",
+                    workspace.baseBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
+                    workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.notes ?? "",
                 ])
             try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
         }
@@ -37,20 +36,9 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
-        else { return nil }
-        return decodeWorkspace(row: row)
-    }
-
-    public func workspace(projectID: String, title: String) throws -> WorkspaceRecord? {
-        guard
-            let row = try queryRow(
-                sql: """
-                    SELECT id, project_id, title, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
-                    FROM workspaces WHERE project_id = ? AND title = ?
-                    """, bindings: [projectID, title])
         else { return nil }
         return decodeWorkspace(row: row)
     }
@@ -59,7 +47,7 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, title, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                     FROM workspaces
                     WHERE dir = ?
                     ORDER BY is_archived ASC
@@ -72,10 +60,10 @@ extension SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, title, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
-                ORDER BY is_default DESC, title
+                ORDER BY is_default DESC, branch
                 """, bindings: [projectID, includeArchived ? "1" : "0"])
         return rows.compactMap { decodeWorkspace(row: $0) }
     }
@@ -138,20 +126,12 @@ extension SQLiteStore {
         try execute(sql: "UPDATE workspaces SET notes = ? WHERE id = ?", bindings: [notes ?? "", id])
     }
 
-    public func updateWorkspaceTitle(id: String, title: String) throws {
-        try execute(sql: "UPDATE workspaces SET title = ? WHERE id = ?", bindings: [title, id])
-    }
-
     public func updateWorkspaceBranch(id: String, branch: String?) throws {
         try execute(sql: "UPDATE workspaces SET branch = ? WHERE id = ?", bindings: [branch ?? "", id])
     }
 
     public func updateWorkspaceDirname(id: String, dirname: String?) throws {
         try execute(sql: "UPDATE workspaces SET dirname = ? WHERE id = ?", bindings: [dirname ?? "", id])
-    }
-
-    public func updateWorkspaceName(id: String, name: String) throws {
-        try execute(sql: "UPDATE workspaces SET title = ? WHERE id = ?", bindings: [name, id])
     }
 
     public func setWorkspaceProcesses(workspaceID: String, processes: [ProcessTemplate]) throws {
@@ -287,11 +267,11 @@ extension SQLiteStore {
     }
 
     func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
-        guard row.count >= 14 else { return nil }
+        guard row.count >= 13 else { return nil }
         return WorkspaceRecord(
-            id: row[0], projectID: row[1], title: row[2], dir: row[3], runtimePath: row[4].isEmpty ? row[3] : row[4],
-            dirname: row[5].isEmpty ? nil : row[5], branch: row[6].isEmpty ? nil : row[6], baseBranch: row[7].isEmpty ? nil : row[7],
-            isDefault: row[8] == "1", isArchived: row[9] == "1", isHidden: row[10] != "0", isRunning: row[11] == "1",
-            lastLaunchedAt: row[12].isEmpty ? nil : row[12], notes: row[13].isEmpty ? nil : row[13])
+            id: row[0], projectID: row[1], dir: row[2], runtimePath: row[3].isEmpty ? row[2] : row[3], dirname: row[4].isEmpty ? nil : row[4],
+            branch: row[5].isEmpty ? nil : row[5], baseBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1",
+            isHidden: row[9] != "0", isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11],
+            notes: row[12].isEmpty ? nil : row[12])
     }
 }

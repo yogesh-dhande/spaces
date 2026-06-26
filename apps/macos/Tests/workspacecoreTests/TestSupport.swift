@@ -39,10 +39,9 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
         browserSessions: [])
 }
 
-func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, title: String, dir: String) -> WorkspaceRecord {
+func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String) -> WorkspaceRecord {
     WorkspaceRecord(
-        id: id, projectID: projectID, title: title, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
-        lastLaunchedAt: nil)
+        id: id, projectID: projectID, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
 }
 
 final class MockTerminalFocusPulseController: TerminalFocusPulseControlling, @unchecked Sendable {

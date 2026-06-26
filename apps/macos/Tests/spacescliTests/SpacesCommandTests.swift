@@ -20,12 +20,11 @@ final class SpacesCommandTests: XCTestCase {
 
     func testWorkspaceCreateParsesDeviceScopedArguments() throws {
         let command = try WorkspaceCreateCommand.parse([
-            "--project", "project-1", "--branch", "feature/a", "--title", "Feature A", "--base-branch", "main", "--existing-branch",
+            "--project", "project-1", "--branch", "feature/a", "--base-branch", "main", "--existing-branch",
         ])
 
         XCTAssertEqual(command.project, "project-1")
         XCTAssertEqual(command.branch, "feature/a")
-        XCTAssertEqual(command.title, "Feature A")
         XCTAssertEqual(command.baseBranch, "main")
         XCTAssertTrue(command.existingBranch)
     }

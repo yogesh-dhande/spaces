@@ -62,19 +62,19 @@ extension OrchestratorTests {
     }
 
     func testPendingSetupBlocksManagedRuntimeLaunchesButAllowsWorkspaceTerminalReservation() throws {
+        let repo = try makeTempGitRepo(name: "pending-setup-blocks")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.setupScript = "echo setup"
             config.processes = [ProcessTemplate(name: "web", command: "echo web")]
             config.agentLaunchers = [AgentLauncher(name: "Codex", command: "echo codex")]
             config.browserSessions = [BrowserSession(name: "App", url: "http://localhost:3000")]
         }
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature", runSetupScript: false)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
 
         func assertSetupBlocked(_ operation: () throws -> Void, file: StaticString = #filePath, line: UInt = #line) {
@@ -118,7 +118,7 @@ extension OrchestratorTests {
             store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
             builtInTerminalSessionLauncher: { _ in throw WorkspaceError.invalidArgument(message: "launcher failed") })
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
         let paths = try TerminalSessionPaths.forSession(id: reservation.sessionID)
 
@@ -150,7 +150,7 @@ extension OrchestratorTests {
                 throw WorkspaceError.invalidArgument(message: "launcher should not run")
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
         let paths = try TerminalSessionPaths.forSession(id: reservation.sessionID)
 
@@ -208,7 +208,7 @@ extension OrchestratorTests {
                         updatedAt: "2026-05-09T18:00:00Z"), paths: paths)
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -228,7 +228,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try store.upsert(
             window: WindowRecord(
@@ -259,7 +259,7 @@ extension OrchestratorTests {
                         updatedAt: "2026-05-17T18:00:00Z"), paths: paths)
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -543,7 +543,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
@@ -595,7 +595,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
@@ -646,7 +646,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Google", url: "https://google.com")])
@@ -729,7 +729,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         try store.upsert(
@@ -793,7 +793,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         let sessionID = "spaces-ad-hoc-session"
@@ -838,7 +838,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         let sessionID = "spaces-ad-hoc-session-stale-remote"
@@ -883,7 +883,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         let sessionID = "spaces-ad-hoc-session-closed"
@@ -1028,17 +1028,17 @@ extension OrchestratorTests {
 
     // Tests refresh all workspace windows skips archived workspaces by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsSkipsArchivedWorkspaces() throws {
+        let repo = try makeTempGitRepo(name: "refresh-skip-archived")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
-        let project = try orchestrator.addProject(dir: projectDir.path)
+        let project = try orchestrator.addProject(dir: repo.path)
         let defaultWorkspace = try XCTUnwrap(
             try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false).first(where: { $0.isDefault }))
-        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, name: "archived")
+        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "active")
+        let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "archived")
         _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
 
         try store.upsert(
@@ -1210,7 +1210,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         let updatedProject = try orchestrator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { config in
             config.stopScript = "echo reviewed-stop"
@@ -1235,7 +1235,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-live-session"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -1266,8 +1266,8 @@ extension OrchestratorTests {
         let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
         try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
         let project = makeProjectRecord(dir: parentDir.path)
-        let parentWorkspace = makeWorkspaceRecord(projectID: project.id, title: "parent", dir: parentDir.path)
-        let childWorkspace = makeWorkspaceRecord(projectID: project.id, title: "child", dir: childDir.path)
+        let parentWorkspace = makeWorkspaceRecord(projectID: project.id, dir: parentDir.path)
+        let childWorkspace = makeWorkspaceRecord(projectID: project.id, dir: childDir.path)
         try store.upsert(project: project)
         try store.upsert(workspace: parentWorkspace)
         try store.upsert(workspace: childWorkspace)
@@ -1358,7 +1358,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", windowID: 707, role: "terminal", orderIndex: 0,
@@ -1425,7 +1425,7 @@ extension OrchestratorTests {
 
         let project = makeProjectRecord(dir: projectDir.path)
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "raw", dir: projectDir.path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir.path)
         try store.upsert(workspace: workspace)
 
         // workspaceSettings seeds defaults when no settings exist; returns an empty (non-nil) settings object.
@@ -1466,8 +1466,8 @@ extension OrchestratorTests {
         let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
         let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
         let archived = WorkspaceRecord(
-            id: defaultWS.id, projectID: project.id, title: defaultWS.title, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch,
-            isDefault: true, isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
+            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true,
+            isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
         try store.upsert(workspace: archived)
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: defaultWS.id)).isArchived)
 
@@ -1493,8 +1493,8 @@ extension OrchestratorTests {
         // Insert a default workspace directly without going through seedWorkspaceSettings.
         let workspaceID = UUID().uuidString
         let workspaceRecord = WorkspaceRecord(
-            id: workspaceID, projectID: normalizedDir, title: "default", dir: normalizedDir, dirname: nil, branch: nil, isDefault: true,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 
@@ -1512,7 +1512,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Archive the workspace directly via the store.
         try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
@@ -1555,7 +1555,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/projects/app")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
@@ -1575,7 +1575,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, title: "dev", dir: "/projects/app", runtimePath: "/projects/app", dirname: nil, branch: "main",
+            id: "workspace-a", projectID: project.id, dir: "/projects/app", runtimePath: "/projects/app", dirname: nil, branch: "main",
             baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
@@ -1592,7 +1592,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/projects/app")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
         try store.setWorkspaceBrowserSessions(
@@ -1613,7 +1613,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/projects/app")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id, sessions: [BrowserSession(name: "App", url: "http://localhost:3000"), BrowserSession(name: "NoURL", url: nil)])
@@ -1629,7 +1629,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "dev", dir: "/projects/app")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
         try store.setWorkspaceBrowserSessions(

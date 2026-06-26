@@ -440,8 +440,7 @@ import workspacecore
                 throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(projectID).")
             }
             let workspace = try orchestrator.createWorkspaceOnDevice(
-                projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch, baseBranch: command.baseBranch,
-                allowExistingBranchReuse: command.existingBranch ?? false)
+                projectID: project.id, branch: branch, baseBranch: command.baseBranch, allowExistingBranchReuse: command.existingBranch ?? false)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
         case .workspaceStart:
             let orchestrator = try makeProfileOrchestrator()
@@ -537,8 +536,8 @@ import workspacecore
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, title: value.title, dir: value.dir, runtimePath: value.runtimePath, dirname: value.dirname,
-            branch: value.branch, baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
+            id: value.id, projectID: value.projectID, dir: value.dir, runtimePath: value.runtimePath, dirname: value.dirname, branch: value.branch,
+            baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
             isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
 

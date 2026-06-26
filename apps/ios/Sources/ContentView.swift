@@ -413,7 +413,7 @@ struct ContentView: View {
 
     private func workspaceHeader(_ group: SpacesMobileWorkspaceGroup) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(group.workspace.title)
+            Text(group.workspace.displayName)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
@@ -807,7 +807,6 @@ private struct WorkspaceCreateSheet: View {
     let projectID: String
 
     @State private var branch = ""
-    @State private var name = ""
 
     private var project: SpacesDeviceProjectSummary? {
         let projects = model.workspaceCreateOptions?.projects ?? model.overview?.projects ?? []
@@ -816,11 +815,10 @@ private struct WorkspaceCreateSheet: View {
 
     private var isGitRepo: Bool { project?.isGitRepo == true }
 
+    // Only git projects support creating workspaces; a non-git project owns a single
+    // workspace (its project directory).
     private var canCreate: Bool {
-        if isGitRepo {
-            return !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        isGitRepo && !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -833,10 +831,9 @@ private struct WorkspaceCreateSheet: View {
                             .autocorrectionDisabled()
                     }
                 } else {
-                    Section("Name") {
-                        TextField("workspace name", text: $name)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                    Section {
+                        Text("Non-git projects have a single workspace for the project directory.")
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -849,12 +846,10 @@ private struct WorkspaceCreateSheet: View {
                     Button(model.isMutating ? "Creating..." : "Create") {
                         Task {
                             let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
                             await model.createWorkspace(
                                 projectID: projectID,
-                                title: isGitRepo ? trimmedBranch : trimmedName,
-                                branch: isGitRepo ? trimmedBranch : nil,
-                                baseBranch: isGitRepo ? project?.defaultBranch : nil,
+                                branch: trimmedBranch,
+                                baseBranch: project?.defaultBranch,
                                 directoryName: nil,
                                 allowExistingBranchReuse: false
                             )
