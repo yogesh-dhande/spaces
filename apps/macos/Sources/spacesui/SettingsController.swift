@@ -21,8 +21,7 @@ import workspacecore
 /// controller renders it by delegating to `host.renderDeviceSettings(...)`, and the
 /// host's device-pairing code drives the open settings window back through this
 /// controller's window/section state.
-@MainActor
-final class SettingsController: NSObject {
+@MainActor final class SettingsController: NSObject {
     unowned let host: AppKitController
 
     init(host: AppKitController) {
@@ -319,6 +318,7 @@ final class SettingsController: NSObject {
         let resetColorButton = host.actionButton(
             title: "Reset", symbol: nil, tooltip: "Reset to default color (\(SettingsKey.defaultWindowFocusPulseColor))",
             action: #selector(resetWindowPulseColor(_:)), primary: false)
+        resetColorButton.target = self
         let colorControlRow = NSStackView()
         colorControlRow.orientation = .horizontal
         colorControlRow.alignment = .centerY
