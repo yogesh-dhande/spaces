@@ -57,6 +57,27 @@ final class EditorLauncherTests: XCTestCase {
         }
     }
 
+    // Tests a launch pins TMPDIR to the stable per-user temp instead of leaking an ephemeral
+    // TMPDIR (e.g. a per-step harness temp), which would break editors that write SSH askpass
+    // scripts under TMPDIR.
+    func testLaunchPinsStableTemporaryDirectory() throws {
+        let root = try makeTempDirectory()
+        let seen = root.appendingPathComponent("seen-tmpdir")
+        let cli = root.appendingPathComponent("editor-cli")
+        try "#!/bin/bash\nprintf '%s' \"${TMPDIR:-}\" > \"\(seen.path)\"\n".write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+
+        let ephemeral = try makeTempDirectory().path
+        let original = ProcessInfo.processInfo.environment["TMPDIR"]
+        setenv("TMPDIR", ephemeral, 1)
+        defer { if let original { setenv("TMPDIR", original, 1) } else { unsetenv("TMPDIR") } }
+
+        try EditorLauncher.open(cliExecutablePath: cli.path, directory: "/tmp/workspace")
+        let pinned = try String(contentsOf: seen)
+        XCTAssertFalse(pinned.isEmpty)
+        XCTAssertNotEqual(pinned, ephemeral, "editor launch must not propagate an ephemeral TMPDIR")
+    }
+
     /// Creates a temp executable that records its pipe-joined arguments to a log file and
     /// exits with `exitCode`, standing in for a real editor CLI without launching an app.
     private func makeLoggingCLI(exitCode: Int32 = 0) throws -> (path: String, log: URL) {
