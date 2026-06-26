@@ -1,8 +1,8 @@
 import Foundation
 import Testing
-import spacesterminalcore
 import workspacecore
 
+@testable import spacesterminalcore
 @testable import spacesui
 
 @Suite struct AppKitControllerLifecycleTests {
@@ -50,20 +50,24 @@ import workspacecore
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        // The teardown decision is driven entirely by the explicit `paths` below, so no process-global
-        // SPACES_DB_PATH override is needed — keeping it out lets this suite run race-free under parallel.
+        // `TerminalSessionPersistence` resolves its database through the active profile, not the passed
+        // `paths`. Bind the task-local override to an isolated database so this test never touches the
+        // developer profile and stays deterministic under parallel execution without mutating the process
+        // environment.
         let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            TerminalSessionLaunchConfiguration(
-                sessionID: "ad-hoc-lifecycle-\(UUID().uuidString)", title: "Terminal", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                createdAt: "2026-06-04T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.$databasePathOverrideForTesting.withValue(root.appendingPathComponent("spaces.db").path) {
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: "ad-hoc-lifecycle-\(UUID().uuidString)", title: "Terminal", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                    createdAt: "2026-06-04T00:00:00Z"), paths: paths)
 
-        #expect(
-            AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
-        #expect(
-            !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
+            #expect(
+                AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
+                    paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
+            #expect(
+                !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
+                    paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
+        }
     }
 
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {

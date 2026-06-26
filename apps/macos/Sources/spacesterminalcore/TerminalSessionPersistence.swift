@@ -887,7 +887,15 @@ public enum TerminalSessionPersistence {
         return try body(database)
     }
 
-    private static func databasePath(for _: TerminalSessionPaths) throws -> String { try SpacesProfile.current().databasePath }
+    /// Test-only seam: when bound, terminal-session persistence resolves its database here instead of the
+    /// active profile, letting tests isolate state without mutating the process-global SPACES_DB_PATH. It is
+    /// task-local so concurrent test suites never observe each other's binding.
+    @TaskLocal static var databasePathOverrideForTesting: String?
+
+    private static func databasePath(for _: TerminalSessionPaths) throws -> String {
+        if let databasePathOverrideForTesting { return databasePathOverrideForTesting }
+        return try SpacesProfile.current().databasePath
+    }
 
     private static func normalizedRootDirectory(_ rootDirectory: String) -> String {
         URL(fileURLWithPath: rootDirectory, isDirectory: true).standardizedFileURL.path
