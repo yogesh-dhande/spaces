@@ -1,26 +1,42 @@
 # AGENTS.md
 
-## Purpose
-- Use this file for coding workflow, verification, and implementation guardrails.
+## Docs
 - Put product behavior from the user's point of view in `docs/spec.md`.
+    - Update `docs/spec.md` when UX or user-visible behavior changes.
 - Put implementation details and the rationale behind design choices in `docs/implementation.md`.
-- Put UI design and interaction guidelines in `docs/design.md`.
+    - Update `docs/implementation.md` when data flow, persistence, implementation structure, or the rationale behind a design choice changes.
+- Put general design system guidelines in `docs/design.md`.
+    - Update `docs/design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
 - Put product overview and adoption pitch in `README.md`.
+    - Update `README.md` when the product overview, feature list, or adoption pitch changes.
 - Put repository development, build, and deploy workflows in `docs/dev.md`.
+    - Update `docs/dev.md` when development, build, deploy, or manual E2E workflows change.
+- Keep docs concise and non-overlapping.
+- Treat `README.md`, `docs/dev.md`, `docs/spec.md`, `docs/implementation.md`, and `docs/design.md` as current-state references, not changelogs; avoid temporal wording like "now", "no longer", "previously", "new", or "changed" when describing the intended steady state.
+- When behavior is added through the CLI, update CLI help and architecture docs in the same change.
+- User-facing docs are in `apps/web` which is published as a static website
+    - Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
 
-## Product Constraints
-- `Spaces` is a macOS Swift app for orchestration of coding tools
-- The CLI is named `spaces`.
 
-## Coding Agent Workflow
+
+## Coding Guidelines
 - Do not add fallback paths without explicit approval. We should first fully understand, implement, and harden the intended path without complicating code or behavior behind fallback paths.
 - Do not add unnecessary options, arguments, alternate code paths, or script modes. Extra surface area should only be added when it supports real product behavior or behavior required for testing, and the intended path should stay clear and singular.
-- Tests should validate product behavior, not database schema shape. Do not add schema-only tests for table or column ownership when code and behavior tests cover the contract.
-- Before committing, go through uncommitted changes to figure out if there are any unnecessary fixes, dead code, fallback paths, options, arguments, or script modes we added during debuging that we should consider removing to avoid unnecessary code complexity, code maintenance, or performance issues.
+- When making breaking changes, explicitly ask whether backwards compatibility is needed. Do not make the decision on supporting or not supporting backwards compatibility without explicit approval.
+- Tests should validate product behavior, not database schema shape. Do not add schema-only tests for table or column ownership. Code and behavior tests should cover the contract.
+- Before committing, go through uncommitted changes to identify and act on:
+    - wrong paths we went down and any code leftover from those that should be removed
+    - excessive, unnecessary, and risky fallbacks in code that should be removed or simplified
+    - any key non-obvious decisions made about how the product should work that should be captured in spec.md
+    - unused or dead code that needs to be removed
+    - places where the decision or logic is not obvious from the code (e.g. why a fallback path exists, and why it is written the way it is, etc). add docstrings and comments to code to make these clear
+    - is there any refactoring recommended for the newly added or adjacent code?
+    - do the tests accurately and sufficiently capture intended product behavior or are we testing for implementation details? do we need to add any more tests?
+    - unnecessary fixes, fallback paths, options, arguments, or script modes we added during debuging that should be removed to avoid unnecessary code complexity, code maintenance, or performance issues.
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title as multiple coding agents may have contributed to the same commit. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
-- When running `git commit`, allow at least a 10-minute timeout so pre-commit checks can finish.
+- When running `git commit`, allow at least a 15-minute timeout so pre-commit checks can finish.
 - When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
-- Use the real-system scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
+- Use the e2e test scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
 - When manually launching a repo-local debug build, use the derived profile helper or `scripts/dev-build-and-launch.sh` so the app, CLI, and E2E helpers stay on the same worktree-scoped profile.
 - When working from a repo-local checkout and other worktrees may also be running Spaces, bind your shell to the current worktree profile before using the debug app, `spaces`, or `spacese2e`: `eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"`.
 - Treat other worktrees' running Spaces instances as separate profiles. Do not kill them just to unblock your own workflow; only stop the app instance for the current profile, and let desktop-global verification wait for desktop control when another profile owns it.
@@ -32,17 +48,6 @@
 - PR checks and Spaces app releases consume Spaces-owned prebuilt artifacts from a GitHub release named `ghostty-artifacts-<full-ghostty-sha>` in this repo. Trusted same-repo PR, main-push, manual, and release workflows build from the pinned submodule and publish reusable artifacts when the matching release is missing or incomplete.
 - Fork PR checks build missing Ghostty artifacts locally without publishing reusable releases.
 - Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.
-
-## Documentation Rules
-- Keep docs concise and non-overlapping.
-- Treat `README.md`, `docs/dev.md`, `docs/spec.md`, `docs/implementation.md`, and `docs/design.md` as current-state references, not changelogs; avoid temporal wording like "now", "no longer", "previously", "new", or "changed" when describing the intended steady state.
-- Update `docs/spec.md` when UX or user-visible behavior changes.
-- Update `docs/implementation.md` when data flow, persistence, implementation structure, or the rationale behind a design choice changes.
-- Update `docs/design.md` when the visual system, reusable interaction patterns, or UI styling guidance changes.
-- Update `README.md` when the product overview, feature list, or adoption pitch changes.
-- Update `docs/dev.md` when development, build, deploy, or manual E2E workflows change.
-- Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
-- When behavior is added through the CLI, update CLI help and architecture docs in the same change.
 
 ## Data and Migration Rules
 - Installed/default database path: `~/.spaces/spaces.db`.
