@@ -436,6 +436,7 @@
                 name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
             NotificationCenter.default.post(
                 name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalOverviewSignal.post()
             rendererHostStorage.terminateSession()
             try? outputHandle?.synchronize()
             try? outputHandle?.close()
@@ -968,6 +969,7 @@
         private func postRuntimeStateDidChange() {
             NotificationCenter.default.post(
                 name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalOverviewSignal.post()
             broadcastCurrentState(reason: "runtime_state")
         }
 

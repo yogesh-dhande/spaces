@@ -336,7 +336,15 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 return
             }
             self.remoteOverviewSubscribing.remove(deviceID)
-            guard let client else { return }  // failed to connect; retried on the next refresh
+            guard let client else {
+                // The connect attempt failed (remote offline at launch or still
+                // unreachable on a reconnect). With no periodic metadata refresh to
+                // fall back on, schedule the same delayed retry the disconnect path
+                // uses so the remote section recovers on its own rather than staying
+                // stale until an unrelated sidebar reload.
+                self.scheduleRemoteOverviewReconnect()
+                return
+            }
             guard self.remoteOverviewSubscriptionsEnabled, self.host.macPairedDevices().contains(where: { $0.id == deviceID }) else {
                 client.stop()
                 return
@@ -350,8 +358,15 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard remoteOverviewSubscriptions[deviceID] != nil else { return }
         remoteOverviewSubscriptions[deviceID] = nil
         guard remoteOverviewSubscriptionsEnabled else { return }
-        // Reconnect after a short delay so a persistently unreachable remote retries
-        // without spinning. This is reconnect-on-drop, not a poll of healthy state.
+        scheduleRemoteOverviewReconnect()
+    }
+
+    /// Retries opening overview subscriptions after a short delay so a persistently
+    /// unreachable remote reconnects without spinning. Used both when an open stream
+    /// drops and when the initial connect fails; `refreshRemoteOverviewSubscriptions`
+    /// reopens any paired device that has no live subscription. This is
+    /// reconnect-on-failure, not a poll of healthy state.
+    private func scheduleRemoteOverviewReconnect() {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             self?.refreshRemoteOverviewSubscriptions()

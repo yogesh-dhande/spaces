@@ -732,6 +732,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let overviewStreamQueue = DispatchQueue(label: "spaces.device.overview.stream")
     private var overviewDatabaseChangeObserver: NSObjectProtocol?
     private var overviewDistributedChangeObserver: NSObjectProtocol?
+    private var overviewTerminalChangeObserver: NSObjectProtocol?
+    private var overviewTerminalDistributedObserver: NSObjectProtocol?
     private var overviewBroadcastScheduled = false
 
     #if canImport(Network) && canImport(Security)
@@ -910,9 +912,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         overviewDatabaseChangeObserver = NotificationCenter.default.addObserver(
             forName: IPCNotification.databaseDidChange, object: nil, queue: nil
         ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
+        // Terminal runtime/title/exit state lives outside the database, so it does not
+        // raise databaseDidChange. Observe the dedicated terminal-overview signal so
+        // those changes still push a fresh overview to subscribers.
+        overviewTerminalChangeObserver = NotificationCenter.default.addObserver(
+            forName: TerminalOverviewSignal.name, object: nil, queue: nil
+        ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
         #if canImport(Network) && canImport(Security)
             overviewDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
+            ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
+            // A terminal session hosted in another process (the app) signals overview
+            // changes profile-scoped across processes; catch those here too.
+            overviewTerminalDistributedObserver = DistributedNotificationCenter.default().addObserver(
+                forName: TerminalOverviewSignal.name, object: try? IPCNotification.currentObject(), queue: nil
             ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
         #endif
     }
@@ -922,11 +935,21 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             NotificationCenter.default.removeObserver(overviewDatabaseChangeObserver)
             self.overviewDatabaseChangeObserver = nil
         }
+        if let overviewTerminalChangeObserver {
+            NotificationCenter.default.removeObserver(overviewTerminalChangeObserver)
+            self.overviewTerminalChangeObserver = nil
+        }
         if let overviewDistributedChangeObserver {
             #if canImport(Network) && canImport(Security)
                 DistributedNotificationCenter.default().removeObserver(overviewDistributedChangeObserver)
             #endif
             self.overviewDistributedChangeObserver = nil
+        }
+        if let overviewTerminalDistributedObserver {
+            #if canImport(Network) && canImport(Security)
+                DistributedNotificationCenter.default().removeObserver(overviewTerminalDistributedObserver)
+            #endif
+            self.overviewTerminalDistributedObserver = nil
         }
         overviewStreamServer?.stop()
         overviewStreamServer = nil
