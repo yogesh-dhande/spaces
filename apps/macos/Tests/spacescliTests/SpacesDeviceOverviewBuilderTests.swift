@@ -214,6 +214,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(workspaceSummary?.setupState?.errorMessage, "missing dependency")
         XCTAssertEqual(workspaceSummary?.setupState?.startedAt, "2026-05-18T08:00:00Z")
         XCTAssertEqual(workspaceSummary?.setupState?.finishedAt, "2026-05-18T08:01:00Z")
+        XCTAssertEqual(workspaceSummary?.setupState?.exitCode, 127)
+        XCTAssertEqual(workspaceSummary?.setupState?.logPath, "/tmp/setup.log")
         XCTAssertEqual(workspaceSummary?.config.stopScript, "make stop-workspace")
         XCTAssertEqual(workspaceSummary?.config.ports.first?.id, "workspace-api-port")
         XCTAssertEqual(workspaceSummary?.config.ports.first?.name, "API")
@@ -227,6 +229,36 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(workspaceSummary?.config.agentLaunchers.first?.id, "workspace-review-agent")
         XCTAssertEqual(workspaceSummary?.config.agentLaunchers.first?.name, "Review")
         XCTAssertEqual(workspaceSummary?.config.agentLaunchers.first?.command, "codex --review")
+    }
+
+    func testOverviewIncludesSetupLogTailWhileRunningSoRemoteClientsCanStreamProgress() throws {
+        let logDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("setup-log-tail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: logDir) }
+        let logURL = logDir.appendingPathComponent("setup.log", isDirectory: false)
+        try "Cloning into 'vendor/ghostty'...\nBuilding artifacts...\n".write(to: logURL, atomically: true, encoding: .utf8)
+
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: "feature", branch: "feature", baseBranch: "main",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+
+        func setupState(status: WorkspaceSetupStatus) -> WorkspaceSetupState {
+            WorkspaceSetupState(status: status, errorMessage: nil, startedAt: "2026-05-18T08:00:00Z", finishedAt: nil, logPath: logURL.path)
+        }
+
+        let running = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, setupState: setupState(status: .running))], sessions: [])
+        let runningTail = running.workspaces.first?.setupState?.logTail
+        XCTAssertEqual(running.workspaces.first?.setupState?.status, .running)
+        XCTAssertTrue(runningTail?.contains("Building artifacts...") == true)
+
+        // Succeeded shows the normal workspace detail rather than the setup screen, so its tail is
+        // omitted to keep the overview snapshot small even when the log file still exists.
+        let succeeded = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, setupState: setupState(status: .succeeded))], sessions: [])
+        XCTAssertNil(succeeded.workspaces.first?.setupState?.logTail)
     }
 
     func testMatchesRenamedConfiguredProcessByTemplateID() {

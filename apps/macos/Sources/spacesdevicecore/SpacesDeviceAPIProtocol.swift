@@ -218,12 +218,24 @@ public struct SpacesDeviceWorkspaceSetupState: Codable, Sendable, Equatable {
     public let errorMessage: String?
     public let startedAt: String?
     public let finishedAt: String?
+    public let exitCode: Int?
+    public let logPath: String?
+    /// Recent setup-log output, captured by the owning daemon. Carried in the overview so a client
+    /// (including a remote one that cannot read the daemon's log file by path) can render live setup
+    /// progress. Populated only while setup is running or after it failed.
+    public let logTail: String?
 
-    public init(status: SpacesDeviceWorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil) {
+    public init(
+        status: SpacesDeviceWorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil,
+        exitCode: Int? = nil, logPath: String? = nil, logTail: String? = nil
+    ) {
         self.status = status
         self.errorMessage = errorMessage
         self.startedAt = startedAt
         self.finishedAt = finishedAt
+        self.exitCode = exitCode
+        self.logPath = logPath
+        self.logTail = logTail
     }
 }
 

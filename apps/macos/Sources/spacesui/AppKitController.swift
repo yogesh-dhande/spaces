@@ -2675,7 +2675,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated private static func localSetupState(from state: SpacesDeviceWorkspaceSetupState?) -> WorkspaceSetupState {
         guard let state else { return WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil) }
         return WorkspaceSetupState(
-            status: localSetupStatus(from: state.status), errorMessage: state.errorMessage, startedAt: state.startedAt, finishedAt: state.finishedAt)
+            status: localSetupStatus(from: state.status), errorMessage: state.errorMessage, startedAt: state.startedAt, finishedAt: state.finishedAt,
+            exitCode: state.exitCode, logPath: state.logPath)
     }
 
     nonisolated private static func runningState(from state: SpacesDeviceRunState) -> RunningProcessState {
@@ -5006,7 +5007,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let setupState = Self.localSetupState(from: deviceWorkspace.setupState)
         prepareWorkspaceDetailContainer(workspaceID: workspace.id)
         if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
-            showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState)
+            showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState, logTail: deviceWorkspace.setupState?.logTail)
             return
         }
         stopWorkspaceSetupDetailRefreshTimer()
@@ -5233,7 +5234,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    private func showWorkspaceSetupDetail(project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState) {
+    private func showWorkspaceSetupDetail(
+        project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState, logTail: String?
+    ) {
         if setupState.status == .running {
             startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: workspace.id)
         } else {
@@ -5306,17 +5309,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         revealButton.isEnabled = isLocalWorkspace(workspace)
         revealButton.setAccessibilityIdentifier("workspace-setup-reveal")
 
+        let hasLogTail = logTail?.isEmpty == false
+        let hasLocalLogFile = isLocalWorkspace(workspace) && setupState.logPath?.isEmpty == false
+
+        // Copy reflects the displayed log content so it works for remote workspaces too; Open opens
+        // the log file on disk, which is only reachable for a local workspace.
         let copyLogButton = actionButton(
             title: "Copy Log", symbol: "doc.on.doc", tooltip: "Copy setup log", action: #selector(copyWorkspaceSetupLog(_:)), primary: false)
-        copyLogButton.identifier = NSUserInterfaceItemIdentifier(setupState.logPath ?? "")
-        copyLogButton.isEnabled = setupState.logPath?.isEmpty == false
+        copyLogButton.isEnabled = hasLogTail
         copyLogButton.setAccessibilityIdentifier("workspace-setup-copy-log")
 
         let openLogButton = actionButton(
             title: "Open Log", symbol: "doc.text.magnifyingglass", tooltip: "Open setup log", action: #selector(openWorkspaceSetupLog(_:)),
             primary: false)
         openLogButton.identifier = NSUserInterfaceItemIdentifier(setupState.logPath ?? "")
-        openLogButton.isEnabled = setupState.logPath?.isEmpty == false
+        openLogButton.isEnabled = hasLocalLogFile
         openLogButton.setAccessibilityIdentifier("workspace-setup-open-log")
 
         let actionRow = NSStackView(views: [runButton, terminalButton, revealButton, copyLogButton, openLogButton])
@@ -5330,7 +5337,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         statusContent.spacing = 8
         statusContent.addArrangedSubview(workspaceSetupMetadataRows(setupState))
         statusContent.addArrangedSubview(actionRow)
-        let logView = workspaceSetupLogTailView(path: setupState.logPath)
+        let logView = workspaceSetupLogTailView(content: logTail)
         statusContent.addArrangedSubview(logView)
         constrainFormFieldToFillWidth(logView, in: statusContent)
 
@@ -5419,13 +5426,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return row
     }
 
-    private func workspaceSetupLogTailView(path: String?) -> NSView {
+    private func workspaceSetupLogTailView(content: String?) -> NSView {
         let textView = NSTextView()
         textView.isRichText = false
         textView.isEditable = false
         textView.isSelectable = true
         textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        let text = path.flatMap { Self.workspaceSetupLogTail(path: $0, maxBytes: 16_384) } ?? ""
+        let text = content ?? ""
         textView.string = text.isEmpty ? "No setup log output." : text
         textView.setAccessibilityIdentifier("workspace-setup-log-tail")
         workspaceSetupLogTextView = textView
@@ -5468,18 +5475,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .succeeded: return .systemGreen
         case .failed: return .systemRed
         }
-    }
-
-    private static func workspaceSetupLogTail(path: String, maxBytes: UInt64) -> String {
-        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return "" }
-        defer { try? handle.close() }
-        let endOffset = (try? handle.seekToEnd()) ?? 0
-        let startOffset = endOffset > maxBytes ? endOffset - maxBytes : 0
-        try? handle.seek(toOffset: startOffset)
-        guard let data = try? handle.readToEnd() else { return "" }
-        var text = String(decoding: data, as: UTF8.self)
-        if startOffset > 0, let firstNewline = text.firstIndex(of: "\n") { text = "...\n" + String(text[text.index(after: firstNewline)...]) }
-        return text
     }
 
     private func workspaceProcessesSection(
@@ -7090,8 +7085,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func copyWorkspaceSetupLog(_ sender: Any) {
-        guard let path = Self.senderIdentifier(sender), !path.isEmpty else { return }
-        let contents = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        // Copy the displayed setup-log content so this works for remote workspaces, whose log file
+        // is not reachable from the client by path.
+        let contents = workspaceSetupLogTextView?.string ?? ""
+        guard !contents.isEmpty, contents != "No setup log output." else { return }
         copyToPasteboard(contents)
     }
 

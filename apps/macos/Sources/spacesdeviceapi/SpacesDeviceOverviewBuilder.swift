@@ -188,7 +188,25 @@ struct SpacesDeviceOverviewBuilder {
     private static func deviceWorkspaceSetupState(_ state: WorkspaceSetupState) -> SpacesDeviceWorkspaceSetupState {
         SpacesDeviceWorkspaceSetupState(
             status: deviceWorkspaceSetupStatus(state.status), errorMessage: state.errorMessage, startedAt: state.startedAt,
-            finishedAt: state.finishedAt)
+            finishedAt: state.finishedAt, exitCode: state.exitCode, logPath: state.logPath, logTail: setupLogTail(state))
+    }
+
+    /// Reads the tail of the setup log for the states that show the setup screen with a log
+    /// (`running` and `failed`). `succeeded` shows the normal workspace detail and `pending` has no
+    /// output yet, so their tails are omitted to keep the overview snapshot small.
+    private static func setupLogTail(_ state: WorkspaceSetupState) -> String? {
+        guard state.status == .running || state.status == .failed else { return nil }
+        guard let path = state.logPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { return nil }
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
+        defer { try? handle.close() }
+        let maxBytes: UInt64 = 16_384
+        let endOffset = (try? handle.seekToEnd()) ?? 0
+        let startOffset = endOffset > maxBytes ? endOffset - maxBytes : 0
+        try? handle.seek(toOffset: startOffset)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+        var text = String(decoding: data, as: UTF8.self)
+        if startOffset > 0, let firstNewline = text.firstIndex(of: "\n") { text = "...\n" + String(text[text.index(after: firstNewline)...]) }
+        return text
     }
 
     private static func deviceWorkspaceSetupStatus(_ status: WorkspaceSetupStatus) -> SpacesDeviceWorkspaceSetupStatus {
