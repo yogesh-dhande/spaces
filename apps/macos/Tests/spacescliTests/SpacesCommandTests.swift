@@ -43,11 +43,11 @@ final class SpacesCommandTests: XCTestCase {
     }
 
     func testAgentSignalParsesExplicitWorkspaceSessionAndEvent() throws {
-        let command = try AgentSignalCommand.parse(["--workspace", "workspace-1", "--session", "session-1", "waiting"])
+        let command = try AgentSignalCommand.parse(["--workspace", "workspace-1", "--session", "session-1", "blocked"])
 
         XCTAssertEqual(command.workspace, "workspace-1")
         XCTAssertEqual(command.session, "session-1")
-        XCTAssertEqual(command.type, .waiting)
+        XCTAssertEqual(command.type, .blocked)
     }
 
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
@@ -253,7 +253,7 @@ final class SpacesCommandTests: XCTestCase {
     func testAgentSignalRejectsUnknownEnumValue() {
         XCTAssertThrowsError(try AgentSignalCommand.parse(["--workspace", "workspace-1", "--session", "session-1", "bogus"])) { error in
             let rendered = String(describing: error)
-            XCTAssertTrue(rendered.contains("bogus") || rendered.contains("waiting"))
+            XCTAssertTrue(rendered.contains("bogus") || rendered.contains("blocked"))
         }
     }
 

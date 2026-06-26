@@ -360,11 +360,11 @@ final class AgentHookTests: XCTestCase {
             workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "remote-session",
             terminalNativeID: "remote-session", status: .idle, claimedLauncherName: "Mock Agent")
 
-        let waitingApplied = try orchestrator.recordRemoteAgentSignal(
+        let blockedApplied = try orchestrator.recordRemoteAgentSignal(
             remoteSignalEvent(
-                id: "event-waiting", sessionID: "remote-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "waiting"))
+                id: "event-blocked", sessionID: "remote-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "blocked"))
 
-        XCTAssertTrue(waitingApplied)
+        XCTAssertTrue(blockedApplied)
         var agent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
         XCTAssertEqual(agent.status, .waiting)
         XCTAssertEqual(agent.label, "Mock Agent")

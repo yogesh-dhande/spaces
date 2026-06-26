@@ -9,9 +9,9 @@ const CLAUDE_PROMPT = `Add global Spaces lifecycle hooks to ~/.claude/settings.j
 reports its state to Spaces.
 
   SessionStart      ->  ${spacesAgentSignalCommand("init")}
-  UserPromptSubmit  ->  ${spacesAgentSignalCommand("start")}
+  UserPromptSubmit  ->  ${spacesAgentSignalCommand("working")}
   Stop              ->  ${spacesAgentSignalCommand("done")}
-  PermissionRequest ->  ${spacesAgentSignalCommand("waiting")}
+  PermissionRequest ->  ${spacesAgentSignalCommand("blocked")}
   SessionEnd        ->  ${spacesAgentSignalCommand("exit")}
 
 Use an empty matcher ("") for every entry. Do not add or remove any
@@ -23,9 +23,9 @@ const CODEX_PROMPT = `Enable Codex hooks with [features].hooks in ~/.codex/confi
 reports its state to Spaces.
 
   SessionStart      ->  ${spacesAgentSignalCommand("init")}
-  UserPromptSubmit  ->  ${spacesAgentSignalCommand("start")}
+  UserPromptSubmit  ->  ${spacesAgentSignalCommand("working")}
   Stop              ->  ${spacesAgentSignalCommand("done")}
-  PermissionRequest ->  ${spacesAgentSignalCommand("waiting")}
+  PermissionRequest ->  ${spacesAgentSignalCommand("blocked")}
 
 Use an empty matcher ("") for every entry. Do not add or remove any
 other keys. Keep the environment-variable guard in every command so
@@ -60,12 +60,12 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Lifecycle Events</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Agents report their own state through <code>spaces agent signal --workspace &lt;id&gt; --session &lt;terminal-session-id&gt; &lt;event&gt;</code>. Spaces uses each event to update the agent row. Both <code>waiting</code> and <code>done</code> raise Alerts and dock attention; <code>waiting</code> clears when the agent&apos;s state changes, while <code>done</code> stays in Alerts until you dismiss it.
+          Agents report their own state through <code>spaces agent signal --workspace &lt;id&gt; --session &lt;terminal-session-id&gt; &lt;event&gt;</code>. Spaces uses each event to update the agent row. Both <code>blocked</code> and <code>done</code> raise Alerts and dock attention; <code>blocked</code> clears when the agent&apos;s state changes, while <code>done</code> stays in Alerts until you dismiss it.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>init</strong> &mdash; identify the terminal and attach it to a tracked row.</li>
-          <li>• <strong>start</strong> &mdash; agent is working; row shows a spinner.</li>
-          <li>• <strong>waiting</strong> &mdash; agent is blocked on you; row shows a warning and raises attention.</li>
+          <li>• <strong>working</strong> &mdash; agent is working; row shows a spinner.</li>
+          <li>• <strong>blocked</strong> &mdash; agent is blocked on you; row shows a warning and raises attention.</li>
           <li>• <strong>done</strong> &mdash; agent finished; row shows a green dot and raises attention until dismissed.</li>
           <li>• <strong>exit</strong> &mdash; agent ended; row returns to idle, or is removed if the terminal is gone.</li>
         </ul>

@@ -338,7 +338,7 @@ final class TerminalSessionModelTests: XCTestCase {
         let sessionID = "session-agent-signal"
         try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
         let event = TerminalServiceAgentSignalEvent(
-            id: "event-1", sessionID: sessionID, workspaceID: "workspace-1", workspacePath: "/tmp/workspace", type: "waiting", provider: "spaces",
+            id: "event-1", sessionID: sessionID, workspaceID: "workspace-1", workspacePath: "/tmp/workspace", type: "blocked", provider: "spaces",
             label: "Mock Agent", terminalTrackingID: sessionID, terminalNativeID: sessionID, codexThreadID: "thread-1",
             environmentKeys: ["SPACES_WORKSPACE_ID", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-05-08T00:00:00Z")
 

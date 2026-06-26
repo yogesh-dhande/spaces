@@ -1359,11 +1359,11 @@ session_id="${{SPACES_TERMINAL_TRACKING_ID:?}}"
 agent_log="{event_log}"
 spaces_cli="{spaces_cli}"
 "$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" init >/dev/null
-"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" start >/dev/null
-printf 'agent-start:%s\\n' "$workspace_dir" >>"$agent_log"
+"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" working >/dev/null
+printf 'agent-working:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 2
-"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" waiting >/dev/null
-printf 'agent-waiting:%s\\n' "$workspace_dir" >>"$agent_log"
+"$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" blocked >/dev/null
+printf 'agent-blocked:%s\\n' "$workspace_dir" >>"$agent_log"
 sleep 6
 "$spaces_cli" agent signal --workspace "$workspace_id" --session "$session_id" done >/dev/null
 printf 'agent-done:%s\\n' "$workspace_dir" >>"$agent_log"
@@ -5720,7 +5720,7 @@ run_agent_status_assertions() {
   run_spaces_logged "/tmp/spaces-e2e-$host-agent-launch.log" start "$workspace_dir"
   transition_pause "$host launch workspace with agent"
 
-  wait_for_event_log_contains "agent-waiting:$workspace_dir"
+  wait_for_event_log_contains "agent-blocked:$workspace_dir"
   wait_for_agent_status "$workspace_dir" "$MOCK_AGENT_LABEL" "waiting"
 
   wait_for_event_log_contains "agent-done:$workspace_dir"
