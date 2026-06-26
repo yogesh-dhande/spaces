@@ -725,6 +725,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let stateLock = NSLock()
     private let terminalLinkTransferAuthorizationTTL: TimeInterval
     private let traceEnabled = ProcessInfo.processInfo.environment["SPACES_DEVICE_API_TRACE"] == "1"
+    // Device-overview push (cross-platform): a unix-socket producer that both
+    // transports relay, fed by database-change notifications. Owned here so the
+    // push logic is shared by the macOS and Linux Device API transports.
+    private var overviewStreamServer: DeviceOverviewStreamServer?
+    private let overviewStreamQueue = DispatchQueue(label: "spaces.device.overview.stream")
+    private var overviewDatabaseChangeObserver: NSObjectProtocol?
+    private var overviewDistributedChangeObserver: NSObjectProtocol?
+    private var overviewBroadcastScheduled = false
 
     #if canImport(Network) && canImport(Security)
         private let networkShaper: NetworkShaper
@@ -879,6 +887,62 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         #else
             throw POSIXError(.ENOTSUP)
         #endif
+        startOverviewStreamServer()
+    }
+
+    /// Starts the device-overview producer and observes database changes so each
+    /// committed write pushes a fresh overview to subscribed clients. Cross-platform
+    /// (POSIX socket + NotificationCenter), with the macOS distributed observer
+    /// added so cross-process writes (the CLI sharing this profile) are caught too.
+    private func startOverviewStreamServer() {
+        guard overviewStreamServer == nil else { return }
+        let server = DeviceOverviewStreamServer(
+            socketPath: (try? TerminalServicePaths.deviceOverviewSocketPath()) ?? "", queue: overviewStreamQueue,
+            lineProvider: { [weak self] in
+                guard let self, let payload = try? self.loadOverview() else { return nil }
+                return try? SpacesDeviceOverviewStreamCodec.encodeLine(payload)
+            })
+        do { try server.start() } catch {
+            trace("overview_stream_server_start_error error=\(error)")
+            return
+        }
+        overviewStreamServer = server
+        overviewDatabaseChangeObserver = NotificationCenter.default.addObserver(
+            forName: IPCNotification.databaseDidChange, object: nil, queue: nil
+        ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
+        #if canImport(Network) && canImport(Security)
+            overviewDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
+                forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
+            ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
+        #endif
+    }
+
+    private func stopOverviewStreamServer() {
+        if let overviewDatabaseChangeObserver {
+            NotificationCenter.default.removeObserver(overviewDatabaseChangeObserver)
+            self.overviewDatabaseChangeObserver = nil
+        }
+        if let overviewDistributedChangeObserver {
+            #if canImport(Network) && canImport(Security)
+                DistributedNotificationCenter.default().removeObserver(overviewDistributedChangeObserver)
+            #endif
+            self.overviewDistributedChangeObserver = nil
+        }
+        overviewStreamServer?.stop()
+        overviewStreamServer = nil
+    }
+
+    /// Coalesces database-change bursts into one overview rebuild + push.
+    private func scheduleOverviewBroadcast() {
+        overviewStreamQueue.async { [weak self] in
+            guard let self, !self.overviewBroadcastScheduled else { return }
+            self.overviewBroadcastScheduled = true
+            self.overviewStreamQueue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+                guard let self else { return }
+                self.overviewBroadcastScheduled = false
+                self.overviewStreamServer?.broadcast()
+            }
+        }
     }
 
     public func stop() { queue.async { self.stopOnQueue() } }
@@ -973,7 +1037,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
-        case .subscribe: return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.")
+        case .subscribe, .subscribeDeviceOverview:
+            return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.")
         }
     }
 
@@ -1679,6 +1744,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     #if os(Linux) && canImport(OpenSSL)
         private func prepareLinuxSubscribe(_ request: SpacesDeviceAPIRequest) throws -> LinuxSubscribeAction {
+            if request.command.isDeviceOverviewSubscription {
+                // Relay the device-overview producer socket (no terminal session,
+                // no control heartbeat); the producer pushes the current overview
+                // on connect and a fresh one on every database change.
+                return .relay(
+                    LinuxSubscription(
+                        sessionID: "device-overview", installationID: request.clientApp?.installationID ?? "",
+                        subscriptionSocketPath: try TerminalServicePaths.deviceOverviewSocketPath(), controlSocketPath: "", clientID: nil))
+            }
             guard let sessionID = request.sessionID else { return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.")) }
             guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines), !installationID.isEmpty
             else { return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.")) }
@@ -1760,6 +1834,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     #if canImport(Network) && canImport(Security)
         private func handleSubscribeRequest(_ request: SpacesDeviceAPIRequest, connection: NWConnection) throws {
+            if request.command.isDeviceOverviewSubscription {
+                try relayOverviewSubscription(
+                    connection: connection, installationID: request.clientApp?.installationID ?? "")
+                return
+            }
             guard let sessionID = request.sessionID else {
                 sendResponse(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID."), to: connection) { _ in connection.cancel() }
                 return
@@ -1826,6 +1905,28 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             TerminalPerformance.logMetric(
                 "device_api_subscribe", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
         }
+
+        /// Relays the device-overview producer socket to a subscribing connection,
+        /// reusing the same stream-relay machinery as terminal subscriptions (no
+        /// terminal heartbeat). The producer sends the current overview on connect
+        /// and a fresh one on every database change.
+        private func relayOverviewSubscription(connection: NWConnection, installationID: String) throws {
+            let socketPath = try TerminalServicePaths.deviceOverviewSocketPath()
+            let relaySocketFD = try connectUnixSocket(path: socketPath)
+            try setNonBlocking(relaySocketFD)
+            let relayQueue = DispatchQueue(label: "spaces.device.api.overview.\(ObjectIdentifier(connection))")
+            let relaySource = DispatchSource.makeReadSource(fileDescriptor: relaySocketFD, queue: relayQueue)
+            relaySource.setEventHandler { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                self.relayStateData(from: relaySocketFD, to: connection)
+            }
+            relaySource.setCancelHandler { close(relaySocketFD) }
+            streamRelays[ObjectIdentifier(connection)] = StreamRelay(
+                sessionID: "device-overview", installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue,
+                relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer())
+            relaySource.resume()
+        }
+
     #endif
 
     #if canImport(Network) && canImport(Security)
@@ -2010,6 +2111,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func stopOnQueue() {
         acceptingRequests = false
+        stopOverviewStreamServer()
         #if canImport(Network) && canImport(Security)
             for relay in Array(streamRelays.values) { closeStreamRelay(connection: relay.connection) }
             for connection in Array(requestConnections.values.map(\.connection)) { connection.cancel() }

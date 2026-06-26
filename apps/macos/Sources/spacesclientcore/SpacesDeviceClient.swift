@@ -116,6 +116,26 @@ public enum SpacesDeviceClient {
         return SpacesDeviceOverview(device: device, overview: overview)
     }
 
+    #if canImport(Network)
+        /// Opens a live device-overview subscription: the paired daemon pushes a
+        /// fresh overview whenever its database changes, so the client stays current
+        /// without polling. The returned client must be retained and `stop()`ped.
+        public static func subscribeOverview(
+            device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+            onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        ) throws -> SpacesDeviceAPIOverviewStreamClient {
+            guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
+                throw SpacesDeviceClientError.missingTransportKey(device.name)
+            }
+            let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile)
+            let client = try SpacesDeviceAPIOverviewStreamClient(
+                authToken: authToken, clientApp: clientApp, host: device.host, port: device.port, transportKey: transportKey,
+                onOverview: { onOverview(SpacesDeviceOverview(device: device, overview: $0)) }, onDisconnect: onDisconnect)
+            try client.start()
+            return client
+        }
+    #endif
+
     public static func workspaceCreateOptions(
         selectedProjectID: String?, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
@@ -392,7 +412,7 @@ public enum SpacesDeviceClient {
             .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
-            .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
+            .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:
             defaultRequestTimeoutSeconds
         }
     }

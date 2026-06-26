@@ -42,6 +42,14 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     /// Per-remote-device timestamp of the last overview fetch, so polls driven by
     /// local events don't re-request every remote's overview on every cycle.
     private var remoteOverviewFetchInstants: [String: ContinuousClock.Instant] = [:]
+    /// Live device-overview subscriptions per paired remote device. The remote
+    /// daemon pushes a fresh overview on every database change, so remote sidebar
+    /// state stays current without polling (remote state has no local event).
+    private var remoteOverviewSubscriptions: [String: SpacesDeviceAPIOverviewStreamClient] = [:]
+    /// Devices with a subscription open in flight, so rapid refreshes don't start
+    /// duplicate connections.
+    private var remoteOverviewSubscribing: Set<String> = []
+    private var remoteOverviewSubscriptionsEnabled = false
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
     private var pendingSidebarReloadFailureMessage: String?
@@ -83,6 +91,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         sidebarReloadTask = nil
         pendingSidebarReloadRequest = false
         pendingSidebarReloadFailureMessage = nil
+        stopRemoteOverviewSubscriptions()
     }
 
     func cancelSidebarReloadTask() { sidebarReloadTask?.cancel() }
@@ -268,6 +277,84 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             host.outlineView.reloadData()
             applySidebarProjectExpansionState()
             updateAlertsSidebarBadge()
+        }
+        refreshRemoteOverviewSubscriptions()
+    }
+
+    /// Enables and opens live overview subscriptions for paired remote devices.
+    /// Called when background services start; the pull above still gives immediate
+    /// population, while the subscription delivers subsequent changes by push.
+    func startRemoteOverviewSubscriptions() {
+        remoteOverviewSubscriptionsEnabled = true
+        refreshRemoteOverviewSubscriptions()
+    }
+
+    func stopRemoteOverviewSubscriptions() {
+        remoteOverviewSubscriptionsEnabled = false
+        let clients = remoteOverviewSubscriptions
+        remoteOverviewSubscriptions.removeAll()
+        remoteOverviewSubscribing.removeAll()
+        for client in clients.values { client.stop() }
+    }
+
+    /// Reconciles open subscriptions to the set of credentialed paired remotes:
+    /// drops gone devices and opens one per newly present device.
+    func refreshRemoteOverviewSubscriptions() {
+        guard remoteOverviewSubscriptionsEnabled else { return }
+        let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(deviceID: $0.id) }
+        let desiredIDs = Set(remotes.map(\.id))
+        for (id, client) in remoteOverviewSubscriptions where !desiredIDs.contains(id) {
+            // Remove before stopping so the disconnect callback treats it as intentional.
+            remoteOverviewSubscriptions[id] = nil
+            client.stop()
+        }
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        for record in remotes where remoteOverviewSubscriptions[record.id] == nil && !remoteOverviewSubscribing.contains(record.id) {
+            remoteOverviewSubscribing.insert(record.id)
+            openRemoteOverviewSubscription(record: record, clientApp: clientApp)
+        }
+    }
+
+    private func openRemoteOverviewSubscription(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp) {
+        let deviceID = record.id
+        // Build the stream callbacks with a single weak capture so the detached
+        // connect task below captures only Sendable values (not `self`).
+        let onOverview: @Sendable (SpacesDeviceOverview) -> Void = { [weak self] overview in
+            Task { @MainActor in self?.applyRemoteDeviceSection(deviceID: deviceID, result: .success(overview)) }
+        }
+        let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
+            Task { @MainActor in self?.handleRemoteOverviewDisconnected(deviceID: deviceID) }
+        }
+        Task { @MainActor [weak self] in
+            // Resolving credentials and connecting block, so do it off the main actor.
+            let client = await Task.detached(priority: .userInitiated) { () -> SpacesDeviceAPIOverviewStreamClient? in
+                try? SpacesDeviceClient.subscribeOverview(
+                    device: record, clientApp: clientApp, onOverview: onOverview, onDisconnect: onDisconnect)
+            }.value
+            guard let self else {
+                client?.stop()
+                return
+            }
+            self.remoteOverviewSubscribing.remove(deviceID)
+            guard let client else { return }  // failed to connect; retried on the next refresh
+            guard self.remoteOverviewSubscriptionsEnabled, self.host.macPairedDevices().contains(where: { $0.id == deviceID }) else {
+                client.stop()
+                return
+            }
+            self.remoteOverviewSubscriptions[deviceID] = client
+        }
+    }
+
+    private func handleRemoteOverviewDisconnected(deviceID: String) {
+        // Ignore disconnects for subscriptions we intentionally removed.
+        guard remoteOverviewSubscriptions[deviceID] != nil else { return }
+        remoteOverviewSubscriptions[deviceID] = nil
+        guard remoteOverviewSubscriptionsEnabled else { return }
+        // Reconnect after a short delay so a persistently unreachable remote retries
+        // without spinning. This is reconnect-on-drop, not a poll of healthy state.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            self?.refreshRemoteOverviewSubscriptions()
         }
     }
 

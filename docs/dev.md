@@ -153,7 +153,13 @@ apps/macos/Tests/e2e.sh mobile
 
 The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
-The E2E helpers source the worktree `.env` when it exists. Local-only scenarios run without `.env`; remote-host lanes require that file to provide `SPACES_E2E_REMOTE_SSH_HOST`.
+The E2E helpers source the worktree `.env` (gitignored, at the repo root) via `scripts/spaces-e2e-env.sh` when it exists. Local-only scenarios run without `.env`; remote-host lanes require it. A working remote test host is configured in the primary checkout's `.env`; a fresh worktree has none, so copy it in to run remote lanes from that worktree:
+
+```bash
+cp ~/projects/spaces/.env .env
+```
+
+The remote keys it provides are `SPACES_E2E_REMOTE_SSH_HOST`, `SPACES_E2E_REMOTE_SSH_USER`, `SPACES_E2E_REMOTE_DAEMON_HOST`, `SPACES_E2E_REMOTE_DAEMON_PORT`, `SPACES_E2E_REMOTE_WORKSPACE_ROOT`, `SPACES_E2E_REMOTE_GIT_ROOT`, `SPACES_E2E_REMOTE_HOST_ID`, `SPACES_E2E_REMOTE_NAME`, and `SPACES_E2E_REMOTE_AUTH_TOKEN`. They drive the remote Device API lanes (`apps/macos/Tests/e2e.sh device-api remote` / `latency-compare`) and the Linux daemon deploy/cleanup scripts. Never commit `.env`.
 
 Each `apps/macos/Tests/e2e.sh` invocation writes an ignored Markdown report under `apps/macos/.artifacts/e2e-runs/<timestamp>-<lane>/summary.md`. The run directory stores collected metric artifacts as flat step-prefixed files alongside the report. The report includes the command timeline, per-case timing table, per-step logs, flattened tables for collected JSON metrics and result files, TSV tables for app metric/result logs, and links to raw JSONL performance logs.
 

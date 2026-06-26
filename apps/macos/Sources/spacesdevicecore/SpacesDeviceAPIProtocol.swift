@@ -1204,6 +1204,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case subscribe(SpacesDeviceTerminalSubscriptionRequest)
     case resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest)
     case readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest)
+    /// Long-lived subscription that streams the device overview whenever the
+    /// remote daemon's database changes, so paired clients stay live without
+    /// polling. No payload: one overview stream per connection.
+    case subscribeDeviceOverview
 
     public var name: String {
         switch self {
@@ -1239,6 +1243,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .subscribe: "subscribe"
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
+        case .subscribeDeviceOverview: "subscribeDeviceOverview"
         }
     }
 
@@ -1268,7 +1273,16 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     }
 
     public var isSubscriptionCommand: Bool {
-        if case .subscribe = self { return true }
+        switch self {
+        case .subscribe, .subscribeDeviceOverview: true
+        default: false
+        }
+    }
+
+    /// True for the device-overview subscription, which streams overview payloads
+    /// rather than terminal state and is not tied to a terminal session.
+    public var isDeviceOverviewSubscription: Bool {
+        if case .subscribeDeviceOverview = self { return true }
         return false
     }
 
@@ -1314,6 +1328,7 @@ extension SpacesDeviceAPICommand: Codable {
         case subscribe
         case resolveTerminalLink
         case readTerminalLinkChunk
+        case subscribeDeviceOverview
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1362,6 +1377,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribe: self = .subscribe(try container.decode(SpacesDeviceTerminalSubscriptionRequest.self, forKey: key))
         case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(SpacesDeviceTerminalLinkResolveRequest.self, forKey: key))
         case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunkRequest.self, forKey: key))
+        case .subscribeDeviceOverview:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .subscribeDeviceOverview
         }
     }
 
@@ -1400,6 +1418,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribe(let payload): try container.encode(payload, forKey: .subscribe)
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
+        case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
         }
     }
 }

@@ -5,6 +5,21 @@ import spacesterminalcore
 @testable import spacesdevicecore
 
 final class SpacesDeviceAPIProtocolTests: XCTestCase {
+    func testSubscribeDeviceOverviewRoundTripsThroughCodecAndIsASubscription() throws {
+        let request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: "SECRET")
+        XCTAssertTrue(request.command.isSubscriptionCommand)
+        XCTAssertTrue(request.command.isDeviceOverviewSubscription)
+        XCTAssertFalse(SpacesDeviceAPIRequest(command: .overview).command.isDeviceOverviewSubscription)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testDeviceOverviewStreamCodecRoundTripsPayload() throws {
+        let payload = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+        let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)
+        XCTAssertEqual(line.last, 0x0A)
+        XCTAssertEqual(try SpacesDeviceOverviewStreamCodec.decodeLine(line.dropLast()), payload)
+    }
+
     func testTerminalControlRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(.init(action: .send, sessionID: "session-1", clientID: "client-1", text: "a")), authToken: "SECRET")

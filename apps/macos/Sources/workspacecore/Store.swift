@@ -58,13 +58,20 @@ public final class SQLiteStore {
         }
     }
 
-    /// Announces a committed write so the app reloads sidebar metadata in response
-    /// to the writer (this process — app, CLI, or daemon) rather than by watching
-    /// database files. Posted synchronously so a short-lived CLI delivers the
-    /// signal before it exits. Suppressed under tests to avoid cross-process noise.
+    /// Announces a committed write so the app reloads sidebar metadata, and so the
+    /// daemon's Device API can push a fresh overview to paired clients, in response
+    /// to the writer rather than by watching database files. Posted synchronously so
+    /// a short-lived CLI delivers the signal before it exits. Suppressed under tests
+    /// to avoid cross-process noise.
     private static func postDatabaseDidChange() {
+        guard NSClassFromString("XCTest") == nil else { return }
+        // In-process signal (cross-platform): the daemon's own writes reach its
+        // Device API overview producer directly — the only available channel on
+        // Linux, where DistributedNotificationCenter does not exist.
+        NotificationCenter.default.post(name: IPCNotification.databaseDidChange, object: nil)
         #if os(macOS)
-            guard NSClassFromString("XCTest") == nil else { return }
+            // Cross-process signal (macOS): app/CLI writes reach the local app's
+            // sidebar reload and the daemon's overview producer in other processes.
             try? IPCNotification.post(IPCNotification.databaseDidChange)
         #endif
     }

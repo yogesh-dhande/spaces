@@ -3935,6 +3935,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         startPeriodicWorkspaceWindowRefresh()
         startProcessExitMonitoring()
         startWorktreeDiscoveryWatchers()
+        sidebar.startRemoteOverviewSubscriptions()
     }
 
     private func stopBackgroundServices() {
