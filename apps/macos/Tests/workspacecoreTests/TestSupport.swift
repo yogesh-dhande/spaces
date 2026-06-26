@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import XCTest
 import spacesterminalcore
 import systembridge
 import workspacecore
@@ -10,13 +11,26 @@ func makeTempDirectory() throws -> URL {
     return base
 }
 
-func makeTemporaryStore() throws -> SQLiteStore {
-    let dir = try makeTempDirectory()
-    let dbURL = dir.appendingPathComponent("spaces-test.db")
-    let runtimeURL = dir.appendingPathComponent("runtime", isDirectory: true)
-    setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
-    setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
-    return try SQLiteStore(path: dbURL.path)
+extension XCTestCase {
+    /// A store backed by a fresh temporary database, with the profile environment scoped to this test.
+    ///
+    /// `SQLiteStore` is given the explicit path, but downstream code (terminal-session persistence, runtime
+    /// paths) still resolves the active profile from `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR`. Those are set
+    /// here and restored in a teardown block so the override never leaks into later tests in the same
+    /// process — previously they were set and never restored, which left a stale (deleted) profile path
+    /// pinned for the rest of the run.
+    func makeTemporaryStore() throws -> SQLiteStore {
+        _ = installHermeticGitEnvironment
+        let dir = try makeTempDirectory()
+        let dbURL = dir.appendingPathComponent("spaces-test.db")
+        let runtimeURL = dir.appendingPathComponent("runtime", isDirectory: true)
+        let keys = [SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        let originalValues = keys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
+        addTeardownBlock { for (name, value) in originalValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
+        setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
+        return try SQLiteStore(path: dbURL.path)
+    }
 }
 
 func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRecord {

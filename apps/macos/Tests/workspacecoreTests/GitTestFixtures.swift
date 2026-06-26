@@ -1,5 +1,22 @@
 import Foundation
 
+// Install a hermetic git environment for the whole test process. Other helpers (notably `withMockCommands`)
+// temporarily repoint `HOME`/`PATH`/`SHELL` at throwaway directories; without this, a real `git` invocation
+// that overlaps such a window reads a bogus `HOME` (no identity, no `~/.gitconfig`) and fails in confusing
+// ways. Pinning git's config to `/dev/null` and supplying a fixed identity makes every git call — fixtures
+// and the orchestrator's `GitClient` alike — independent of ambient `HOME`/config. The values are constant,
+// so applying them once, idempotently, is race-free and never needs restoring, and they never escape the
+// test process into the developer's shell.
+let installHermeticGitEnvironment: Void = {
+    setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1)
+    setenv("GIT_CONFIG_SYSTEM", "/dev/null", 1)
+    setenv("GIT_AUTHOR_NAME", "spaces-test", 1)
+    setenv("GIT_AUTHOR_EMAIL", "test@example.com", 1)
+    setenv("GIT_COMMITTER_NAME", "spaces-test", 1)
+    setenv("GIT_COMMITTER_EMAIL", "test@example.com", 1)
+    setenv("GIT_TERMINAL_PROMPT", "0", 1)
+}()
+
 // Shared git fixture helpers for workspacecore tests.
 //
 // Building a throwaway repository with real `git init`/`add`/`commit` costs three process spawns each time.
@@ -53,6 +70,7 @@ func initializeGitRepository(at directory: URL, initialBranch: String = "main") 
 /// GIT_DIR/GIT_WORK_TREE for the repository being committed; tests use throwaway repositories, so those
 /// inherited values are stripped to keep each git invocation scoped to the fixture under test.
 @discardableResult func runGit(_ arguments: [String], cwd: String) throws -> String {
+    _ = installHermeticGitEnvironment
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     process.arguments = ["git"] + arguments
