@@ -219,9 +219,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
     private var windowShortcutSpec: HotkeySpec?
-    private var shortcutButtonsBySetting: [String: NSButton] = [:]
-    private var activeShortcutCaptureSetting: ShortcutSetting?
-    private weak var pulseColorWell: NSColorWell?
+    var shortcutButtonsBySetting: [String: NSButton] = [:]
+    var activeShortcutCaptureSetting: ShortcutSetting?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
     private var periodicProcessMonitorTask: Task<Void, Never>?
     private var periodicWorktreeDiscoveryTask: Task<Void, Never>?
@@ -236,18 +235,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     lazy var alerts = AlertsController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
     lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
-    private var selectedSettingsSection: SettingsSection = .general
-    private var selectedMCPClient: MCPClient = .claudeCode
-    private weak var mcpConfigTextView: NSTextView?
-    private weak var mcpConfigHintLabel: NSTextField?
-    private var settingsWindow: NSWindow?
+    lazy var settings = SettingsController(host: self)
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
     var projectSettingsProjectID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
-    private weak var settingsSectionContentContainer: NSView?
-    private var settingsSectionRowViews: [SettingsSection: SettingsSidebarRowView] = [:]
     private weak var remoteDeviceSSHHostField: NSTextField?
     private weak var remoteDeviceSSHUserField: NSTextField?
     private weak var remoteDeviceSSHPortField: NSTextField?
@@ -4149,109 +4142,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func presentSettingsWindow() {
-        settingsSectionRowViews.removeAll()
-        let content = buildSettingsWindowContent()
-
-        let window: NSWindow
-        if let existing = settingsWindow {
-            window = existing
-        } else {
-            let created = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 760, height: 560), styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
-                backing: .buffered, defer: false)
-            created.titlebarAppearsTransparent = true
-            created.titleVisibility = .hidden
-            created.isMovableByWindowBackground = true
-            created.isReleasedWhenClosed = false
-            created.minSize = NSSize(width: 680, height: 460)
-            created.standardWindowButton(.miniaturizeButton)?.isHidden = true
-            created.standardWindowButton(.zoomButton)?.isHidden = true
-            created.standardWindowButton(.closeButton)?.isHidden = true
-            created.delegate = self
-            created.center()
-            settingsWindow = created
-            window = created
-        }
-        window.contentView = content
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-
-        renderSelectedSettingsSection()
-    }
-
-    private func buildSettingsWindowContent() -> NSView {
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-
-        let headerBar = buildSettingsWindowHeader()
-        let headerDivider = settingsHairlineDivider()
-
-        let sidebar = buildSettingsSidebar()
-        let bodyDivider = settingsHairlineDivider()
-        let rightContainer = NSView()
-        rightContainer.translatesAutoresizingMaskIntoConstraints = false
-        settingsSectionContentContainer = rightContainer
-
-        for view in [headerBar, headerDivider, sidebar, bodyDivider, rightContainer] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(view)
-        }
-
-        NSLayoutConstraint.activate([
-            headerBar.leadingAnchor.constraint(equalTo: root.leadingAnchor), headerBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            headerBar.topAnchor.constraint(equalTo: root.topAnchor), headerBar.heightAnchor.constraint(equalToConstant: 52),
-
-            headerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            headerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            headerDivider.topAnchor.constraint(equalTo: headerBar.bottomAnchor), headerDivider.heightAnchor.constraint(equalToConstant: 1),
-
-            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor), sidebar.topAnchor.constraint(equalTo: headerDivider.bottomAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor), sidebar.widthAnchor.constraint(equalToConstant: 200),
-
-            bodyDivider.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor), bodyDivider.widthAnchor.constraint(equalToConstant: 1),
-            bodyDivider.topAnchor.constraint(equalTo: headerDivider.bottomAnchor), bodyDivider.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-
-            rightContainer.leadingAnchor.constraint(equalTo: bodyDivider.trailingAnchor),
-            rightContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            rightContainer.topAnchor.constraint(equalTo: headerDivider.bottomAnchor),
-            rightContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-        ])
-        return root
-    }
-
-    private func buildSettingsWindowHeader() -> NSView {
-        let header = NSView()
-
-        let iconView = NSImageView()
-        iconView.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Settings")
-        iconView.contentTintColor = .secondaryLabelColor
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
-
-        let title = NSTextField(labelWithString: "Settings")
-        title.font = .systemFont(ofSize: 16, weight: .semibold)
-        title.textColor = .labelColor
-
-        let closeButton = iconButton(symbol: "xmark", tooltip: "Close settings", action: #selector(closeSettingsWindow))
-        closeButton.keyEquivalent = "\u{1b}"
-
-        let stack = NSStackView(views: [iconView, title, NSView(), closeButton])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 14)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        header.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: header.leadingAnchor), stack.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: header.topAnchor), stack.bottomAnchor.constraint(equalTo: header.bottomAnchor),
-        ])
-        return header
-    }
-
     func settingsHairlineDivider() -> NSView {
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
@@ -4260,7 +4150,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return divider
     }
 
-    @objc private func closeSettingsWindow() { settingsWindow?.performClose(nil) }
+    @objc func closeSettingsWindow() { settings.closeSettingsWindow() }
 
     public func windowWillClose(_ notification: Notification) {
         let closingWindow = notification.object as? NSWindow
@@ -4279,239 +4169,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             projectHasUnsavedChanges = false
             return
         }
-        guard closingWindow === settingsWindow else { return }
+        guard closingWindow === settings.settingsWindow else { return }
         showingSettings = false
-        settingsSectionContentContainer = nil
-        settingsSectionRowViews.removeAll()
-        pulseColorWell = nil
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
+        settings.handleSettingsWindowClosed()
     }
 
-    private func buildSettingsSidebar() -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 2
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        for section in SettingsSection.allCases {
-            let row = buildSettingsSidebarRow(section)
-            stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        }
-
-        container.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -16),
-        ])
-        return container
-    }
-
-    private func buildSettingsSidebarRow(_ section: SettingsSection) -> SettingsSidebarRowView {
-        let row = SettingsSidebarRowView()
-        row.identifier = NSUserInterfaceItemIdentifier(section.rawValue)
-        row.setAccessibilityIdentifier("settings-section-\(section.rawValue)")
-        row.selectedBackgroundColor = sidebarSelectedCardBackgroundColor()
-        row.isSelected = section == selectedSettingsSection
-
-        let iconView = NSImageView()
-        iconView.image = NSImage(systemSymbolName: section.symbol, accessibilityDescription: section.title)
-        iconView.contentTintColor = .secondaryLabelColor
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
-
-        let label = NSTextField(labelWithString: section.title)
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .labelColor
-
-        let hstack = NSStackView(views: [iconView, label])
-        hstack.orientation = .horizontal
-        hstack.alignment = .centerY
-        hstack.spacing = 10
-        hstack.translatesAutoresizingMaskIntoConstraints = false
-
-        row.addSubview(hstack)
-        NSLayoutConstraint.activate([
-            hstack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
-            hstack.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor, constant: -10),
-            hstack.topAnchor.constraint(equalTo: row.topAnchor, constant: 7), hstack.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -7),
-        ])
-
-        let click = NSClickGestureRecognizer(target: self, action: #selector(settingsSectionRowClicked(_:)))
-        row.addGestureRecognizer(click)
-
-        settingsSectionRowViews[section] = row
-        return row
-    }
-
-    @objc private func settingsSectionRowClicked(_ sender: NSClickGestureRecognizer) {
-        guard let id = sender.view?.identifier?.rawValue, let section = SettingsSection(rawValue: id) else { return }
-        guard section != selectedSettingsSection else { return }
-        selectedSettingsSection = section
-        for (candidate, row) in settingsSectionRowViews { row.isSelected = candidate == section }
-        renderSelectedSettingsSection()
-    }
-
-    private func renderSelectedSettingsSection() {
-        activeShortcutCaptureSetting = nil
-        shortcutButtonsBySetting.removeAll()
-        switch selectedSettingsSection {
-        case .general: renderSettingsCards(generalSettingsCards())
-        case .shortcuts: renderSettingsCards(shortcutsSettingsCards())
-        case .devices: renderDeviceSettings(response: currentDeviceControlResponse())
-        case .mcp: renderSettingsCards(mcpSettingsCards())
-        }
-    }
-
-    private func renderSettingsCards(_ cards: [NSView]) {
-        guard let container = settingsSectionContentContainer else { return }
-        for view in container.subviews { view.removeFromSuperview() }
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 20
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        for card in cards {
-            stack.addArrangedSubview(card)
-            constrainFormFieldToFillWidth(card, in: stack)
-        }
-
-        showScrollableDetailStack(stack, in: container)
-    }
-
-    private func generalSettingsCards() -> [NSView] {
-        let options = installedEditorOptions()
-        let currentEditor: EditorPreference? = {
-            guard let editor = configCache?.editor, editor != .none else { return nil }
-            return editor
-        }()
-        let editorPopUp = NSPopUpButton()
-        editorPopUp.translatesAutoresizingMaskIntoConstraints = false
-        editorPopUp.autoenablesItems = false
-        if options.isEmpty {
-            editorPopUp.addItem(withTitle: "None detected")
-            editorPopUp.isEnabled = false
-        } else {
-            editorPopUp.addItem(withTitle: "Select editor")
-            editorPopUp.item(at: 0)?.isEnabled = false
-            for option in options {
-                editorPopUp.addItem(withTitle: option.displayName)
-                editorPopUp.itemArray.last?.representedObject = option.preference
-            }
-            if let current = currentEditor, let item = editorPopUp.itemArray.first(where: { ($0.representedObject as? EditorPreference) == current })
-            {
-                editorPopUp.select(item)
-            } else {
-                editorPopUp.selectItem(at: 0)
-            }
-            editorPopUp.target = self
-            editorPopUp.action = #selector(editorPreferenceChanged(_:))
-        }
-        editorPopUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        editorPopUp.setAccessibilityIdentifier("settings-editor")
-
-        var editorContentViews: [NSView] = [
-            settingsLabeledField(
-                name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp)
-        ]
-        if let current = currentEditor, !options.contains(where: { $0.preference == current }) {
-            let note = helpTextLabel("Saved editor \"\(editorDisplayName(current))\" is not installed.")
-            editorContentViews.append(note)
-        }
-        let editorCard = formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
-
-        let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(windowPulseEnabledChanged(_:)))
-        pulseEnabledCheckbox.state = clientWindowFocusPulseEnabled() ? .on : .off
-
-        let (pulseR, pulseG, pulseB) = clientWindowFocusPulseColor()
-        let colorWell = NSColorWell()
-        colorWell.color = NSColor(red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
-        colorWell.translatesAutoresizingMaskIntoConstraints = false
-        colorWell.target = self
-        colorWell.action = #selector(windowPulseColorChanged(_:))
-        colorWell.widthAnchor.constraint(equalToConstant: 36).isActive = true
-        colorWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        pulseColorWell = colorWell
-
-        let resetColorButton = actionButton(
-            title: "Reset", symbol: nil, tooltip: "Reset to default color (\(SettingsKey.defaultWindowFocusPulseColor))",
-            action: #selector(resetWindowPulseColor(_:)), primary: false)
-        let colorControlRow = NSStackView()
-        colorControlRow.orientation = .horizontal
-        colorControlRow.alignment = .centerY
-        colorControlRow.spacing = 8
-        colorControlRow.addArrangedSubview(colorWell)
-        colorControlRow.addArrangedSubview(resetColorButton)
-
-        let pulseCard = formSectionCard(
-            icon: "eye", title: "Window focus pulse", subtitle: "Briefly overlays focused terminal windows when focus moves to them",
-            contentViews: [
-                settingsSettingRow(
-                    name: "Enable focus pulse", hint: "Tints the border so the focused window is obvious", control: pulseEnabledCheckbox),
-                settingsSettingRow(name: "Pulse color", hint: "Default \(SettingsKey.defaultWindowFocusPulseColor)", control: colorControlRow),
-            ])
-
-        return [editorCard, pulseCard]
-    }
-
-    private func shortcutsSettingsCards() -> [NSView] {
-        let shortcutContainer = buildShortcutRowsContainer()
-        let shortcutCard = formSectionCard(
-            icon: "keyboard", title: "Keyboard shortcuts",
-            subtitle: "Click record on a row to capture a new chord. Leader-based shortcuts inherit the leader modifier.",
-            contentViews: [shortcutContainer])
-        return [shortcutCard]
-    }
-
-    private func mcpSettingsCards() -> [NSView] {
-        let clients = MCPClient.allCases
-        let picker = NSSegmentedControl(
-            labels: clients.map(\.title), trackingMode: .selectOne, target: self, action: #selector(mcpClientSegmentChanged(_:)))
-        picker.selectedSegment = clients.firstIndex(of: selectedMCPClient) ?? 0
-        picker.setContentHuggingPriority(.required, for: .horizontal)
-        picker.setAccessibilityIdentifier("settings-mcp-client-picker")
-        let pickerRow = NSStackView(views: [picker, NSView()])
-        pickerRow.orientation = .horizontal
-        pickerRow.alignment = .centerY
-
-        let cliPath = MCPClientConfiguration.resolvedCLIPath()
-        let textView = NSTextView()
-        textView.isRichText = false
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        textView.string = selectedMCPClient.configSnippet(cliPath: cliPath)
-        textView.setAccessibilityIdentifier("settings-mcp-config")
-        mcpConfigTextView = textView
-        let configScroll = scrollableTextView(textView, height: 90)
-
-        let hint = helpTextLabel(selectedMCPClient.configHint)
-        mcpConfigHintLabel = hint
-
-        let setupCard = formSectionCard(icon: "puzzlepiece.extension", title: "MCP Client Setup", contentViews: [pickerRow, hint, configScroll])
-
-        return [setupCard]
-    }
-
-    @objc private func mcpClientSegmentChanged(_ sender: NSSegmentedControl) {
-        let clients = MCPClient.allCases
-        guard clients.indices.contains(sender.selectedSegment) else { return }
-        selectedMCPClient = clients[sender.selectedSegment]
-        let cliPath = MCPClientConfiguration.resolvedCLIPath()
-        mcpConfigTextView?.string = selectedMCPClient.configSnippet(cliPath: cliPath)
-        mcpConfigHintLabel?.stringValue = selectedMCPClient.configHint
-    }
-
-    private func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
+    func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
         let nameLabel = NSTextField(labelWithString: name)
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
 
@@ -4536,7 +4201,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    private func settingsSettingRow(name: String, hint: String, control: NSView) -> NSView {
+    func settingsSettingRow(name: String, hint: String, control: NSView) -> NSView {
         let nameLabel = NSTextField(labelWithString: name)
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
 
@@ -4567,7 +4232,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return row
     }
 
-    private func buildShortcutRowsContainer() -> NSView {
+    func buildShortcutRowsContainer() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
@@ -4791,7 +4456,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func closeProjectSettingsWindow() { projectSettingsWindow?.performClose(nil) }
 
-    private func formSectionCard(
+    func formSectionCard(
         icon: String?, title: String, subtitle: String = "", iconColor: NSColor? = nil, trailingView: NSView? = nil, contentViews: [NSView]
     ) -> NSView {
         let section = NSView()
@@ -6737,7 +6402,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return label
     }
 
-    private func helpTextLabel(_ text: String) -> NSTextField {
+    func helpTextLabel(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 11)
         label.textColor = .tertiaryLabelColor
@@ -6989,13 +6654,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    private struct EditorOption {
+    struct EditorOption {
         let preference: EditorPreference
         let displayName: String
         let bundleName: String
     }
 
-    private func installedEditorOptions() -> [EditorOption] {
+    func installedEditorOptions() -> [EditorOption] {
         let candidates = [
             EditorOption(preference: .vscode, displayName: "VS Code", bundleName: "Visual Studio Code.app"),
             EditorOption(preference: .cursor, displayName: "Cursor", bundleName: "Cursor.app"),
@@ -7011,7 +6676,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return paths.contains { FileManager.default.fileExists(atPath: $0) }
     }
 
-    private func editorDisplayName(_ editor: EditorPreference) -> String {
+    func editorDisplayName(_ editor: EditorPreference) -> String {
         switch editor {
         case .vscode: return "VS Code"
         case .cursor: return "Cursor"
@@ -7324,7 +6989,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return button
     }
 
-    private func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
+    func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton(title: "", target: self, action: action)
         button.bezelStyle = .texturedRounded
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
@@ -7332,7 +6997,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return button
     }
 
-    private func actionButton(title: String, symbol: String?, tooltip: String, action: Selector, primary: Bool) -> NSButton {
+    func actionButton(title: String, symbol: String?, tooltip: String, action: Selector, primary: Bool) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
         button.bezelStyle = primary ? .rounded : .texturedRounded
         if let symbol {
@@ -7408,7 +7073,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    private func scrollableTextView(_ textView: NSTextView, height: CGFloat) -> NSScrollView {
+    func scrollableTextView(_ textView: NSTextView, height: CGFloat) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
@@ -7523,7 +7188,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc func showMobileConnection() {
         devicePanelStatusMessage = nil
-        openSettings(section: .devices)
+        settings.openSettings(section: .devices)
     }
 
     private func mobileConnectionUnavailableResponse(for error: Error) -> SpacesDeviceAPIControlResponse? {
@@ -7533,7 +7198,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             message: "Device API control is unavailable for this profile. Relaunch Spaces without the disabled Device API environment override.")
     }
 
-    private func currentDeviceControlResponse() -> SpacesDeviceAPIControlResponse {
+    func currentDeviceControlResponse() -> SpacesDeviceAPIControlResponse {
         do { return try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() } catch {
             if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) { return unavailableResponse }
             return SpacesDeviceAPIControlResponse(ok: false, message: error.localizedDescription)
@@ -7543,24 +7208,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Switches the open settings dialog to the Devices section and renders it with the given response.
     /// Opens the settings dialog on the Devices section when it is not already showing.
     private func showDeviceSettings(_ response: SpacesDeviceAPIControlResponse) {
-        if settingsWindow?.isVisible == true, settingsSectionContentContainer != nil {
-            selectedSettingsSection = .devices
-            for (section, row) in settingsSectionRowViews { row.isSelected = section == .devices }
+        if settings.settingsWindow?.isVisible == true, settings.settingsSectionContentContainer != nil {
+            settings.selectedSettingsSection = .devices
+            for (section, row) in settings.settingsSectionRowViews { row.isSelected = section == .devices }
             renderDeviceSettings(response: response)
         } else {
-            openSettings(section: .devices)
+            settings.openSettings(section: .devices)
         }
     }
 
     private func refreshVisibleDeviceSettings(_ response: SpacesDeviceAPIControlResponse) {
-        guard settingsWindow?.isVisible == true, selectedSettingsSection == .devices, settingsSectionContentContainer != nil else { return }
+        guard settings.settingsWindow?.isVisible == true, settings.selectedSettingsSection == .devices, settings.settingsSectionContentContainer != nil
+        else { return }
         renderDeviceSettings(response: response)
     }
 
-    private func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) {
+    func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) {
         activeShortcutCaptureSetting = nil
         shortcutButtonsBySetting.removeAll()
-        renderSettingsCards(deviceSettingsCards(response: response))
+        settings.renderSettingsCards(deviceSettingsCards(response: response))
     }
 
     private func visibleDevicePairingWindow(for response: SpacesDeviceAPIControlResponse) -> SpacesDevicePairingWindowSnapshot? {
@@ -8042,15 +7708,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return image
     }
 
-    @objc func showSettings() { openSettings(section: .general) }
-
-    /// Opens user settings as a floating dialog on the given section. The dialog floats over the
-    /// main window, so the current sidebar selection and detail pane are left untouched.
-    private func openSettings(section: SettingsSection) {
-        selectedSettingsSection = section
-        showingSettings = true
-        presentSettingsWindow()
-    }
+    @objc func showSettings() { settings.openSettings(section: .general) }
 
     private func copyToPasteboard(_ value: String) {
         NSPasteboard.general.clearContents()
@@ -8108,37 +7766,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private func openWorkspaceFinder(_ sender: NSButton) {
         guard let workspaceID = sender.identifier?.rawValue else { return }
         openWorkspaceFinder(workspaceID: workspaceID)
-    }
-
-    @objc private func editorPreferenceChanged(_ sender: NSPopUpButton) {
-        guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
-        if configCache?.editor == preference { return }
-        do {
-            try clientDatabase().setSetting(key: SettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
-            configCache = try clientAppConfig(base: orchestrator.appConfig())
-        } catch { showError(error) }
-    }
-
-    @objc private func windowPulseEnabledChanged(_ sender: NSButton) {
-        do { try clientDatabase().setSetting(key: SettingsKey.windowFocusPulseEnabled, value: sender.state == .on ? "1" : "0") } catch {
-            showError(error)
-        }
-    }
-
-    @objc private func resetWindowPulseColor(_ sender: NSButton) {
-        let color = SettingsKey.windowFocusPulseColor(from: nil)
-        do {
-            try clientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: SettingsKey.defaultWindowFocusPulseColor)
-            pulseColorWell?.color = NSColor(red: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: 1)
-        } catch { showError(error) }
-    }
-
-    @objc private func windowPulseColorChanged(_ sender: NSColorWell) {
-        guard let rgb = sender.color.usingColorSpace(.deviceRGB) else { return }
-        let r = Int((rgb.redComponent * 255).rounded())
-        let g = Int((rgb.greenComponent * 255).rounded())
-        let b = Int((rgb.blueComponent * 255).rounded())
-        do { try clientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(r),\(g),\(b)") } catch { showError(error) }
     }
 
     @objc private func addProject() { showAddProjectForm() }
@@ -9790,7 +9417,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return .alerts
     }
 
-    nonisolated private static func clientAppConfig(base: AppConfig) throws -> AppConfig {
+    nonisolated static func clientAppConfig(base: AppConfig) throws -> AppConfig {
         let editor = try SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
         return AppConfig(editor: editor, portRange: base.portRange)
     }
@@ -9800,14 +9427,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return AppConfig(editor: editor, portRange: base.portRange)
     }
 
-    private func clientWindowFocusPulseEnabled() -> Bool {
+    func clientWindowFocusPulseEnabled() -> Bool {
         guard let raw = try? clientDatabase().setting(key: SettingsKey.windowFocusPulseEnabled) else {
             return SettingsKey.defaultWindowFocusPulseEnabled
         }
         return raw != "0"
     }
 
-    private func clientWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
+    func clientWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
         SettingsKey.windowFocusPulseColor(from: try? clientDatabase().setting(key: SettingsKey.windowFocusPulseColor))
     }
 
