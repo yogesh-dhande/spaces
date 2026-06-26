@@ -51,7 +51,7 @@ final class CommandPaletteController {
     func filteredCommandPaletteItems(_ items: [CommandPaletteItem]) -> [CommandPaletteItem] {
         items.filter { item in
             guard let attentionID = item.alertsAttentionID else { return true }
-            return !host.dismissedAlertsAttentionItemIDs.contains(attentionID)
+            return !host.alerts.dismissedAlertsAttentionItemIDs.contains(attentionID)
         }
     }
 
@@ -195,7 +195,7 @@ final class CommandPaletteController {
             NSSound.beep()
             return
         }
-        host.dismissAlertsAttentionItem(attentionID)
+        host.alerts.dismissAlertsAttentionItem(attentionID)
         commandPaletteItems.removeAll { $0.alertsAttentionID == attentionID }
         applyCommandPaletteFilter()
     }

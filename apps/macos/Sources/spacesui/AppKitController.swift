@@ -178,7 +178,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var splitView: NSSplitView?
     let outlineView = SidebarOutlineView()
     lazy var sidebar = SidebarController(host: self)
-    private let detailContainer = NSView()
+    let detailContainer = NSView()
     private weak var workspaceShortcutFooterRowView: NSStackView?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
     var orchestrator: WorkspaceOrchestrator!
@@ -194,11 +194,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localDeviceOverview: SpacesDeviceOverviewPayload?
     var deviceSections: [DeviceSection] = []
     var alertsGroups: [AlertsGroup] = []
-    var dismissedAlertsAttentionItemIDs: Set<String> = []
-    private var visibleDetailWorkspaceID: String?
+    var visibleDetailWorkspaceID: String?
 
-    var selectedProjectID: String? { didSet { updateOperationProgressOverlayVisibility() } }
-    var selectedWorkspaceID: String? { didSet { updateOperationProgressOverlayVisibility() } }
+    var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
+    var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var lastSelectedRow: Int = -1
     var suppressOutlineSelectionChanges = false
     private var projectHasUnsavedChanges = false
@@ -210,7 +209,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var pendingLeaderCaptureModifiers: Set<HotkeyModifier> = []
     private var toggleShortcutSpec: HotkeySpec?
     private var commandPaletteShortcutSpec: HotkeySpec?
-    private var alertsShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
@@ -235,6 +233,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceSetupDetailRefreshWorkspaceID: String?
     private weak var workspaceSetupLogTextView: NSTextView?
     lazy var commandPalette = CommandPaletteController(host: self)
+    lazy var alerts = AlertsController(host: self)
+    lazy var overlays = TransientOverlaysController(host: self)
+    lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
     private var selectedSettingsSection: SettingsSection = .general
     private var selectedMCPClient: MCPClient = .claudeCode
     private weak var mcpConfigTextView: NSTextView?
@@ -243,11 +244,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var addProjectWindow: NSWindow?
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
-    private var workspaceVisibilityWindow: NSWindow?
-    private let workspaceVisibilityTable = WorkspaceVisibilityTableController()
-    private weak var workspaceVisibilityTableView: NSTableView?
-    private var workspaceVisibilityQuery = ""
-    private var workspaceVisibilityDeviceFilter: String?
     var projectSettingsProjectID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
     private weak var settingsSectionContentContainer: NSView?
@@ -313,21 +309,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var activeAddWorkspaceFormTag: Int?
     var activeAddProjectFormTag: Int?
     private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
-    private var operationProgressOverlay: NSVisualEffectView?
-    private var operationProgressOverlayTitleLabel: NSTextField?
-    private var operationProgressOverlayDetailLabel: NSTextField?
-    private var operationProgressContext: OperationProgressContext?
-    private var windowIssueToastOverlay: NSView?
-    private var windowIssueToastTitleLabel: NSTextField?
-    private var windowIssueToastDetailLabel: NSTextField?
-    private var windowIssueToastActionButton: NSButton?
-    private var windowIssueToastActionHandler: (() -> Void)?
-    private var windowIssueToastDismissTask: Task<Void, Never>?
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     var showingAlerts = false
-    /// Maps sequential window shortcut numbers (1-9) to focus targets for the current Alerts view.
-    private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var terminalSessionWindowControllers: [String: TerminalSessionWindowController] = [:]
     private var lastFocusedBuiltInTerminalSessionID: String?
@@ -2035,7 +2019,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             commandPaletteMainWindowVisibility: commandPalette.commandPaletteMainWindowVisibility ?? commandPalette.pendingCommandPalettePresentation?.mainWindowWasVisible)
     }
 
-    private static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
+    static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
         switch tint {
         case .browser: .systemBlue
         case .terminal: .systemGreen
@@ -2067,7 +2051,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return .workspaceWindow(workspaceID: workspaceID, index: windowListIndex)
     }
 
-    nonisolated private static func deviceMutation(
+    nonisolated static func deviceMutation(
         device: SpacesPairedDeviceRecord, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
     ) async -> Result<SpacesDeviceAPIResponse, Error> {
         await Task.detached(priority: .userInitiated) { do { return .success(try operation(device)) } catch { return .failure(error) } }.value
@@ -3664,225 +3648,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
 
 
-    @objc func alertsRowClicked() { showAlertsDetail() }
+    @objc func alertsRowClicked() { alerts.showAlertsDetail() }
 
-
-    // MARK: - Alerts content
-
-    private func buildAlertsGroups() -> [AlertsGroup] {
-        alertsGroups.compactMap { group -> AlertsGroup? in
-            let items = group.items.filter { !dismissedAlertsAttentionItemIDs.contains($0.attentionID) }
-            guard !items.isEmpty else { return nil }
-            return AlertsGroup(
-                projectName: group.projectName, workspaceID: group.workspaceID, workspaceName: group.workspaceName,
-                workspaceBranch: group.workspaceBranch, items: items)
-        }
-    }
-
-    func alertsAttentionCount() -> Int {
-        buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count }
-    }
-
-    func loadAlertsDismissedAttentionItemIDs() {
-        dismissedAlertsAttentionItemIDs = (try? orchestrator.alertsDismissedAttentionItemIDs()) ?? []
-    }
-
-    func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
-        let activeIDs = Set(alertsGroups.flatMap { $0.items.map(\.attentionID) })
-        let prunedIDs = dismissedAlertsAttentionItemIDs.intersection(activeIDs)
-        guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
-        dismissedAlertsAttentionItemIDs = prunedIDs
-        do { try orchestrator.setAlertsDismissedAttentionItemIDs(prunedIDs) } catch { showError(error) }
-    }
-
-    func dismissAlertsAttentionItem(_ attentionID: String) {
-        guard !dismissedAlertsAttentionItemIDs.contains(attentionID) else { return }
-        dismissedAlertsAttentionItemIDs.insert(attentionID)
-        do {
-            try orchestrator.setAlertsDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs)
-            updateAlertsSidebarBadge()
-            if showingAlerts { showAlertsDetail() }
-        } catch {
-            dismissedAlertsAttentionItemIDs.remove(attentionID)
-            showError(error)
-        }
-    }
-
-    func showAlertsDetail() {
-        clearActiveAddFormStateAndCloseWindows()
-        stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
-        showingSettings = false
-        showingAlerts = true
-        let previousProjectID = selectedProjectID
-        let previousWorkspaceID = selectedWorkspaceID
-        selectedProjectID = nil
-        selectedWorkspaceID = nil
-        alertsFocusRequestMap = [:]
-        outlineView.deselectAll(nil)
-        // Reload only the previously-selected workspace row to clear its selection styling;
-        // avoid full reloadData() which would reset expand/collapse state.
-        refreshSidebarSelectionRows(
-            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
-        updateAlertsRowAppearance()
-
-        for view in detailContainer.subviews { view.removeFromSuperview() }
-        detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-
-        let groups = buildAlertsGroups()
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        // Header
-        let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
-        let headerTitle = NSTextField(labelWithString: "Alerts")
-        headerTitle.font = .systemFont(ofSize: 20, weight: .semibold)
-        headerTitle.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
-        headerRow.addArrangedSubview(headerTitle)
-
-        stack.addArrangedSubview(headerRow)
-        constrainFormFieldToFillWidth(headerRow, in: stack)
-
-        if groups.isEmpty {
-            let sep = NSView()
-            sep.translatesAutoresizingMaskIntoConstraints = false
-            sep.wantsLayer = true
-            sep.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).cgColor
-            sep.heightAnchor.constraint(equalToConstant: 1).isActive = true
-            stack.addArrangedSubview(sep)
-            constrainFormFieldToFillWidth(sep, in: stack)
-
-            let icon = NSImageView()
-            icon.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "All clear")
-            icon.contentTintColor = sidebarRunningIndicatorColor()
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 28), icon.heightAnchor.constraint(equalToConstant: 28)])
-            let emptyTitle = NSTextField(labelWithString: "No attention required")
-            emptyTitle.font = .systemFont(ofSize: 13, weight: .medium)
-            emptyTitle.textColor = .labelColor
-            let emptyDetail = NSTextField(labelWithString: "All running workspaces are healthy.")
-            emptyDetail.font = .systemFont(ofSize: 11)
-            emptyDetail.textColor = .secondaryLabelColor
-            let emptyStack = NSStackView()
-            emptyStack.orientation = .vertical
-            emptyStack.alignment = .centerX
-            emptyStack.spacing = 6
-            emptyStack.translatesAutoresizingMaskIntoConstraints = false
-            emptyStack.addArrangedSubview(icon)
-            emptyStack.addArrangedSubview(emptyTitle)
-            emptyStack.addArrangedSubview(emptyDetail)
-            stack.addArrangedSubview(emptyStack)
-            constrainFormFieldToFillWidth(emptyStack, in: stack)
-        } else {
-            // Sequential window shortcut counter across all groups and items.
-            var shortcutCounter = 1
-
-            for group in groups {
-                // Workspace group header
-                let groupHeaderStack = NSStackView()
-                groupHeaderStack.orientation = .horizontal
-                groupHeaderStack.alignment = .centerY
-                groupHeaderStack.spacing = 4
-                groupHeaderStack.translatesAutoresizingMaskIntoConstraints = false
-
-                let projectLabel = NSTextField(labelWithString: group.projectName)
-                projectLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-                projectLabel.textColor = .secondaryLabelColor
-                projectLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-                let slashLabel = NSTextField(labelWithString: "/")
-                slashLabel.font = .systemFont(ofSize: 12)
-                slashLabel.textColor = .tertiaryLabelColor
-                slashLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-                let workspaceLabel = NSTextField(labelWithString: group.workspaceName)
-                workspaceLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-                workspaceLabel.textColor = accentColor
-                workspaceLabel.lineBreakMode = .byTruncatingTail
-                workspaceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-                groupHeaderStack.addArrangedSubview(projectLabel)
-                groupHeaderStack.addArrangedSubview(slashLabel)
-                groupHeaderStack.addArrangedSubview(workspaceLabel)
-                stack.addArrangedSubview(groupHeaderStack)
-                constrainFormFieldToFillWidth(groupHeaderStack, in: stack)
-
-                let itemsStack = NSStackView()
-                itemsStack.orientation = .vertical
-                itemsStack.spacing = 4
-                itemsStack.translatesAutoresizingMaskIntoConstraints = false
-
-                for entry in group.items {
-                    let shortcut = shortcutCounter <= 10 ? windowShortcutBadgeText(index: shortcutCounter) : ""
-                    if shortcutCounter <= 10, let focusRequest = entry.focusRequest { alertsFocusRequestMap[shortcutCounter] = focusRequest }
-                    shortcutCounter += 1
-                    let cardAction: (() async -> Void)?
-                    if let focusRequest = entry.focusRequest {
-                        cardAction = { [weak self] in
-                            guard let self else { return }
-                            await self.performWindowFocus(focusRequest)
-                        }
-                    } else {
-                        cardAction = nil
-                    }
-                    let card = alertsWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
-                    itemsStack.addArrangedSubview(card)
-                    constrainFormFieldToFillWidth(card, in: itemsStack)
-                }
-
-                stack.addArrangedSubview(itemsStack)
-                constrainFormFieldToFillWidth(itemsStack, in: stack)
-            }
-        }
-
-        showScrollableDetailStack(stack)
-    }
-
-    /// Builds an alerts card with focus and dismiss affordances while preserving the workspace Run tab rows.
-    private func alertsWindowCard(entry: AlertsAttentionEntry, shortcut: String, action: (() async -> Void)? = nil) -> NSView {
-        let dismissButton = NSButton()
-        dismissButton.title = ""
-        dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")
-        dismissButton.imagePosition = .imageOnly
-        dismissButton.setButtonType(.momentaryPushIn)
-        dismissButton.isBordered = false
-        dismissButton.contentTintColor = .secondaryLabelColor
-        dismissButton.bezelStyle = .regularSquare
-        dismissButton.target = self
-        dismissButton.action = #selector(dismissAlertsAttentionItemAction(_:))
-        dismissButton.identifier = NSUserInterfaceItemIdentifier(entry.attentionID)
-        dismissButton.toolTip = "Dismiss from alerts"
-
-        let mainRow = windowRow(
-            icon: entry.icon, iconColor: Self.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
-            processStatus: entry.processStatus, agentStatus: entry.agentStatus,
-            automationID: entry.agentStatus == nil ? nil : "alerts-agent-\(Self.automationIdentifierSlug(entry.label))",
-            trailingAccessory: dismissButton, action: action)
-
-        let container = NSStackView()
-        container.orientation = .vertical
-        container.spacing = 4
-        container.translatesAutoresizingMaskIntoConstraints = false
-
-        container.addArrangedSubview(mainRow)
-        constrainFormFieldToFillWidth(mainRow, in: container)
-
-        return container
-    }
-
-    @objc private func dismissAlertsAttentionItemAction(_ sender: NSButton) {
-        guard let attentionID = sender.identifier?.rawValue, !attentionID.isEmpty else { return }
-        dismissAlertsAttentionItem(attentionID)
-    }
+    // MARK: - Alerts forwarders
+    // Thin pass-throughs that keep widely-used alerts entry points callable from
+    // host and sidebar code. The implementations live on `alerts` (AlertsController).
+    func alertsAttentionCount() -> Int { alerts.alertsAttentionCount() }
+    func loadAlertsDismissedAttentionItemIDs() { alerts.loadAlertsDismissedAttentionItemIDs() }
+    func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
+    func showAlertsDetail() { alerts.showAlertsDetail() }
 
     private func makeRightPane() -> NSView {
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -4050,7 +3824,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The id of the device that owns a workspace/project, falling back to the
     /// local device. These give every action its per-row device context so it
     /// routes to the daemon that actually hosts the workspace.
-    private func deviceID(forWorkspaceID workspaceID: String) -> String {
+    func deviceID(forWorkspaceID workspaceID: String) -> String {
         findWorkspace(id: workspaceID)?.0.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
     }
 
@@ -4106,7 +3880,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             ])
     }
 
-    private func showDeviceNotLoadedError() { showError(Self.deviceNotLoadedError()) }
+    func showDeviceNotLoadedError() { showError(Self.deviceNotLoadedError()) }
 
     private func deviceProjectSummary(projectID: String) -> SpacesDeviceProjectSummary? {
         // Search every device section's overview, not just the local one, so detail
@@ -4164,7 +3938,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if showingAlerts { showAlertsDetail() }
     }
 
-    private func applyDeviceMutationResponse(
+    func applyDeviceMutationResponse(
         _ response: SpacesDeviceAPIResponse, selectedProjectID preferredProjectID: String? = nil,
         selectedWorkspaceID preferredWorkspaceID: String? = nil
     ) {
@@ -4250,7 +4024,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func stopWorkspaceSetupDetailRefreshTimer() {
+    func stopWorkspaceSetupDetailRefreshTimer() {
         workspaceSetupDetailRefreshTimer?.invalidate()
         workspaceSetupDetailRefreshTimer = nil
         workspaceSetupDetailRefreshWorkspaceID = nil
@@ -4335,265 +4109,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    private enum OperationProgressContext: Equatable {
-        case workspace(String)
-        case project(String)
-        case global
+    // MARK: - Transient overlays forwarders
+    // Thin pass-throughs for the operation-progress HUD and window-issue toast/modal.
+    // The implementations live on `overlays` (TransientOverlaysController).
+    func showOperationProgressOverlay(message: String, detail: String, context: TransientOverlaysController.OperationProgressContext) {
+        overlays.showOperationProgressOverlay(message: message, detail: detail, context: context)
     }
-
-    private func showOperationProgressOverlay(message: String, detail: String, context: OperationProgressContext) {
-        guard let contentView = window?.contentView else { return }
-        let overlay: NSVisualEffectView
-        let titleLabel: NSTextField
-        let detailLabel: NSTextField
-        if let existingOverlay = operationProgressOverlay, let existingTitleLabel = operationProgressOverlayTitleLabel,
-            let existingDetailLabel = operationProgressOverlayDetailLabel
-        {
-            overlay = existingOverlay
-            titleLabel = existingTitleLabel
-            detailLabel = existingDetailLabel
-        } else {
-            overlay = NSVisualEffectView()
-            overlay.material = .hudWindow
-            overlay.blendingMode = .withinWindow
-            overlay.state = .active
-            overlay.wantsLayer = true
-            overlay.layer?.cornerRadius = UIRadius.large
-            overlay.layer?.borderWidth = 1
-            overlay.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
-            overlay.translatesAutoresizingMaskIntoConstraints = false
-
-            let stack = NSStackView()
-            stack.orientation = .horizontal
-            stack.alignment = .top
-            stack.spacing = 10
-            stack.translatesAutoresizingMaskIntoConstraints = false
-
-            let spinner = NSProgressIndicator()
-            spinner.style = .spinning
-            spinner.controlSize = .small
-            spinner.startAnimation(nil)
-            spinner.translatesAutoresizingMaskIntoConstraints = false
-            spinner.setContentHuggingPriority(.required, for: .horizontal)
-            stack.addArrangedSubview(spinner)
-
-            let labelStack = NSStackView()
-            labelStack.orientation = .vertical
-            labelStack.alignment = .leading
-            labelStack.spacing = 2
-            labelStack.translatesAutoresizingMaskIntoConstraints = false
-
-            titleLabel = NSTextField(labelWithString: "")
-            titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-            titleLabel.textColor = .labelColor
-            titleLabel.maximumNumberOfLines = 1
-            labelStack.addArrangedSubview(titleLabel)
-
-            detailLabel = NSTextField(labelWithString: "")
-            detailLabel.font = .systemFont(ofSize: 11)
-            detailLabel.textColor = .secondaryLabelColor
-            detailLabel.maximumNumberOfLines = 2
-            labelStack.addArrangedSubview(detailLabel)
-
-            stack.addArrangedSubview(labelStack)
-            overlay.addSubview(stack)
-            contentView.addSubview(overlay)
-
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
-                stack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
-                stack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 10),
-                stack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -10),
-
-                overlay.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14),
-                overlay.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-                overlay.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
-            ])
-
-            operationProgressOverlay = overlay
-            operationProgressOverlayTitleLabel = titleLabel
-            operationProgressOverlayDetailLabel = detailLabel
-        }
-
-        titleLabel.stringValue = message
-        detailLabel.stringValue = detail
-        operationProgressContext = context
-        updateOperationProgressOverlayVisibility()
+    func hideOperationProgressOverlay() { overlays.hideOperationProgressOverlay() }
+    func showWindowIssueToast(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
+        overlays.showWindowIssueToast(title: title, detail: detail, actionTitle: actionTitle, action: action)
     }
-
-    private func hideOperationProgressOverlay() {
-        operationProgressContext = nil
-        operationProgressOverlay?.isHidden = true
+    func showWindowIssueModal(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
+        overlays.showWindowIssueModal(title: title, detail: detail, actionTitle: actionTitle, action: action)
     }
-
-    private func updateOperationProgressOverlayVisibility() {
-        guard let overlay = operationProgressOverlay else { return }
-        guard let context = operationProgressContext else {
-            overlay.isHidden = true
-            return
-        }
-        let isRelevant: Bool
-        switch context {
-        case .workspace(let id): isRelevant = selectedWorkspaceID == id
-        case .project(let id): isRelevant = selectedProjectID == id
-        case .global: isRelevant = true
-        }
-        overlay.isHidden = !isRelevant
-    }
-
-    private func showWindowIssueToast(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
-        guard let contentView = window?.contentView else { return }
-        let overlay: NSView
-        let titleLabel: NSTextField
-        let detailLabel: NSTextField
-        let actionButton: NSButton
-        if let existingOverlay = windowIssueToastOverlay, let existingTitleLabel = windowIssueToastTitleLabel,
-            let existingDetailLabel = windowIssueToastDetailLabel, let existingActionButton = windowIssueToastActionButton
-        {
-            overlay = existingOverlay
-            titleLabel = existingTitleLabel
-            detailLabel = existingDetailLabel
-            actionButton = existingActionButton
-        } else {
-            overlay = NSView()
-            overlay.wantsLayer = true
-            overlay.translatesAutoresizingMaskIntoConstraints = false
-
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 8
-            stack.translatesAutoresizingMaskIntoConstraints = false
-
-            titleLabel = NSTextField(labelWithString: "")
-            titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-            titleLabel.textColor = .labelColor
-            titleLabel.maximumNumberOfLines = 1
-            stack.addArrangedSubview(titleLabel)
-
-            detailLabel = NSTextField(labelWithString: "")
-            detailLabel.font = .systemFont(ofSize: 11)
-            detailLabel.textColor = .secondaryLabelColor
-            detailLabel.maximumNumberOfLines = 2
-            stack.addArrangedSubview(detailLabel)
-
-            actionButton = NSButton(title: "", target: self, action: #selector(handleWindowIssueToastAction))
-            actionButton.bezelStyle = .rounded
-            actionButton.controlSize = .small
-            stack.addArrangedSubview(actionButton)
-
-            overlay.addSubview(stack)
-            contentView.addSubview(overlay)
-
-            NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
-                stack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
-                stack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 10),
-                stack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -10),
-
-                overlay.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14),
-                overlay.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-                overlay.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
-            ])
-
-            windowIssueToastOverlay = overlay
-            windowIssueToastTitleLabel = titleLabel
-            windowIssueToastDetailLabel = detailLabel
-            windowIssueToastActionButton = actionButton
-        }
-
-        refreshWindowIssueToastAppearance()
-        titleLabel.stringValue = title
-        detailLabel.stringValue = detail
-        actionButton.title = actionTitle ?? ""
-        actionButton.isHidden = actionTitle == nil
-        if actionTitle != nil { Theme.applyPrimaryStyle(to: actionButton) }
-        windowIssueToastActionHandler = action
-        overlay.isHidden = false
-
-        windowIssueToastDismissTask?.cancel()
-        let dismissAfterSeconds: Double = actionTitle == nil ? 4 : 8
-        windowIssueToastDismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(dismissAfterSeconds))
-            guard !Task.isCancelled else { return }
-            self?.hideWindowIssueToast()
-        }
-    }
-
-    private func hideWindowIssueToast() {
-        windowIssueToastDismissTask?.cancel()
-        windowIssueToastDismissTask = nil
-        windowIssueToastActionHandler = nil
-        windowIssueToastOverlay?.isHidden = true
-    }
-
-    private func refreshWindowIssueToastAppearance() {
-        guard let layer = windowIssueToastOverlay?.layer else { return }
-        layer.cornerRadius = UIRadius.large
-        layer.borderWidth = 1
-        let appearance = window?.contentView?.effectiveAppearance ?? window?.effectiveAppearance ?? NSApp.effectiveAppearance
-        appearance.performAsCurrentDrawingAppearance {
-            layer.borderColor = NSColor.systemRed.withAlphaComponent(0.35).cgColor
-            layer.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
-        }
-    }
-
-    @objc private func handleWindowIssueToastAction() {
-        let action = windowIssueToastActionHandler
-        hideWindowIssueToast()
-        action?()
-    }
-
-    private func showWindowIssueModal(title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
-        hideWindowIssueToast()
-        if commandPalette.commandPalettePanel?.isVisible == true {
-            commandPalette.commandPaletteReturnTerminalSessionID = nil
-            commandPalette.commandPaletteReturnApplicationProcessID = nil
-            commandPalette.dismissCommandPalette()
-        }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = title
-        alert.informativeText = detail
-
-        if let actionTitle {
-            let actionButton = alert.addButton(withTitle: actionTitle)
-            actionButton.keyEquivalent = "r"
-            actionButton.keyEquivalentModifierMask = [.command]
-            let cancelButton = alert.addButton(withTitle: "Cancel (Esc)")
-            cancelButton.keyEquivalent = "\u{1b}"
-            cancelButton.keyEquivalentModifierMask = []
-        } else {
-            let okButton = alert.addButton(withTitle: "OK")
-            okButton.keyEquivalent = "\r"
-            okButton.keyEquivalentModifierMask = []
-        }
-
-        if let window {
-            prepareWindowForActiveSpaceSummon(window)
-            NSApp.unhide(nil)
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
-        }
-        Task { @MainActor in
-            await Task.yield()
-            if let window {
-                prepareWindowForActiveSpaceSummon(window)
-                NSApp.activate(ignoringOtherApps: true)
-                window.makeKeyAndOrderFront(nil)
-                window.orderFrontRegardless()
-            }
-            let response = alert.runModal()
-            if actionTitle != nil, response == .alertFirstButtonReturn { action?() }
-        }
-    }
-
-    private func writeWindowIssueModalAck(to outputPath: String) {
-        let url = URL(fileURLWithPath: outputPath)
-        let payload = #"{"received":true}"#
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? payload.write(to: url, atomically: true, encoding: .utf8)
-    }
+    func writeWindowIssueModalAck(to outputPath: String) { overlays.writeWindowIssueModalAck(to: outputPath) }
 
     enum SettingsSection: String, CaseIterable {
         case general
@@ -4723,7 +4252,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return header
     }
 
-    private func settingsHairlineDivider() -> NSView {
+    func settingsHairlineDivider() -> NSView {
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
@@ -5664,7 +5193,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return window
     }
 
-    private func buildFormWindowHeader(symbol: String, title: String, closeAction: Selector) -> NSView {
+    func buildFormWindowHeader(symbol: String, title: String, closeAction: Selector) -> NSView {
         let header = NSView()
 
         let iconView = NSImageView()
@@ -5701,236 +5230,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         addWorkspaceWindow = presentFormWindow(existing: addWorkspaceWindow, header: header, hosting: stack)
     }
 
-    // MARK: - Workspace visibility dialog
-
-    @objc private func showWorkspaceVisibilityDialog() {
-        clearActiveAddFormStateAndCloseWindows()
-        workspaceVisibilityQuery = ""
-        workspaceVisibilityDeviceFilter = nil
-
-        let searchField = NSSearchField()
-        searchField.placeholderString = "Search workspaces"
-        searchField.target = self
-        searchField.action = #selector(workspaceVisibilitySearchChanged(_:))
-        searchField.sendsWholeSearchString = false
-        searchField.sendsSearchStringImmediately = false
-        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        searchField.setAccessibilityIdentifier("workspace-visibility-search")
-
-        let devicePopUp = NSPopUpButton()
-        devicePopUp.target = self
-        devicePopUp.action = #selector(workspaceVisibilityDeviceFilterChanged(_:))
-        devicePopUp.setContentHuggingPriority(.required, for: .horizontal)
-        populateWorkspaceVisibilityDevicePopUp(devicePopUp)
-
-        let filterRow = NSStackView(views: [searchField, devicePopUp])
-        filterRow.orientation = .horizontal
-        filterRow.spacing = 8
-        filterRow.distribution = .fill
-
-        let tableView = NSTableView()
-        tableView.dataSource = workspaceVisibilityTable
-        tableView.delegate = workspaceVisibilityTable
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.rowHeight = 24
-        tableView.allowsColumnSelection = false
-        tableView.headerView = NSTableHeaderView()
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.visibleColumn, title: "Show", width: 44, fixed: true)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.titleColumn, title: "Workspace", width: 180)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.projectColumn, title: "Project", width: 150)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.deviceColumn, title: "Device", width: 130)
-        addWorkspaceVisibilityColumn(tableView, id: WorkspaceVisibilityTableController.branchColumn, title: "Branch", width: 130)
-        workspaceVisibilityTableView = tableView
-        workspaceVisibilityTable.onToggleVisible = { [weak self] workspaceID, visible in
-            self?.setWorkspaceHidden(workspaceID: workspaceID, isHidden: !visible) { [weak self] _ in self?.reloadWorkspaceVisibilityRows() }
-        }
-
-        let scroll = NSScrollView()
-        scroll.documentView = tableView
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-
-        reloadWorkspaceVisibilityRows()
-        presentWorkspaceVisibilityWindow(filterRow: filterRow, tableScroll: scroll)
-    }
-
-    private func addWorkspaceVisibilityColumn(
-        _ tableView: NSTableView, id: NSUserInterfaceItemIdentifier, title: String, width: CGFloat, fixed: Bool = false
-    ) {
-        let column = NSTableColumn(identifier: id)
-        column.title = title
-        column.width = width
-        column.minWidth = fixed ? width : 60
-        if fixed { column.maxWidth = width }
-        tableView.addTableColumn(column)
-    }
-
-    private func populateWorkspaceVisibilityDevicePopUp(_ popup: NSPopUpButton) {
-        popup.removeAllItems()
-        popup.addItem(withTitle: "All devices")
-        for section in deviceSections {
-            popup.addItem(withTitle: section.deviceName)
-            popup.lastItem?.representedObject = section.deviceID
-        }
-        if let filter = workspaceVisibilityDeviceFilter, let item = popup.itemArray.first(where: { ($0.representedObject as? String) == filter }) {
-            popup.select(item)
-        } else {
-            popup.selectItem(at: 0)
-        }
-    }
-
-    @objc private func workspaceVisibilitySearchChanged(_ sender: NSSearchField) {
-        workspaceVisibilityQuery = sender.stringValue
-        reloadWorkspaceVisibilityRows()
-    }
-
-    @objc private func workspaceVisibilityDeviceFilterChanged(_ sender: NSPopUpButton) {
-        workspaceVisibilityDeviceFilter = sender.selectedItem?.representedObject as? String
-        reloadWorkspaceVisibilityRows()
-    }
-
-    private func buildWorkspaceVisibilityRows() -> [WorkspaceVisibilityRow] {
-        var rows: [WorkspaceVisibilityRow] = []
-        for project in projects {
-            let deviceName = deviceSection(id: project.deviceID)?.deviceName ?? project.deviceID
-            for workspace in workspacesByProject[project.id] ?? [] where !workspace.isArchived {
-                rows.append(
-                    WorkspaceVisibilityRow(
-                        workspaceID: workspace.id, deviceID: project.deviceID, title: workspace.title, projectName: project.name,
-                        deviceName: deviceName, branch: workspace.branch ?? "", isHidden: workspace.isHidden))
-            }
-        }
-        return rows
-    }
-
-    private func reloadWorkspaceVisibilityRows() {
-        let deviceFiltered =
-            workspaceVisibilityDeviceFilter.map { id in buildWorkspaceVisibilityRows().filter { $0.deviceID == id } }
-            ?? buildWorkspaceVisibilityRows()
-        let candidates = deviceFiltered.enumerated().map { offset, row in
-            CommandPaletteFuzzySearch.Candidate(
-                id: offset,
-                fields: [
-                    .init(text: row.title, weight: 1.0), .init(text: row.projectName, weight: 0.6), .init(text: row.deviceName, weight: 0.4),
-                    .init(text: row.branch, weight: 0.5),
-                ])
-        }
-        let ranked = CommandPaletteFuzzySearch.rank(query: workspaceVisibilityQuery, candidates: candidates)
-        workspaceVisibilityTable.rows = ranked.map { deviceFiltered[$0.id] }
-        workspaceVisibilityTableView?.reloadData()
-    }
-
-    private func presentWorkspaceVisibilityWindow(filterRow: NSView, tableScroll: NSView) {
-        let header = buildFormWindowHeader(
-            symbol: "line.3.horizontal.decrease.circle", title: "Workspaces", closeAction: #selector(closeWorkspaceVisibilityWindow))
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
-        let headerDivider = settingsHairlineDivider()
-        for view in [header, headerDivider, filterRow, tableScroll] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(view)
-        }
-        NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor), header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            header.topAnchor.constraint(equalTo: root.topAnchor), header.heightAnchor.constraint(equalToConstant: 52),
-            headerDivider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            headerDivider.trailingAnchor.constraint(equalTo: root.trailingAnchor), headerDivider.topAnchor.constraint(equalTo: header.bottomAnchor),
-            headerDivider.heightAnchor.constraint(equalToConstant: 1), filterRow.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            filterRow.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            filterRow.topAnchor.constraint(equalTo: headerDivider.bottomAnchor, constant: 12),
-            tableScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            tableScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            tableScroll.topAnchor.constraint(equalTo: filterRow.bottomAnchor, constant: 10),
-            tableScroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
-        ])
-        let window: NSWindow
-        if let existing = workspaceVisibilityWindow {
-            window = existing
-        } else {
-            let created = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 720, height: 560), styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
-                backing: .buffered, defer: false)
-            created.titlebarAppearsTransparent = true
-            created.titleVisibility = .hidden
-            created.isMovableByWindowBackground = true
-            created.isReleasedWhenClosed = false
-            created.minSize = NSSize(width: 560, height: 360)
-            created.standardWindowButton(.miniaturizeButton)?.isHidden = true
-            created.standardWindowButton(.zoomButton)?.isHidden = true
-            created.standardWindowButton(.closeButton)?.isHidden = true
-            created.center()
-            workspaceVisibilityWindow = created
-            window = created
-        }
-        window.contentView = root
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    @objc private func closeWorkspaceVisibilityWindow() { workspaceVisibilityWindow?.performClose(nil) }
-
-    /// Sets a workspace's sidebar visibility (persisted as `isHidden`), routing to
-    /// the device that owns the workspace and stopping it first if it is running.
-    private func setWorkspaceHidden(workspaceID: String, isHidden: Bool, completion: @escaping (Bool) -> Void) {
-        guard let (project, workspace) = findWorkspace(id: workspaceID) else { return completion(false) }
-        Task { @MainActor [weak self] in
-            guard let self else { return completion(false) }
-            guard let device = deviceRecord(forDeviceID: deviceID(forWorkspaceID: workspaceID)) else {
-                showDeviceNotLoadedError()
-                return completion(false)
-            }
-            // Decide the "Stop and Hide" prompt and the stop from fresh daemon state,
-            // not a possibly-stale cached snapshot (remote overviews refresh on a
-            // throttled cadence), so a running workspace is never hidden without being
-            // stopped, nor a stopped one prompted about needlessly.
-            var isRunning = workspace.isRunning
-            if isHidden {
-                let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-                let overviewResult: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(device: device, clientApp: clientApp)) } catch { return .failure(error) }
-                }.value
-                switch overviewResult {
-                case .success(let overview): isRunning = overview.overview.workspaces.first(where: { $0.id == workspaceID })?.isRunning ?? false
-                case .failure(let error):
-                    showError(error)
-                    return completion(false)
-                }
-            }
-            if isHidden, isRunning {
-                let alert = NSAlert()
-                alert.alertStyle = .warning
-                alert.messageText = "Hide workspace?"
-                alert.informativeText = "\"\(workspace.title)\" is currently running. Hiding it stops the workspace first."
-                alert.addButton(withTitle: "Stop and Hide")
-                alert.addButton(withTitle: "Cancel")
-                guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }
-                let stopResult = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.stopWorkspace(
-                        workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-                if case .failure(let error) = stopResult {
-                    showError(error)
-                    return completion(false)
-                }
-            }
-            let result = await Self.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.updateWorkspaceMetadata(
-                    workspaceID: workspaceID, isHidden: isHidden, updatesHidden: true, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
-            switch result {
-            case .success(let response):
-                if isHidden, selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
-                applyDeviceMutationResponse(response, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
-                completion(true)
-            case .failure(let error):
-                showError(error)
-                completion(false)
-            }
-        }
-    }
+    // MARK: - Workspace visibility forwarders
+    // The dialog-open (sidebar header) and window-close buttons bind their target
+    // to the host, so these stay as @objc host methods; the implementation lives
+    // on `workspaceVisibility` (WorkspaceVisibilityController).
+    @objc func showWorkspaceVisibilityDialog() { workspaceVisibility.showWorkspaceVisibilityDialog() }
+    @objc func closeWorkspaceVisibilityWindow() { workspaceVisibility.closeWorkspaceVisibilityWindow() }
 
     @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
 
@@ -7091,7 +6396,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         activeAddWorkspaceFormTag = nil
     }
 
-    private func clearActiveAddFormStateAndCloseWindows() {
+    func clearActiveAddFormStateAndCloseWindows() {
         clearActiveAddProjectFormState()
         clearInlineWorkspaceFieldRefs()
         clearActiveAddWorkspaceFormState()
@@ -7463,7 +6768,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return (cleanedName?.isEmpty == false ? cleanedName! : "Terminal", cleanedDetail?.isEmpty == false ? cleanedDetail : nil)
     }
 
-    private func windowRow(
+    func windowRow(
         icon: String, iconColor: NSColor, label: String, detail: String? = nil, shortcut: String, processStatus: RunningProcessState? = nil,
         agentStatus: AgentWindowStatus? = nil, automationID: String? = nil, trailingAccessory: NSView? = nil, action: (() async -> Void)? = nil
     ) -> NSView {
@@ -8045,7 +7350,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let image = button.image { button.image = image.withSymbolConfiguration(.init(paletteColors: [Theme.primaryButtonText])) }
     }
 
-    private func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
+    func constrainFormFieldToFillWidth(_ view: NSView, in stack: NSStackView) {
         view.translatesAutoresizingMaskIntoConstraints = false
         view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
@@ -8069,7 +7374,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return row
     }
 
-    private func showScrollableDetailStack(_ stack: NSStackView, in host: NSView? = nil) {
+    func showScrollableDetailStack(_ stack: NSStackView, in host: NSView? = nil) {
         let container = host ?? detailContainer
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -10174,7 +9479,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
             if self.handleReloadShortcut(event: event) { return nil }
             if self.handleFormCancelShortcut(event: event) { return nil }
-            if self.handleAlertsShortcut(event: event) { return nil }
+            if self.alerts.handleAlertsShortcut(event: event) { return nil }
             if let openSettingsShortcutSpec, matches(event: event, spec: openSettingsShortcutSpec) {
                 self.showSettings()
                 return nil
@@ -10282,12 +9587,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return true
         }
         return false
-    }
-
-    private func handleAlertsShortcut(event: NSEvent) -> Bool {
-        guard let alertsShortcutSpec, matches(event: event, spec: alertsShortcutSpec) else { return false }
-        showAlertsDetail()
-        return true
     }
 
     private func handleNewWorkspaceShortcut(event: NSEvent) -> Bool {
@@ -10526,7 +9825,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
         commandPaletteShortcutSpec = loadShortcutSpec(setting: .guiCommandPaletteHotkey)
-        alertsShortcutSpec = loadShortcutSpec(setting: .guiAlertsShortcut)
+        alerts.alertsShortcutSpec = loadShortcutSpec(setting: .guiAlertsShortcut)
         addWorkspaceShortcutSpec = loadShortcutSpec(setting: .guiAddWorkspaceShortcut)
         reloadShortcutSpec = loadShortcutSpec(setting: .guiReloadShortcut)
         nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
@@ -10560,7 +9859,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiHotkey: return toggleShortcutSpec
         case .guiCommandPaletteHotkey: return commandPaletteShortcutSpec
         case .guiLeaderHotkey: return nil
-        case .guiAlertsShortcut: return alertsShortcutSpec
+        case .guiAlertsShortcut: return alerts.alertsShortcutSpec
         case .guiAddWorkspaceShortcut: return addWorkspaceShortcutSpec
         case .guiReloadShortcut: return reloadShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec
@@ -10573,7 +9872,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func matches(event: NSEvent, spec: HotkeySpec) -> Bool {
+    func matches(event: NSEvent, spec: HotkeySpec) -> Bool {
         guard UInt32(event.keyCode) == spec.keyCode else { return false }
         let flags = eventModifierCarbonFlags(event)
         return flags == spec.modifiersCarbon
@@ -10589,7 +9888,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return result
     }
 
-    private func performWindowFocus(_ request: WindowFocusRequest) async {
+    func performWindowFocus(_ request: WindowFocusRequest) async {
         let result = await Self.performWindowFocusSnapshot(request)
         switch result {
         case .success(let action):
@@ -10618,7 +9917,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             await runDeviceWindowShortcut(index: index, startedAt: startedAt)
             return
         }
-        let alertsFocusRequest = showingAlerts ? alertsFocusRequestMap[index] : nil
+        let alertsFocusRequest = showingAlerts ? alerts.alertsFocusRequest(for: index) : nil
         let routeStartedAt = Date()
         let result = await Self.focusWindowShortcutSnapshot(
             index: index, selectedWorkspaceID: selectedWorkspaceID, alertsFocusRequest: alertsFocusRequest)
@@ -10827,7 +10126,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return keyMap[event.keyCode]
     }
 
-    private func windowShortcutBadgeText(index: Int) -> String {
+    func windowShortcutBadgeText(index: Int) -> String {
         let keyText = index == 10 ? "0" : String(index)
         guard let windowShortcutSpec else { return "⌘\(keyText)" }
         return displayShortcut(windowShortcutSpec, keyText: keyText)
@@ -11211,7 +10510,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
+    func prepareWindowForActiveSpaceSummon(_ window: NSWindow) {
         activeSpaceSummonCleanupTask?.cancel()
         window.collectionBehavior = Self.collectionBehaviorForActiveSpaceSummon(window.collectionBehavior)
         activeSpaceSummonCleanupTask = Task { @MainActor [weak self, weak window] in
