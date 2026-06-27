@@ -384,6 +384,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var pairedDevices: [SpacesMobilePairedDeviceRecord]
     var activeDeviceID: String?
     var overview: SpacesDeviceOverviewPayload?
+    /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
+    /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
+    var daemonStatus: TerminalServiceDaemonStatus?
+    var compatibility: SpacesWireCompatibility?
     var isLoading = false
     var isMutating = false
     var isShowingConnectionSettings = false
@@ -470,6 +474,34 @@ private enum SpacesMobileMutationTimeoutRecovery {
         .sorted(by: groupSort)
     }
 
+    /// The active device cannot be used until its daemon is restarted/updated or this app updates.
+    var isActiveDeviceBlocked: Bool {
+        guard let compatibility else { return false }
+        return !compatibility.isCompatible
+    }
+
+    /// Compatible, but the daemon reports an older app version than this client — a non-blocking hint
+    /// that a daemon update is pending and will apply on the next restart.
+    var daemonUpdatePending: Bool {
+        guard compatibility == .compatible, let status = daemonStatus else { return false }
+        return SpacesMobileAppModel.isVersion(status.version, olderThan: SpacesMobileAppModel.clientAppVersion)
+    }
+
+    static let clientAppVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+
+    /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric or empty inputs compare equal.
+    static func isVersion(_ lhs: String, olderThan rhs: String) -> Bool {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        let lhsParts = lhs.split(separator: ".").map { Int($0) ?? 0 }
+        let rhsParts = rhs.split(separator: ".").map { Int($0) ?? 0 }
+        for index in 0..<max(lhsParts.count, rhsParts.count) {
+            let l = index < lhsParts.count ? lhsParts[index] : 0
+            let r = index < rhsParts.count ? rhsParts[index] : 0
+            if l != r { return l < r }
+        }
+        return false
+    }
+
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }
         return "\(settings.trimmedHost):\(settings.port)"
@@ -502,6 +534,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
+        // Read the frozen-core handshake first: it stays decodable even when a wire-incompatible
+        // daemon's normal overview payload would not, so a blocked device shows the restart/update
+        // block instead of a generic connection error.
+        await refreshCompatibility()
+        if isActiveDeviceBlocked {
+            // Fully blocked for this device; skip the normal overview entirely.
+            overview = nil
+            connectionNotice = nil
+            errorMessage = nil
+            return
+        }
         do {
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             self.overview = overview
@@ -518,6 +561,36 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// Requests a restart of the active device's daemon. The caller should already have confirmed the
+    /// restart impact with the user. After the daemon respawns, the next refresh re-runs the handshake.
+    func requestDaemonRestart() async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel)
+            connectionNotice = "Restarting the daemon…"
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshCompatibility() async {
+        do {
+            let status = try await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel)
+            daemonStatus = status
+            compatibility = SpacesWireCompatibility.evaluate(daemonStatus: status)
+        } catch is CancellationError {
+            return
+        } catch {
+            // Could not read the handshake; leave compatibility unknown rather than blocking.
+            daemonStatus = nil
+            compatibility = nil
+        }
+    }
+
     func applyConnectionSettings(_ settings: SpacesMobileConnectionSettings, deviceName: String? = nil) {
         let previousCommandChannel = commandChannel
         let deviceState =
@@ -531,6 +604,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(deviceState.settings)
         overview = nil
+        daemonStatus = nil
+        compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
@@ -547,6 +622,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
+        daemonStatus = nil
+        compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
@@ -563,6 +640,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
+        daemonStatus = nil
+        compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         Task { await previousCommandChannel.close() }

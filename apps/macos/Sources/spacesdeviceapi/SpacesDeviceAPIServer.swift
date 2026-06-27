@@ -719,6 +719,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
+    /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon process exits and
+    /// is respawned by launchd `KeepAlive` / systemd `Restart=always` from the updated binary.
+    private let onRestartRequested: (@Sendable () -> Void)?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
@@ -744,7 +747,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(), pairingStore: SpacesDevicePairingStore? = nil,
         onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -754,6 +758,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.onRestartRequested = onRestartRequested
         overviewLoaderForTesting = nil
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
         #if canImport(Network) && canImport(Security)
@@ -771,6 +776,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil
     ) {
@@ -783,6 +789,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.onRestartRequested = onRestartRequested
         self.overviewLoaderForTesting = overviewLoaderForTesting
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
@@ -942,6 +949,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             onPairingSucceeded?(clientApp)
             return SpacesDeviceAPIResponse(ok: true, message: "Paired iOS client.", result: .issuedAuthToken(.init(authToken: issuedToken)))
         case .ping: return SpacesDeviceAPIResponse(ok: true, message: "pong")
+        case .daemonStatus:
+            return SpacesDeviceAPIResponse(ok: true, message: "Loaded daemon status.", result: .daemonStatus(try loadDaemonStatus()))
+        case .requestDaemonRestart:
+            guard let onRestartRequested else {
+                return SpacesDeviceAPIResponse(ok: false, message: "This daemon cannot restart itself.")
+            }
+            onRestartRequested()
+            return SpacesDeviceAPIResponse(ok: true, message: "spacesd is restarting.")
         case .overview:
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.", result: .overview(try loadOverview(clientApp: request.clientApp)))
@@ -1034,6 +1049,34 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private static func normalizedClientID(_ value: String?) -> String? {
         guard let clientID = value?.trimmingCharacters(in: .whitespacesAndNewlines), !clientID.isEmpty else { return nil }
         return clientID
+    }
+
+    // Frozen-core daemon status: wire protocol numbers plus the restart-impact counts a daemon
+    // restart would destroy. Kept deliberately cheap and store-driven so it works even when the
+    // rest of the protocol is incompatible.
+    private func loadDaemonStatus() throws -> TerminalServiceDaemonStatus {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        var runningProcesses = 0
+        var activeAgents = 0
+        var waitingAgents = 0
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+                runningProcesses += try store.runningProcesses(workspaceID: workspace.id).filter { $0.status == .running }.count
+                for agent in try store.agentWindows(workspaceID: workspace.id) {
+                    switch agent.status {
+                    case .spinning: activeAgents += 1
+                    case .waiting: waitingAgents += 1
+                    case .idle, .done: break
+                    }
+                }
+            }
+        }
+        let liveTerminals = (try? TerminalSessionCatalog.listLiveSessions().count) ?? 0
+        return TerminalServiceDaemonStatus(
+            version: AppVersion.current,
+            artifactVersion: ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"].flatMap { $0.isEmpty ? nil : $0 },
+            certificateFingerprint: nil, activeSessionCount: liveTerminals,
+            runningProcesses: runningProcesses, activeAgents: activeAgents, waitingAgents: waitingAgents)
     }
 
     private func loadOverview(clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload {

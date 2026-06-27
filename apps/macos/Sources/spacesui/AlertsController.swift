@@ -79,6 +79,7 @@ final class AlertsController: NSObject {
         host.clearActiveAddFormStateAndCloseWindows()
         host.stopWorkspaceSetupDetailRefreshTimer()
         host.visibleDetailWorkspaceID = nil
+        host.visibleCompatibilityBlockDeviceID = nil
         host.showingSettings = false
         host.showingAlerts = true
         let previousProjectID = host.selectedProjectID

@@ -110,6 +110,9 @@ import workspacecore
         if host.showingAlerts || host.showingSettings { return true }
         if let selectedWorkspaceID = host.selectedWorkspaceID { return findWorkspace(id: selectedWorkspaceID) != nil }
         if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID }) }
+        if let blockDeviceID = host.visibleCompatibilityBlockDeviceID {
+            return host.deviceCompatibility(forDeviceID: blockDeviceID)?.isCompatible == false
+        }
         return false
     }
 
@@ -176,13 +179,19 @@ import workspacecore
         // sections, so a periodic refresh never makes remote devices vanish and
         // reload. Skip the full outline reload entirely when the local overview is
         // unchanged, so background polls don't collapse expanded projects.
+        // Include the daemon status/compatibility in the unchanged check: when only those change (a
+        // restart resolving a block, or an update-pending state clearing), the caption must still
+        // reload or it keeps showing stale Resolve/update-pending UI.
+        let previousLocalSection = host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })
         let localOutlineUnchanged =
-            host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })?.overview == snapshot.localDeviceOverview
+            previousLocalSection?.overview == snapshot.localDeviceOverview
+            && previousLocalSection?.compatibility == snapshot.localCompatibility
+            && previousLocalSection?.daemonStatus == snapshot.localDaemonStatus
         let localSection = DeviceSection(
             deviceID: snapshot.localDeviceID, deviceName: snapshot.localDeviceName, isLocal: true, loadState: .loaded,
             device: snapshot.localPairedDevice, projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject,
             workspaceRuntimeStatusByID: snapshot.workspaceRuntimeStatusByID, alertsGroups: snapshot.alertsGroups,
-            overview: snapshot.localDeviceOverview)
+            overview: snapshot.localDeviceOverview, daemonStatus: snapshot.localDaemonStatus, compatibility: snapshot.localCompatibility)
         if let localIndex = host.deviceSections.firstIndex(where: { $0.deviceID == snapshot.localDeviceID }) {
             host.deviceSections[localIndex] = localSection
         } else {
@@ -192,6 +201,9 @@ import workspacecore
         host.localDeviceName = snapshot.localDeviceName
         host.localPairedDevice = snapshot.localPairedDevice
         host.localDeviceOverview = snapshot.localDeviceOverview
+        // If the local block was showing and the daemon is now compatible, drop the obsolete block
+        // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
+        host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
         rebuildFlatSidebarData()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
@@ -219,6 +231,14 @@ import workspacecore
 
     /// Adds a section for every paired remote device and fetches each one's overview
     /// independently so a slow or unreachable device never blocks the sidebar.
+    /// A reachable remote device's loaded overview plus its frozen-core handshake result.
+    struct RemoteDeviceLoad: Sendable {
+        /// `nil` when the device is reachable but wire-incompatible (no decodable overview).
+        let overview: SpacesDeviceOverview?
+        let daemonStatus: TerminalServiceDaemonStatus?
+        let compatibility: SpacesWireCompatibility?
+    }
+
     func loadRemoteDeviceSections(forceRefresh: Bool = false) {
         let remotes = host.macPairedDevices()
         var addedSection = false
@@ -253,8 +273,20 @@ import workspacecore
             if !forceRefresh, let last = remoteOverviewFetchInstants[record.id], now - last < freshnessWindow { continue }
             remoteOverviewFetchInstants[record.id] = now
             Task { @MainActor [weak self] in
-                let result: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(device: record, clientApp: clientApp)) } catch { return .failure(error) }
+                let result: Result<RemoteDeviceLoad, Error> = await Task.detached(priority: .userInitiated) {
+                    do {
+                        // Read the frozen-core handshake first: it stays decodable even when a
+                        // wire-incompatible daemon's normal overview payload would not.
+                        let status = try? SpacesDeviceClient.daemonStatus(device: record, clientApp: clientApp)
+                        let compatibility = status.map(SpacesWireCompatibility.evaluate(daemonStatus:))
+                        if let compatibility, !compatibility.isCompatible {
+                            // Lockstep gate: an incompatible device is fully blocked, so do not issue the
+                            // non-frozen-core overview call at all — present it as blocked (no overview).
+                            return .success(RemoteDeviceLoad(overview: nil, daemonStatus: status, compatibility: compatibility))
+                        }
+                        let overview = try SpacesDeviceClient.overview(device: record, clientApp: clientApp)
+                        return .success(RemoteDeviceLoad(overview: overview, daemonStatus: status, compatibility: compatibility))
+                    } catch { return .failure(error) }
                 }.value
                 self?.applyRemoteDeviceSection(deviceID: record.id, result: result)
             }
@@ -267,15 +299,52 @@ import workspacecore
         }
     }
 
-    func applyRemoteDeviceSection(deviceID: String, result: Result<SpacesDeviceOverview, Error>) {
+    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>) {
         guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
         // A background refresh re-fetches each remote; only touch the outline when
         // the device's overview or load state actually changed, so unchanged polls
         // don't collapse expanded projects.
         let wasLoaded = host.deviceSections[index].loadState == .loaded
         switch result {
-        case .success(let overview):
-            if wasLoaded, host.deviceSections[index].overview == overview.overview {
+        case .success(let load):
+            // Compatibility/status can change while the overview stays identical (e.g. after a restart
+            // updates a remote daemon), so the unchanged-check must include them or the badge/block
+            // would keep showing the stale verdict until an unrelated overview change.
+            let statusUnchanged =
+                host.deviceSections[index].compatibility == load.compatibility
+                && host.deviceSections[index].daemonStatus == load.daemonStatus
+            host.deviceSections[index].daemonStatus = load.daemonStatus
+            host.deviceSections[index].compatibility = load.compatibility
+            // If this device's block was showing and it is now compatible, drop the obsolete block.
+            host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
+            guard let overview = load.overview else {
+                // Reachable but wire-incompatible: present an empty loaded section so the sidebar shows
+                // the compatibility badge instead of a generic offline error.
+                // Capture (before clearing) whether a workspace of this device is the current selection —
+                // its detail controls are about to become stale and must switch to the block.
+                let selectedWorkspaceUnderThisDevice =
+                    host.selectedWorkspaceID.map { wsID in
+                        host.deviceSections[index].workspacesByProject.values.contains { $0.contains { $0.id == wsID } }
+                    } ?? false
+                let changed = !wasLoaded || !statusUnchanged || host.deviceSections[index].overview != nil
+                host.deviceSections[index].projects = []
+                host.deviceSections[index].workspacesByProject = [:]
+                host.deviceSections[index].workspaceRuntimeStatusByID = [:]
+                host.deviceSections[index].alertsGroups = []
+                host.deviceSections[index].overview = nil
+                host.deviceSections[index].loadState = .loaded
+                if changed {
+                    rebuildFlatSidebarData()
+                    host.outlineView.reloadData()
+                    applySidebarProjectExpansionState()
+                }
+                if selectedWorkspaceUnderThisDevice, let verdict = load.compatibility {
+                    host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+                }
+                updateAlertsSidebarBadge()
+                return
+            }
+            if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
                 return
             }
@@ -290,7 +359,12 @@ import workspacecore
             host.deviceSections[index].loadState = .loaded
         case .failure(let error):
             if case .offline = host.deviceSections[index].loadState { return }
+            // Drop the prior verdict so an offline device shows "offline" rather than a stale Resolve
+            // button / restart block from when it was last reachable-but-incompatible.
+            host.deviceSections[index].compatibility = nil
+            host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(error.localizedDescription)
+            host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
         }
         rebuildFlatSidebarData()
         host.outlineView.reloadData()
@@ -508,7 +582,14 @@ import workspacecore
         switch section.loadState {
         case .loading: return ("loading…", .tertiaryLabelColor)
         case .offline: return ("offline", sidebarFailedIndicatorColor())
-        case .loaded: return nil
+        case .loaded:
+            // Incompatible devices render an actionable button in the caption (see sidebarSectionRowCell);
+            // a compatible-but-older daemon shows a quiet "update pending" caption.
+            if section.compatibility?.isCompatible == false { return nil }
+            if AppKitController.daemonUpdatePending(status: section.daemonStatus) {
+                return ("update pending", .tertiaryLabelColor)
+            }
+            return nil
         }
     }
 
@@ -531,7 +612,21 @@ import workspacecore
         contentRow.addArrangedSubview(nameLabel)
         contentRow.addArrangedSubview(NSView())
 
-        if let state = deviceSectionLoadStateLabel(deviceID: deviceID) {
+        if let compatibility = host.deviceSections.first(where: { $0.deviceID == deviceID })?.compatibility, !compatibility.isCompatible {
+            // Device headers are non-selectable, so an incompatible device's only affordance is this
+            // caption button, which opens the compatibility block (restart/update) in the detail pane.
+            let button = NSButton(
+                title: compatibility == .clientTooOld ? "Update app" : "Resolve", target: self,
+                action: #selector(compatibilityActionClicked(_:)))
+            button.bezelStyle = .inline
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: 11, weight: .semibold)
+            button.contentTintColor = .systemOrange
+            button.identifier = NSUserInterfaceItemIdentifier("compat:\(deviceID)")
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+            contentRow.addArrangedSubview(button)
+        } else if let state = deviceSectionLoadStateLabel(deviceID: deviceID) {
             let stateLabel = NSTextField(labelWithString: state.text)
             stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
             stateLabel.textColor = state.color
@@ -840,6 +935,13 @@ import workspacecore
             let source = isDark ? dark : light
             return NSColor(calibratedRed: CGFloat(source.0) / 255, green: CGFloat(source.1) / 255, blue: CGFloat(source.2) / 255, alpha: alpha)
         }
+    }
+
+    @objc private func compatibilityActionClicked(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, raw.hasPrefix("compat:") else { return }
+        let deviceID = String(raw.dropFirst("compat:".count))
+        guard let verdict = host.deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
+        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {

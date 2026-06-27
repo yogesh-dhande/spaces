@@ -639,13 +639,44 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public let artifactVersion: String?
     public let certificateFingerprint: String?
     public let activeSessionCount: Int
+    /// Wire-contract version the daemon speaks. Client and daemon must match exactly.
+    public let protocolVersion: Int
+    /// Live tracked processes that a daemon restart would kill (status `running`).
+    public let runningProcesses: Int
+    /// Coding agents actively working (status `spinning`).
+    public let activeAgents: Int
+    /// Coding agents awaiting user input (status `waiting`).
+    public let waitingAgents: Int
+    /// Daemon host OS: `"macOS"` or `"Linux"`. Lets clients tailor restart guidance — e.g. a remote
+    /// Linux daemon must be updated from the Mac app.
+    public let operatingSystem: String
 
-    public init(version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int) {
+    public init(
+        version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
+        protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
+        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem
+    ) {
         self.version = version
         self.artifactVersion = artifactVersion
         self.certificateFingerprint = certificateFingerprint
         self.activeSessionCount = activeSessionCount
+        self.protocolVersion = protocolVersion
+        self.runningProcesses = runningProcesses
+        self.activeAgents = activeAgents
+        self.waitingAgents = waitingAgents
+        self.operatingSystem = operatingSystem
     }
+
+    /// The OS of the process building this status (the daemon's own host).
+    public static var currentOperatingSystem: String {
+        #if os(Linux)
+            "Linux"
+        #else
+            "macOS"
+        #endif
+    }
+
+    public var isLinuxDaemon: Bool { operatingSystem == "Linux" }
 }
 
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {

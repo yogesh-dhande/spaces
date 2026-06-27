@@ -194,6 +194,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var deviceSections: [DeviceSection] = []
     var alertsGroups: [AlertsGroup] = []
     var visibleDetailWorkspaceID: String?
+    /// Device whose compatibility block is currently shown in the detail pane (when no workspace is
+    /// selected). Lets the block survive background sidebar reloads instead of being replaced.
+    var visibleCompatibilityBlockDeviceID: String?
 
     var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
@@ -1752,6 +1755,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let localDeviceName: String
         let localPairedDevice: SpacesPairedDeviceRecord
         let localDeviceOverview: SpacesDeviceOverviewPayload
+        let localDaemonStatus: TerminalServiceDaemonStatus?
+        let localCompatibility: SpacesWireCompatibility?
     }
 
     enum SidebarDeviceLoadState: Sendable, Equatable {
@@ -1774,6 +1779,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
         var alertsGroups: [AlertsGroup] = []
         var overview: SpacesDeviceOverviewPayload?
+        /// Frozen-core handshake read for this device, refreshed alongside the overview. `nil` until
+        /// the first successful handshake; drives the per-device compatibility banner and gating.
+        var daemonStatus: TerminalServiceDaemonStatus?
+        var compatibility: SpacesWireCompatibility?
     }
 
     enum BackgroundRefreshFailureAction: Equatable {
@@ -2518,13 +2527,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let deviceClientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
                 let localDevice = try SpacesDeviceClient.bootstrapLocalDevice(
                     database: SpacesClientDatabase.defaultDatabase(), clientApp: deviceClientApp)
-                let localOverview = try SpacesDeviceClient.overview(device: localDevice, clientApp: deviceClientApp)
-                let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: localOverview.device.id)) ?? [:]
-                let mapped = deviceSidebarData(from: localOverview.overview, deviceID: localOverview.device.id, projectCollapseStates: collapseStates)
+                // Read the frozen-core handshake first: it stays decodable even when a wire-incompatible
+                // daemon's normal overview payload would not, so the local device can show the
+                // restart/update block instead of a generic load error.
+                let localDaemonStatus = try? SpacesDeviceClient.daemonStatus(device: localDevice, clientApp: deviceClientApp)
+                let localCompatibility = localDaemonStatus.map(SpacesWireCompatibility.evaluate(daemonStatus:))
+                let localOverview: SpacesDeviceOverviewPayload
+                if let localCompatibility, !localCompatibility.isCompatible {
+                    // Lockstep gate: do not issue the non-frozen-core overview call to an incompatible
+                    // daemon; render the block from an empty snapshot instead.
+                    localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                } else {
+                    localOverview = try SpacesDeviceClient.overview(device: localDevice, clientApp: deviceClientApp).overview
+                }
+                let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: localDevice.id)) ?? [:]
+                let mapped = deviceSidebarData(from: localOverview, deviceID: localDevice.id, projectCollapseStates: collapseStates)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_local_device_ready",
-                    details: "device=\(localOverview.device.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
+                    details: "device=\(localDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
                 let alertsGroups = try buildAlertsGroupsSnapshot(
                     orchestrator: orchestrator, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject)
                 logStartupSnapshotProfile(
@@ -2536,8 +2557,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     .init(
                         config: config, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
                         workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups,
-                        localDeviceID: localOverview.device.id, localDeviceName: localOverview.device.name, localPairedDevice: localOverview.device,
-                        localDeviceOverview: localOverview.overview))
+                        localDeviceID: localDevice.id, localDeviceName: localDevice.name, localPairedDevice: localDevice,
+                        localDeviceOverview: localOverview, localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility))
             } catch { return .failure(error) }
         }.value
     }
@@ -3903,6 +3924,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return
             }
         }
+        // With nothing else selected, surface a compatibility block so the user can act on it: the
+        // remote device whose block was opened from its caption button (which has no workspace to
+        // select), otherwise the local daemon if it is incompatible.
+        if let blockDeviceID = visibleCompatibilityBlockDeviceID, let verdict = deviceCompatibility(forDeviceID: blockDeviceID),
+            !verdict.isCompatible
+        {
+            showCompatibilityBlock(deviceID: blockDeviceID, verdict: verdict)
+            return
+        }
+        if let verdict = deviceCompatibility(forDeviceID: localDeviceID), !verdict.isCompatible {
+            showCompatibilityBlock(deviceID: localDeviceID, verdict: verdict)
+            return
+        }
         showAlertsDetail()
     }
 
@@ -3975,6 +4009,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         visibleDetailWorkspaceID = nil
+        visibleCompatibilityBlockDeviceID = nil
         showingSettings = false
         showingAlerts = false
         updateAlertsRowAppearance()
@@ -3989,6 +4024,147 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
         ])
+    }
+
+    /// Wire-protocol verdict for a device section, or `nil` if the device hasn't been handshaken yet.
+    func deviceCompatibility(forDeviceID deviceID: String) -> SpacesWireCompatibility? {
+        deviceSection(id: deviceID)?.compatibility
+    }
+
+    func deviceDaemonStatus(forDeviceID deviceID: String) -> TerminalServiceDaemonStatus? {
+        deviceSection(id: deviceID)?.daemonStatus
+    }
+
+    /// If the device whose compatibility block is currently shown is no longer incompatible (e.g. after
+    /// a restart updated its daemon), drop the obsolete block and re-resolve the detail pane. Called
+    /// from the apply paths after a reload updates a section's verdict.
+    func clearCompatibilityBlockIfResolved(deviceID: String) {
+        guard visibleCompatibilityBlockDeviceID == deviceID else { return }
+        if deviceCompatibility(forDeviceID: deviceID)?.isCompatible == false { return }
+        visibleCompatibilityBlockDeviceID = nil
+        refreshSelection()
+    }
+
+    /// Renders the full-pane compatibility block for an incompatible device, with the restart-impact
+    /// report and a restart action. Switching to a compatible device in the sidebar leaves it.
+    func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
+        clearActiveAddFormStateAndCloseWindows()
+        stopWorkspaceSetupDetailRefreshTimer()
+        visibleDetailWorkspaceID = nil
+        visibleCompatibilityBlockDeviceID = deviceID
+        showingSettings = false
+        showingAlerts = false
+        updateAlertsRowAppearance()
+        activeShortcutCaptureSetting = nil
+        // Clear any prior workspace/project selection so refreshSelection and shortcuts target the block,
+        // not the previously-selected workspace. Suppress the change handler so deselecting does not run
+        // showPlaceholder() and replace the block we are about to render.
+        let previousProjectID = selectedProjectID
+        let previousWorkspaceID = selectedWorkspaceID
+        selectedProjectID = nil
+        selectedWorkspaceID = nil
+        suppressOutlineSelectionChanges = true
+        outlineView.deselectAll(nil)
+        suppressOutlineSelectionChanges = false
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        for view in detailContainer.subviews { view.removeFromSuperview() }
+
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        let card = CompatibilityBlockView(
+            verdict: verdict, status: status,
+            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.confirmDaemonRestart(deviceID: deviceID) })
+        card.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 24),
+            card.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 24),
+            card.trailingAnchor.constraint(lessThanOrEqualTo: detailContainer.trailingAnchor, constant: -24),
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
+        ])
+    }
+
+    /// Confirms the restart-impact with the user, then restarts the device's daemon. A remote Linux
+    /// daemon is updated from the signed artifact over SSH (which restarts it); every other device
+    /// restarts through the `requestDaemonRestart` RPC, after which launchd/systemd respawns it.
+    private func confirmDaemonRestart(deviceID: String) {
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        let alert = NSAlert()
+        alert.messageText = "Restart this device's daemon?"
+        alert.informativeText = Self.restartImpactMessage(status: status)
+        alert.addButton(withTitle: "Restart")
+        alert.addButton(withTitle: "Defer")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let device = deviceRecord(forDeviceID: deviceID) else {
+            showDeviceNotLoadedError()
+            return
+        }
+        // The daemon reports its own OS, so route on that rather than probing SSH: a non-Linux daemon
+        // must not run the Linux SSH preflight, or a stale/unavailable SSH path would block restarting a
+        // remote Mac whose Device API is still reachable.
+        let isLinuxDaemon = status?.isLinuxDaemon ?? false
+        Task { @MainActor [weak self] in
+            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    if isLinuxDaemon {
+                        // A remote Linux daemon must be reinstalled from the signed artifact to actually
+                        // update (a plain restart respawns the same old binary); the installer restarts it.
+                        // `false` means the SSH path could not confirm a Linux host, so nothing happened —
+                        // surface that instead of reloading as if it succeeded.
+                        let updated = try SpacesDevicePairingClient.updateRemoteLinuxDaemon(
+                            for: device, appVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey)
+                        guard updated else {
+                            throw NSError(
+                                domain: "SpacesCompatibility", code: 1,
+                                userInfo: [
+                                    NSLocalizedDescriptionKey:
+                                        "Couldn't update this device's daemon over SSH. Check the SSH connection to the device and try again."
+                                ])
+                        }
+                    } else {
+                        // Local or remote Mac: restart through the RPC, applying any update already staged on disk.
+                        try SpacesDeviceClient.requestDaemonRestart(device: device)
+                    }
+                    return .success(())
+                } catch { return .failure(error) }
+            }.value
+            guard let self else { return }
+            if case .failure(let error) = result { self.showError(error) }
+            // Give the daemon a moment to exit and respawn, then re-handshake.
+            try? await Task.sleep(for: .seconds(2))
+            self.requestSidebarReload(forceRemoteRefresh: true)
+        }
+    }
+
+    /// Compatible, but the daemon reports an older app version than this build — a daemon update is
+    /// staged and applies on the next restart. Non-blocking; surfaced as a quiet caption only.
+    static func daemonUpdatePending(status: TerminalServiceDaemonStatus?) -> Bool {
+        guard let status else { return false }
+        return isVersion(status.version, olderThan: AppVersion.short)
+    }
+
+    /// Compares dotted numeric version strings (e.g. "0.1.0"). Empty inputs compare equal.
+    static func isVersion(_ lhs: String, olderThan rhs: String) -> Bool {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        let lhsParts = lhs.split(separator: ".").map { Int($0) ?? 0 }
+        let rhsParts = rhs.split(separator: ".").map { Int($0) ?? 0 }
+        for index in 0..<max(lhsParts.count, rhsParts.count) {
+            let l = index < lhsParts.count ? lhsParts[index] : 0
+            let r = index < rhsParts.count ? rhsParts[index] : 0
+            if l != r { return l < r }
+        }
+        return false
+    }
+
+    static func restartImpactMessage(status: TerminalServiceDaemonStatus?) -> String {
+        guard let status else { return "Running terminals, processes, and coding agents on this device will stop." }
+        let agents = status.activeAgents + status.waitingAgents
+        var parts: [String] = []
+        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
+        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
+        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
+        guard !parts.isEmpty else { return "No running work will be interrupted." }
+        return "This will stop " + parts.joined(separator: ", ") + ". Defer if you need them to finish first."
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
@@ -4997,6 +5173,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+        // Fully blocked, scoped to the owning device: if its daemon is wire-incompatible, the only
+        // detail surface is the compatibility banner. Other devices' workspaces stay usable.
+        let workspaceDeviceID = deviceID(forWorkspaceID: workspace.id)
+        if let verdict = deviceCompatibility(forDeviceID: workspaceDeviceID), !verdict.isCompatible {
+            showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict)
+            return
+        }
+        visibleCompatibilityBlockDeviceID = nil
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
             prepareWorkspaceDetailContainer(workspaceID: workspace.id)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)

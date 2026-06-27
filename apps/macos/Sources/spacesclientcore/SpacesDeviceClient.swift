@@ -116,6 +116,25 @@ public enum SpacesDeviceClient {
         return SpacesDeviceOverview(device: device, overview: overview)
     }
 
+    /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status so the
+    /// caller can classify compatibility against this build.
+    public static func daemonStatus(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> TerminalServiceDaemonStatus {
+        let response = try request(.init(command: .daemonStatus), device: device, clientApp: clientApp, profile: profile)
+        guard let status = response.daemonStatus else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return status
+    }
+
+    /// Frozen-core restart request: asks the daemon to restart itself. The OS service manager
+    /// (launchd `KeepAlive` / systemd `Restart=always`) respawns it from the updated binary.
+    @discardableResult
+    public static func requestDaemonRestart(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .requestDaemonRestart), device: device, clientApp: clientApp, profile: profile)
+    }
+
     public static func workspaceCreateOptions(
         selectedProjectID: String?, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
@@ -390,8 +409,9 @@ public enum SpacesDeviceClient {
             .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess,
             .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
-        case .pair, .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
-            .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
+        case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
+            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink,
+            .readTerminalLinkChunk, .subscribe:
             defaultRequestTimeoutSeconds
         }
     }

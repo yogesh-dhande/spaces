@@ -102,6 +102,9 @@ import workspacecore
                     return try self.launchBuiltInTerminalSession(launchConfiguration)
                 }
             }.get()
+        },
+        onRestartRequested: { [weak self] in
+            Task { @MainActor in self?.requestDaemonRestart() }
         })
     private let git = RemoteWorkspaceGitClient()
 
@@ -169,6 +172,17 @@ import workspacecore
         TerminalServiceDaemonStatus(
             version: AppVersion.current, artifactVersion: normalizedString(ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"]),
             certificateFingerprint: remoteCertificateFingerprint, activeSessionCount: sessionCores.count)
+    }
+
+    // Frozen-core restart: terminate gracefully after a short grace so the Device API response can
+    // flush, then let launchd `KeepAlive` / systemd `Restart=always` respawn the updated binary.
+    func requestDaemonRestart() {
+        writeStandardError("spacesd: daemon restart requested\n")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
+            shutdown()
+            Self.terminateProcess()
+        }
     }
 
     private func shutdownIfIdle() -> TerminalServiceResponse {
@@ -1172,11 +1186,13 @@ private enum SpacesDaemonMobileCredentialStore {
 
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
-                builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+                builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
+                onRestartRequested: onRestartRequested)
         #endif
     }
 
