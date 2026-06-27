@@ -84,6 +84,7 @@ stop_current_profile_runtime_for_tests() {
 cd "$root"
 
 "$root/Tests/setup_ghostty_xcode_mismatch_autobuild.sh"
+"$root/Tests/setup_ghostty_cache_restore.sh"
 "$root/scripts/lint.sh"
 "$root/scripts/swiftpm.sh" build
 spaces_profile_eval_shell_env "$root/.build/debug/spaces"

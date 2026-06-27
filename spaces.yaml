@@ -2,6 +2,7 @@ version: 1
 setup_script: |
   cp $SPACES_PROJECT_DIR/.env .env
   git submodule update --init --recursive
+  export SPACES_GHOSTTY_CACHE_DIR="$SPACES_PROJECT_DIR/apps/macos/.local/ghostty-cache"
   apps/macos/scripts/setup_ghostty.sh
   (cd apps/web && npm i)
 stop_script: ''
