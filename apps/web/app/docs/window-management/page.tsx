@@ -48,6 +48,15 @@ export default function WindowManagementDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Open in Your Editor</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• Press <code>cmd+alt+e</code> to open the selected workspace in your preferred editor. Choose it in Settings under General — Spaces lists whichever of VS Code, Devin Desktop, and Zed you have installed.</li>
+          <li>• Re-opening focuses the editor&apos;s existing window for that folder instead of opening a duplicate.</li>
+          <li>• For a workspace on a paired remote device, the editor opens the remote folder over SSH as a local window. Devin Desktop and Zed handle this out of the box; for VS Code, Spaces offers to install the Remote-SSH extension if it&apos;s missing.</li>
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Recovery</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• If you close a tracked browser window, focusing it reopens the URL in a new Chrome window.</li>

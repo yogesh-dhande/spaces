@@ -5234,9 +5234,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    private func showWorkspaceSetupDetail(
-        project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState, logTail: String?
-    ) {
+    private func showWorkspaceSetupDetail(project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState, logTail: String?) {
         if setupState.status == .running {
             startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: workspace.id)
         } else {
@@ -6480,36 +6478,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    struct EditorOption {
-        let preference: EditorPreference
-        let displayName: String
-        let bundleName: String
-    }
+    /// Editors offered in settings, filtered to those installed on this Mac. Detection and
+    /// launch both key off the bundle identifier so an app rename (e.g. Windsurf → Devin
+    /// Desktop) does not require a path or display-name update here.
+    func installedEditorOptions() -> [EditorPreference] { [.vscode, .devin, .zed].filter(isEditorInstalled) }
 
-    func installedEditorOptions() -> [EditorOption] {
-        let candidates = [
-            EditorOption(preference: .vscode, displayName: "VS Code", bundleName: "Visual Studio Code.app"),
-            EditorOption(preference: .cursor, displayName: "Cursor", bundleName: "Cursor.app"),
-            EditorOption(preference: .windsurf, displayName: "Windsurf", bundleName: "Windsurf.app"),
-        ]
-        return candidates.filter { isEditorInstalled(bundleName: $0.bundleName) }
-    }
-
-    private func isEditorInstalled(bundleName: String) -> Bool {
-        let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
-        let userApplications = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
-        let paths = [applications.appendingPathComponent(bundleName).path, userApplications.appendingPathComponent(bundleName).path]
-        return paths.contains { FileManager.default.fileExists(atPath: $0) }
-    }
-
-    func editorDisplayName(_ editor: EditorPreference) -> String {
-        switch editor {
-        case .vscode: return "VS Code"
-        case .cursor: return "Cursor"
-        case .windsurf: return "Windsurf"
-        case .vim: return "Vim"
-        case .none: return "None"
-        }
+    private func isEditorInstalled(_ editor: EditorPreference) -> Bool {
+        guard let bundleID = editor.bundleIdentifier else { return false }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
     }
 
     private func shortcutSettingsRow(setting: ShortcutSetting) -> NSView {
@@ -8120,24 +8096,100 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return true
     }
 
+    /// The configured editor resolved to a launchable CLI, carrying the per-family data a
+    /// remote open needs: VS Code-family editors keep their `EditorRemoteSSHSupport` (for
+    /// extension detection); Zed needs only its CLI path because remoting is built in.
+    private enum EditorLaunchTarget {
+        case vscode(editor: EditorPreference, support: EditorRemoteSSHSupport)
+        case zed(editor: EditorPreference, cliExecutablePath: String)
+
+        var cliExecutablePath: String {
+            switch self {
+            case .vscode(_, let support): return support.cliExecutableURL.path
+            case .zed(_, let cli): return cli
+            }
+        }
+    }
+
     private func openWorkspaceEditor(workspaceID: String) {
         do {
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
             guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
-            let editor = try clientAppConfig(base: orchestrator.appConfig()).editor
+            let target = try resolveEditorLaunch(try clientAppConfig(base: orchestrator.appConfig()).editor)
             let deviceID = deviceID(forWorkspaceID: workspaceID)
             if isRemoteDeviceID(deviceID) {
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
                     !sshHost.isEmpty
                 else { throw WorkspaceError.invalidArgument(message: "Remote editor launch requires SSH settings for the paired device.") }
-                try EditorLauncher.openRemote(
-                    editor: editor, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort, directory: workspace.dir)
+                switch target {
+                case .vscode(let editor, let support):
+                    guard ensureRemoteSSHCapability(editor: editor, support: support) else { return }
+                    try EditorLauncher.openRemoteVSCode(
+                        cliExecutablePath: support.cliExecutableURL.path, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
+                        directory: workspace.dir)
+                case .zed(_, let cliExecutablePath):
+                    try EditorLauncher.openRemoteZed(
+                        cliExecutablePath: cliExecutablePath, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
+                        directory: workspace.dir)
+                }
             } else {
-                try EditorLauncher.open(editor: editor, directory: workspace.dir)
+                try EditorLauncher.open(cliExecutablePath: target.cliExecutablePath, directory: workspace.dir)
             }
             reloadData()
             hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
         } catch { showError(error) }
+    }
+
+    /// Resolves the configured editor to a launchable CLI from its installed bundle,
+    /// throwing a clear error when no editor is configured or it is not installed.
+    private func resolveEditorLaunch(_ editor: EditorPreference?) throws -> EditorLaunchTarget {
+        guard let editor, editor != .none, let bundleID = editor.bundleIdentifier else {
+            throw WorkspaceError.configError(message: "Preferred editor is not configured.")
+        }
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
+        }
+        switch editor.family {
+        case .vscode:
+            guard let support = EditorRemoteSSHSupport(appBundleURL: appURL) else {
+                throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
+            }
+            return .vscode(editor: editor, support: support)
+        case .zed:
+            let cli = appURL.appendingPathComponent("Contents/MacOS/cli")
+            guard FileManager.default.isExecutableFile(atPath: cli.path) else {
+                throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
+            }
+            return .zed(editor: editor, cliExecutablePath: cli.path)
+        }
+    }
+
+    /// Ensures the editor can resolve a `vscode-remote://ssh-remote+` workspace before a
+    /// remote open. Returns true to proceed. When the editor ships no SSH-remote extension
+    /// (stock VS Code), prompts the user to install one and returns true only after a
+    /// successful install; the forks bundle their own, so this passes for them.
+    private func ensureRemoteSSHCapability(editor: EditorPreference, support: EditorRemoteSSHSupport) -> Bool {
+        if support.hasRemoteSSHExtension(homeDirectory: FileManager.default.homeDirectoryForCurrentUser) { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\(editor.displayName) needs the Remote-SSH extension"
+        guard let extensionID = editor.installableRemoteSSHExtensionID else {
+            alert.informativeText = "Install an SSH-remote extension in \(editor.displayName) to open remote workspaces over SSH."
+            alert.runModal()
+            return false
+        }
+        alert.informativeText =
+            "Opening a remote workspace runs it over SSH inside \(editor.displayName), which needs its Remote-SSH extension. Install it now?"
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        do {
+            try EditorLauncher.installRemoteSSHExtension(cliExecutablePath: support.cliExecutableURL.path, extensionID: extensionID)
+            return true
+        } catch {
+            showError(error)
+            return false
+        }
     }
 
     private enum WorkspaceTerminalOpenRoute: String {
