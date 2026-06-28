@@ -92,11 +92,11 @@ import workspacecore
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
-    private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
     private var databaseChangeObserver: NSObjectProtocol?
     #if os(macOS)
         private var databaseDistributedChangeObserver: NSObjectProtocol?
         private var processExitMonitor: ProcessExitMonitorService?
+        private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
     #endif
     private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
         builtInTerminalSessionTerminator: { [weak self] sessionID in
@@ -144,17 +144,17 @@ import workspacecore
         }
         worktreeService.start()
         worktreeDiscoveryService = worktreeService
-        let foregroundAgentReconciler = TerminalForegroundAgentReconciler(databasePath: databasePath) { error in
-            writeStandardError("spacesd terminal_foreground_agent_reconcile_error error=\(error)\n")
-        }
-        foregroundAgentReconciler.start()
-        terminalForegroundAgentReconciler = foregroundAgentReconciler
         #if os(macOS)
             let monitor = ProcessExitMonitorService(databasePath: databasePath) { error in
                 writeStandardError("spacesd process_exit_monitor_error error=\(error)\n")
             }
             monitor.start()
             processExitMonitor = monitor
+            let foregroundAgentReconciler = TerminalForegroundAgentReconciler(databasePath: databasePath) { error in
+                writeStandardError("spacesd terminal_foreground_agent_reconcile_error error=\(error)\n")
+            }
+            foregroundAgentReconciler.start()
+            terminalForegroundAgentReconciler = foregroundAgentReconciler
         #endif
         databaseChangeObserver = NotificationCenter.default.addObserver(
             forName: IPCNotification.databaseDidChange, object: nil, queue: nil
@@ -213,11 +213,11 @@ import workspacecore
         #endif
         worktreeDiscoveryService?.stop()
         worktreeDiscoveryService = nil
-        terminalForegroundAgentReconciler?.stop()
-        terminalForegroundAgentReconciler = nil
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
+            terminalForegroundAgentReconciler?.stop()
+            terminalForegroundAgentReconciler = nil
         #endif
         deviceAPISupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
