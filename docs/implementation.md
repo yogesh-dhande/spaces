@@ -177,8 +177,7 @@ flowchart TD
 ### Database
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- Daemon SQLite stores projects, workspaces, runtime state, terminal metadata, paired-client metadata, daemon settings, and global settings.
-- macOS client SQLite stores paired-device metadata under `<profile-root>/Client/spaces-client.db`, with timestamped backups under `<profile-root>/Client/Backups/`.
+- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, and terminal window frames. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` records the canonical schema version. The active daemon schema is version `3`.
@@ -218,7 +217,6 @@ erDiagram
     TEXT dir
     INTEGER is_git
     TEXT default_branch
-    INTEGER is_collapsed
     TEXT setup_script
     TEXT stop_script
   }
@@ -541,6 +539,94 @@ Notable uniqueness outside primary keys:
 - `workspaces(project_id, branch)` is unique for active non-empty branch names.
 - `terminal_sessions.root_directory`, `terminal_runtime_states.root_directory`, and `terminal_remote_session_states.root_directory` are unique.
 - `terminal_attachments` enforces at most one active owner per root and at most one active attachment per root/client pair through partial unique indexes.
+
+### Client Database
+
+The diagram above is the daemon database (`spaces.db`). The macOS client keeps a separate `spaces-client.db` for client/desktop-owned state. It is keyed by `device_id` where rows are scoped to a paired device, so one client database describes the local device and every remote it has paired with.
+
+```mermaid
+erDiagram
+  paired_devices {
+    TEXT id PK
+    TEXT name
+    TEXT platform
+    TEXT host
+    INTEGER port
+    TEXT certificate_fingerprint
+    TEXT ssh_host
+    TEXT ssh_user
+    INTEGER ssh_port
+    TEXT last_selected_at
+  }
+
+  client_settings {
+    TEXT key PK
+    TEXT value
+  }
+
+  project_sidebar_state {
+    TEXT device_id PK
+    TEXT project_id PK
+    INTEGER is_collapsed
+  }
+
+  terminal_window_frames {
+    TEXT root_directory PK
+    TEXT mode PK
+    TEXT session_id
+    REAL x
+    REAL y
+    REAL width
+    REAL height
+  }
+
+  runtime_targets {
+    TEXT id PK
+    TEXT device_id
+    TEXT workspace_id
+    TEXT type
+    TEXT app
+    INTEGER window_id
+    TEXT tracking_id
+    INTEGER order_index
+  }
+
+  browser_targets {
+    TEXT runtime_target_id PK
+    TEXT target_url
+    TEXT resolved_url
+  }
+
+  runtime_target_events {
+    TEXT id PK
+    TEXT runtime_target_id FK
+    TEXT event_type
+    INTEGER window_id
+  }
+
+  local_window_focus_state {
+    TEXT key PK
+    TEXT workspace_id
+    INTEGER window_id
+  }
+
+  migration_state {
+    INTEGER current_version
+  }
+
+  runtime_targets ||--o| browser_targets : extends
+  runtime_targets ||--o{ runtime_target_events : records
+```
+
+Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, and `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`).
+
+`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not yet read or written. They are reserved for client-owned desktop window/runtime-target state — yabai window IDs only mean anything on the device's own desktop — but that state currently still lives in the daemon `runtime_targets.window_id`. Moving it client-side is the remaining step of the thin-client split: see [Window-ID ownership](#window-id-ownership).
+
+### Window-ID ownership
+
+Desktop window identity (`window_id`/yabai window IDs) is a client/desktop concern, but it currently lives in the daemon `runtime_targets` table, mixed with daemon-owned terminal/runtime identity (`tracking_id`, `type`, `app`, `order_index`) that running-process and agent-session rows reference. Because the daemon emits `window_id` in the overview, it also leaks meaningless yabai IDs to remote viewers.
+
+The intended end state moves only the desktop window-ID mapping off the daemon: the daemon keeps `runtime_targets` minus `window_id` (pure runtime/terminal identity), and the client writes the device's window IDs into its own `runtime_targets`/`local_window_focus_state` from yabai window tracking. Because the two databases live in different processes, the join is in application code, not SQL: the daemon supplies runtime targets through the overview, and the client correlates its locally-stored `window_id` onto them by the stable `tracking_id` (and `workspace_id`) to drive yabai focus. Remote devices then carry no window IDs, which is correct — a viewer cannot focus another desktop's windows.
 
 ### Projects
 Projects persist:
