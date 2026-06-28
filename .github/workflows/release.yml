@@ -271,7 +271,7 @@ jobs:
           tar -tzf spacesd-ubuntu-24.04-arm64.tar.gz >/dev/null
 
       - name: Install remote artifact signing dependency
-        run: python3 -m pip install --user cryptography
+        run: python3 -m pip install --user --break-system-packages cryptography
 
       - name: Sign remote artifact manifest
         env:
