@@ -237,10 +237,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// is not reconciled again, avoiding a loop. Cleared when the pid leaves the
     /// running set.
     private var reconciledDeadProcessPIDs: Set<Int> = []
-    /// Per-local-git-project FSEvents watchers on each repo's git common directory.
-    /// They replace worktree-discovery polling: filesystem changes under
-    /// `worktrees/`/`HEAD` trigger the existing reconcile path. Keyed by project id.
-    private var worktreeDiscoveryWatchers: [String: WorktreeDiscoveryWatch] = [:]
     private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
     private var activeSpaceSummonCleanupTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
@@ -259,7 +255,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var projectSettingsWindow: NSWindow?
     var projectSettingsProjectID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
-    var pendingWorktreeDiscoveryReload = false
     private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard Self.isRunningFromAppBundle else { return nil }
@@ -569,7 +564,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         periodicWorkspaceRefreshTask?.cancel()
         stopProcessExitMonitoring()
-        stopWorktreeDiscoveryWatchers()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebar.cancelSidebarReloadTask()
         teardownInlineWorkspaceOutsideClickMonitor()
@@ -1864,114 +1858,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return kill(pid_t(pid), 0) == 0 || errno == EPERM
     }
 
-    /// Holds the FSEvents watcher for one local git project along with the repo
-    /// directory it was installed for, so `refreshWorktreeDiscoveryWatchers` can
-    /// detect when a project's path changes and reinstall.
-    private struct WorktreeDiscoveryWatch {
-        let projectDir: String
-        let watcher: FileSystemWatcher
-    }
-
-    private func startWorktreeDiscoveryWatchers() {
-        refreshWorktreeDiscoveryWatchers()
-        // Reconcile once on startup to catch worktrees created, removed, or
-        // branch-switched while the app was not watching.
-        handleWorktreeDiscoveryChange(projectID: nil)
-    }
-
-    private func stopWorktreeDiscoveryWatchers() {
-        for watch in worktreeDiscoveryWatchers.values { watch.watcher.stop() }
-        worktreeDiscoveryWatchers.removeAll()
-    }
-
-    /// Reconciles the installed watchers to the current set of local git projects.
-    /// Idempotent and cheap, so it is safe to call after every sidebar reload:
-    /// it only tears down watchers for projects that vanished or moved and only
-    /// resolves git directories (off the main thread) for newly added projects.
-    func refreshWorktreeDiscoveryWatchers() {
-        guard didStartBackgroundServices else { return }
-        let desired = Dictionary(
-            projects.filter { $0.deviceID == localDeviceID && $0.isGitRepo }.map { ($0.id, $0.dir) },
-            uniquingKeysWith: { first, _ in first })
-        for (projectID, watch) in worktreeDiscoveryWatchers where desired[projectID] != watch.projectDir {
-            watch.watcher.stop()
-            worktreeDiscoveryWatchers[projectID] = nil
-        }
-        let missing = desired.filter { worktreeDiscoveryWatchers[$0.key] == nil }
-        guard !missing.isEmpty else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            for (projectID, projectDir) in missing {
-                guard self.didStartBackgroundServices, self.worktreeDiscoveryWatchers[projectID] == nil else { continue }
-                let commonDir = await Task.detached(priority: .utility) { GitClient().commonDirectory(path: projectDir) }.value
-                guard self.didStartBackgroundServices, self.worktreeDiscoveryWatchers[projectID] == nil,
-                    self.projects.contains(where: { $0.id == projectID && $0.dir == projectDir })
-                else { continue }
-                guard let commonDir else {
-                    self.handleBackgroundRefreshFailure(
-                        WorkspaceError.invalidArgument(
-                            message: "Live worktree discovery unavailable: could not resolve git directory for \(projectDir)"),
-                        source: "worktree_discovery_watch")
-                    continue
-                }
-                self.installWorktreeDiscoveryWatcher(projectID: projectID, projectDir: projectDir, commonDirectory: commonDir)
-            }
-        }
-    }
-
-    private func installWorktreeDiscoveryWatcher(projectID: String, projectDir: String, commonDirectory: String) {
-        let watcher = FileSystemWatcher(paths: [commonDirectory], latency: 1) { [weak self] changedPaths in
-            guard Self.changedPathsAffectWorktrees(changedPaths, commonDirectory: commonDirectory) else { return }
-            Task { @MainActor [weak self] in self?.handleWorktreeDiscoveryChange(projectID: projectID) }
-        }
-        do {
-            try watcher.start()
-            worktreeDiscoveryWatchers[projectID] = WorktreeDiscoveryWatch(projectDir: projectDir, watcher: watcher)
-        } catch {
-            handleBackgroundRefreshFailure(error, source: "worktree_discovery_watch")
-        }
-    }
-
-    /// Only git worktree metadata should trigger a reconcile; object/index/log
-    /// churn from ordinary commits must not. Matches the shared `HEAD` (main
-    /// checkout branch switch) and anything under `worktrees/` (linked worktree
-    /// add, remove, or branch switch).
-    nonisolated static func changedPathsAffectWorktrees(_ paths: [String], commonDirectory: String) -> Bool {
-        let head = commonDirectory + "/HEAD"
-        let worktreesDir = commonDirectory + "/worktrees"
-        return paths.contains { $0 == head || $0 == worktreesDir || $0.hasPrefix(worktreesDir + "/") }
-    }
-
-    private func handleWorktreeDiscoveryChange(projectID: String?) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await Self.runWorktreeDiscoverySnapshot(projectID: projectID)
-            switch result {
-            case .success(let createdCount):
-                if createdCount > 0 {
-                    if self.canReloadAfterBackgroundWorkspaceRefresh() {
-                        self.pendingWorktreeDiscoveryReload = false
-                        self.requestSidebarReload()
-                    } else {
-                        self.pendingWorktreeDiscoveryReload = true
-                    }
-                } else if self.pendingWorktreeDiscoveryReload, self.canReloadAfterBackgroundWorkspaceRefresh() {
-                    self.pendingWorktreeDiscoveryReload = false
-                    self.requestSidebarReload()
-                }
-            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "worktree_discovery_watch")
-            }
-        }
-    }
-
     /// Flushes sidebar reloads that were deferred because the user was mid-edit.
-    /// Watcher events are one-shot, so this runs at natural idle points (forms
-    /// closing, app re-activation) in place of the old poll re-check.
+    /// Reload triggers (the daemon's `databaseDidChange`) are one-shot, so this
+    /// runs at natural idle points (forms closing, app re-activation) in place of
+    /// the old poll re-check.
     func flushDeferredSidebarReloadsIfNeeded() {
         sidebar.flushPendingDatabaseReloadIfNeeded()
-        guard pendingWorktreeDiscoveryReload, canReloadAfterBackgroundWorkspaceRefresh() else { return }
-        pendingWorktreeDiscoveryReload = false
-        requestSidebarReload()
     }
 
 
@@ -2637,17 +2529,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
     }
 
-    nonisolated private static func runWorktreeDiscoverySnapshot(projectID: String?) async -> Result<Int, Error> {
-        await Task.detached(priority: .utility) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                let created = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
-                return .success(created.count)
-            } catch { return .failure(error) }
-        }.value
-    }
 
     /// Builds attention alerts for a remote device from its overview payload.
     /// A remote device has no local orchestrator, but its overview already carries
@@ -3934,7 +3815,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         didStartBackgroundServices = true
         startPeriodicWorkspaceWindowRefresh()
         startProcessExitMonitoring()
-        startWorktreeDiscoveryWatchers()
         sidebar.startRemoteOverviewSubscriptions()
     }
 
@@ -3942,7 +3822,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         periodicWorkspaceRefreshTask?.cancel()
         periodicWorkspaceRefreshTask = nil
         stopProcessExitMonitoring()
-        stopWorktreeDiscoveryWatchers()
         sidebar.stopSidebarTasks()
         didStartBackgroundServices = false
     }

@@ -180,7 +180,6 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false) {
         host.logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
-        host.pendingWorktreeDiscoveryReload = false
         pendingDatabaseReload = false
         host.commandPalette.invalidateCommandPaletteCache()
         host.configCache = snapshot.config
@@ -205,7 +204,6 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         host.localPairedDevice = snapshot.localPairedDevice
         host.localDeviceOverview = snapshot.localDeviceOverview
         rebuildFlatSidebarData()
-        host.refreshWorktreeDiscoveryWatchers()
         host.refreshProcessExitObservers()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()

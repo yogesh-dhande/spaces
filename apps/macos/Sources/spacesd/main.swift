@@ -91,6 +91,11 @@ import workspacecore
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
+    private var worktreeDiscoveryService: WorktreeDiscoveryService?
+    private var databaseChangeObserver: NSObjectProtocol?
+    #if os(macOS)
+        private var databaseDistributedChangeObserver: NSObjectProtocol?
+    #endif
     private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
         builtInTerminalSessionTerminator: { [weak self] sessionID in
             Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
@@ -118,11 +123,48 @@ import workspacecore
         try configuredRemoteServer?.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
+        startWorktreeDiscovery()
+    }
+
+    /// Worktree discovery is device-runtime work, so the daemon owns it (it runs on
+    /// every device, including headless remotes; the GUI is a thin client). The
+    /// service scans on startup and watches each local git project; `databaseDidChange`
+    /// reconciles the watcher set when projects are added or removed.
+    private func startWorktreeDiscovery() {
+        guard let databasePath = try? DatabaseLocator.defaultPath() else {
+            writeStandardError("spacesd worktree_discovery_error error=could not resolve database path\n")
+            return
+        }
+        let service = WorktreeDiscoveryService(databasePath: databasePath) { error in
+            writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
+        }
+        service.start()
+        worktreeDiscoveryService = service
+        databaseChangeObserver = NotificationCenter.default.addObserver(
+            forName: IPCNotification.databaseDidChange, object: nil, queue: nil
+        ) { [weak self] _ in Task { @MainActor in self?.worktreeDiscoveryService?.refreshWatchers() } }
+        #if os(macOS)
+            databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
+                forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
+            ) { [weak self] _ in Task { @MainActor in self?.worktreeDiscoveryService?.refreshWatchers() } }
+        #endif
     }
 
     func shutdown() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
+        if let databaseChangeObserver {
+            NotificationCenter.default.removeObserver(databaseChangeObserver)
+            self.databaseChangeObserver = nil
+        }
+        #if os(macOS)
+            if let databaseDistributedChangeObserver {
+                DistributedNotificationCenter.default().removeObserver(databaseDistributedChangeObserver)
+                self.databaseDistributedChangeObserver = nil
+            }
+        #endif
+        worktreeDiscoveryService?.stop()
+        worktreeDiscoveryService = nil
         deviceAPISupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
         remoteServer?.stop()
