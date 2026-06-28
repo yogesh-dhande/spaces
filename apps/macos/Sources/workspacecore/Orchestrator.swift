@@ -20,6 +20,10 @@ public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionTerminator = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionLauncher = @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary
+    /// `(title, body, subtitle)`. Delivers a user-facing notification. The daemon
+    /// cannot show OS notifications (no app bundle), so it installs a process-wide
+    /// override that forwards to the client instead of delivering directly.
+    public typealias NotificationDeliverer = @Sendable (String, String, String?) -> Void
 
     #if canImport(UserNotifications)
         private final class NotificationAuthorizationCache: @unchecked Sendable {
@@ -80,6 +84,24 @@ public final class WorkspaceOrchestrator {
     private static let notificationAuthorizationCache = NotificationAuthorizationCache()
     private static let builtInTerminalSessionLauncherOverrideStore = BuiltInTerminalSessionLauncherOverrideStore()
     private static let builtInTerminalSessionTerminatorOverrideStore = BuiltInTerminalSessionTerminatorOverrideStore()
+    private static let notificationDelivererOverrideStore = NotificationDelivererOverrideStore()
+
+    private final class NotificationDelivererOverrideStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deliverer: NotificationDeliverer?
+
+        func set(_ deliverer: NotificationDeliverer?) {
+            lock.lock()
+            self.deliverer = deliverer
+            lock.unlock()
+        }
+
+        func get() -> NotificationDeliverer? {
+            lock.lock()
+            defer { lock.unlock() }
+            return deliverer
+        }
+    }
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -128,6 +150,13 @@ public final class WorkspaceOrchestrator {
 
     public static func setProcessWideBuiltInTerminalSessionTerminator(_ terminator: BuiltInTerminalSessionTerminator?) {
         builtInTerminalSessionTerminatorOverrideStore.set(terminator)
+    }
+
+    /// Installs a process-wide notification deliverer used when an orchestrator is
+    /// created without an explicit one. The daemon sets this to forward notifications
+    /// to the client, since a bundle-less daemon cannot post OS notifications.
+    public static func setProcessWideNotificationDeliverer(_ deliverer: NotificationDeliverer?) {
+        notificationDelivererOverrideStore.set(deliverer)
     }
 
     public static func sendTerminalServiceRequest(to target: SpacesDaemonConnectionTarget, request: TerminalServiceRequest) throws
@@ -311,7 +340,7 @@ public final class WorkspaceOrchestrator {
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
-        self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
+        self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
         self.windowFocusPulseEnabledProvider = windowFocusPulseEnabledProvider ?? { SettingsKey.defaultWindowFocusPulseEnabled }
         self.windowFocusPulseColorProvider = windowFocusPulseColorProvider ?? { SettingsKey.windowFocusPulseColor(from: nil) }
         #if canImport(Darwin)
@@ -1217,7 +1246,7 @@ public final class WorkspaceOrchestrator {
     }
 
     #if canImport(UserNotifications)
-        private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
+        public static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
             guard NSClassFromString("XCTest") == nil else { return }
             let center = UNUserNotificationCenter.current()
             guard let authorizationStatus = currentNotificationAuthorizationStatus(center: center) else {
@@ -1309,7 +1338,7 @@ public final class WorkspaceOrchestrator {
             }
         }
     #else
-        private static func deliverUserNotification(title _: String, body _: String, subtitle _: String? = nil) {}
+        public static func deliverUserNotification(title _: String, body _: String, subtitle _: String? = nil) {}
 
         public static func prepareUserNotificationAuthorization() {}
     #endif

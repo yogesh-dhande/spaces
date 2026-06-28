@@ -227,16 +227,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var shortcutButtonsBySetting: [String: NSButton] = [:]
     var activeShortcutCaptureSetting: ShortcutSetting?
     private var periodicWorkspaceRefreshTask: Task<Void, Never>?
-    /// Exit observers for owned child processes, keyed by pid. They replace the
-    /// process-monitor poll: a child's exit triggers the existing status reconcile
-    /// immediately instead of on a fixed interval.
-    private var processExitObservers: [Int: DispatchSourceProcess] = [:]
-    /// Recorded-running pids that were already dead when observed (they died before
-    /// an observer was installed, so no exit event is coming). Tracked so they are
-    /// reconciled once; a pid the reconcile keeps running (e.g. a surviving child)
-    /// is not reconciled again, avoiding a loop. Cleared when the pid leaves the
-    /// running set.
-    private var reconciledDeadProcessPIDs: Set<Int> = []
     private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
     private var activeSpaceSummonCleanupTask: Task<Void, Never>?
     private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
@@ -280,6 +270,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.performTerminalSessionWindowShortcut, #selector(handlePerformTerminalSessionWindowShortcutIPC(_:))),
         (IPCNotification.focusTerminalSessionWindow, #selector(handleFocusTerminalSessionWindowIPC(_:))),
         (IPCNotification.databaseDidChange, #selector(handleDatabaseDidChangeIPC(_:))),
+        (IPCNotification.deliverUserNotification, #selector(handleDeliverUserNotificationIPC(_:))),
     ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
     private var appDidResignActiveObserver: NSObjectProtocol?
@@ -563,7 +554,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NSLog("spaces: prepared add-project cleanup failed during termination: \(String(describing: error))")
         }
         periodicWorkspaceRefreshTask?.cancel()
-        stopProcessExitMonitoring()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebar.cancelSidebarReloadTask()
         teardownInlineWorkspaceOutsideClickMonitor()
@@ -607,6 +597,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self, object] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
             self.reloadData()
+        }
+    }
+
+    /// Delivers an OS notification the daemon asked for. The daemon detects the
+    /// event (e.g. an on-exit `notify` process exit) but cannot post a notification
+    /// itself (no app bundle), so the client delivers it.
+    @objc private nonisolated func handleDeliverUserNotificationIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        let userInfo = notification.userInfo as? [String: String]
+        Task { @MainActor [weak self, object, userInfo] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            guard let title = userInfo?[IPCNotification.titleUserInfoKey], let body = userInfo?[IPCNotification.detailUserInfoKey] else { return }
+            WorkspaceOrchestrator.deliverUserNotification(
+                title: title, body: body, subtitle: userInfo?[IPCNotification.notificationSubtitleUserInfoKey])
         }
     }
 
@@ -1767,97 +1771,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func startProcessExitMonitoring() {
-        // Reconcile once on startup (catching exits that happened while not
-        // observing) and install exit observers for currently-running children.
-        handleProcessMonitorChange()
-    }
-
-    private func stopProcessExitMonitoring() {
-        for source in processExitObservers.values { source.cancel() }
-        processExitObservers.removeAll()
-        reconciledDeadProcessPIDs.removeAll()
-    }
-
-    /// Reconciles the installed exit observers to the set of currently-running
-    /// owned processes. Idempotent and cheap, so it is safe to call after every
-    /// sidebar reload (workspace launches/stops change the running set).
-    func refreshProcessExitObservers() {
-        guard didStartBackgroundServices else { return }
-        Task { @MainActor [weak self] in
-            guard let self, self.didStartBackgroundServices else { return }
-            guard let runningPIDs = await Self.runningOwnedProcessPIDsSnapshot() else {
-                // Transient read failure: keep existing observers rather than
-                // dropping them all, which would leave exits undetected.
-                self.handleBackgroundRefreshFailure(
-                    WorkspaceError.invalidArgument(message: "Could not read running processes to refresh exit observers."),
-                    source: "process_exit_observers")
-                return
-            }
-            guard self.didStartBackgroundServices else { return }
-            for (pid, source) in self.processExitObservers where !runningPIDs.contains(pid) {
-                source.cancel()
-                self.processExitObservers[pid] = nil
-            }
-            self.reconciledDeadProcessPIDs.formIntersection(runningPIDs)
-            var hasUnreconciledDeadPID = false
-            for pid in runningPIDs where self.processExitObservers[pid] == nil {
-                if Self.isProcessAlive(pid: pid) {
-                    self.installProcessExitObserver(pid: pid)
-                } else if !self.reconciledDeadProcessPIDs.contains(pid) {
-                    // Recorded running but already dead with no exit event coming
-                    // (it died before its observer was installed). Reconcile once,
-                    // ignoring the startup grace, so it is marked exited and its
-                    // on-exit policy runs.
-                    self.reconciledDeadProcessPIDs.insert(pid)
-                    hasUnreconciledDeadPID = true
-                }
-            }
-            if hasUnreconciledDeadPID { self.handleProcessMonitorChange(ignoreStartupGracePeriod: true) }
-        }
-    }
-
-    private func installProcessExitObserver(pid: Int) {
-        let source = DispatchSource.makeProcessSource(identifier: pid_t(pid), eventMask: .exit, queue: .global(qos: .utility))
-        // The handler runs on a background dispatch queue, so it must be a
-        // non-isolated @Sendable closure that hops to the main actor; otherwise
-        // the closure inherits this method's @MainActor isolation and dispatch
-        // trips a `dispatch_assert_queue` SIGTRAP when it invokes it off-main.
-        source.setEventHandler { @Sendable [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                self.processExitObservers[pid]?.cancel()
-                self.processExitObservers[pid] = nil
-                // The kernel told us this pid exited, so reconcile authoritatively:
-                // ignore the startup grace period that the periodic poll used, which
-                // would otherwise skip a process that exited within its first 10s and
-                // leave it stuck running with no retry now that the poll is gone.
-                self.handleProcessMonitorChange(ignoreStartupGracePeriod: true)
-            }
-        }
-        source.resume()
-        processExitObservers[pid] = source
-    }
-
-    private func handleProcessMonitorChange(ignoreStartupGracePeriod: Bool = false) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await Self.runProcessMonitorSnapshot(ignoreStartupGracePeriod: ignoreStartupGracePeriod)
-            switch result {
-            case .success(let didUpdate): if didUpdate && self.canReloadAfterBackgroundWorkspaceRefresh() { self.requestSidebarReload() }
-            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "process_monitor")
-            }
-            // The reconcile may have applied restart/exit policies that changed the
-            // running set, so reattach observers to the current children.
-            self.refreshProcessExitObservers()
-        }
-    }
-
-    nonisolated private static func isProcessAlive(pid: Int) -> Bool {
-        guard pid > 0 else { return false }
-        return kill(pid_t(pid), 0) == 0 || errno == EPERM
-    }
-
     /// Flushes sidebar reloads that were deferred because the user was mid-edit.
     /// Reload triggers (the daemon's `databaseDidChange`) are one-shot, so this
     /// runs at natural idle points (forms closing, app re-activation) in place of
@@ -2491,19 +2404,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
-    nonisolated private static func runProcessMonitorSnapshot(ignoreStartupGracePeriod: Bool = false) async -> Result<Bool, Error> {
-        await Task.detached(priority: .utility) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                let didUpdateProcessStates = try orchestrator.checkAndUpdateProcessStatuses(
-                    ignoreStartupGracePeriod: ignoreStartupGracePeriod)
-                return .success(didUpdateProcessStates)
-            } catch { return .failure(error) }
-        }.value
-    }
-
     nonisolated private static func runTerminalForegroundAgentReconcileSnapshot() async -> Result<Bool, Error> {
         await Task.detached(priority: .utility) {
             do {
@@ -2514,21 +2414,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             } catch { return .failure(error) }
         }.value
     }
-
-    /// Returns nil on a transient store/profile error so callers can distinguish
-    /// "no processes are running" from "could not read", and avoid tearing down
-    /// live exit observers on a failed read.
-    nonisolated private static func runningOwnedProcessPIDsSnapshot() async -> Set<Int>? {
-        await Task.detached(priority: .utility) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                return try orchestrator.runningOwnedProcessPIDs()
-            } catch { return nil }
-        }.value
-    }
-
 
     /// Builds attention alerts for a remote device from its overview payload.
     /// A remote device has no local orchestrator, but its overview already carries
@@ -3814,14 +3699,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
         startPeriodicWorkspaceWindowRefresh()
-        startProcessExitMonitoring()
         sidebar.startRemoteOverviewSubscriptions()
     }
 
     private func stopBackgroundServices() {
         periodicWorkspaceRefreshTask?.cancel()
         periodicWorkspaceRefreshTask = nil
-        stopProcessExitMonitoring()
         sidebar.stopSidebarTasks()
         didStartBackgroundServices = false
     }

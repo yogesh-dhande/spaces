@@ -22,10 +22,15 @@ public enum IPCNotification {
     /// reload sidebar metadata from external CLI/daemon edits without polling or
     /// watching database files.
     public static let databaseDidChange = Notification.Name("spaces.ipc.database-did-change")
+    /// Posted by the daemon to ask the client to show an OS notification, because a
+    /// bundle-less daemon cannot post one itself. Carries `titleUserInfoKey`,
+    /// `detailUserInfoKey` (body), and optional `notificationSubtitleUserInfoKey`.
+    public static let deliverUserNotification = Notification.Name("spaces.ipc.deliver-user-notification")
     public static let workspaceIDUserInfoKey = "workspace_id"
     public static let workspaceTargetNameUserInfoKey = "workspace_target_name"
     public static let titleUserInfoKey = "title"
     public static let detailUserInfoKey = "detail"
+    public static let notificationSubtitleUserInfoKey = "notification_subtitle"
     public static let cycleDirectionUserInfoKey = "cycle_direction"
     public static let terminalSessionIDUserInfoKey = "terminal_session_id"
     public static let terminalAttachmentModeUserInfoKey = "terminal_attachment_mode"

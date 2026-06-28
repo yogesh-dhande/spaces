@@ -204,7 +204,6 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         host.localPairedDevice = snapshot.localPairedDevice
         host.localDeviceOverview = snapshot.localDeviceOverview
         rebuildFlatSidebarData()
-        host.refreshProcessExitObservers()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
         if !localOutlineUnchanged {
