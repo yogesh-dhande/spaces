@@ -276,12 +276,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var appDidResignActiveObserver: NSObjectProtocol?
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
-    private var terminalRuntimeStateDidChangeObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
-    /// Coalesces foreground-agent reconciles triggered by terminal runtime-state
-    /// events: guards against overlap and re-runs once if events arrived mid-run.
-    private var terminalForegroundReconcileInFlight = false
-    private var terminalForegroundReconcilePending = false
     private var didStartBackgroundServices = false
     var setupManager: SetupManager?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
@@ -473,7 +468,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         setupAppActivationObservers()
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
-        setupTerminalRuntimeStateObserver()
         setupTextInputDidEndEditingObserver()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
         logStartupProfile("ipc_observers_ready")
@@ -575,10 +569,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let terminalAttachmentStateDidChangeObserver {
             NotificationCenter.default.removeObserver(terminalAttachmentStateDidChangeObserver)
             self.terminalAttachmentStateDidChangeObserver = nil
-        }
-        if let terminalRuntimeStateDidChangeObserver {
-            NotificationCenter.default.removeObserver(terminalRuntimeStateDidChangeObserver)
-            self.terminalRuntimeStateDidChangeObserver = nil
         }
         if let textInputDidEndEditingObserver {
             NotificationCenter.default.removeObserver(textInputDidEndEditingObserver)
@@ -1702,17 +1692,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
-    private func setupTerminalRuntimeStateObserver() {
-        terminalRuntimeStateDidChangeObserver = NotificationCenter.default.addObserver(
-            forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.reconcileTerminalForegroundAgentsFromRuntimeEvent()
-            }
-        }
-    }
-
     /// Flushes a deferred sidebar reload when text editing ends. The reload guard
     /// is also false while any text input is focused, and database/worktree
     /// changes that arrive then are only held; without the removed metadata poll,
@@ -1724,29 +1703,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             forName: NSText.didEndEditingNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Self.scheduleAfterNextRunLoopTurn { self?.flushDeferredSidebarReloadsIfNeeded() }
-        }
-    }
-
-    /// Reconciles ad-hoc foreground-agent classifications when a terminal's
-    /// runtime state changes (the foreground process is part of runtime state).
-    /// Replaces the periodic reconcile the process-monitor poll used to drive.
-    private func reconcileTerminalForegroundAgentsFromRuntimeEvent() {
-        guard didStartBackgroundServices else { return }
-        guard !terminalForegroundReconcileInFlight else {
-            terminalForegroundReconcilePending = true
-            return
-        }
-        terminalForegroundReconcileInFlight = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            repeat {
-                self.terminalForegroundReconcilePending = false
-                let result = await Self.runTerminalForegroundAgentReconcileSnapshot()
-                if case .success(let didMutate) = result, didMutate, self.canReloadAfterBackgroundWorkspaceRefresh() {
-                    self.requestSidebarReload()
-                }
-            } while self.terminalForegroundReconcilePending
-            self.terminalForegroundReconcileInFlight = false
         }
     }
 
@@ -2403,17 +2359,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func shouldShowWorkspaceSetupScriptEditor(status: WorkspaceSetupStatus) -> Bool { status == .failed }
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
-
-    nonisolated private static func runTerminalForegroundAgentReconcileSnapshot() async -> Result<Bool, Error> {
-        await Task.detached(priority: .utility) {
-            do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                return .success(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            } catch { return .failure(error) }
-        }.value
-    }
 
     /// Builds attention alerts for a remote device from its overview payload.
     /// A remote device has no local orchestrator, but its overview already carries
