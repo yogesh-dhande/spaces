@@ -1033,6 +1033,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.", result: .overview(try loadOverview(clientApp: request.clientApp)))
         case .createProject(let payload): return try handleCreateProjectRequest(payload)
+        case .prepareGitProject(let payload): return try handlePrepareGitProjectRequest(payload)
+        case .discardPreparedGitProject(let payload): return try handleDiscardPreparedGitProjectRequest(payload)
         case .deleteProject(let payload): return try handleDeleteProjectRequest(payload)
         case .importProject(let payload): return try handleImportProjectRequest(payload)
         case .exportProject(let payload): return try handleExportProjectRequest(payload)
@@ -1392,14 +1394,73 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 project = try orchestrator.addProject(dir: projectDir)
             }
         } else if let gitURL {
-            project = try orchestrator.addProject(gitURL: gitURL) { project in
-                if let config = request.config { applyProjectConfig(config, to: &project) }
+            if let handle = normalizedString(request.preparedGitProjectHandle) {
+                // Adopt the repository already cloned by prepareGitProject instead of re-cloning.
+                let prepared = try Self.decodePreparedGitProject(handle: handle)
+                project = try orchestrator.addPreparedGitProject(prepared) { project in
+                    if let config = request.config { applyProjectConfig(config, to: &project) }
+                }
+            } else {
+                project = try orchestrator.addProject(gitURL: gitURL) { project in
+                    if let config = request.config { applyProjectConfig(config, to: &project) }
+                }
             }
         } else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide exactly one project directory or Git URL.")
         }
         let defaultWorkspaceID = try store.workspaces(projectID: project.id, includeArchived: false).first(where: \.isDefault)?.id
         return try refreshedMutationResponse(message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID)
+    }
+
+    /// Clones a git repository to its final managed location on this daemon and returns the detected
+    /// `spaces.yaml`-derived config plus an opaque handle to the clone. The client populates the add
+    /// form from the config and later either creates the project (reusing the clone via the handle)
+    /// or discards it — so a git import clones exactly once, on the device that will own it.
+    private func handlePrepareGitProjectRequest(_ request: SpacesDevicePrepareGitProjectRequest) throws -> SpacesDeviceAPIResponse {
+        guard let gitURL = normalizedString(request.gitURL) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Git repository URL is required.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let orchestrator = deviceOrchestrator(store: store)
+        // Report managed-directory collisions before cloning so the client can confirm replacement.
+        let candidates = try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: gitURL)
+        if !candidates.isEmpty, !request.replaceExistingManagedDirectories {
+            let mapped = candidates.map { SpacesDeviceManagedDirectoryReplacementCandidate(kind: $0.kind.rawValue, path: $0.path) }
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Managed directories already exist for this repository.",
+                result: .gitProjectPreparation(
+                    SpacesDeviceGitProjectPreparation(
+                        preparedGitProjectHandle: nil, name: nil, defaultBranch: nil, config: nil, replacementCandidates: mapped)))
+        }
+        let prepared = try orchestrator.prepareGitProject(
+            gitURL: gitURL, replaceExistingManagedDirectories: request.replaceExistingManagedDirectories)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Prepared git project '\(prepared.project.name)'.",
+            result: .gitProjectPreparation(
+                SpacesDeviceGitProjectPreparation(
+                    preparedGitProjectHandle: try Self.encodePreparedGitProject(prepared), name: prepared.project.name,
+                    defaultBranch: prepared.project.defaultBranch, config: SpacesDeviceOverviewBuilder.projectConfig(from: prepared.project),
+                    replacementCandidates: [])))
+    }
+
+    private func handleDiscardPreparedGitProjectRequest(_ request: SpacesDeviceDiscardPreparedGitProjectRequest) throws -> SpacesDeviceAPIResponse {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let prepared = try Self.decodePreparedGitProject(handle: request.preparedGitProjectHandle)
+        try deviceOrchestrator(store: store).discardPreparedGitProject(prepared)
+        return SpacesDeviceAPIResponse(ok: true, message: "Discarded prepared git project.")
+    }
+
+    /// The prepared import round-trips to the client as an opaque base64 blob: it references this
+    /// daemon's on-disk clone, so the client only holds and returns it, never interprets it.
+    private static func encodePreparedGitProject(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport) throws -> String {
+        try JSONEncoder().encode(prepared).base64EncodedString()
+    }
+
+    private static func decodePreparedGitProject(handle: String) throws -> WorkspaceOrchestrator.PreparedGitProjectImport {
+        guard let data = Data(base64Encoded: handle) else {
+            throw WorkspaceError.invalidArgument(message: "Invalid prepared git project handle.")
+        }
+        return try JSONDecoder().decode(WorkspaceOrchestrator.PreparedGitProjectImport.self, from: data)
     }
 
     private func handleDeleteProjectRequest(_ request: SpacesDeviceProjectReference) throws -> SpacesDeviceAPIResponse {

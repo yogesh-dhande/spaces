@@ -117,7 +117,7 @@ public final class WorkspaceOrchestrator {
         public init(notice: String?) { self.notice = notice }
     }
 
-    public struct PreparedGitProjectImport: Sendable {
+    public struct PreparedGitProjectImport: Codable, Sendable {
         public let project: ProjectRecord
         public let defaultWorkspace: WorkspaceRecord
         public let importedDocument: SpacesYAMLDocument?

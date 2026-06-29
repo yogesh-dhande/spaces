@@ -164,12 +164,37 @@ public enum SpacesDeviceClient {
     }
 
     public static func createProject(
-        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, preparedGitProjectHandle: String? = nil,
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(command: .createProject(.init(projectDir: projectDir, gitURL: gitURL, config: config))), device: device, clientApp: clientApp,
-            profile: profile)
+            .init(
+                command: .createProject(
+                    .init(projectDir: projectDir, gitURL: gitURL, config: config, preparedGitProjectHandle: preparedGitProjectHandle))),
+            device: device, clientApp: clientApp, profile: profile)
+    }
+
+    /// Clones a git repository on the target daemon and returns its detected config plus an opaque
+    /// handle to the clone (or replacement candidates to confirm first). The handle is later passed
+    /// to `createProject` to adopt the clone, or to `discardPreparedGitProject` to delete it.
+    public static func prepareGitProject(
+        gitURL: String, replaceExistingManagedDirectories: Bool, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceGitProjectPreparation {
+        let response = try request(
+            .init(command: .prepareGitProject(.init(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories))),
+            device: device, clientApp: clientApp, profile: profile)
+        guard let preparation = response.gitProjectPreparation else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return preparation
+    }
+
+    @discardableResult public static func discardPreparedGitProject(
+        preparedGitProjectHandle: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .discardPreparedGitProject(.init(preparedGitProjectHandle: preparedGitProjectHandle))), device: device,
+            clientApp: clientApp, profile: profile)
     }
 
     public static func deleteProject(
@@ -407,9 +432,9 @@ public enum SpacesDeviceClient {
 
     static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
-        case .createProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace, .restartWorkspace,
-            .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess,
-            .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
+        case .createProject, .prepareGitProject, .discardPreparedGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace,
+            .launchWorkspace, .stopWorkspace, .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal,
+            .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
             .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:

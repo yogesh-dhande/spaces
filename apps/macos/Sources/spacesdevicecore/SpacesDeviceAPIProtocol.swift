@@ -828,17 +828,22 @@ public struct SpacesDeviceProjectCreateRequest: Codable, Sendable, Equatable {
     public let projectDir: String?
     public let gitURL: String?
     public let config: SpacesDeviceProjectConfig?
+    /// Opaque handle returned by `prepareGitProject`. When present the daemon adopts the already
+    /// cloned repository for that handle instead of re-cloning `gitURL`, so a git import clones once.
+    public let preparedGitProjectHandle: String?
 
-    public init(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil) {
+    public init(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, preparedGitProjectHandle: String? = nil) {
         self.projectDir = projectDir
         self.gitURL = gitURL
         self.config = config
+        self.preparedGitProjectHandle = preparedGitProjectHandle
     }
 
     private enum CodingKeys: String, CodingKey {
         case projectDir
         case gitURL
         case config
+        case preparedGitProjectHandle
     }
 
     public init(from decoder: any Decoder) throws {
@@ -846,6 +851,57 @@ public struct SpacesDeviceProjectCreateRequest: Codable, Sendable, Equatable {
         projectDir = try container.decodeIfPresent(String.self, forKey: .projectDir)
         gitURL = try container.decodeIfPresent(String.self, forKey: .gitURL)
         config = try container.decodeIfPresent(SpacesDeviceProjectConfig.self, forKey: .config)
+        preparedGitProjectHandle = try container.decodeIfPresent(String.self, forKey: .preparedGitProjectHandle)
+    }
+}
+
+public struct SpacesDevicePrepareGitProjectRequest: Codable, Sendable, Equatable {
+    public let gitURL: String
+    public let replaceExistingManagedDirectories: Bool
+
+    public init(gitURL: String, replaceExistingManagedDirectories: Bool) {
+        self.gitURL = gitURL
+        self.replaceExistingManagedDirectories = replaceExistingManagedDirectories
+    }
+}
+
+public struct SpacesDeviceDiscardPreparedGitProjectRequest: Codable, Sendable, Equatable {
+    public let preparedGitProjectHandle: String
+
+    public init(preparedGitProjectHandle: String) { self.preparedGitProjectHandle = preparedGitProjectHandle }
+}
+
+/// A managed project/workspace directory that already exists for a git URL and would be replaced by
+/// preparing it again. Surfaced so the client can confirm replacement before the daemon clones.
+public struct SpacesDeviceManagedDirectoryReplacementCandidate: Codable, Sendable, Equatable {
+    public let kind: String
+    public let path: String
+
+    public init(kind: String, path: String) {
+        self.kind = kind
+        self.path = path
+    }
+}
+
+/// Result of `prepareGitProject`. When `replacementCandidates` is non-empty the daemon did not clone
+/// (the client must confirm replacement and retry); otherwise it carries the opaque handle for the
+/// cloned repository plus its detected `spaces.yaml`-derived config for populating the add form.
+public struct SpacesDeviceGitProjectPreparation: Codable, Sendable, Equatable {
+    public let preparedGitProjectHandle: String?
+    public let name: String?
+    public let defaultBranch: String?
+    public let config: SpacesDeviceProjectConfig?
+    public let replacementCandidates: [SpacesDeviceManagedDirectoryReplacementCandidate]
+
+    public init(
+        preparedGitProjectHandle: String?, name: String?, defaultBranch: String?, config: SpacesDeviceProjectConfig?,
+        replacementCandidates: [SpacesDeviceManagedDirectoryReplacementCandidate]
+    ) {
+        self.preparedGitProjectHandle = preparedGitProjectHandle
+        self.name = name
+        self.defaultBranch = defaultBranch
+        self.config = config
+        self.replacementCandidates = replacementCandidates
     }
 }
 
@@ -1185,6 +1241,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case ping
     case overview
     case createProject(SpacesDeviceProjectCreateRequest)
+    case prepareGitProject(SpacesDevicePrepareGitProjectRequest)
+    case discardPreparedGitProject(SpacesDeviceDiscardPreparedGitProjectRequest)
     case deleteProject(SpacesDeviceProjectReference)
     case importProject(SpacesDeviceProjectImportRequest)
     case exportProject(SpacesDeviceProjectReference)
@@ -1224,6 +1282,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .ping: "ping"
         case .overview: "overview"
         case .createProject: "createProject"
+        case .prepareGitProject: "prepareGitProject"
+        case .discardPreparedGitProject: "discardPreparedGitProject"
         case .deleteProject: "deleteProject"
         case .importProject: "importProject"
         case .exportProject: "exportProject"
@@ -1309,6 +1369,8 @@ extension SpacesDeviceAPICommand: Codable {
         case ping
         case overview
         case createProject
+        case prepareGitProject
+        case discardPreparedGitProject
         case deleteProject
         case importProject
         case exportProject
@@ -1355,6 +1417,9 @@ extension SpacesDeviceAPICommand: Codable {
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .overview
         case .createProject: self = .createProject(try container.decode(SpacesDeviceProjectCreateRequest.self, forKey: key))
+        case .prepareGitProject: self = .prepareGitProject(try container.decode(SpacesDevicePrepareGitProjectRequest.self, forKey: key))
+        case .discardPreparedGitProject:
+            self = .discardPreparedGitProject(try container.decode(SpacesDeviceDiscardPreparedGitProjectRequest.self, forKey: key))
         case .deleteProject: self = .deleteProject(try container.decode(SpacesDeviceProjectReference.self, forKey: key))
         case .importProject: self = .importProject(try container.decode(SpacesDeviceProjectImportRequest.self, forKey: key))
         case .exportProject: self = .exportProject(try container.decode(SpacesDeviceProjectReference.self, forKey: key))
@@ -1399,6 +1464,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .ping: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .ping)
         case .overview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .overview)
         case .createProject(let payload): try container.encode(payload, forKey: .createProject)
+        case .prepareGitProject(let payload): try container.encode(payload, forKey: .prepareGitProject)
+        case .discardPreparedGitProject(let payload): try container.encode(payload, forKey: .discardPreparedGitProject)
         case .deleteProject(let payload): try container.encode(payload, forKey: .deleteProject)
         case .importProject(let payload): try container.encode(payload, forKey: .importProject)
         case .exportProject(let payload): try container.encode(payload, forKey: .exportProject)
@@ -1475,6 +1542,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalState(GhosttyRemoteSessionStatePayload)
     case workspaceCreateOptions(SpacesDeviceWorkspaceCreateOptions)
     case projectPreview(SpacesDeviceProjectPreview)
+    case gitProjectPreparation(SpacesDeviceGitProjectPreparation)
     case directorySuggestions(SpacesDeviceDirectorySuggestions)
     case mutation(SpacesDeviceMutationResult)
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
@@ -1488,6 +1556,7 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalState
         case workspaceCreateOptions
         case projectPreview
+        case gitProjectPreparation
         case directorySuggestions
         case mutation
         case terminalLinkMetadata
@@ -1506,6 +1575,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalState: self = .terminalState(try container.decode(GhosttyRemoteSessionStatePayload.self, forKey: key))
         case .workspaceCreateOptions: self = .workspaceCreateOptions(try container.decode(SpacesDeviceWorkspaceCreateOptions.self, forKey: key))
         case .projectPreview: self = .projectPreview(try container.decode(SpacesDeviceProjectPreview.self, forKey: key))
+        case .gitProjectPreparation: self = .gitProjectPreparation(try container.decode(SpacesDeviceGitProjectPreparation.self, forKey: key))
         case .directorySuggestions: self = .directorySuggestions(try container.decode(SpacesDeviceDirectorySuggestions.self, forKey: key))
         case .mutation: self = .mutation(try container.decode(SpacesDeviceMutationResult.self, forKey: key))
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
@@ -1521,6 +1591,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalState(let payload): try container.encode(payload, forKey: .terminalState)
         case .workspaceCreateOptions(let payload): try container.encode(payload, forKey: .workspaceCreateOptions)
         case .projectPreview(let payload): try container.encode(payload, forKey: .projectPreview)
+        case .gitProjectPreparation(let payload): try container.encode(payload, forKey: .gitProjectPreparation)
         case .directorySuggestions(let payload): try container.encode(payload, forKey: .directorySuggestions)
         case .mutation(let payload): try container.encode(payload, forKey: .mutation)
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
@@ -1557,6 +1628,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var projectPreview: SpacesDeviceProjectPreview? { if case .projectPreview(let payload) = result { payload } else { nil } }
+
+    public var gitProjectPreparation: SpacesDeviceGitProjectPreparation? {
+        if case .gitProjectPreparation(let payload) = result { payload } else { nil }
+    }
 
     public var directorySuggestions: SpacesDeviceDirectorySuggestions? {
         if case .directorySuggestions(let payload) = result { payload } else { nil }
