@@ -195,6 +195,45 @@ import workspacecore
                         kind: .process)))
     }
 
+    @Test func windowFocusResolutionMapsAlertsRequestsToSharedTargets() {
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", title: "Feature", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    config: SpacesDeviceWorkspaceConfig(processes: [
+                        SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")
+                    ]),
+                    processRows: [
+                        SpacesDeviceWorkspaceProcessRow(
+                            id: "process-web", workspaceID: "workspace-1", name: "web", command: "npm run dev", templateID: "process-web",
+                            processID: "running-web", sessionID: "session-web", runState: .running, canRun: false, canStop: true, canRestart: true)
+                    ])
+            ], sessions: [])
+
+        // A browser attention item maps to the device-agnostic openURL target carrying its workspace.
+        #expect(
+            AppKitController.windowFocusResolution(
+                for: .workspaceBrowserSession(workspaceID: "workspace-1", targetURL: "http://localhost:3000"), overview: overview)
+                == .openURL(workspaceID: "workspace-1", targetURL: "http://localhost:3000"))
+
+        // A running-process attention item maps to the same openTerminal target the numbered path produces,
+        // falling back to the row's title/dir when the session is not yet in the catalog.
+        #expect(
+            AppKitController.windowFocusResolution(for: .workspaceProcess(workspaceID: "workspace-1", processID: "running-web"), overview: overview)
+                == .openTerminal(
+                    AppKitController.DeviceTerminalOpenRequest(
+                        workspaceID: "workspace-1", sessionID: "session-web", title: "web", workingDirectory: "/device/project-feature",
+                        kind: .process)))
+
+        // A missing-configured-process item maps to a run via the Device API with the resolved template id.
+        #expect(
+            AppKitController.windowFocusResolution(
+                for: .workspaceMissingConfiguredProcess(workspaceID: "workspace-1", processKey: "web"), overview: overview)
+                == .runProcess(workspaceID: "workspace-1", processKey: "web", processTemplateID: "process-web"))
+    }
+
     @Test func deviceTerminalOpenRequestPreservesStartingSessionMetadata() {
         let session = SpacesDeviceTerminalSessionSummary(
             id: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature", state: .starting, backend: .ghosttyEmbedded,

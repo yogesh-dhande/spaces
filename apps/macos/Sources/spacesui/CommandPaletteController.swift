@@ -608,15 +608,11 @@ final class CommandPaletteController {
         let item = commandPaletteFilteredItems[commandPaletteSelectedIndex]
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let result = await AppKitController.performWindowFocusSnapshot(item.focusRequest)
-            switch result {
-            case .success(let action):
-                if case .focus(_) = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
-                self.dismissCommandPalette()
-                self.host.reloadData()
-                self.host.hideAfterSuccessfulExternalWindowAction(action)
-            case .failure(let error): await self.host.handleWindowFocusFailure(error)
-            }
+            guard let action = await self.host.executeWindowFocus(item.focusRequest) else { return }
+            if case .focus(_) = action { self.rememberRecentCommandPaletteFocusIdentity(item.recentFocusIdentity) }
+            self.dismissCommandPalette()
+            self.host.reloadData()
+            self.host.hideAfterSuccessfulExternalWindowAction(action)
         }
     }
 }

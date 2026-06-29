@@ -379,18 +379,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case workspaceMissingConfiguredProcess(workspaceID: String, processKey: String)
         case workspaceAgentLauncher(workspaceID: String, name: String)
         case agentWindow(AgentWindowRecord)
+
+        var workspaceID: String {
+            switch self {
+            case .workspaceBrowserSession(let workspaceID, _), .workspaceWindow(let workspaceID, _), .workspaceProcess(let workspaceID, _),
+                .workspaceMissingConfiguredProcess(let workspaceID, _), .workspaceAgentLauncher(let workspaceID, _):
+                return workspaceID
+            case .agentWindow(let record): return record.workspaceID
+            }
+        }
     }
 
     enum ExternalWindowAction: Sendable {
         case focus(hidesApp: Bool)
         case open(hidesApp: Bool)
-    }
-
-    private enum WindowShortcutExecutionOutcome: Sendable {
-        case focused(kind: String, recentFocusIdentity: String, hidesApp: Bool)
-        case opened(kind: String, hidesApp: Bool)
-        case noWorkspace
-        case noMatch
     }
 
     private static let isRunningFromAppBundle = Bundle.main.bundleURL.pathExtension == "app"
@@ -648,36 +650,202 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
         guard let direction = notification.userInfo?[IPCNotification.cycleDirectionUserInfoKey] as? String else { return }
-        let requestID = (notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String)?.trimmingCharacters(
-            in: .whitespacesAndNewlines)
         let preferredFocusedBuiltInTerminalSessionID = (notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        Task { @MainActor [weak self, object, workspaceID, direction, requestID, preferredFocusedBuiltInTerminalSessionID] in
-            guard let self, self.matchesProfileIPCObject(object) else { return }
-            do {
-                let effectiveRequestID = (requestID?.isEmpty == false) ? requestID : UUID().uuidString
-                let effectivePreferredTerminalSessionID =
-                    (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
-                    ? preferredFocusedBuiltInTerminalSessionID : self.activeBuiltInTerminalSessionID()
-                let hidesApp: Bool
-                switch direction {
-                case "next":
-                    hidesApp = try self.orchestrator.focusNextWindowHidesApp(
-                        workspaceID: workspaceID, requestID: effectiveRequestID,
-                        preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
-                case "previous":
-                    hidesApp = try self.orchestrator.focusPreviousWindowHidesApp(
-                        workspaceID: workspaceID, requestID: effectiveRequestID,
-                        preferredFocusedBuiltInTerminalSessionID: effectivePreferredTerminalSessionID)
-                default: return
-                }
-                if hidesApp {
-                    self.hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
-                } else {
-                    self.commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
-                }
-            } catch { self.showError(error) }
+        let delta: Int
+        switch direction {
+        case "next": delta = 1
+        case "previous": delta = -1
+        default: return
         }
+        Task { @MainActor [weak self, object, workspaceID, delta, preferredFocusedBuiltInTerminalSessionID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            let preferredTerminalSessionID =
+                (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
+                ? preferredFocusedBuiltInTerminalSessionID : self.activeBuiltInTerminalSessionID()
+            await self.cycleWorkspaceWindow(workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredTerminalSessionID)
+        }
+    }
+
+    // In-memory window-cycle state (a "window" is a client concept). The cursor remembers
+    // the last-focused target per workspace; the cycle session preserves rotation order
+    // across a short burst of rapid presses. MainActor-isolated, so no lock is needed.
+    private var windowNavigationCursorByWorkspace: [String: WorkspaceWindowCycle.Cursor] = [:]
+    private var windowNavigationCycleSessionByWorkspace: [String: WorkspaceWindowCycle.CycleSession] = [:]
+
+    /// Cycles focus to the next/previous window of a workspace, entirely client-side:
+    /// rebuilds the focusable targets from the workspace's overview, resolves the current
+    /// target from the focused terminal session / frontmost Chrome tab / remembered
+    /// cursor, advances, and focuses through the shared `executeWindowFocusResolution`.
+    private func cycleWorkspaceWindow(workspaceID: String, delta: Int, preferredTerminalSessionID: String?) async {
+        let cycleStartedAt = Date()
+        let direction = delta > 0 ? "next" : "previous"
+        // The real-system E2E waits for this `window_cycle` perf line, so emit it on both
+        // success and failure (matching the orchestrator's format) — it is a parsed surface.
+        func logCycleMetric(target: String, success: Bool) {
+            TerminalPerformance.logWorkspaceMetric(
+                "window_cycle", workspaceID: workspaceID, target: target, elapsedMS: windowShortcutElapsedMS(since: cycleStartedAt),
+                success: success, detail: "direction=\(direction)")
+        }
+        guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else {
+            logCycleMetric(target: "none", success: false)
+            return
+        }
+        // A "window" is client state, so a configured browser session is only a cycle target
+        // when it currently has an open Chrome tab. Scan Chrome once (when any browser is
+        // configured) for the open tab URLs and the frontmost tab URL; the latter resolves
+        // the current target when no built-in terminal session is focused.
+        let chromeState: (openTabURLs: [String], frontmostURL: String?) =
+            detail.config.resolvedBrowserSessions.isEmpty
+            ? ([], nil)
+            : await Task.detached(priority: .userInitiated) {
+                let chrome = ChromeAdapter()
+                guard chrome.isAvailable() else { return ([], nil) }
+                return ((try? chrome.allTabs())?.map(\.url) ?? [], try? chrome.frontmostActiveTabURL())
+            }.value
+        let openBrowserSessions = detail.config.resolvedBrowserSessions.filter { session in
+            guard let url = session.url, !url.isEmpty else { return false }
+            return chromeState.openTabURLs.contains { $0.hasPrefix(url) }
+        }.map(Self.localBrowserSession(from:))
+
+        // Cycle over the same ordered targets the numbered shortcuts use, limited to running
+        // windows (open browsers, running processes/terminals, agents) — not launch actions.
+        let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: openBrowserSessions).filter { target in
+            switch target.kind {
+            case .browser, .process, .window, .agent: return true
+            case .missingConfiguredProcess, .agentLauncher: return false
+            }
+        }
+        guard !targets.isEmpty else {
+            logCycleMetric(target: "none", success: false)
+            return
+        }
+
+        let cursorKeys = targets.map { Self.cycleCursorKey(for: $0, detail: detail) }
+        let cursor = windowNavigationCursorByWorkspace[workspaceID]
+        let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : chromeState.frontmostURL
+        let currentIndex = Self.cycleCurrentIndex(
+            targets: targets, detail: detail, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: frontmostBrowserURL,
+            cursorKeys: cursorKeys, cursor: cursor)
+        let ordering = WorkspaceWindowCycle.cycleOrdering(
+            cursors: cursorKeys, currentIndex: currentIndex, session: validCycleSession(workspaceID: workspaceID))
+        let orderedTargets = ordering.indices.map { targets[$0] }
+        let orderedCursors = ordering.indices.map { cursorKeys[$0] }
+        guard !orderedTargets.isEmpty else {
+            logCycleMetric(target: "none", success: false)
+            return
+        }
+        let startIndex = WorkspaceWindowCycle.nextIndex(orderedCount: orderedTargets.count, orderedCurrentIndex: ordering.currentIndex, delta: delta)
+
+        var focusedAction: ExternalWindowAction?
+        var resolvedIndex = startIndex
+        for attempt in 0..<orderedTargets.count {
+            let candidateIndex = (startIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
+            let resolution = Self.windowShortcutTargetResolution(
+                orderedTargets[candidateIndex], workspaceID: workspaceID, detail: detail, overview: overview)
+            if let action = await executeWindowFocusResolution(resolution) {
+                focusedAction = action
+                resolvedIndex = candidateIndex
+                break
+            }
+        }
+        guard let action = focusedAction else {
+            logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[startIndex], detail: detail), success: false)
+            return
+        }
+
+        windowNavigationCursorByWorkspace[workspaceID] = orderedCursors[resolvedIndex]
+        windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceWindowCycle.CycleSession(
+            orderedCursors: orderedCursors, currentIndex: resolvedIndex, lastUsedAt: Date())
+        logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true)
+
+        let hidesApp: Bool
+        switch action {
+        case .focus(let value), .open(let value): hidesApp = value
+        }
+        if hidesApp {
+            hideAfterSuccessfulExternalWindowAction(action)
+        } else {
+            commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
+        }
+    }
+
+    private func validCycleSession(workspaceID: String) -> WorkspaceWindowCycle.CycleSession? {
+        guard let session = windowNavigationCycleSessionByWorkspace[workspaceID] else { return nil }
+        guard Date().timeIntervalSince(session.lastUsedAt) <= WorkspaceWindowCycle.cycleSessionTimeout else {
+            windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID)
+            return nil
+        }
+        return session
+    }
+
+    /// Stable per-target identity used to remember the cursor and preserve cycle order.
+    nonisolated private static func cycleCursorKey(for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel) -> String {
+        switch target.kind {
+        case .browser: return "browser:\(target.targetURL ?? "")"
+        case .process: return "process:\(target.processID ?? "")"
+        case .window: return "terminal:\(cycleTargetSessionID(for: target, detail: detail) ?? String(target.windowListIndex ?? -1))"
+        case .agent: return "agent:\(target.agentWindow?.id ?? "")"
+        case .missingConfiguredProcess: return "missing:\(target.processKey ?? "")"
+        case .agentLauncher: return "launcher:\(target.launcherName ?? "")"
+        }
+    }
+
+    nonisolated private static func cycleTargetSessionID(for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel)
+        -> String?
+    {
+        switch target.kind {
+        case .process: return detail.processRows.first(where: { ($0.processID ?? $0.id) == target.processID })?.sessionID
+        case .window:
+            guard let index = target.windowListIndex, detail.terminalRows.indices.contains(index) else { return nil }
+            return detail.terminalRows[index].sessionID
+        case .agent: return detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == target.agentWindow?.id })?.sessionID
+        case .browser, .missingConfiguredProcess, .agentLauncher: return nil
+        }
+    }
+
+    /// Short name for a target, used in the `window_cycle` perf line the E2E parses; matches
+    /// the orchestrator's `kind:name` shape (e.g. `process:web`, `terminal:shell`).
+    nonisolated private static func cycleDebugName(for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel) -> String {
+        switch target.kind {
+        case .browser: return "browser:\(target.targetURL ?? "")"
+        case .process:
+            let name = target.processID.flatMap { id in detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name }
+            return "process:\(name ?? target.processID ?? "")"
+        case .window:
+            let title = target.windowListIndex.flatMap { detail.terminalRows.indices.contains($0) ? detail.terminalRows[$0].title : nil }
+            return "terminal:\(title ?? "")"
+        case .agent: return "agent:\(target.agentWindow?.label ?? target.agentWindow?.id ?? "")"
+        case .missingConfiguredProcess: return "process:\(target.processKey ?? "")"
+        case .agentLauncher: return "agent:\(target.launcherName ?? "")"
+        }
+    }
+
+    nonisolated private static func cycleCurrentIndex(
+        targets: [WorkspaceRunShortcutTarget], detail: SpacesDeviceWorkspaceDetailViewModel, focusedTerminalSessionID: String?,
+        frontmostBrowserURL: String?, cursorKeys: [String], cursor: String?
+    ) -> Int? {
+        if let focusedTerminalSessionID, !focusedTerminalSessionID.isEmpty {
+            let matches = targets.indices.filter { cycleTargetSessionID(for: targets[$0], detail: detail) == focusedTerminalSessionID }
+            if !matches.isEmpty {
+                if let cursor, let match = matches.first(where: { cursorKeys[$0] == cursor }) { return match }
+                return matches.last
+            }
+        }
+        if let frontmostBrowserURL, !frontmostBrowserURL.isEmpty {
+            let matches = targets.indices.compactMap { index -> (offset: Int, targetURL: String)? in
+                guard targets[index].kind == .browser, let targetURL = targets[index].targetURL, !targetURL.isEmpty,
+                    frontmostBrowserURL.hasPrefix(targetURL)
+                else { return nil }
+                return (index, targetURL)
+            }
+            if !matches.isEmpty {
+                if let cursor, let match = matches.first(where: { cursorKeys[$0.offset] == cursor }) { return match.offset }
+                return matches.max(by: { $0.targetURL.count < $1.targetURL.count })?.offset
+            }
+        }
+        if let cursor { return cursorKeys.firstIndex(of: cursor) }
+        return nil
     }
 
     @objc private nonisolated func handleSelectWorkspaceDetailIPC(_ notification: Notification) {
@@ -2112,209 +2280,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
     }
 
-    nonisolated static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<ExternalWindowAction, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let orchestrator = try localWorkspaceOrchestrator()
-                switch request {
-                case .workspaceBrowserSession(let workspaceID, let targetURL):
-                    try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                    Self.setClientActiveWorkspaceID(workspaceID)
-                    return .success(.focus(hidesApp: true))
-                case .workspaceWindow(let workspaceID, let index):
-                    let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
-                    let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
-                    try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
-                    Self.setClientActiveWorkspaceID(workspaceID)
-                    return .success(.focus(hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
-                case .workspaceProcess(let workspaceID, let processID):
-                    try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-                    Self.setClientActiveWorkspaceID(workspaceID)
-                    return .success(.focus(hidesApp: false))
-                case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
-                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                    Self.setClientActiveWorkspaceID(workspaceID)
-                    return .success(.open(hidesApp: false))
-                case .workspaceAgentLauncher(let workspaceID, let name):
-                    _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                    Self.setClientActiveWorkspaceID(workspaceID)
-                    return .success(.open(hidesApp: false))
-                case .agentWindow(let record):
-                    try orchestrator.focusAgentWindow(record)
-                    Self.setClientActiveWorkspaceID(record.workspaceID)
-                    return .success(.focus(hidesApp: false))
-                }
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func recoverMissingTrackedWindowSnapshot(_ context: MissingTrackedWindowContext) async -> Result<Void, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let orchestrator = try localWorkspaceOrchestrator()
-                switch context.kind {
-                case .browserSession:
-                    guard let targetURL = context.targetURL else {
-                        throw WorkspaceError.invalidArgument(message: "Browser recovery requires a target URL.")
-                    }
-                    try orchestrator.recoverMissingBrowserSession(workspaceID: context.workspaceID, targetURL: targetURL)
-                case .process:
-                    guard let processID = context.processID else {
-                        throw WorkspaceError.invalidArgument(message: "Process recovery requires a process identifier.")
-                    }
-                    let recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: context.workspaceID, processID: processID)
-                    if !recovered { try orchestrator.restartWorkspaceProcess(workspaceID: context.workspaceID, processID: processID) }
-                case .codingAgent, .window: throw WorkspaceError.invalidArgument(message: "This window cannot be recovered automatically.")
-                }
-                return .success(())
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func recoveredWorkspaceProcessSnapshot(workspaceID: String, processID: String) async -> Result<
-        RunningProcessRecord?, Error
-    > {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let orchestrator = try localWorkspaceOrchestrator()
-                return .success(try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated static func recoveredProcessWindowDetail(title: String, terminalApp _: String?) -> String {
-        "\(title) reopened in a new Spaces window."
-    }
-
-    nonisolated private static func recoverRunningWorkspaceProcessIfPossibleSnapshot(_ context: MissingTrackedWindowContext) async -> Result<
-        Bool, Error
-    > {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                guard context.kind == .process, let processID = context.processID else {
-                    throw WorkspaceError.invalidArgument(message: "Running-process recovery requires a process identifier.")
-                }
-                let orchestrator = try localWorkspaceOrchestrator()
-                return .success(try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: context.workspaceID, processID: processID))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func focusWindowShortcutSnapshot(index: Int, selectedWorkspaceID: String?, alertsFocusRequest: WindowFocusRequest?)
-        async -> Result<WindowShortcutExecutionOutcome, Error>
-    {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let orchestrator = try localWorkspaceOrchestrator()
-
-                if let alertsFocusRequest {
-                    switch alertsFocusRequest {
-                    case .workspaceBrowserSession(let workspaceID, let targetURL):
-                        try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-                        Self.setClientActiveWorkspaceID(workspaceID)
-                        return .success(
-                            .focused(
-                                kind: "alerts_browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
-                                hidesApp: true))
-                    case .workspaceWindow(let workspaceID, let index):
-                        let trackedWindows = try orchestrator.windows(workspaceID: workspaceID)
-                        let trackedWindow = index > 0 && index <= trackedWindows.count ? trackedWindows[index - 1] : nil
-                        try orchestrator.focusWorkspaceWindow(workspaceID: workspaceID, index: index)
-                        Self.setClientActiveWorkspaceID(workspaceID)
-                        return .success(
-                            .focused(
-                                kind: "alerts_window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
-                                hidesApp: trackedWindow?.app != TerminalHost.spaces.appName))
-                    case .workspaceProcess(let workspaceID, let processID):
-                        try orchestrator.focusWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-                        Self.setClientActiveWorkspaceID(workspaceID)
-                        return .success(
-                            .focused(
-                                kind: "alerts_process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
-                                hidesApp: false))
-                    case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
-                        try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-                        Self.setClientActiveWorkspaceID(workspaceID)
-                        return .success(.opened(kind: "alerts_process", hidesApp: false))
-                    case .workspaceAgentLauncher(let workspaceID, let name):
-                        _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                        Self.setClientActiveWorkspaceID(workspaceID)
-                        return .success(.opened(kind: "alerts_agent_launcher", hidesApp: false))
-                    case .agentWindow(let record):
-                        try orchestrator.focusAgentWindow(record)
-                        Self.setClientActiveWorkspaceID(record.workspaceID)
-                        return .success(
-                            .focused(
-                                kind: "alerts_agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: alertsFocusRequest),
-                                hidesApp: false))
-                    }
-                }
-                guard let selectedWorkspaceID else { return .success(.noWorkspace) }
-
-                let windows = try orchestrator.windows(workspaceID: selectedWorkspaceID)
-                let processes = try orchestrator.runningProcesses(workspaceID: selectedWorkspaceID)
-                let agentWindows = try orchestrator.agentWindows(workspaceID: selectedWorkspaceID)
-                let workspaceIsRunning = try orchestrator.store.workspace(id: selectedWorkspaceID)?.isRunning ?? false
-                let browserSessions =
-                    shouldShowConfiguredBrowserSessions(workspaceIsRunning: workspaceIsRunning)
-                    ? try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: selectedWorkspaceID) : []
-                let workspaceSettings = try orchestrator.workspaceSettings(workspaceID: selectedWorkspaceID)
-                let configuredProcesses = workspaceSettings?.processes ?? []
-                let processEntries = orderedWorkspaceRunProcessEntries(
-                    configuredProcesses: configuredProcesses, windows: windows, processes: processes, agentWindows: agentWindows)
-                let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
-                let shortcutTargets = orderedWorkspaceRunShortcutTargets(
-                    browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-                    configuredAgentLaunchers: workspaceSettings?.agentLaunchers ?? [], agentWindows: agentWindows)
-                guard index > 0, index <= shortcutTargets.count else { return .success(.noMatch) }
-                let target = shortcutTargets[index - 1]
-                switch target.kind {
-                case .browser:
-                    guard let targetURL = target.targetURL else { return .success(.noMatch) }
-                    let focusRequest = WindowFocusRequest.workspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
-                    try orchestrator.focusWorkspaceBrowserSession(workspaceID: selectedWorkspaceID, targetURL: targetURL)
-                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
-                    return .success(
-                        .focused(kind: "browser", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: true))
-                case .process:
-                    guard let processID = target.processID else { return .success(.noMatch) }
-                    let focusRequest = WindowFocusRequest.workspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
-                    try orchestrator.focusWorkspaceProcess(workspaceID: selectedWorkspaceID, processID: processID)
-                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
-                    return .success(
-                        .focused(kind: "process", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: false))
-                case .window:
-                    guard let windowListIndex = target.windowListIndex else { return .success(.noMatch) }
-                    let focusRequest = WindowFocusRequest.workspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
-                    let targetWindow = windowListIndex < windows.count ? windows[windowListIndex] : nil
-                    try orchestrator.focusWorkspaceWindow(workspaceID: selectedWorkspaceID, index: windowListIndex + 1)
-                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
-                    return .success(
-                        .focused(
-                            kind: "window", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest),
-                            hidesApp: targetWindow?.app != TerminalHost.spaces.appName))
-                case .missingConfiguredProcess:
-                    guard let processKey = target.processKey else { return .success(.noMatch) }
-                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: selectedWorkspaceID, processKey: processKey)
-                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
-                    return .success(.opened(kind: "process", hidesApp: false))
-                case .agentLauncher:
-                    guard let launcherName = target.launcherName else { return .success(.noMatch) }
-                    _ = try orchestrator.launchAgentLauncher(workspaceID: selectedWorkspaceID, name: launcherName)
-                    Self.setClientActiveWorkspaceID(selectedWorkspaceID)
-                    return .success(.opened(kind: "agent_launcher", hidesApp: false))
-                case .agent:
-                    guard let record = target.agentWindow else { return .success(.noMatch) }
-                    let focusRequest = WindowFocusRequest.agentWindow(record)
-                    try orchestrator.focusAgentWindow(record)
-                    Self.setClientActiveWorkspaceID(record.workspaceID)
-                    return .success(
-                        .focused(kind: "agent", recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: focusRequest), hidesApp: false))
-                }
-            } catch { return .failure(error) }
-        }.value
-    }
-
     // Browser rows stay visible even when the workspace is stopped so the Run tab
     // remains a stable launch surface for configured browser sessions.
     nonisolated static func shouldShowConfiguredBrowserSessions(workspaceIsRunning _: Bool) -> Bool { true }
@@ -2694,8 +2659,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// A device-agnostic window-focus target resolved from the overview. The dispatcher
+    /// focuses the client's window for the target; only two leaves vary by where the
+    /// workspace's daemon runs — browser tab focus (local) vs URL open (remote), and
+    /// native vs mirror terminal-window open — both keyed off the carried `workspaceID`.
     enum DeviceWindowShortcutResolution: Sendable, Equatable {
-        case openURL(String)
+        case openURL(workspaceID: String, targetURL: String)
         case openTerminal(DeviceTerminalOpenRequest)
         case runProcess(workspaceID: String, processKey: String, processTemplateID: String?)
         case runCodingAgent(workspaceID: String, agentName: String, agentLauncherID: String?)
@@ -3083,59 +3052,71 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let deviceWorkspace = overview.workspaces.first(where: { $0.id == selectedWorkspaceID }) else { return .noWorkspace }
 
         let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
+        let targets = workspaceShortcutTargets(detail: detail, browserSessions: detail.config.resolvedBrowserSessions.map(localBrowserSession(from:)))
+        guard targets.indices.contains(index - 1) else { return .noMatch }
+        return windowShortcutTargetResolution(targets[index - 1], workspaceID: selectedWorkspaceID, detail: detail, overview: overview)
+    }
+
+    /// The ordered focusable targets for a workspace (browsers, configured/running
+    /// processes, ad hoc terminals, agents). Shared by the numbered shortcuts and window
+    /// cycling so both rotate over the same list.
+    nonisolated static func workspaceShortcutTargets(detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession])
+        -> [WorkspaceRunShortcutTarget]
+    {
         let windows = deviceTerminalWindows(from: detail.terminalRows)
         let processes = runningProcesses(from: detail.processRows)
         let agentWindows = agentWindows(from: detail.codingAgentRows)
         let settings = localWorkspaceSettings(from: detail.config)
-        let browserSessions = detail.config.resolvedBrowserSessions.map(localBrowserSession(from:))
         let processEntries = orderedWorkspaceRunProcessEntries(
             configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
-        let shortcutTargets = orderedWorkspaceRunShortcutTargets(
+        return orderedWorkspaceRunShortcutTargets(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
             configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows)
-        guard shortcutTargets.indices.contains(index - 1) else { return .noMatch }
+    }
 
-        let target = shortcutTargets[index - 1]
+    /// Maps a single focusable target to a device-agnostic focus resolution.
+    nonisolated static func windowShortcutTargetResolution(
+        _ target: WorkspaceRunShortcutTarget, workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel,
+        overview: SpacesDeviceOverviewPayload
+    ) -> DeviceWindowShortcutResolution {
         switch target.kind {
         case .browser:
             guard let targetURL = target.targetURL, !targetURL.isEmpty else { return .noMatch }
-            return .openURL(targetURL)
+            return .openURL(workspaceID: workspaceID, targetURL: targetURL)
         case .process:
             guard let processID = target.processID, let row = detail.processRows.first(where: { ($0.processID ?? $0.id) == processID }),
                 let sessionID = row.sessionID
             else { return .noMatch }
             return .openTerminal(
-                deviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
                     ?? DeviceTerminalOpenRequest(
-                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .process
-                    ))
+                        workspaceID: workspaceID, sessionID: sessionID, title: row.name, workingDirectory: detail.dir, kind: .process))
         case .window:
             guard let windowListIndex = target.windowListIndex, detail.terminalRows.indices.contains(windowListIndex),
                 let sessionID = detail.terminalRows[windowListIndex].sessionID
             else { return .noMatch }
             let row = detail.terminalRows[windowListIndex]
             return .openTerminal(
-                deviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
                     ?? DeviceTerminalOpenRequest(
-                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell
-                    ))
+                        workspaceID: workspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell))
         case .missingConfiguredProcess:
             guard let processKey = target.processKey else { return .noMatch }
             let processTemplateID = detail.config.processes.first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
-            return .runProcess(workspaceID: selectedWorkspaceID, processKey: processKey, processTemplateID: processTemplateID)
+            return .runProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID)
         case .agentLauncher:
             guard let launcherName = target.launcherName else { return .noMatch }
             let launcherID = detail.config.agentLaunchers.first { normalizedRunRowName($0.name) == normalizedRunRowName(launcherName) }?.id
-            return .runCodingAgent(workspaceID: selectedWorkspaceID, agentName: launcherName, agentLauncherID: launcherID)
+            return .runCodingAgent(workspaceID: workspaceID, agentName: launcherName, agentLauncherID: launcherID)
         case .agent:
             guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id }),
                 let sessionID = row.sessionID
             else { return .noMatch }
             return .openTerminal(
-                deviceTerminalOpenRequest(workspaceID: selectedWorkspaceID, sessionID: sessionID, overview: overview)
+                deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
                     ?? DeviceTerminalOpenRequest(
-                        workspaceID: selectedWorkspaceID, sessionID: sessionID, title: row.name, workingDirectory: deviceWorkspace.dir, kind: .agent))
+                        workspaceID: workspaceID, sessionID: sessionID, title: row.name, workingDirectory: detail.dir, kind: .agent))
         }
     }
 
@@ -8848,101 +8829,182 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func performWindowFocus(_ request: WindowFocusRequest) async {
-        let result = await Self.performWindowFocusSnapshot(request)
-        switch result {
-        case .success(let action):
-            reloadData()
-            hideAfterSuccessfulExternalWindowAction(action)
-        case .failure(let error): await handleWindowFocusFailure(error)
-        }
+        guard let action = await executeWindowFocus(request) else { return }
+        reloadData()
+        hideAfterSuccessfulExternalWindowAction(action)
+    }
+
+    /// Resolves an explicit focus request against its workspace's overview and focuses the
+    /// client's window for it, returning the resulting action (or nil if nothing was
+    /// focused). Shared by the command palette and attention-item focus. A missing window
+    /// is reopened by the executor itself, so there is no separate recovery prompt.
+    func executeWindowFocus(_ request: WindowFocusRequest) async -> ExternalWindowAction? {
+        guard let overview = overview(forWorkspaceID: request.workspaceID) else { return nil }
+        return await executeWindowFocusResolution(Self.windowFocusResolution(for: request, overview: overview))
     }
 
     private func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
         logWindowShortcutProfile("stage=received index=\(index) alerts=\(showingAlerts ? 1 : 0)")
-        // Focus through the Device API when the selected workspace lives on a remote
-        // device; its processes/terminals have no local windows to raise.
-        if let selectedWorkspaceID, isRemoteDeviceID(deviceID(forWorkspaceID: selectedWorkspaceID)) {
-            await runDeviceWindowShortcut(index: index, startedAt: startedAt)
-            return
+        await dispatchWindowShortcut(windowShortcutResolution(index: index), index: index, startedAt: startedAt)
+    }
+
+    /// Resolves a window-shortcut press to a device-agnostic focus target. Alerts focus
+    /// uses the clicked attention item; otherwise the target is reconstructed from the
+    /// selected workspace's overview — the same path for local and remote workspaces.
+    private func windowShortcutResolution(index: Int) -> DeviceWindowShortcutResolution {
+        if showingAlerts {
+            guard let request = alerts.alertsFocusRequest(for: index) else { return .noMatch }
+            guard let overview = overview(forWorkspaceID: request.workspaceID) else { return .noMatch }
+            return Self.windowFocusResolution(for: request, overview: overview)
         }
-        let alertsFocusRequest = showingAlerts ? alerts.alertsFocusRequest(for: index) : nil
-        let routeStartedAt = Date()
-        let result = await Self.focusWindowShortcutSnapshot(
-            index: index, selectedWorkspaceID: selectedWorkspaceID, alertsFocusRequest: alertsFocusRequest)
-        switch result {
-        case .success(.focused(let kind, let recentFocusIdentity, let hidesApp)):
-            logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-            activeWindowShortcutProfile?.routeCompletedAt = Date()
-            commandPalette.rememberRecentCommandPaletteFocusIdentity(recentFocusIdentity)
-            logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
-            if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) } else { activeWindowShortcutProfile = nil }
-        case .success(.opened(let kind, let hidesApp)):
-            logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-            activeWindowShortcutProfile?.routeCompletedAt = Date()
-            logWindowShortcutProfile("stage=total index=\(index) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
-            reloadData()
-            if hidesApp { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) } else { activeWindowShortcutProfile = nil }
-        case .success(.noWorkspace):
-            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-            activeWindowShortcutProfile = nil
-        case .success(.noMatch):
-            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-            activeWindowShortcutProfile = nil
-        case .failure(let error):
-            await handleWindowFocusFailure(error)
-            logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-            activeWindowShortcutProfile = nil
+        guard let selectedWorkspaceID else { return .noWorkspace }
+        guard let overview = overview(forWorkspaceID: selectedWorkspaceID) else { return .noWorkspace }
+        return Self.deviceWindowShortcutResolution(index: index, selectedWorkspaceID: selectedWorkspaceID, overview: overview)
+    }
+
+    /// The overview for the daemon that owns `workspaceID` (local or remote).
+    private func overview(forWorkspaceID workspaceID: String) -> SpacesDeviceOverviewPayload? {
+        deviceSection(id: deviceID(forWorkspaceID: workspaceID))?.overview ?? localDeviceOverview
+    }
+
+    /// Focuses the client's window for a terminal session. The session-window registry is
+    /// keyed by sessionID and shared by native and mirror windows, so an already-open
+    /// window focuses identically regardless of owning daemon; when none exists yet, a
+    /// local session opens a native window and a remote session opens a Device API mirror.
+    @discardableResult private func focusClientSessionWindow(
+        _ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
+    ) -> Bool {
+        if isRemoteDeviceID(deviceID(forWorkspaceID: request.workspaceID)) {
+            return openDeviceTerminalSession(request, device: device, requestID: requestID)
+        }
+        focusTerminalSessionWindow(sessionID: request.sessionID, requestID: requestID)
+        return true
+    }
+
+    /// Focuses the Chrome tab matching `targetURL` on this desktop, opening the URL as a
+    /// fallback when no tab matches. Used for browser sessions whose daemon is local;
+    /// remote browser sessions run on another machine, so those only open the URL.
+    private func focusLocalChromeTab(targetURL: String, fallbackURL: URL) async {
+        let focused = await Task.detached(priority: .userInitiated) {
+            let chrome = ChromeAdapter()
+            guard chrome.isAvailable() else { return false }
+            return (try? chrome.focusFirstMatchingTab(urlPrefix: targetURL)) ?? false
+        }.value
+        if !focused { NSWorkspace.shared.open(fallbackURL) }
+    }
+
+    /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
+    /// target the numbered-shortcut path produces, so both flow through one dispatcher.
+    nonisolated static func windowFocusResolution(for request: WindowFocusRequest, overview: SpacesDeviceOverviewPayload)
+        -> DeviceWindowShortcutResolution
+    {
+        switch request {
+        case .workspaceBrowserSession(let workspaceID, let targetURL):
+            return .openURL(workspaceID: workspaceID, targetURL: targetURL)
+        case .workspaceProcess(let workspaceID, let processID):
+            guard let detail = workspaceDetail(workspaceID, in: overview),
+                let row = detail.processRows.first(where: { ($0.processID ?? $0.id) == processID }), let sessionID = row.sessionID
+            else { return .noMatch }
+            return openTerminalResolution(
+                workspaceID: workspaceID, sessionID: sessionID, fallbackTitle: row.name, fallbackDir: detail.dir, fallbackKind: .process,
+                overview: overview)
+        case .workspaceWindow(let workspaceID, let index):
+            guard let detail = workspaceDetail(workspaceID, in: overview), detail.terminalRows.indices.contains(index - 1),
+                let sessionID = detail.terminalRows[index - 1].sessionID
+            else { return .noMatch }
+            let row = detail.terminalRows[index - 1]
+            return openTerminalResolution(
+                workspaceID: workspaceID, sessionID: sessionID, fallbackTitle: row.title, fallbackDir: row.workingDirectory, fallbackKind: .shell,
+                overview: overview)
+        case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
+            let templateID = workspaceDetail(workspaceID, in: overview)?.config.processes
+                .first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
+            return .runProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: templateID)
+        case .workspaceAgentLauncher(let workspaceID, let name):
+            let launcherID = workspaceDetail(workspaceID, in: overview)?.config.agentLaunchers
+                .first { normalizedRunRowName($0.name) == normalizedRunRowName(name) }?.id
+            return .runCodingAgent(workspaceID: workspaceID, agentName: name, agentLauncherID: launcherID)
+        case .agentWindow(let record):
+            guard let detail = workspaceDetail(record.workspaceID, in: overview),
+                let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == record.id }), let sessionID = row.sessionID
+            else { return .noMatch }
+            return openTerminalResolution(
+                workspaceID: record.workspaceID, sessionID: sessionID, fallbackTitle: row.name, fallbackDir: detail.dir, fallbackKind: .agent,
+                overview: overview)
         }
     }
 
-    private func runDeviceWindowShortcut(index: Int, startedAt: Date) async {
+    /// Builds an `.openTerminal` target for a session, preferring live session-catalog
+    /// metadata from the overview and falling back to the row's own title/dir when the
+    /// session has not yet surfaced in the catalog (e.g. a just-started process).
+    nonisolated private static func openTerminalResolution(
+        workspaceID: String, sessionID: String, fallbackTitle: String, fallbackDir: String, fallbackKind: TerminalSessionKind,
+        overview: SpacesDeviceOverviewPayload
+    ) -> DeviceWindowShortcutResolution {
+        .openTerminal(
+            deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
+                ?? DeviceTerminalOpenRequest(
+                    workspaceID: workspaceID, sessionID: sessionID, title: fallbackTitle, workingDirectory: fallbackDir, kind: fallbackKind))
+    }
+
+    nonisolated private static func workspaceDetail(_ workspaceID: String, in overview: SpacesDeviceOverviewPayload)
+        -> SpacesDeviceWorkspaceDetailViewModel?
+    {
+        overview.workspaces.first(where: { $0.id == workspaceID }).map(SpacesDeviceWorkspaceDetailViewModel.init)
+    }
+
+    /// The single window-shortcut dispatcher for every device. It executes the resolved
+    /// target, then applies the window-shortcut profiling and app-hide handling. The
+    /// focus work itself lives in `executeWindowFocusResolution` so the cycle and
+    /// command-palette paths reuse it.
+    private func dispatchWindowShortcut(_ resolution: DeviceWindowShortcutResolution, index: Int, startedAt: Date) async {
         let routeStartedAt = Date()
-        guard let overview = selectedWorkspaceID.flatMap({ deviceSection(id: deviceID(forWorkspaceID: $0))?.overview }) ?? localDeviceOverview else {
-            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_device_overview elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
+        let kind = Self.windowShortcutKind(for: resolution)
+        guard let action = await executeWindowFocusResolution(resolution) else {
+            logWindowShortcutProfile("stage=aborted index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
             activeWindowShortcutProfile = nil
-            showDeviceNotLoadedError()
             return
         }
-        let resolution = Self.deviceWindowShortcutResolution(index: index, selectedWorkspaceID: selectedWorkspaceID, overview: overview)
+        logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
+        logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+        hideAfterSuccessfulExternalWindowAction(action)
+        activeWindowShortcutProfile = nil
+    }
+
+    /// Executes a resolved focus target on the client and reports the resulting window
+    /// action, or nil when nothing was focused (the executor surfaces its own errors).
+    /// Shared by the numbered-shortcut, command-palette, and cycle focus paths so all
+    /// three behave identically. Only two leaves depend on where the workspace's daemon
+    /// runs: browser tab focus (local) vs URL open (remote), and native vs mirror
+    /// terminal windows.
+    @discardableResult private func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution) async -> ExternalWindowAction? {
         switch resolution {
-        case .openURL(let targetURL):
+        case .openURL(let workspaceID, let targetURL):
             guard let url = URL(string: targetURL) else {
-                logWindowShortcutProfile("stage=aborted index=\(index) reason=invalid_url elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-                activeWindowShortcutProfile = nil
                 showError(WorkspaceError.invalidArgument(message: "Browser session URL is invalid."))
-                return
+                return nil
             }
-            NSWorkspace.shared.open(url)
-            logWindowShortcutProfile("stage=route_done index=\(index) kind=browser elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
-            hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true))
+            if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
+                NSWorkspace.shared.open(url)
+            } else {
+                await focusLocalChromeTab(targetURL: targetURL, fallbackURL: url)
+            }
+            Self.setClientActiveWorkspaceID(workspaceID)
+            return .focus(hidesApp: true)
         case .openTerminal(let request):
-            guard let device = deviceForDaemonStateMutation() else {
-                logWindowShortcutProfile("stage=aborted index=\(index) reason=no_device elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-                activeWindowShortcutProfile = nil
+            guard let device = deviceForWorkspaceMutation(workspaceID: request.workspaceID) else {
                 showDeviceNotLoadedError()
-                return
+                return nil
             }
-            let opened = openDeviceTerminalSession(request, device: device)
-            logWindowShortcutProfile("stage=route_done index=\(index) kind=terminal elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: opened)
-            activeWindowShortcutProfile = nil
+            Self.setClientActiveWorkspaceID(request.workspaceID)
+            guard focusClientSessionWindow(request, device: device) else { return nil }
+            return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
-            guard let device = deviceForDaemonStateMutation() else {
-                logWindowShortcutProfile("stage=aborted index=\(index) reason=no_device elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-                activeWindowShortcutProfile = nil
+            guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                 showDeviceNotLoadedError()
-                return
+                return nil
             }
             let result = await Self.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.runWorkspaceProcess(
@@ -8951,22 +9013,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             switch result {
             case .success(let response):
-                logWindowShortcutProfile("stage=route_done index=\(index) kind=process elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+                Self.setClientActiveWorkspaceID(workspaceID)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                return .open(hidesApp: false)
             case .failure(let error):
-                logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
                 showError(error)
+                return nil
             }
-            activeWindowShortcutProfile = nil
         case .runCodingAgent(let workspaceID, let agentName, let agentLauncherID):
-            guard let device = deviceForDaemonStateMutation() else {
-                logWindowShortcutProfile("stage=aborted index=\(index) reason=no_device elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-                activeWindowShortcutProfile = nil
+            guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                 showDeviceNotLoadedError()
-                return
+                return nil
             }
             let result = await Self.deviceMutation(device: device) { device in
                 try SpacesDeviceClient.runCodingAgent(
@@ -8975,24 +9032,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             switch result {
             case .success(let response):
-                logWindowShortcutProfile(
-                    "stage=route_done index=\(index) kind=agent_launcher elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+                Self.setClientActiveWorkspaceID(workspaceID)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                return .open(hidesApp: false)
             case .failure(let error):
-                logWindowShortcutProfile("stage=aborted index=\(index) reason=error elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-                logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
                 showError(error)
+                return nil
             }
-            activeWindowShortcutProfile = nil
-        case .noWorkspace:
-            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_workspace elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-            activeWindowShortcutProfile = nil
-        case .noMatch:
-            logWindowShortcutProfile("stage=aborted index=\(index) reason=no_match elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
-            activeWindowShortcutProfile = nil
+        case .noWorkspace, .noMatch:
+            return nil
+        }
+    }
+
+    nonisolated private static func windowShortcutKind(for resolution: DeviceWindowShortcutResolution) -> String {
+        switch resolution {
+        case .openURL: return "browser"
+        case .openTerminal: return "terminal"
+        case .runProcess: return "process"
+        case .runCodingAgent: return "agent_launcher"
+        case .noWorkspace, .noMatch: return "none"
         }
     }
 
@@ -9111,27 +9169,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 detail: "direction=\(direction > 0 ? "next" : "previous") reason=no_workspace request_id=\(requestID)")
             return
         }
-        do {
-            let hidesApp: Bool
-            let preferredFocusedBuiltInTerminalSessionID = activeBuiltInTerminalSessionID()
-            if direction > 0 {
-                hidesApp = try orchestrator.focusNextWindowHidesApp(
-                    workspaceID: workspaceID, requestID: requestID, preferredFocusedBuiltInTerminalSessionID: preferredFocusedBuiltInTerminalSessionID
-                )
-            } else {
-                hidesApp = try orchestrator.focusPreviousWindowHidesApp(
-                    workspaceID: workspaceID, requestID: requestID, preferredFocusedBuiltInTerminalSessionID: preferredFocusedBuiltInTerminalSessionID
-                )
-            }
-            logPerfMetric(
-                "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-                detail: "direction=\(direction > 0 ? "next" : "previous") hides_app=\(hidesApp ? 1 : 0) request_id=\(requestID)")
-            if hidesApp { hideAfterSuccessfulExternalWindowAction(.focus(hidesApp: true)) } else { commandPalette.dismissCommandPaletteForBuiltInWindowNavigation() }
-        } catch {
-            logPerfMetric(
-                "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "direction=\(direction > 0 ? "next" : "previous") request_id=\(requestID)")
-            showError(error)
+        let preferredFocusedBuiltInTerminalSessionID = activeBuiltInTerminalSessionID()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.cycleWorkspaceWindow(
+                workspaceID: workspaceID, delta: direction > 0 ? 1 : -1, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
+            self.logPerfMetric(
+                "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: self.windowShortcutElapsedMS(since: startedAt),
+                success: true, detail: "direction=\(direction > 0 ? "next" : "previous") request_id=\(requestID)")
         }
     }
 
@@ -9154,80 +9199,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func cancelDeferredExternalWindowHide() {
         deferredExternalWindowHideTask?.cancel()
         deferredExternalWindowHideTask = nil
-    }
-
-    func handleWindowFocusFailure(_ error: Error) async {
-        guard let spacesError = error as? WorkspaceError, case .missingTrackedWindow(let context) = spacesError else {
-            handleWindowFocusError(error)
-            return
-        }
-        guard context.kind == .process else {
-            handleWindowFocusError(error)
-            return
-        }
-
-        switch await Self.recoverRunningWorkspaceProcessIfPossibleSnapshot(context) {
-        case .success(true): reloadData()
-        case .success(false): handleWindowFocusError(error)
-        case .failure(let recoveryError): showError(recoveryError)
-        }
-    }
-
-    private func handleWindowFocusError(_ error: Error) {
-        guard let spacesError = error as? WorkspaceError, case .missingTrackedWindow(let context) = spacesError else {
-            showError(error)
-            return
-        }
-        switch context.kind {
-        case .browserSession:
-            showWindowIssueModal(
-                title: "Browser window not found", detail: "\(context.title) is no longer open.", actionTitle: "Recover (Cmd+R)",
-                action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
-        case .process:
-            showWindowIssueModal(
-                title: "Process window not found", detail: "\(context.title) is no longer open.", actionTitle: "Recover (Cmd+R)",
-                action: { [weak self] in Task { await self?.recoverMissingTrackedWindow(context) } })
-        case .codingAgent: showWindowIssueModal(title: "Agent window not found", detail: "\(context.title) is no longer open.")
-        case .window: showWindowIssueModal(title: "Window not found", detail: "\(context.title) is no longer open.")
-        }
-    }
-
-    private func recoverMissingTrackedWindow(_ context: MissingTrackedWindowContext) async {
-        let progressTitle: String
-        let progressDetail: String
-        switch context.kind {
-        case .browserSession:
-            progressTitle = "Recovering Browser Session"
-            progressDetail = context.title
-        case .process:
-            progressTitle = "Recovering Process"
-            progressDetail = context.title
-        case .codingAgent, .window: return
-        }
-
-        showOperationProgressOverlay(message: progressTitle, detail: progressDetail, context: .workspace(context.workspaceID))
-        let result = await Self.recoverMissingTrackedWindowSnapshot(context)
-        hideOperationProgressOverlay()
-        switch result {
-        case .success:
-            reloadData()
-            switch context.kind {
-            case .browserSession:
-                showWindowIssueToast(title: "Browser session recovered", detail: "\(context.title) reopened in a new Chrome window.")
-            case .process:
-                let recoveredProcess: RunningProcessRecord?
-                if let processID = context.processID {
-                    recoveredProcess = try? await Self.recoveredWorkspaceProcessSnapshot(workspaceID: context.workspaceID, processID: processID).get()
-                } else {
-                    recoveredProcess = nil
-                }
-                showWindowIssueToast(
-                    title: "Process recovered",
-                    detail: Self.recoveredProcessWindowDetail(title: context.title, terminalApp: recoveredProcess?.terminalApp))
-            case .codingAgent, .window: break
-            }
-        case .failure(let error): showError(error)
-        }
     }
 
     private func globalWindowNavigationWorkspaceID(requestID: String? = nil) -> String? {
