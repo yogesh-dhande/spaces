@@ -441,7 +441,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 "profile_root=\(launchProfile.rootDirectory) runtime_root=\(launchProfile.runtimeDirectory) source=\(launchProfile.source.rawValue) desktop_control=\(desktopControlLease == nil ? "passive" : "active")"
         )
         do {
-            let store = try SQLiteStore(path: launchProfile.databasePath)
+            let store = try SQLiteStore(path: launchProfile.databasePath, desktopWindowIDStore: ClientDesktopWindowIDStore())
             orchestrator = makeUIOrchestrator(store: store)
         } catch {
             releaseLaunchLeases()
@@ -2051,12 +2051,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
     }
 
+    /// Builds an in-process orchestrator over the local daemon database, backed by the client
+    /// store for desktop (yabai) window IDs. Window IDs are client/desktop-local, so they are
+    /// read and written through the client database rather than `spaces.db`.
+    nonisolated private static func localWorkspaceOrchestrator() throws -> WorkspaceOrchestrator {
+        let db = try DatabaseLocator.defaultPath()
+        return WorkspaceOrchestrator(store: try SQLiteStore(path: db, desktopWindowIDStore: ClientDesktopWindowIDStore()))
+    }
+
     nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<WorkspaceOrchestrator.RefreshResult, Error> {
         await Task.detached(priority: .utility) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 let result = try orchestrator.refreshAllWorkspaceWindows()
                 return .success(result)
             } catch { return .failure(error) }
@@ -2068,9 +2074,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     > {
         await Task.detached(priority: .utility) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 let didMutateWindows = try orchestrator.refreshWorkspaceWindows(workspaceID: workspaceID)
                 let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses()
                 return .success(.init(didMutateWindows: didMutateWindows, didUpdateProcesses: didUpdateProcesses))
@@ -2102,9 +2106,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     > {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 return .success(
                     try orchestrator.prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories))
             } catch { return .failure(error) }
@@ -2117,9 +2119,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated private static func discardPreparedGitProject(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport) -> Result<Void, Error> {
         do {
-            let db = try DatabaseLocator.defaultPath()
-            let store = try SQLiteStore(path: db)
-            let orchestrator = WorkspaceOrchestrator(store: store)
+            let orchestrator = try localWorkspaceOrchestrator()
             try orchestrator.discardPreparedGitProject(prepared)
             return .success(())
         } catch { return .failure(error) }
@@ -2128,9 +2128,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func performWindowFocusSnapshot(_ request: WindowFocusRequest) async -> Result<ExternalWindowAction, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 switch request {
                 case .workspaceBrowserSession(let workspaceID, let targetURL):
                     try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
@@ -2166,9 +2164,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated private static func recoverMissingTrackedWindowSnapshot(_ context: MissingTrackedWindowContext) async -> Result<Void, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 switch context.kind {
                 case .browserSession:
                     guard let targetURL = context.targetURL else {
@@ -2193,9 +2189,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     > {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 return .success(try orchestrator.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }))
             } catch { return .failure(error) }
         }.value
@@ -2213,9 +2207,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard context.kind == .process, let processID = context.processID else {
                     throw WorkspaceError.invalidArgument(message: "Running-process recovery requires a process identifier.")
                 }
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 return .success(try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: context.workspaceID, processID: processID))
             } catch { return .failure(error) }
         }.value
@@ -2224,9 +2216,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated private static func launchConfiguredAgentSnapshot(workspaceID: String, name: String) async -> Result<Void, Error> {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
                 return .success(())
             } catch { return .failure(error) }
@@ -2238,9 +2228,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         await Task.detached(priority: .userInitiated) {
             do {
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
 
                 if let alertsFocusRequest {
                     switch alertsFocusRequest {
@@ -2504,9 +2492,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         await Task.detached(priority: .userInitiated) {
             do {
                 let snapshotStartedAt = ProcessInfo.processInfo.systemUptime
-                let db = try DatabaseLocator.defaultPath()
-                let store = try SQLiteStore(path: db)
-                let orchestrator = WorkspaceOrchestrator(store: store)
+                let orchestrator = try localWorkspaceOrchestrator()
                 logStartupSnapshotProfile("sidebar_snapshot_store_ready")
                 let config = try clientAppConfig(base: orchestrator.syncConfig())
                 logStartupSnapshotProfile("sidebar_snapshot_config_ready")

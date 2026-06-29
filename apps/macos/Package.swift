@@ -84,6 +84,7 @@ let terminalTargets: [Target] = [
             "spacesterminalcore",
             "spacesdevicecore",
             "spacesdeviceapi",
+            "systembridge",
         ]
     ),
     .target(

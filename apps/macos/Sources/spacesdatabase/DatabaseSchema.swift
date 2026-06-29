@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -55,6 +55,11 @@ public enum DatabaseSchema {
                       'window_focus_pulse_enabled'
                     );
                     """)
+        },
+        // Desktop window IDs moved to the client database (client-owned, desktop-local). The
+        // daemon never has a desktop session, so this column was only ever written by the GUI.
+        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop daemon-owned desktop window IDs", requiresBackup: true) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE runtime_targets DROP COLUMN window_id;")
         },
     ]
 
@@ -356,7 +361,6 @@ public enum DatabaseSchema {
               name TEXT,
               detail TEXT,
               app TEXT NOT NULL,
-              window_id INTEGER,
               tracking_id TEXT,
               order_index INTEGER NOT NULL,
               created_at TEXT NOT NULL,

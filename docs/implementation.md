@@ -177,7 +177,7 @@ flowchart TD
 ### Database
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, and terminal window frames. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
+- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, terminal window frames, and desktop (yabai) window IDs. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` records the canonical schema version. The active daemon schema is version `3`.
@@ -345,7 +345,6 @@ erDiagram
     TEXT name
     TEXT detail
     TEXT app
-    INTEGER window_id
     TEXT tracking_id
     INTEGER order_index
     TEXT created_at
@@ -610,6 +609,13 @@ erDiagram
     INTEGER window_id
   }
 
+  desktop_window_ids {
+    TEXT device_id PK
+    TEXT workspace_id PK
+    TEXT runtime_target_id PK
+    INTEGER window_id
+  }
+
   migration_state {
     INTEGER current_version
   }
@@ -618,15 +624,15 @@ erDiagram
   runtime_targets ||--o{ runtime_target_events : records
 ```
 
-Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, and `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`).
+Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`), and `desktop_window_ids` (desktop/yabai window IDs, keyed by `device_id`+`workspace_id`+`runtime_target_id`).
 
-`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not yet read or written. They are reserved for client-owned desktop window/runtime-target state — yabai window IDs only mean anything on the device's own desktop — but that state currently still lives in the daemon `runtime_targets.window_id`. Moving it client-side is the remaining step of the thin-client split: see [Window-ID ownership](#window-id-ownership).
+`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not yet read or written. They were scaffolded for the thin-client split; the desktop window-ID portion of that split now ships as `desktop_window_ids` (see [Window-ID ownership](#window-id-ownership)).
 
 ### Window-ID ownership
 
-Desktop window identity (`window_id`/yabai window IDs) is a client/desktop concern, but it currently lives in the daemon `runtime_targets` table, mixed with daemon-owned terminal/runtime identity (`tracking_id`, `type`, `app`, `order_index`) that running-process and agent-session rows reference. Because the daemon emits `window_id` in the overview, it also leaks meaningless yabai IDs to remote viewers.
+Desktop window identity (`window_id`/yabai window IDs) is a client/desktop concern: a yabai window ID only means anything on the device's own desktop, and the session-less daemon (no yabai) never owns one. So window IDs live entirely in the client database (`desktop_window_ids`), keyed by `device_id` + `workspace_id` + the daemon-owned `runtime_target_id`, and recorded only for the local device.
 
-The intended end state moves only the desktop window-ID mapping off the daemon: the daemon keeps `runtime_targets` minus `window_id` (pure runtime/terminal identity), and the client writes the device's window IDs into its own `runtime_targets`/`local_window_focus_state` from yabai window tracking. Because the two databases live in different processes, the join is in application code, not SQL: the daemon supplies runtime targets through the overview, and the client correlates its locally-stored `window_id` onto them by the stable `tracking_id` (and `workspace_id`) to drive yabai focus. Remote devices then carry no window IDs, which is correct — a viewer cannot focus another desktop's windows.
+The daemon `runtime_targets` table carries pure runtime/terminal identity (`tracking_id`, `type`, `app`, `order_index`) with no `window_id` column, and the overview emits no window IDs — a remote viewer carries none, which is correct since it cannot focus another desktop's windows. The correlation happens in client code, not SQL: an in-process `SQLiteStore` is injected with a client-database-backed `DesktopWindowIDStore` (`ClientDesktopWindowIDStore` in `spacesclientcore`, conforming to the `systembridge` protocol), so reading a runtime target overlays its captured window ID and writing one (yabai window capture on launch/refresh) persists it to `desktop_window_ids` — all keyed by the stable `runtime_target_id`, which uniformly covers terminal, browser, and editor windows. Because the store is process-local rather than the shared daemon database, **every local process that drives desktop focus through an in-process orchestrator must inject it** — the app and the `spacese2e` harness both do. The daemon never has a desktop session and the `spaces` CLI routes focus through the daemon, so neither injects a store and their window IDs are simply absent.
 
 ### Projects
 Projects persist:
@@ -681,7 +687,7 @@ This separation lets template edits coexist with current runtime state and per-w
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
 
 ### Runtime Target Model
-- `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, current yabai `window_id`, durable terminal `tracking_id`, ordering, and display metadata.
+- `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, durable terminal `tracking_id`, ordering, and display metadata. The desktop (yabai) window ID is not stored here — it is client/desktop-local and lives in the client database (see [Window-ID ownership](#window-id-ownership)).
 - `browser_targets` extends browser runtime targets with the configured target URL and the last resolved URL.
 - `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` when the session is focusable and stores agent-session state: provider, display label, status, provider session key, claimed launcher identity, durable Spaces `terminal_session_id`, and timestamps.
 - `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces agent signal` for that event.

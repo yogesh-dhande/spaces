@@ -15,28 +15,25 @@ extension SQLiteStore {
                     if hasExistingTargetID {
                         window.id
                     } else {
-                        try matchingRuntimeTargetID(workspaceID: window.workspaceID, trackingID: window.terminalTrackingID, windowID: window.windowID)
-                            ?? window.id
+                        try matchingRuntimeTargetID(workspaceID: window.workspaceID, trackingID: window.terminalTrackingID) ?? window.id
                     }
                 } else { window.id }
             let baseBindings: [Any] = [
                 runtimeTargetID, window.workspaceID, targetType, window.name ?? "", window.detail ?? "", window.app,
-                window.windowID.map(String.init) ?? "", window.terminalNativeID ?? window.terminalTrackingID ?? "", String(window.orderIndex),
-                window.lastSeenAt, window.lastSeenAt,
+                window.terminalNativeID ?? window.terminalTrackingID ?? "", String(window.orderIndex), window.lastSeenAt, window.lastSeenAt,
             ]
             try execute(
                 sql: """
                     INSERT INTO runtime_targets(
-                      id, workspace_id, type, name, detail, app, window_id, tracking_id, order_index, created_at, updated_at
+                      id, workspace_id, type, name, detail, app, tracking_id, order_index, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       workspace_id = excluded.workspace_id,
                       type = excluded.type,
                       name = excluded.name,
                       detail = excluded.detail,
                       app = excluded.app,
-                      window_id = excluded.window_id,
                       tracking_id = excluded.tracking_id,
                       order_index = excluded.order_index,
                       updated_at = excluded.updated_at
@@ -54,6 +51,9 @@ extension SQLiteStore {
                           resolved_url = excluded.resolved_url
                         """, bindings: [runtimeTargetID, window.targetURL ?? "", window.detail ?? ""])
             }
+            // Desktop window IDs are client-owned: record the captured yabai window outside spaces.db,
+            // keyed by the resolved runtime-target id (the row this upsert wrote).
+            try persistDesktopWindowID(workspaceID: window.workspaceID, runtimeTargetID: runtimeTargetID, windowID: window.windowID)
         }
     }
 
@@ -67,7 +67,6 @@ extension SQLiteStore {
                   rt.name,
                   rt.detail,
                   COALESCE(bt.target_url, ''),
-                  rt.window_id,
                   COALESCE(rt.tracking_id, ''),
                   CASE WHEN rt.type = 'browser' THEN 'browser' ELSE 'terminal' END,
                   rt.order_index,
@@ -80,33 +79,23 @@ extension SQLiteStore {
         return rows.compactMap { decodeWindow(row: $0) }
     }
 
+    /// Reverse-lookup of the runtime targets that own a captured desktop window. Desktop window
+    /// IDs live in the injected client store, so this resolves them there and re-fetches the
+    /// matching window records. With no client store injected (daemon/CLI), there are no matches.
     public func windows(windowID: Int) throws -> [WindowRecord] {
-        let rows = try queryRows(
-            sql: """
-                SELECT
-                  rt.id,
-                  rt.workspace_id,
-                  rt.app,
-                  rt.name,
-                  rt.detail,
-                  COALESCE(bt.target_url, ''),
-                  rt.window_id,
-                  COALESCE(rt.tracking_id, ''),
-                  CASE WHEN rt.type = 'browser' THEN 'browser' ELSE 'terminal' END,
-                  rt.order_index,
-                  rt.updated_at
-                FROM runtime_targets rt
-                LEFT JOIN browser_targets bt ON bt.runtime_target_id = rt.id
-                WHERE rt.window_id = ?
-                ORDER BY rt.updated_at DESC, rt.order_index
-                """, bindings: [String(windowID)])
-        return rows.compactMap { decodeWindow(row: $0) }
+        guard let desktopWindowIDStore else { return [] }
+        let matches = try desktopWindowIDStore.desktopWindowMatches(windowID: windowID)
+        var result: [WindowRecord] = []
+        for match in matches {
+            if let window = try windows(workspaceID: match.workspaceID).first(where: { $0.id == match.runtimeTargetID }) { result.append(window) }
+        }
+        return result
     }
 
     public func workspaceID(windowID: Int) throws -> String? {
-        let row = try queryRow(
-            sql: "SELECT workspace_id FROM runtime_targets WHERE window_id = ? ORDER BY updated_at DESC LIMIT 1", bindings: [String(windowID)])
-        return row?.first
+        // Resolve through windows(windowID:) so the answer is validated against live runtime targets:
+        // a client-store entry for a since-deleted target must not resolve to a stale workspace.
+        try windows(windowID: windowID).first?.workspaceID
     }
 
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? {
@@ -148,16 +137,15 @@ extension SQLiteStore {
     }
 
     public func workspaceIDForAgentWindow(yabaiWindowID: Int) throws -> String? {
-        let row = try queryRow(
-            sql: """
-                SELECT agent_sessions.workspace_id
-                FROM agent_sessions
-                JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
-                WHERE runtime_targets.window_id = ?
-                ORDER BY agent_sessions.updated_at DESC
-                LIMIT 1
-                """, bindings: [String(yabaiWindowID)])
-        return row?.first
+        guard let desktopWindowIDStore else { return nil }
+        // A captured desktop window maps to a runtime-target id; return the workspace whose agent
+        // session is linked to that runtime target.
+        for match in try desktopWindowIDStore.desktopWindowMatches(windowID: yabaiWindowID) {
+            if let agent = try agentWindows(workspaceID: match.workspaceID).first(where: { $0.runtimeTargetID == match.runtimeTargetID }) {
+                return agent.workspaceID
+            }
+        }
+        return nil
     }
 
     public func deleteWindows(workspaceID: String) throws {
@@ -167,10 +155,13 @@ extension SQLiteStore {
     public func deleteWindow(id: String) throws { try execute(sql: "DELETE FROM runtime_targets WHERE id = ?", bindings: [id]) }
 
     func decodeWindow(row: [String]) -> WindowRecord? {
-        guard row.count >= 11 else { return nil }
+        guard row.count >= 10 else { return nil }
+        let targetURL = row[5].isEmpty ? nil : row[5]
+        let trackingID = row[6].isEmpty ? nil : row[6]
+        let role = row[7]
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], name: row[3].isEmpty ? nil : row[3], detail: row[4].isEmpty ? nil : row[4],
-            targetURL: row[5].isEmpty ? nil : row[5], windowID: Int(row[6]), terminalTrackingID: row[7].isEmpty ? nil : row[7],
-            terminalNativeID: row[7].isEmpty ? nil : row[7], role: row[8], orderIndex: Int(row[9]) ?? 0, lastSeenAt: row[10])
+            targetURL: targetURL, windowID: overlaidWindowID(workspaceID: row[1], runtimeTargetID: row[0]), terminalTrackingID: trackingID,
+            terminalNativeID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0, lastSeenAt: row[9])
     }
 }

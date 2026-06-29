@@ -7,8 +7,7 @@ extension SQLiteStore {
     public func upsert(runningProcess: RunningProcessRecord) throws {
         let runtimeTargetID =
             try runningProcess.runtimeTargetID
-            ?? matchingRuntimeTargetID(
-                workspaceID: runningProcess.workspaceID, trackingID: runningProcess.terminalTrackingID, windowID: runningProcess.windowID)
+            ?? matchingRuntimeTargetID(workspaceID: runningProcess.workspaceID, trackingID: runningProcess.terminalTrackingID)
         let resolvedRuntimeTargetID = try ensureRuntimeTargetForRunningProcess(runningProcess, runtimeTargetID: runtimeTargetID)
         let terminalSessionID = spacesTerminalSessionID(
             terminalApp: runningProcess.terminalApp, terminalTrackingID: runningProcess.terminalTrackingID)
@@ -51,7 +50,6 @@ extension SQLiteStore {
                   COALESCE(rt.app, ''),
                   COALESCE(rt.name, ''),
                   COALESCE(rt.detail, ''),
-                  COALESCE(rt.window_id, ''),
                   COALESCE(rt.tracking_id, ''),
                   COALESCE(rp.terminal_session_id, ''),
                   COALESCE(rp.pid, ''),
@@ -77,17 +75,20 @@ extension SQLiteStore {
     }
 
     func decodeRunningProcess(row: [String]) -> RunningProcessRecord? {
-        guard row.count >= 18 else { return nil }
-        let terminalSessionID = row[11].isEmpty ? nil : row[11]
+        guard row.count >= 17 else { return nil }
+        let terminalSessionID = row[10].isEmpty ? nil : row[10]
         let terminalApp = row[6].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[6]
+        let resolvedTrackingID = row[9].isEmpty ? row[10] : row[9]
+        // The captured desktop window belongs to the linked runtime target (row[5]); a process
+        // detached from its target has none, so its window ID resolves to nil.
         let terminalTarget = decodeTerminalTarget(
-            runtimeTargetID: row[5], app: terminalApp, name: row[7], detail: row[8], windowID: row[9], trackingID: row[10].isEmpty ? row[11] : row[10]
-        )
+            runtimeTargetID: row[5], app: terminalApp, name: row[7], detail: row[8],
+            windowID: overlaidWindowID(workspaceID: row[1], runtimeTargetID: row[5].isEmpty ? nil : row[5]), trackingID: resolvedTrackingID)
         return RunningProcessRecord(
             id: row[0], workspaceID: row[1], templateID: row[2].isEmpty ? nil : row[2], templateName: row[3], command: row[4],
             runtimeTargetID: row[5].isEmpty ? nil : row[5], terminalApp: terminalApp.isEmpty ? nil : terminalApp, terminalTarget: terminalTarget,
-            pid: Int(row[12]), status: RunningProcessState(rawValue: row[13]) ?? .running, logPath: row[14].isEmpty ? nil : row[14],
-            lastOutputAt: row[15].isEmpty ? nil : row[15], startedAt: row[16].isEmpty ? nil : row[16], exitedAt: row[17].isEmpty ? nil : row[17])
+            pid: Int(row[11]), status: RunningProcessState(rawValue: row[12]) ?? .running, logPath: row[13].isEmpty ? nil : row[13],
+            lastOutputAt: row[14].isEmpty ? nil : row[14], startedAt: row[15].isEmpty ? nil : row[15], exitedAt: row[16].isEmpty ? nil : row[16])
     }
 
     func spacesTerminalSessionID(terminalApp: String?, terminalTrackingID: String?) -> String? {

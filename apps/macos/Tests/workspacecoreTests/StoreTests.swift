@@ -30,7 +30,7 @@ final class StoreTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("fresh.db")
 
-        _ = try SQLiteStore(path: dbURL.path)
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state")
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
@@ -136,7 +136,7 @@ final class StoreTests: XCTestCase {
                 INSERT INTO migration_state(current_version) VALUES (0);
                 """)
 
-        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())) { error in
             XCTAssertEqual(error.localizedDescription, "No migration path exists from schema version 0 to \(DatabaseSchema.currentVersion).")
         }
     }
@@ -146,8 +146,8 @@ final class StoreTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("current.db")
 
-        _ = try SQLiteStore(path: dbURL.path)
-        _ = try SQLiteStore(path: dbURL.path)
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
@@ -156,7 +156,7 @@ final class StoreTests: XCTestCase {
     func testCurrentSchemaRejectsBlankPortNamesAtDatabaseLevel() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("port-name-constraints.db")
-        _ = try SQLiteStore(path: dbURL.path)
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         try runSQLiteExec(
             dbURL: dbURL,
@@ -199,7 +199,7 @@ final class StoreTests: XCTestCase {
                 INSERT INTO migration_state(current_version) VALUES (99);
                 """)
 
-        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())) { error in
             XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 99 at \(dbURL.path).")
         }
     }
@@ -468,7 +468,7 @@ final class StoreTests: XCTestCase {
     func testProjectRoundTripDoesNotRequireSidebarState() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("project-round-trip.db")
-        let store = try SQLiteStore(path: dbURL.path)
+        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let project = makeProjectRecord(id: "p1", dir: "/tmp/project")
         try store.upsert(project: project)
 
@@ -480,7 +480,7 @@ final class StoreTests: XCTestCase {
     func testStoreWriteWaitsForTransientDatabaseLock() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("busy-timeout.db")
-        let store = try SQLiteStore(path: dbURL.path)
+        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         var lockDB: OpaquePointer?
         guard sqlite3_open(dbURL.path, &lockDB) == SQLITE_OK, let lockDB else {
@@ -613,7 +613,7 @@ final class StoreTests: XCTestCase {
     func testWorkspaceIDForTerminalSessionResolvesWorkspaceOwnedTerminalRow() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces-test.db")
-        let store = try SQLiteStore(path: dbURL.path)
+        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature-terminal", dir: project.dir)
         try store.upsert(project: project)
@@ -730,7 +730,7 @@ final class StoreTests: XCTestCase {
     func testUpdateWorkspaceNameUpdatesTitleColumn() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("workspace-title.db")
-        let store = try SQLiteStore(path: dbURL.path)
+        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
         try store.upsert(project: project)

@@ -2182,7 +2182,12 @@ private func emitJSON<T: Encodable>(_ value: T) throws {
 
 /// Builds the same real orchestrator used by the app and CLI so the manual E2E
 /// helper exercises production storage and lifecycle code.
-private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath())) }
+// Desktop window IDs are client-owned (in spaces-client.db), so the e2e harness — which drives real
+// desktop focus through an in-process orchestrator just like the app — must inject the same client
+// store. Without it the harness would neither persist captured window IDs nor read them back.
+private func makeOrchestrator() throws -> WorkspaceOrchestrator {
+    try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath(), desktopWindowIDStore: ClientDesktopWindowIDStore()))
+}
 
 private func sendTerminalServiceRequestForSession(sessionID rawSessionID: String, request: TerminalServiceRequest) throws -> TerminalServiceResponse {
     let sessionID = try required(rawSessionID, label: "session-id")

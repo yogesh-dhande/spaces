@@ -285,7 +285,7 @@ final class AgentHookTests: XCTestCase {
     func testHandleAgentExitKeepsLiveAdHocSpacesSessionIdleWithoutPersistingSignalWindowID() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces-test.db").path
-        let store = try SQLiteStore(path: dbPath)
+        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(

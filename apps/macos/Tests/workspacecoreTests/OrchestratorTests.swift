@@ -131,7 +131,7 @@ final class OrchestratorTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let dbPath = root.appendingPathComponent("spaces-test.db").path
-        let store = try SQLiteStore(path: dbPath)
+        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let orchestrator = WorkspaceOrchestrator(
             store: store, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
             terminalFocusPulseController: terminalFocusPulseController,
