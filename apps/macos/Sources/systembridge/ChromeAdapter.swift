@@ -64,6 +64,40 @@ public final class ChromeAdapter {
         return output == "1"
     }
 
+    /// Focuses the tab matching `urlPrefix` within a specific window, raising that window.
+    /// Returns false when the window no longer exists or no longer holds a matching tab, so
+    /// callers can reopen a dedicated window. Scoping to one window id (rather than scanning
+    /// all windows) keeps a browser session's focus on its own window and never on an
+    /// unrelated window that happens to have the same URL open.
+    public func focusMatchingTabInWindow(windowID: Int, urlPrefix: String) throws -> Bool {
+        let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Google Chrome"
+              set requestedWindowID to "\(windowID)"
+              repeat with w in windows
+                if (id of w as string) is requestedWindowID then
+                  set tabCount to count of tabs of w
+                  repeat with i from 1 to tabCount
+                    set u to URL of tab i of w
+                    if u is not missing value then
+                      if u starts with "\(escaped)" then
+                        set active tab index of w to i
+                        set index of w to 1
+                        activate
+                        return "1"
+                      end if
+                    end if
+                  end repeat
+                  return "0"
+                end if
+              end repeat
+            end tell
+            return "0"
+            """
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return output == "1"
+    }
+
     public func focusFirstMatchingTab(urlPrefix: String) throws -> Bool {
         let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """

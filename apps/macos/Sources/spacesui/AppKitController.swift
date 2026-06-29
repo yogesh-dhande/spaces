@@ -253,6 +253,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.hideMainWindow, #selector(handleHideMainWindowIPC(_:))),
         (IPCNotification.showWindowIssueModal, #selector(handleShowWindowIssueModalIPC(_:))),
         (IPCNotification.cycleWorkspaceWindow, #selector(handleCycleWorkspaceWindowIPC(_:))),
+        (IPCNotification.focusWorkspaceWindowByName, #selector(handleFocusWorkspaceWindowByNameIPC(_:))),
+        (IPCNotification.focusWorkspaceProcess, #selector(handleFocusWorkspaceProcessIPC(_:))),
+        (IPCNotification.dumpFocusableWindowNames, #selector(handleDumpFocusableWindowNamesIPC(_:))),
         (IPCNotification.selectWorkspaceDetail, #selector(handleSelectWorkspaceDetailIPC(_:))),
         (IPCNotification.openWorkspaceTerminal, #selector(handleOpenWorkspaceTerminalIPC(_:))),
         (IPCNotification.runWorkspaceProcess, #selector(handleRunWorkspaceProcessIPC(_:))),
@@ -625,6 +628,147 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 ? preferredFocusedBuiltInTerminalSessionID : self.activeBuiltInTerminalSessionID()
             await self.cycleWorkspaceWindow(workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredTerminalSessionID)
         }
+    }
+
+    @objc private nonisolated func handleFocusWorkspaceWindowByNameIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let name = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, workspaceID, name] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            await self.focusWorkspaceWindowByName(workspaceID: workspaceID, name: name)
+        }
+    }
+
+    @objc private nonisolated func handleFocusWorkspaceProcessIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let name = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
+        let requestID = (notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        Task { @MainActor [weak self, object, workspaceID, name, requestID] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            await self.focusWorkspaceProcess(
+                workspaceID: workspaceID, processName: name, requestID: (requestID?.isEmpty == false) ? requestID : nil)
+        }
+    }
+
+    @objc private nonisolated func handleDumpFocusableWindowNamesIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
+        guard let outputPath = notification.userInfo?[IPCNotification.outputPathUserInfoKey] as? String else { return }
+        Task { @MainActor [weak self, object, workspaceID, outputPath] in
+            guard let self, self.matchesProfileIPCObject(object) else { return }
+            self.writeFocusableWindowNames(workspaceID: workspaceID, to: outputPath)
+        }
+    }
+
+    /// The workspace's focusable targets plus the context needed to name and resolve them,
+    /// using the same ordering and (all configured) browser sessions as the numbered
+    /// shortcuts so by-name focus, the names dump, and Cmd-N stay consistent.
+    private func focusableWindowContext(workspaceID: String)
+        -> (
+            detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
+            targets: [WorkspaceRunShortcutTarget]
+        )?
+    {
+        guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else {
+            return nil
+        }
+        let browserSessions = detail.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:))
+        let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
+        return (detail, overview, browserSessions, targets)
+    }
+
+    /// The display name for a focusable target, matching the names the numbered-shortcut
+    /// list surfaces (browser session name, process/terminal title, agent label).
+    nonisolated private static func focusableWindowName(
+        for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession]
+    ) -> String? {
+        switch target.kind {
+        case .browser: return browserSessionDisplayName(for: target.targetURL, sessions: browserSessions)
+        case .process: return target.processID.flatMap { id in detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name }
+        case .window: return target.windowListIndex.flatMap { detail.terminalRows.indices.contains($0) ? detail.terminalRows[$0].title : nil }
+        case .agent: return target.agentWindow?.label
+        case .missingConfiguredProcess: return target.processKey
+        case .agentLauncher: return target.launcherName
+        }
+    }
+
+    /// The workspace's ordered focusable window names. The app owns this ordering, so the
+    /// dump IPC lets harnesses read it instead of recomputing it from daemon data.
+    func focusableWindowNames(workspaceID: String) -> [String] {
+        guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
+        return context.targets.compactMap {
+            Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions)
+        }
+    }
+
+    private struct FocusableWindowNamesDump: Codable { let names: [String] }
+
+    private func writeFocusableWindowNames(workspaceID: String, to outputPath: String) {
+        let url = URL(fileURLWithPath: outputPath)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(FocusableWindowNamesDump(names: focusableWindowNames(workspaceID: workspaceID)))
+            try data.write(to: url, options: [.atomic])
+        } catch {}
+    }
+
+    /// Focuses a workspace window by display name through the shared focus path. Emits the
+    /// `named_window_focus` perf line the real-system E2E parses (it also satisfies the
+    /// browser-focus matcher, since a browser session resolves to the same name).
+    private func focusWorkspaceWindowByName(workspaceID: String, name: String) async {
+        let startedAt = Date()
+        func logResult(_ success: Bool) {
+            logPerfMetric("named_window_focus", target: name, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success)
+        }
+        guard let context = focusableWindowContext(workspaceID: workspaceID),
+            let target = context.targets.first(where: {
+                Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions)
+                    .map { Self.normalizedRunRowName($0) == Self.normalizedRunRowName(name) } ?? false
+            })
+        else {
+            logResult(false)
+            return
+        }
+        let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        guard let action = await executeWindowFocusResolution(resolution) else {
+            logResult(false)
+            return
+        }
+        logResult(true)
+        hideAfterSuccessfulExternalWindowAction(action)
+    }
+
+    /// Focuses a workspace's running process window by template name. Threads `requestID`
+    /// to the terminal focus so the `terminal_window_focus_ipc` line carries it, which the
+    /// real-system E2E correlates; also emits `process_focus` for the non-correlated path.
+    private func focusWorkspaceProcess(workspaceID: String, processName: String, requestID: String?) async {
+        let startedAt = Date()
+        func logResult(_ success: Bool) {
+            logPerfMetric("process_focus", target: processName, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success)
+        }
+        guard let context = focusableWindowContext(workspaceID: workspaceID),
+            let target = context.targets.first(where: { target in
+                guard target.kind == .process, let id = target.processID,
+                    let rowName = context.detail.processRows.first(where: { ($0.processID ?? $0.id) == id })?.name
+                else { return false }
+                return Self.normalizedRunRowName(rowName) == Self.normalizedRunRowName(processName)
+            })
+        else {
+            logResult(false)
+            return
+        }
+        let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        guard let action = await executeWindowFocusResolution(resolution, requestID: requestID) else {
+            logResult(false)
+            return
+        }
+        logResult(true)
+        hideAfterSuccessfulExternalWindowAction(action)
     }
 
     // In-memory window-cycle state (a "window" is a client concept). The cursor remembers
@@ -8760,14 +8904,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return true
     }
 
-    /// Focuses the Chrome tab matching `targetURL` on this desktop, opening the URL as a
-    /// fallback when no tab matches. Used for browser sessions whose daemon is local;
-    /// remote browser sessions run on another machine, so those only open the URL.
-    private func focusLocalChromeTab(targetURL: String, fallbackURL: URL) async {
+    /// Focuses the local Chrome window for a workspace browser session. A browser session is a
+    /// distinct client "window", so the app opens a dedicated Chrome window for it once and
+    /// tracks that window's id in client state (`ClientBrowserWindowIDStore`, keyed by the
+    /// resolved URL) — replacing the daemon's former `extracted_window_id`. Re-focus returns to
+    /// that specific window by id; only when it is gone does the app open a fresh dedicated
+    /// window. Scoping to the tracked window id means focus never lands on an unrelated window
+    /// that merely has the same URL open. `NSWorkspace.open` is a last resort when Chrome
+    /// cannot be scripted. Used for local sessions; remote sessions only open the URL.
+    private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
         let focused = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
             guard chrome.isAvailable() else { return false }
-            return (try? chrome.focusFirstMatchingTab(urlPrefix: targetURL)) ?? false
+            let store = ClientBrowserWindowIDStore()
+            if let trackedID = try? store.windowID(workspaceID: workspaceID, targetURL: targetURL),
+                (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
+            {
+                return true
+            }
+            let newWindowID = (try? chrome.openWindow(url: targetURL, background: false)) ?? -1
+            guard newWindowID > 0 else { return false }
+            try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: newWindowID)
+            return true
         }.value
         if !focused { NSWorkspace.shared.open(fallbackURL) }
     }
@@ -8857,7 +9015,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// three behave identically. Only two leaves depend on where the workspace's daemon
     /// runs: browser tab focus (local) vs URL open (remote), and native vs mirror
     /// terminal windows.
-    @discardableResult private func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution) async -> ExternalWindowAction? {
+    @discardableResult private func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution, requestID: String? = nil) async
+        -> ExternalWindowAction?
+    {
         switch resolution {
         case .openURL(let workspaceID, let targetURL):
             guard let url = URL(string: targetURL) else {
@@ -8867,7 +9027,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
                 NSWorkspace.shared.open(url)
             } else {
-                await focusLocalChromeTab(targetURL: targetURL, fallbackURL: url)
+                await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, fallbackURL: url)
             }
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
@@ -8877,7 +9037,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             Self.setClientActiveWorkspaceID(request.workspaceID)
-            guard focusClientSessionWindow(request, device: device) else { return nil }
+            guard focusClientSessionWindow(request, device: device, requestID: requestID) else { return nil }
             return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
             guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {

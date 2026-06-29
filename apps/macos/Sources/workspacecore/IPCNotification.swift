@@ -8,6 +8,18 @@ public enum IPCNotification {
     public static let hideMainWindow = Notification.Name("spaces.ipc.hide-main-window")
     public static let showWindowIssueModal = Notification.Name("spaces.ipc.show-window-issue-modal")
     public static let cycleWorkspaceWindow = Notification.Name("spaces.ipc.cycle-workspace-window")
+    /// Focus a workspace's focusable window by its display name (browser session, process,
+    /// or agent), driving the same client-side focus path the numbered shortcuts use.
+    /// Carries `workspaceIDUserInfoKey` and `workspaceTargetNameUserInfoKey`.
+    public static let focusWorkspaceWindowByName = Notification.Name("spaces.ipc.focus-workspace-window-by-name")
+    /// Focus a workspace's running process window. Carries `workspaceIDUserInfoKey`,
+    /// `workspaceTargetNameUserInfoKey` (the process template name), and optional
+    /// `focusRequestIDUserInfoKey` for terminal-focus follow-through correlation.
+    public static let focusWorkspaceProcess = Notification.Name("spaces.ipc.focus-workspace-process")
+    /// Ask the app to write the workspace's ordered focusable window names as
+    /// `{"names": [...]}` to `outputPathUserInfoKey`. Carries `workspaceIDUserInfoKey`.
+    /// The app owns the ordering, so harnesses read it from the app rather than recomputing.
+    public static let dumpFocusableWindowNames = Notification.Name("spaces.ipc.dump-focusable-window-names")
     public static let openWorkspaceTerminal = Notification.Name("spaces.ipc.open-workspace-terminal")
     public static let runWorkspaceProcess = Notification.Name("spaces.ipc.run-workspace-process")
     public static let stopWorkspaceProcess = Notification.Name("spaces.ipc.stop-workspace-process")

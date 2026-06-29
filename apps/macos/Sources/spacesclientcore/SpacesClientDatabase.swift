@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 3
+    public static let currentVersion = 4
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -325,6 +325,32 @@ public final class SpacesClientDatabase {
         }
     }
 
+    /// Records the dedicated Chrome window opened for a workspace browser session on the local
+    /// desktop. A browser "window" is client/desktop-local state (not daemon state), keyed by
+    /// the session's resolved target URL so re-focus returns to the same window.
+    public func setBrowserSessionWindowID(deviceID: String, workspaceID: String, targetURL: String, windowID: Int) throws {
+        try execute(
+            sql: """
+                INSERT INTO browser_session_window_ids(device_id, workspace_id, target_url, window_id, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(device_id, workspace_id, target_url) DO UPDATE SET
+                  window_id = excluded.window_id,
+                  updated_at = excluded.updated_at
+                """, bindings: [deviceID, workspaceID, targetURL, windowID, Self.timestamp()])
+    }
+
+    public func browserSessionWindowID(deviceID: String, workspaceID: String, targetURL: String) throws -> Int? {
+        try queryRow(
+            sql: "SELECT window_id FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ? AND target_url = ?",
+            bindings: [deviceID, workspaceID, targetURL])?.first.flatMap(Int.init)
+    }
+
+    public func clearBrowserSessionWindowID(deviceID: String, workspaceID: String, targetURL: String) throws {
+        try execute(
+            sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ? AND target_url = ?",
+            bindings: [deviceID, workspaceID, targetURL])
+    }
+
     public func backupURLs() throws -> [URL] { try backupManager.existingBackups() }
 
     private func initializeSchema() throws {
@@ -563,12 +589,15 @@ public final class SpacesClientDatabase {
 
             \(desktopWindowIDsSchemaSQL)
 
+            \(browserSessionWindowIDsSchemaSQL)
+
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
             );
         """
 
     private static let dropSchemaSQL = """
+            DROP TABLE IF EXISTS browser_session_window_ids;
             DROP TABLE IF EXISTS desktop_window_ids;
             DROP TABLE IF EXISTS local_window_focus_state;
             DROP TABLE IF EXISTS runtime_target_events;
@@ -663,12 +692,30 @@ public final class SpacesClientDatabase {
             );
         """
 
+    // Browser session windows are client/desktop-local: the dedicated Chrome window opened for
+    // a workspace browser session exists only on this desktop and is keyed by the session's
+    // resolved target URL. Keeping it client-side replaces the daemon's former
+    // `extracted_window_id` so the daemon persists no desktop overlay.
+    private static let browserSessionWindowIDsSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS browser_session_window_ids (
+              device_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              target_url TEXT NOT NULL,
+              window_id INTEGER NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (device_id, workspace_id, target_url)
+            );
+        """
+
     public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
         SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
             try executeClientBatch(database: database, sql: clientStateSchemaSQL)
         },
         SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Add client-owned desktop window IDs") { database in
             try executeClientBatch(database: database, sql: desktopWindowIDsSchemaSQL)
+        },
+        SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
+            try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
         },
     ]
 
