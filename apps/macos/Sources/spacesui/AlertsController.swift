@@ -51,7 +51,7 @@ final class AlertsController: NSObject {
     }
 
     func loadAlertsDismissedAttentionItemIDs() {
-        dismissedAlertsAttentionItemIDs = (try? host.orchestrator.alertsDismissedAttentionItemIDs()) ?? []
+        dismissedAlertsAttentionItemIDs = host.loadDismissedAlertsAttentionItemIDs()
     }
 
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
@@ -59,14 +59,14 @@ final class AlertsController: NSObject {
         let prunedIDs = dismissedAlertsAttentionItemIDs.intersection(activeIDs)
         guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
         dismissedAlertsAttentionItemIDs = prunedIDs
-        do { try host.orchestrator.setAlertsDismissedAttentionItemIDs(prunedIDs) } catch { host.showError(error) }
+        do { try host.storeDismissedAlertsAttentionItemIDs(prunedIDs) } catch { host.showError(error) }
     }
 
     func dismissAlertsAttentionItem(_ attentionID: String) {
         guard !dismissedAlertsAttentionItemIDs.contains(attentionID) else { return }
         dismissedAlertsAttentionItemIDs.insert(attentionID)
         do {
-            try host.orchestrator.setAlertsDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs)
+            try host.storeDismissedAlertsAttentionItemIDs(dismissedAlertsAttentionItemIDs)
             host.updateAlertsSidebarBadge()
             if host.showingAlerts { showAlertsDetail() }
         } catch {

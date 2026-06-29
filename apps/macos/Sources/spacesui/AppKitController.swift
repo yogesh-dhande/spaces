@@ -181,7 +181,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     let detailContainer = NSView()
     private weak var workspaceShortcutFooterRowView: NSStackView?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
-    var orchestrator: WorkspaceOrchestrator!
     var projects: [ProjectSummary] = []
     var workspacesByProject: [String: [WorkspaceSummary]] = [:] { didSet { sidebar.invalidateVisibleWorkspacesCache() } }
     var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
@@ -438,16 +437,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             details:
                 "profile_root=\(launchProfile.rootDirectory) runtime_root=\(launchProfile.runtimeDirectory) source=\(launchProfile.source.rawValue) desktop_control=\(desktopControlLease == nil ? "passive" : "active")"
         )
-        do {
-            let store = try SQLiteStore(path: launchProfile.databasePath, desktopWindowIDStore: ClientDesktopWindowIDStore())
-            orchestrator = makeUIOrchestrator(store: store)
-        } catch {
-            releaseLaunchLeases()
-            showError(error)
-            return
-        }
-        logStartupProfile("store_ready")
-
         NSApp.activate(ignoringOtherApps: true)
         logStartupProfile("app_activated")
         buildMainMenu()
@@ -492,30 +481,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         processInfo.disableAutomaticTermination(reason)
         processInfo.disableSuddenTermination()
     }
-
-    private func makeUIOrchestrator(store: SQLiteStore) -> WorkspaceOrchestrator {
-        WorkspaceOrchestrator(
-            store: store,
-            builtInTerminalWindowOpener: { [weak self] sessionID, mode in
-                Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.openTerminalSessionWindow(sessionID: sessionID, mode: mode) }
-            },
-            builtInTerminalWindowFocuser: { [weak self] sessionID, requestID in
-                Self.dispatchBuiltInTerminalWindowActionOnMainThread { self?.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID) }
-            },
-            builtInTerminalWindowCloser: { [weak self] sessionID in
-                Self.dispatchBuiltInTerminalWindowActionOnMainThread {
-                    self?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
-                }
-            }, builtInTerminalSessionTerminator: Self.terminateBuiltInTerminalSession,
-            builtInTerminalSessionLauncher: Self.launchServiceBuiltInTerminalSession,
-            windowFocusPulseEnabledProvider: { [weak self] in self?.clientWindowFocusPulseEnabled() ?? SettingsKey.defaultWindowFocusPulseEnabled },
-            windowFocusPulseColorProvider: { [weak self] in self?.clientWindowFocusPulseColor() ?? SettingsKey.windowFocusPulseColor(from: nil) })
-    }
-
-    nonisolated static func dispatchBuiltInTerminalWindowActionOnMainThread(
-        isMainThread: Bool = Thread.isMainThread,
-        scheduler: (@escaping @MainActor () -> Void) -> Void = { action in Task { @MainActor in action() } }, action: @escaping @MainActor () -> Void
-    ) { if isMainThread { MainActor.assumeIsolated { action() } } else { scheduler(action) } }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let liveSessions = Self.liveBuiltInTerminalSessions()
@@ -1062,7 +1027,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 } else {
                     agentSignalHandler = { [weak self] events in
                         guard let self else { return [String]() }
-                        return try self.applyRemoteAgentSignals(events)
+                        return self.applyRemoteAgentSignals(events)
                     }
                 }
                 let remoteClientStore = RemoteTerminalWindowClientStore()
@@ -1266,17 +1231,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) throws -> [String] {
-        var acknowledgedIDs: [String] = []
-        var didApply = false
-        for event in events {
-            if try orchestrator.recordRemoteAgentSignal(event) {
-                acknowledgedIDs.append(event.id)
-                didApply = true
-            }
-        }
-        if didApply { reloadData() }
-        return acknowledgedIDs
+    private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) -> [String] {
+        // This fires only for a remote terminal mirror. Agent state is recorded by the
+        // daemon that owns the session and reaches this client through the overview, so the
+        // mirror only acknowledges delivery to release the remote terminal service's queue.
+        events.map(\.id)
     }
 
     private func refreshRemoteTerminalSessionMirror(
@@ -1288,20 +1247,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             throw WorkspaceError.invalidArgument(message: "Remote spacesd did not return terminal state.")
         }
         if (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) == nil {
-            let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID)
-            let kind = try remoteTerminalSessionKind(sessionID: sessionID, workspaceID: workspaceID)
+            let workspaceID = clientWorkspaceID(forTerminalSession: sessionID)
+            let kind = remoteTerminalSessionKind(sessionID: sessionID)
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 Self.remoteTerminalLaunchConfiguration(sessionID: sessionID, workspaceID: workspaceID, kind: kind, payload: payload), paths: paths)
         }
         try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
     }
 
-    private func remoteTerminalSessionKind(sessionID: String, workspaceID: String?) throws -> TerminalSessionKind {
-        guard let workspaceID else { return .shell }
-        if try orchestrator.runningProcesses(workspaceID: workspaceID).contains(where: { Self.terminalSessionID(for: $0) == sessionID }) {
-            return .process
+    private func remoteTerminalSessionKind(sessionID: String) -> TerminalSessionKind {
+        for overview in deviceSections.compactMap({ $0.overview }) {
+            if let session = overview.sessions.first(where: { $0.id == sessionID }) { return Self.terminalSessionKind(rowKind: session.rowKind) }
+            for workspace in overview.workspaces {
+                if workspace.processRows.contains(where: { $0.sessionID == sessionID }) { return .process }
+                if workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID }) { return .agent }
+            }
         }
-        if try orchestrator.agentWindows(workspaceID: workspaceID).contains(where: { Self.terminalSessionID(for: $0) == sessionID }) { return .agent }
         return .shell
     }
 
@@ -1410,7 +1371,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         let startedAt = Date()
         let workspaceLookupStartedAt = Date()
-        guard let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID) else {
+        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID) else {
             let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID) != nil
             logTerminalRuntimeControlsRefresh(
                 sessionID: sessionID, startedAt: startedAt, cause: cause, requestID: requestID,
@@ -1420,17 +1381,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         let workspaceLookupMS = windowShortcutElapsedMS(since: workspaceLookupStartedAt)
 
+        // The runtime-controls descriptor is built from the workspace's overview rows
+        // (config, processes, agents, terminals) rather than daemon-DB reads.
         let settingsStartedAt = Date()
-        let settings = try? orchestrator.workspaceSettings(workspaceID: workspaceID)
+        let detail = overview(forWorkspaceID: workspaceID).flatMap { Self.workspaceDetail(workspaceID, in: $0) }
+        let settings = detail.map { Self.localWorkspaceSettings(from: $0.config) }
         let settingsMS = windowShortcutElapsedMS(since: settingsStartedAt)
         let processesStartedAt = Date()
-        let runningProcesses = (try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []
+        let runningProcesses = detail.map { Self.runningProcesses(from: $0.processRows) } ?? []
         let processesMS = windowShortcutElapsedMS(since: processesStartedAt)
         let agentsStartedAt = Date()
-        let agentWindows = (try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? []
+        let agentWindows = detail.map { Self.agentWindows(from: $0.codingAgentRows) } ?? []
         let agentsMS = windowShortcutElapsedMS(since: agentsStartedAt)
         let windowsStartedAt = Date()
-        let trackedWindows = (try? orchestrator.windows(workspaceID: workspaceID)) ?? []
+        let trackedWindows = detail.map { Self.deviceTerminalWindows(from: $0.terminalRows) } ?? []
         let windowsMS = windowShortcutElapsedMS(since: windowsStartedAt)
         let runtimeStateStartedAt = Date()
         let isSessionRunning = Self.terminalSessionIsRunning(sessionID: sessionID)
@@ -1742,35 +1706,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func stopBuiltInTerminalSessionClosedByUser(sessionID: String) {
         guard !keepsTerminalSessionsRunningDuringTermination else { return }
-        do {
-            let didStop = try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID)
-            logPerfMetric("terminal_window_closed_by_user_stop", target: "session=\(sessionID)", elapsedMS: 0, success: didStop)
-            if didStop { requestSidebarReload() }
-        } catch {
-            logPerfMetric("terminal_window_closed_by_user_stop", target: "session=\(sessionID)", elapsedMS: 0, success: false)
-            showError(error)
-        }
+        // Only ad hoc sessions stop on window close; a configured process/agent session
+        // keeps running and just detaches its window.
+        guard remoteTerminalSessionKind(sessionID: sessionID) == .shell else { return }
+        stopAdHocTerminalSession(sessionID: sessionID)
     }
 
     private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
-        let workspaceID = try? orchestrator.workspaceIDForTerminalSession(sessionID)
-        let sessionOwnsTrackedRuntime =
-            workspaceID.map { workspaceID in
-                let processOwnsSession = ((try? orchestrator.runningProcesses(workspaceID: workspaceID)) ?? []).contains {
-                    ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
-                }
-                let agentOwnsSession = ((try? orchestrator.agentWindows(workspaceID: workspaceID)) ?? []).contains {
-                    ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
-                }
-                return processOwnsSession || agentOwnsSession
-            } ?? false
+        // A session owned by a configured process or agent is not ad hoc; the overview's
+        // session kind tells us without a daemon-DB read.
+        let sessionOwnsTrackedRuntime = remoteTerminalSessionKind(sessionID: sessionID) != .shell
         let paths = try? TerminalSessionPaths.forSession(id: sessionID)
         guard
             Self.shouldTerminateAdHocBuiltInTerminalSession(
                 paths: paths, isConfiguredProcessSession: sessionOwnsTrackedRuntime,
                 isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination, now: now)
         else { return }
-        if (try? orchestrator.stopAdHocBuiltInTerminalSession(sessionID: sessionID)) == true { requestSidebarReload() }
+        stopAdHocTerminalSession(sessionID: sessionID)
+    }
+
+    /// Stops an ad hoc built-in terminal session through the owning daemon's Device API.
+    private func stopAdHocTerminalSession(sessionID: String) {
+        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID),
+            let device = deviceForWorkspaceMutation(workspaceID: workspaceID)
+        else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.stopWorkspaceTerminal(
+                    workspaceID: workspaceID, sessionID: sessionID, device: device,
+                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            }
+            if case .success = result { self.requestSidebarReload() }
+        }
     }
 
     private func logWorkspaceDetailIPC(_ message: String) {
@@ -3992,7 +3960,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         clearActiveAddFormStateAndCloseWindows()
         projectHasUnsavedChanges = false
 
-        let fullProject = (try? orchestrator.project(id: project.id))
         let projectSettings:
             (
                 setupScript: String?, stopScript: String?, ports: [PortDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
@@ -4001,11 +3968,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let activeProject = deviceProjectSummary(projectID: project.id).map({ SpacesDeviceProjectSettingsViewModel(project: $0) }) {
             projectSettings = Self.localProjectSettings(from: activeProject.config)
         } else {
-            projectSettings = (
-                setupScript: fullProject?.setupScript, stopScript: fullProject?.stopScript, ports: fullProject?.ports ?? [],
-                processes: fullProject?.processes ?? [], browserSessions: fullProject?.browserSessions ?? [],
-                agentLaunchers: fullProject?.agentLaunchers ?? []
-            )
+            projectSettings = (setupScript: nil, stopScript: nil, ports: [], processes: [], browserSessions: [], agentLaunchers: [])
         }
 
         let stack = NSStackView()
@@ -4049,7 +4012,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self?.presentProjectPortRemoveConfirmation(port: port, confirm: confirm)
         }
         processesSection.onCommit = { [weak self] _ in self?.projectHasUnsavedChanges = true }
-        processesSection.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
+        processesSection.validateProcess = { process in try Self.validateProcessTemplate(process) }
         processesSection.presentValidationError = { [weak self] error in self?.showError(error) }
         processesSection.presentRemoveConfirmation = { [weak self] process, confirm in
             self?.presentProjectProcessRemoveConfirmation(process: process, confirm: confirm)
@@ -5181,11 +5144,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         constrainFormFieldToFillWidth(statusCard, in: stack)
 
         if Self.shouldShowWorkspaceSetupScriptEditor(status: setupState.status) {
-            let fullProject = (try? orchestrator.project(id: project.id))
             let activeProjectConfig = deviceProjectSummary(projectID: project.id)?.config
             let setupScriptSection = ScriptSection(
                 title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script",
-                value: activeProjectConfig?.setupScript ?? fullProject?.setupScript ?? "",
+                value: activeProjectConfig?.setupScript ?? "",
                 subtitle: "Edit the project setup script, then run setup again.")
             setupScriptSection.onCommit = { [weak self] value in
                 guard let self else { return }
@@ -5332,7 +5294,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let runningProcesses = providedRunningProcesses ?? []
         let runningProcessIDByName = Dictionary(uniqueKeysWithValues: runningProcesses.map { (Self.processRuntimeKey(name: $0.templateName), $0.id) })
         let section = ProcessesSection(processes: config.processes)
-        section.validateProcess = { [weak self] process in try self?.orchestrator.validateProcessTemplate(process) }
+        section.validateProcess = { process in try Self.validateProcessTemplate(process) }
         section.presentValidationError = { [weak self] error in self?.showError(error) }
         section.onCommit = { [weak self] updated in
             guard let self else { return }
@@ -6893,6 +6855,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func clientDatabase() throws -> SpacesClientDatabase { try SpacesClientDatabase.defaultDatabase() }
+
+    /// Attention-item dismissals are per-client desktop state, so they live in the client
+    /// database rather than the daemon's settings.
+    func loadDismissedAlertsAttentionItemIDs() -> Set<String> {
+        guard let raw = (try? clientDatabase().setting(key: SettingsKey.alertsDismissedAttentionItems)) ?? nil, !raw.isEmpty,
+            let data = raw.data(using: .utf8), let decoded = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return Set(decoded)
+    }
+
+    func storeDismissedAlertsAttentionItemIDs(_ ids: Set<String>) throws {
+        guard !ids.isEmpty else {
+            try clientDatabase().setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: nil)
+            return
+        }
+        let encoded = try JSONEncoder().encode(ids.sorted())
+        try clientDatabase().setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
+    }
 
     func macPairedDevices() -> [SpacesPairedDeviceRecord] {
         guard let database = try? clientDatabase() else { return [] }
@@ -8614,7 +8594,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func globalEditorWorkspaceID() -> String? {
-        if let workspaceID = try? orchestrator.workspaceIDForFocusedWindow() { return workspaceID }
+        if let workspaceID = clientWorkspaceIDForFocusedWindow() { return workspaceID }
         if NSApp.isActive, let selectedWorkspaceID { return selectedWorkspaceID }
         if let workspaceID = clientActiveWorkspaceID() { return workspaceID }
         return nil
@@ -9099,6 +9079,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deferredExternalWindowHideTask = nil
     }
 
+    /// Resolves the workspace owning a terminal session from the overview (sessions and
+    /// process/agent/terminal rows all carry both the session id and workspace id),
+    /// replacing the orchestrator's daemon-DB lookup. Searches every paired device's
+    /// overview so mirrored remote sessions resolve too.
+    func clientWorkspaceID(forTerminalSession sessionID: String) -> String? {
+        for overview in deviceSections.compactMap({ $0.overview }) {
+            if let workspaceID = overview.sessions.first(where: { $0.id == sessionID })?.workspaceID { return workspaceID }
+            for workspace in overview.workspaces
+            where workspace.processRows.contains(where: { $0.sessionID == sessionID })
+                || workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID })
+                || workspace.terminalRows.contains(where: { $0.sessionID == sessionID })
+            {
+                return workspace.id
+            }
+        }
+        return nil
+    }
+
+    /// Resolves the workspace of the focused desktop window when it is a Chrome browser
+    /// window, by matching the frontmost tab URL to a configured browser session in the
+    /// overview. A focused built-in terminal is resolved earlier by its session id.
+    func clientWorkspaceIDForFocusedWindow() -> String? {
+        let chrome = ChromeAdapter()
+        guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
+        var best: (workspaceID: String, prefixLength: Int)?
+        for overview in deviceSections.compactMap({ $0.overview }) {
+            for workspace in overview.workspaces {
+                for session in workspace.config.resolvedBrowserSessions {
+                    guard let url = session.url, !url.isEmpty, activeURL.hasPrefix(url) else { continue }
+                    if best == nil || url.count > best!.prefixLength { best = (workspace.id, url.count) }
+                }
+            }
+        }
+        return best?.workspaceID
+    }
+
+    /// Validates a process template before it is saved. Pure, client-local string
+    /// validation (mirrors the orchestrator's `validateProcessTemplate`).
+    nonisolated static func validateProcessTemplate(_ template: ProcessTemplate) throws {
+        guard !template.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkspaceError.invalidArgument(message: "Process command is required.")
+        }
+    }
+
     private func globalWindowNavigationWorkspaceID(requestID: String? = nil) -> String? {
         let startedAt = Date()
         let activeTerminalSessionStartedAt = Date()
@@ -9119,7 +9143,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         if let focusedTerminalSessionID {
             let lookupStartedAt = Date()
-            focusedTerminalSessionWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(focusedTerminalSessionID)
+            focusedTerminalSessionWorkspaceID = clientWorkspaceID(forTerminalSession: focusedTerminalSessionID)
             terminalWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
             terminalWorkspaceSource = "focused"
             terminalWorkspaceStatus = focusedTerminalSessionWorkspaceID == nil ? "miss" : "hit"
@@ -9127,7 +9151,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         if focusedTerminalSessionWorkspaceID == nil {
             let lookupStartedAt = Date()
-            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+            focusedWindowWorkspaceID = clientWorkspaceIDForFocusedWindow()
             focusedWindowWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
             focusedWindowWorkspaceStatus = focusedWindowWorkspaceID == nil ? "miss" : "hit"
         }
@@ -9136,7 +9160,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let rememberedSessionID = rememberedBuiltInTerminalSessionIDForGlobalNavigation()
         {
             let lookupStartedAt = Date()
-            rememberedTerminalSessionWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(rememberedSessionID)
+            rememberedTerminalSessionWorkspaceID = clientWorkspaceID(forTerminalSession: rememberedSessionID)
             terminalWorkspaceMS += windowShortcutElapsedMS(since: lookupStartedAt)
             terminalWorkspaceSource = terminalWorkspaceSource == "skipped" ? "remembered" : "\(terminalWorkspaceSource)+remembered"
             terminalWorkspaceStatus = rememberedTerminalSessionWorkspaceID == nil ? "miss" : "hit"
@@ -9270,7 +9294,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let selectionRefreshSource: String
         if let terminalSessionID = focusedTerminalSessionID {
             let lookupStartedAt = Date()
-            focusedTerminalWorkspaceID = try? orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+            focusedTerminalWorkspaceID = clientWorkspaceID(forTerminalSession: terminalSessionID)
             logPerfMetric(
                 "toggle_window_terminal_workspace_lookup", target: "session=\(terminalSessionID)",
                 elapsedMS: windowShortcutElapsedMS(since: lookupStartedAt), success: focusedTerminalWorkspaceID != nil)
@@ -9282,7 +9306,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let focusedWindowWorkspaceID: String?
         if focusedTerminalWorkspaceID == nil {
             let focusedWindowLookupStartedAt = Date()
-            focusedWindowWorkspaceID = try? orchestrator.workspaceIDForFocusedWindow()
+            focusedWindowWorkspaceID = clientWorkspaceIDForFocusedWindow()
             logPerfMetric(
                 "toggle_window_focused_window_workspace_lookup", target: "frontmost_window",
                 elapsedMS: windowShortcutElapsedMS(since: focusedWindowLookupStartedAt), success: focusedWindowWorkspaceID != nil)

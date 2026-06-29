@@ -129,7 +129,7 @@ final class CommandPaletteController {
         let focusedTerminalWorkspaceID: String?
         if let terminalSessionID = host.focusedTerminalSessionIDForToggle() {
             let lookupStartedAt = Date()
-            focusedTerminalWorkspaceID = try? host.orchestrator.workspaceIDForTerminalSession(terminalSessionID)
+            focusedTerminalWorkspaceID = host.clientWorkspaceID(forTerminalSession: terminalSessionID)
             host.logPerfMetric(
                 "toggle_palette_terminal_workspace_lookup", target: "session=\(terminalSessionID)",
                 elapsedMS: host.windowShortcutElapsedMS(since: lookupStartedAt), success: focusedTerminalWorkspaceID != nil)
@@ -140,7 +140,7 @@ final class CommandPaletteController {
         let focusedWindowWorkspaceID: String?
         if host.selectedWorkspaceID == nil, focusedTerminalWorkspaceID == nil {
             let lookupStartedAt = Date()
-            focusedWindowWorkspaceID = try? host.orchestrator.workspaceIDForFocusedWindow()
+            focusedWindowWorkspaceID = host.clientWorkspaceIDForFocusedWindow()
             host.logPerfMetric(
                 "toggle_palette_focused_window_workspace_lookup", target: "frontmost_window",
                 elapsedMS: host.windowShortcutElapsedMS(since: lookupStartedAt), success: focusedWindowWorkspaceID != nil)
