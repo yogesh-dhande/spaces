@@ -651,6 +651,12 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// Linux daemon must be updated from the Mac app.
     public let operatingSystem: String
 
+    /// Protocol version reported when a peer's status omits the field entirely — i.e. a daemon old
+    /// enough to predate wire-version negotiation. It must compare as incompatible against any real
+    /// `SpacesWireProtocol.version` (which starts at 1) so such a peer is blocked, not mistaken for a
+    /// match. See `unknownProtocolVersion` use in `init(from:)`.
+    public static let unknownProtocolVersion = 0
+
     public init(
         version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
@@ -665,6 +671,37 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         self.activeAgents = activeAgents
         self.waitingAgents = waitingAgents
         self.operatingSystem = operatingSystem
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case artifactVersion
+        case certificateFingerprint
+        case activeSessionCount
+        case protocolVersion
+        case runningProcesses
+        case activeAgents
+        case waitingAgents
+        case operatingSystem
+    }
+
+    /// This is the frozen core's contract: its decode must tolerate version skew so an incompatible
+    /// peer can still be negotiated and recovered. Every field decodes with `decodeIfPresent` and a
+    /// default, so a peer whose field set differs (an older build that omits a field this build added,
+    /// or a newer build that adds one) still produces a decodable status instead of throwing
+    /// `keyNotFound` on the very handshake meant to keep working. A missing `protocolVersion` defaults
+    /// to `unknownProtocolVersion`, which `SpacesWireCompatibility` evaluates as incompatible.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? ""
+        artifactVersion = try container.decodeIfPresent(String.self, forKey: .artifactVersion)
+        certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint)
+        activeSessionCount = try container.decodeIfPresent(Int.self, forKey: .activeSessionCount) ?? 0
+        protocolVersion = try container.decodeIfPresent(Int.self, forKey: .protocolVersion) ?? Self.unknownProtocolVersion
+        runningProcesses = try container.decodeIfPresent(Int.self, forKey: .runningProcesses) ?? 0
+        activeAgents = try container.decodeIfPresent(Int.self, forKey: .activeAgents) ?? 0
+        waitingAgents = try container.decodeIfPresent(Int.self, forKey: .waitingAgents) ?? 0
+        operatingSystem = try container.decodeIfPresent(String.self, forKey: .operatingSystem) ?? Self.currentOperatingSystem
     }
 
     /// The OS of the process building this status (the daemon's own host).

@@ -9,6 +9,21 @@ import Foundation
 /// window). Raise `version` whenever the wire contract changes.
 public enum SpacesWireProtocol {
     public static let version = 1
+
+    /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
+    /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and
+    /// iOS so the "daemon is running an older app build" check can't drift between the two clients.
+    public static func isVersion(_ lhs: String, olderThan rhs: String) -> Bool {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        let lhsParts = lhs.split(separator: ".").map { Int($0) ?? 0 }
+        let rhsParts = rhs.split(separator: ".").map { Int($0) ?? 0 }
+        for index in 0..<max(lhsParts.count, rhsParts.count) {
+            let l = index < lhsParts.count ? lhsParts[index] : 0
+            let r = index < rhsParts.count ? rhsParts[index] : 0
+            if l != r { return l < r }
+        }
+        return false
+    }
 }
 
 /// Result of comparing this build's wire protocol against a daemon's advertised protocol.
@@ -23,9 +38,7 @@ public enum SpacesWireCompatibility: String, Sendable, Equatable, Codable {
     /// Whether normal (non-frozen-core) operations should be allowed against the daemon.
     public var isCompatible: Bool { self == .compatible }
 
-    public static func evaluate(
-        daemonProtocolVersion: Int, localVersion: Int = SpacesWireProtocol.version
-    ) -> SpacesWireCompatibility {
+    public static func evaluate(daemonProtocolVersion: Int, localVersion: Int = SpacesWireProtocol.version) -> SpacesWireCompatibility {
         if daemonProtocolVersion == localVersion { return .compatible }
         return daemonProtocolVersion < localVersion ? .daemonTooOld : .clientTooOld
     }

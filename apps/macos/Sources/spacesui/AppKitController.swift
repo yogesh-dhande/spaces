@@ -2527,19 +2527,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let deviceClientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
                 let localDevice = try SpacesDeviceClient.bootstrapLocalDevice(
                     database: SpacesClientDatabase.defaultDatabase(), clientApp: deviceClientApp)
-                // Read the frozen-core handshake first: it stays decodable even when a wire-incompatible
-                // daemon's normal overview payload would not, so the local device can show the
-                // restart/update block instead of a generic load error.
-                let localDaemonStatus = try? SpacesDeviceClient.daemonStatus(device: localDevice, clientApp: deviceClientApp)
-                let localCompatibility = localDaemonStatus.map(SpacesWireCompatibility.evaluate(daemonStatus:))
-                let localOverview: SpacesDeviceOverviewPayload
-                if let localCompatibility, !localCompatibility.isCompatible {
-                    // Lockstep gate: do not issue the non-frozen-core overview call to an incompatible
-                    // daemon; render the block from an empty snapshot instead.
-                    localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
-                } else {
-                    localOverview = try SpacesDeviceClient.overview(device: localDevice, clientApp: deviceClientApp).overview
-                }
+                // Read compatibility from the overview's inline frozen-core status: the compatible
+                // steady state costs a single round-trip, and only an incompatible/too-old daemon falls
+                // back to the standalone handshake (which stays decodable when the overview would not),
+                // so the local device can show the restart/update block instead of a generic load error.
+                let localResolution = try SpacesDeviceClient.resolveOverview(device: localDevice, clientApp: deviceClientApp)
+                let localDaemonStatus = localResolution.daemonStatus
+                let localCompatibility = localResolution.compatibility
+                // A blocked (incompatible) device has no decodable overview to show; render the block
+                // from an empty snapshot instead.
+                let localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
                 let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: localDevice.id)) ?? [:]
                 let mapped = deviceSidebarData(from: localOverview, deviceID: localDevice.id, projectCollapseStates: collapseStates)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
@@ -2556,9 +2553,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return .success(
                     .init(
                         config: config, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
-                        workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups,
-                        localDeviceID: localDevice.id, localDeviceName: localDevice.name, localPairedDevice: localDevice,
-                        localDeviceOverview: localOverview, localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility))
+                        workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups, localDeviceID: localDevice.id,
+                        localDeviceName: localDevice.name, localPairedDevice: localDevice, localDeviceOverview: localOverview,
+                        localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility))
             } catch { return .failure(error) }
         }.value
     }
@@ -3927,8 +3924,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // With nothing else selected, surface a compatibility block so the user can act on it: the
         // remote device whose block was opened from its caption button (which has no workspace to
         // select), otherwise the local daemon if it is incompatible.
-        if let blockDeviceID = visibleCompatibilityBlockDeviceID, let verdict = deviceCompatibility(forDeviceID: blockDeviceID),
-            !verdict.isCompatible
+        if let blockDeviceID = visibleCompatibilityBlockDeviceID, let verdict = deviceCompatibility(forDeviceID: blockDeviceID), !verdict.isCompatible
         {
             showCompatibilityBlock(deviceID: blockDeviceID, verdict: verdict)
             return
@@ -4027,13 +4023,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Wire-protocol verdict for a device section, or `nil` if the device hasn't been handshaken yet.
-    func deviceCompatibility(forDeviceID deviceID: String) -> SpacesWireCompatibility? {
-        deviceSection(id: deviceID)?.compatibility
-    }
+    func deviceCompatibility(forDeviceID deviceID: String) -> SpacesWireCompatibility? { deviceSection(id: deviceID)?.compatibility }
 
-    func deviceDaemonStatus(forDeviceID deviceID: String) -> TerminalServiceDaemonStatus? {
-        deviceSection(id: deviceID)?.daemonStatus
-    }
+    func deviceDaemonStatus(forDeviceID deviceID: String) -> TerminalServiceDaemonStatus? { deviceSection(id: deviceID)?.daemonStatus }
 
     /// If the device whose compatibility block is currently shown is no longer incompatible (e.g. after
     /// a restart updated its daemon), drop the obsolete block and re-resolve the detail pane. Called
@@ -4140,20 +4132,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// staged and applies on the next restart. Non-blocking; surfaced as a quiet caption only.
     static func daemonUpdatePending(status: TerminalServiceDaemonStatus?) -> Bool {
         guard let status else { return false }
-        return isVersion(status.version, olderThan: AppVersion.short)
-    }
-
-    /// Compares dotted numeric version strings (e.g. "0.1.0"). Empty inputs compare equal.
-    static func isVersion(_ lhs: String, olderThan rhs: String) -> Bool {
-        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
-        let lhsParts = lhs.split(separator: ".").map { Int($0) ?? 0 }
-        let rhsParts = rhs.split(separator: ".").map { Int($0) ?? 0 }
-        for index in 0..<max(lhsParts.count, rhsParts.count) {
-            let l = index < lhsParts.count ? lhsParts[index] : 0
-            let r = index < rhsParts.count ? rhsParts[index] : 0
-            if l != r { return l < r }
-        }
-        return false
+        return SpacesWireProtocol.isVersion(status.version, olderThan: AppVersion.short)
     }
 
     static func restartImpactMessage(status: TerminalServiceDaemonStatus?) -> String {

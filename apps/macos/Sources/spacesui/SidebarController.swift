@@ -184,8 +184,7 @@ import workspacecore
         // reload or it keeps showing stale Resolve/update-pending UI.
         let previousLocalSection = host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })
         let localOutlineUnchanged =
-            previousLocalSection?.overview == snapshot.localDeviceOverview
-            && previousLocalSection?.compatibility == snapshot.localCompatibility
+            previousLocalSection?.overview == snapshot.localDeviceOverview && previousLocalSection?.compatibility == snapshot.localCompatibility
             && previousLocalSection?.daemonStatus == snapshot.localDaemonStatus
         let localSection = DeviceSection(
             deviceID: snapshot.localDeviceID, deviceName: snapshot.localDeviceName, isLocal: true, loadState: .loaded,
@@ -275,17 +274,14 @@ import workspacecore
             Task { @MainActor [weak self] in
                 let result: Result<RemoteDeviceLoad, Error> = await Task.detached(priority: .userInitiated) {
                     do {
-                        // Read the frozen-core handshake first: it stays decodable even when a
-                        // wire-incompatible daemon's normal overview payload would not.
-                        let status = try? SpacesDeviceClient.daemonStatus(device: record, clientApp: clientApp)
-                        let compatibility = status.map(SpacesWireCompatibility.evaluate(daemonStatus:))
-                        if let compatibility, !compatibility.isCompatible {
-                            // Lockstep gate: an incompatible device is fully blocked, so do not issue the
-                            // non-frozen-core overview call at all — present it as blocked (no overview).
-                            return .success(RemoteDeviceLoad(overview: nil, daemonStatus: status, compatibility: compatibility))
-                        }
-                        let overview = try SpacesDeviceClient.overview(device: record, clientApp: clientApp)
-                        return .success(RemoteDeviceLoad(overview: overview, daemonStatus: status, compatibility: compatibility))
+                        // Read compatibility from the overview's inline frozen-core status: a compatible
+                        // remote costs one round-trip, and only an incompatible/too-old daemon falls back
+                        // to the standalone handshake — which stays decodable when the overview would not,
+                        // so the device is presented as blocked (no overview) rather than offline.
+                        let resolution = try SpacesDeviceClient.resolveOverview(device: record, clientApp: clientApp)
+                        return .success(
+                            RemoteDeviceLoad(
+                                overview: resolution.overview, daemonStatus: resolution.daemonStatus, compatibility: resolution.compatibility))
                     } catch { return .failure(error) }
                 }.value
                 self?.applyRemoteDeviceSection(deviceID: record.id, result: result)
@@ -311,8 +307,7 @@ import workspacecore
             // updates a remote daemon), so the unchanged-check must include them or the badge/block
             // would keep showing the stale verdict until an unrelated overview change.
             let statusUnchanged =
-                host.deviceSections[index].compatibility == load.compatibility
-                && host.deviceSections[index].daemonStatus == load.daemonStatus
+                host.deviceSections[index].compatibility == load.compatibility && host.deviceSections[index].daemonStatus == load.daemonStatus
             host.deviceSections[index].daemonStatus = load.daemonStatus
             host.deviceSections[index].compatibility = load.compatibility
             // If this device's block was showing and it is now compatible, drop the obsolete block.
@@ -586,9 +581,7 @@ import workspacecore
             // Incompatible devices render an actionable button in the caption (see sidebarSectionRowCell);
             // a compatible-but-older daemon shows a quiet "update pending" caption.
             if section.compatibility?.isCompatible == false { return nil }
-            if AppKitController.daemonUpdatePending(status: section.daemonStatus) {
-                return ("update pending", .tertiaryLabelColor)
-            }
+            if AppKitController.daemonUpdatePending(status: section.daemonStatus) { return ("update pending", .tertiaryLabelColor) }
             return nil
         }
     }
@@ -616,8 +609,7 @@ import workspacecore
             // Device headers are non-selectable, so an incompatible device's only affordance is this
             // caption button, which opens the compatibility block (restart/update) in the detail pane.
             let button = NSButton(
-                title: compatibility == .clientTooOld ? "Update app" : "Resolve", target: self,
-                action: #selector(compatibilityActionClicked(_:)))
+                title: compatibility == .clientTooOld ? "Update app" : "Resolve", target: self, action: #selector(compatibilityActionClicked(_:)))
             button.bezelStyle = .inline
             button.controlSize = .small
             button.font = .systemFont(ofSize: 11, weight: .semibold)

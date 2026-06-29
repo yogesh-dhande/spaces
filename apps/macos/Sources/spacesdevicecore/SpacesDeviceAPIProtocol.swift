@@ -627,19 +627,29 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     public let projects: [SpacesDeviceProjectSummary]
     public let workspaces: [SpacesDeviceWorkspaceSummary]
     public let sessions: [SpacesDeviceTerminalSessionSummary]
+    /// Frozen-core handshake (wire protocol version + restart-impact counts) for the daemon that
+    /// produced this overview. Carried inline so a compatible client reads the compatibility verdict
+    /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
+    /// every refresh. `nil` only when the daemon predates this field; clients fall back to the
+    /// standalone frozen-core `daemonStatus` command (which is also the path used when an
+    /// incompatible daemon's overview cannot decode at all).
+    public let daemonStatus: TerminalServiceDaemonStatus?
 
     public init(
-        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary]
+        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
+        daemonStatus: TerminalServiceDaemonStatus? = nil
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
+        self.daemonStatus = daemonStatus
     }
 
     private enum CodingKeys: String, CodingKey {
         case projects
         case workspaces
         case sessions
+        case daemonStatus
     }
 
     public init(from decoder: any Decoder) throws {
@@ -647,6 +657,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         projects = try container.decodeIfPresent([SpacesDeviceProjectSummary].self, forKey: .projects) ?? []
         workspaces = try container.decodeIfPresent([SpacesDeviceWorkspaceSummary].self, forKey: .workspaces) ?? []
         sessions = try container.decodeIfPresent([SpacesDeviceTerminalSessionSummary].self, forKey: .sessions) ?? []
+        daemonStatus = try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
     }
 }
 
@@ -1286,7 +1297,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
-        case .ping, .daemonStatus, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink, .readTerminalLinkChunk:
+        case .ping, .daemonStatus, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink,
+            .readTerminalLinkChunk:
             true
         default: false
         }

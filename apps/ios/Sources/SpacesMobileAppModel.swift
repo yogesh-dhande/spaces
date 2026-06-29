@@ -484,23 +484,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// that a daemon update is pending and will apply on the next restart.
     var daemonUpdatePending: Bool {
         guard compatibility == .compatible, let status = daemonStatus else { return false }
-        return SpacesMobileAppModel.isVersion(status.version, olderThan: SpacesMobileAppModel.clientAppVersion)
+        return SpacesWireProtocol.isVersion(status.version, olderThan: SpacesMobileAppModel.clientAppVersion)
     }
 
     static let clientAppVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-
-    /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric or empty inputs compare equal.
-    static func isVersion(_ lhs: String, olderThan rhs: String) -> Bool {
-        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
-        let lhsParts = lhs.split(separator: ".").map { Int($0) ?? 0 }
-        let rhsParts = rhs.split(separator: ".").map { Int($0) ?? 0 }
-        for index in 0..<max(lhsParts.count, rhsParts.count) {
-            let l = index < lhsParts.count ? lhsParts[index] : 0
-            let r = index < rhsParts.count ? rhsParts[index] : 0
-            if l != r { return l < r }
-        }
-        return false
-    }
 
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }
@@ -534,25 +521,34 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-        // Read the frozen-core handshake first: it stays decodable even when a wire-incompatible
-        // daemon's normal overview payload would not, so a blocked device shows the restart/update
-        // block instead of a generic connection error.
-        await refreshCompatibility()
-        if isActiveDeviceBlocked {
-            // Fully blocked for this device; skip the normal overview entirely.
-            overview = nil
-            connectionNotice = nil
-            errorMessage = nil
-            return
-        }
         do {
+            // Read compatibility from the overview's inline frozen-core status so the compatible steady
+            // state costs a single round-trip. Only an older daemon (no inline status) or a refresh that
+            // fails entirely falls back to the standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            self.overview = overview
+            if let status = overview.daemonStatus {
+                applyCompatibility(status)
+            } else {
+                await refreshCompatibility()
+            }
+            // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
+            // show the restart/update block, not its stale workspace data.
+            self.overview = isActiveDeviceBlocked ? nil : overview
             connectionNotice = nil
             errorMessage = nil
         } catch is CancellationError {
             return
         } catch {
+            // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
+            // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
+            // incompatible verdict shows the block; otherwise surface the original connection error.
+            await refreshCompatibility()
+            if isActiveDeviceBlocked {
+                overview = nil
+                connectionNotice = nil
+                errorMessage = nil
+                return
+            }
             if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
                 handleAuthenticationFailure(message: recoveryMessage)
                 return
@@ -577,11 +573,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    private func applyCompatibility(_ status: TerminalServiceDaemonStatus) {
+        daemonStatus = status
+        compatibility = SpacesWireCompatibility.evaluate(daemonStatus: status)
+    }
+
+    /// Standalone frozen-core handshake, used only as a fallback when the overview cannot carry the
+    /// inline status (an older daemon) or could not be fetched/decoded at all (incompatible/offline).
     private func refreshCompatibility() async {
         do {
             let status = try await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel)
-            daemonStatus = status
-            compatibility = SpacesWireCompatibility.evaluate(daemonStatus: status)
+            applyCompatibility(status)
         } catch is CancellationError {
             return
         } catch {

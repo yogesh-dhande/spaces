@@ -747,8 +747,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(), pairingStore: SpacesDevicePairingStore? = nil,
         onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -949,12 +948,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             onPairingSucceeded?(clientApp)
             return SpacesDeviceAPIResponse(ok: true, message: "Paired iOS client.", result: .issuedAuthToken(.init(authToken: issuedToken)))
         case .ping: return SpacesDeviceAPIResponse(ok: true, message: "pong")
-        case .daemonStatus:
-            return SpacesDeviceAPIResponse(ok: true, message: "Loaded daemon status.", result: .daemonStatus(try loadDaemonStatus()))
+        case .daemonStatus: return SpacesDeviceAPIResponse(ok: true, message: "Loaded daemon status.", result: .daemonStatus(try loadDaemonStatus()))
         case .requestDaemonRestart:
-            guard let onRestartRequested else {
-                return SpacesDeviceAPIResponse(ok: false, message: "This daemon cannot restart itself.")
-            }
+            guard let onRestartRequested else { return SpacesDeviceAPIResponse(ok: false, message: "This daemon cannot restart itself.") }
             onRestartRequested()
             return SpacesDeviceAPIResponse(ok: true, message: "spacesd is restarting.")
         case .overview:
@@ -1052,31 +1048,49 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     // Frozen-core daemon status: wire protocol numbers plus the restart-impact counts a daemon
-    // restart would destroy. Kept deliberately cheap and store-driven so it works even when the
-    // rest of the protocol is incompatible.
+    // restart would destroy. This standalone path runs its own store scan so it works even when the
+    // rest of the protocol is incompatible (the only time a client issues it). The compatible steady
+    // state never reaches here — the same status rides inline on the overview (see `loadOverview`).
     private func loadDaemonStatus() throws -> TerminalServiceDaemonStatus {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        var runningProcesses = 0
-        var activeAgents = 0
-        var waitingAgents = 0
+        var impact = RestartImpactCounts()
         for project in try store.projects() {
             for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
-                runningProcesses += try store.runningProcesses(workspaceID: workspace.id).filter { $0.status == .running }.count
-                for agent in try store.agentWindows(workspaceID: workspace.id) {
-                    switch agent.status {
-                    case .spinning: activeAgents += 1
-                    case .waiting: waitingAgents += 1
-                    case .idle, .done: break
-                    }
-                }
+                impact.accumulate(
+                    runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
+                    agentWindows: try store.agentWindows(workspaceID: workspace.id))
             }
         }
         let liveTerminals = (try? TerminalSessionCatalog.listLiveSessions().count) ?? 0
-        return TerminalServiceDaemonStatus(
+        return Self.makeDaemonStatus(activeSessionCount: liveTerminals, impact: impact)
+    }
+
+    /// Restart-impact tallies a daemon restart would destroy. Shared by the standalone frozen-core
+    /// `loadDaemonStatus` and the inline status attached to the overview so both report the same
+    /// counts from whichever scan already loaded the records.
+    private struct RestartImpactCounts {
+        var runningProcesses = 0
+        var activeAgents = 0
+        var waitingAgents = 0
+
+        mutating func accumulate(runningProcesses processes: [RunningProcessRecord], agentWindows: [AgentWindowRecord]) {
+            runningProcesses += processes.filter { $0.status == .running }.count
+            for agent in agentWindows {
+                switch agent.status {
+                case .spinning: activeAgents += 1
+                case .waiting: waitingAgents += 1
+                case .idle, .done: break
+                }
+            }
+        }
+    }
+
+    private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
+        TerminalServiceDaemonStatus(
             version: AppVersion.current,
             artifactVersion: ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"].flatMap { $0.isEmpty ? nil : $0 },
-            certificateFingerprint: nil, activeSessionCount: liveTerminals,
-            runningProcesses: runningProcesses, activeAgents: activeAgents, waitingAgents: waitingAgents)
+            certificateFingerprint: nil, activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses,
+            activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents)
     }
 
     private func loadOverview(clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload {
@@ -1099,7 +1113,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
         let sessions = mergedTerminalSessions(localSessions)
         let workspaceRows = try loadWorkspaceTerminalRows(store: store, workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
-        return SpacesDeviceOverviewBuilder.build(projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
+        // Reuse the records the overview already scanned to tally restart impact, so the inline
+        // handshake costs no extra store work on the refresh hot path.
+        var impact = RestartImpactCounts()
+        for descriptor in workspaces { impact.accumulate(runningProcesses: descriptor.runningProcesses, agentWindows: descriptor.agentWindows) }
+        let daemonStatus = Self.makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
+        return SpacesDeviceOverviewBuilder.build(
+            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions, daemonStatus: daemonStatus)
     }
 
     private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
