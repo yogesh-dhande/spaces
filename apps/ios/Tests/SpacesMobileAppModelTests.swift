@@ -21,7 +21,7 @@
             XCTAssertEqual(model.workspaceGroups.first?.rows.count, 2)
 
             model.visibleRowTypes = [.codingAgents]
-            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.title }, ["Feature"])
+            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["feature"])
             XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["Codex"])
 
             model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases)
@@ -30,7 +30,7 @@
 
             model.visibleRunStates = Set([.notStarted, .running, .exited])
             model.searchText = "docs"
-            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.title }, ["Docs"])
+            XCTAssertEqual(model.workspaceGroups.map { $0.workspace.displayName }, ["docs"])
             XCTAssertEqual(model.workspaceGroups.first?.rows.map(\.title), ["shell"])
         }
 
@@ -283,10 +283,75 @@
             XCTAssertEqual(request?.commandName, "openWorkspaceTerminal")
         }
 
+        func testRefreshUsesEmbeddedStatusWithoutSecondHandshake() async {
+            let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version))
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.refresh()
+
+            // The verdict rode inline on the overview, so the compatible steady state makes one round-trip.
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, ["overview"])
+            XCTAssertEqual(model.compatibility, .compatible)
+            XCTAssertEqual(model.daemonStatus?.protocolVersion, SpacesWireProtocol.version)
+            XCTAssertEqual(model.overview, overview)
+            XCTAssertFalse(model.isActiveDeviceBlocked)
+        }
+
+        func testRefreshBlocksOnIncompatibleEmbeddedStatus() async {
+            let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version + 1))
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.refresh()
+
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, ["overview"])
+            XCTAssertTrue(model.isActiveDeviceBlocked)
+            // Blocked: do not surface the incompatible daemon's stale workspace data.
+            XCTAssertNil(model.overview)
+        }
+
+        func testRefreshFallsBackToHandshakeWhenOverviewLacksStatus() async {
+            let overview = makeOverview(daemonStatus: nil)
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "daemonStatus" {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(status))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.refresh()
+
+            // An older daemon without the inline field falls back to the standalone handshake but keeps
+            // the overview that was already fetched.
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, ["overview", "daemonStatus"])
+            XCTAssertEqual(model.compatibility, .compatible)
+            XCTAssertEqual(model.overview, overview)
+        }
+
         private func makeOverview(
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
-            featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil
+            featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil,
+            daemonStatus: TerminalServiceDaemonStatus? = nil
         ) -> SpacesDeviceOverviewPayload {
             let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
             let processRows =
@@ -305,14 +370,14 @@
                         canStop: true, canRestart: true)
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
-                id: "workspace-feature", projectID: project.id, projectName: project.name, title: "Feature", branch: "feature",
+                id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature",
                 baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
                 sessionCount: 1,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
                 terminalRows: [])
             let docs = SpacesDeviceWorkspaceSummary(
-                id: "workspace-docs", projectID: project.id, projectName: project.name, title: "Docs", branch: "docs", baseBranch: "main",
+                id: "workspace-docs", projectID: project.id, projectName: project.name, branch: "docs", baseBranch: "main",
                 dir: "/repo/docs", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
                 processRows: [],
                 codingAgentRows: [],
@@ -321,7 +386,13 @@
                         id: "terminal-shell", workspaceID: "workspace-docs", title: "shell", workingDirectory: "/repo/docs", sessionID: nil,
                         runState: .exited, canOpenTerminal: false)
                 ])
-            return SpacesDeviceOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions)
+            return SpacesDeviceOverviewPayload(
+                projects: [project], workspaces: [feature, docs], sessions: sessions, daemonStatus: daemonStatus)
+        }
+
+        private func daemonStatus(protocolVersion: Int) -> TerminalServiceDaemonStatus {
+            TerminalServiceDaemonStatus(
+                version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
         }
 
         private func makeSession(

@@ -9,16 +9,16 @@ extension OrchestratorTests {
 
     // Tests workspace stop script is seeded from project and can be overridden by arranging representative inputs and asserting the expected result.
     func testWorkspaceStopScriptIsSeededFromProjectAndCanBeOverridden() throws {
+        let repo = try makeTempGitRepo(name: "stop-script-seed")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
-        let project = try orchestrator.addProject(dir: projectDir.path)
+        let project = try orchestrator.addProject(dir: repo.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.stopScript = "echo project-stop" }
 
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
         XCTAssertEqual(try orchestrator.workspaceSettings(workspaceID: workspace.id)?.stopScript, "echo project-stop")
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in settings.stopScript = "echo workspace-stop" }
@@ -38,15 +38,17 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
-        let suggested = try orchestrator.suggestedWorkspaceName(projectID: project.id)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: suggested, branch: suggested)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
 
-        XCTAssertEqual(workspace.title, suggested)
-        XCTAssertEqual(workspace.dirname, suggested)
-        XCTAssertEqual(workspace.branch, suggested)
+        // The display name is the branch; the checkout directory is a generated food
+        // name chosen independently of the branch.
+        XCTAssertEqual(workspace.displayName, "feature")
+        XCTAssertEqual(workspace.branch, "feature")
+        XCTAssertNotNil(workspace.dirname)
+        XCTAssertNotEqual(workspace.dirname, "feature")
 
-        let nextSuggested = try orchestrator.suggestedWorkspaceName(projectID: project.id)
-        XCTAssertNotEqual(nextSuggested, suggested)
+        let next = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-2")
+        XCTAssertNotEqual(next.dirname, workspace.dirname)
     }
 
     // Tests static workspace name suggestion chooses first available food name by arranging representative inputs and asserting the expected result.
@@ -57,15 +59,15 @@ extension OrchestratorTests {
 
     // Tests deferred workspace setup updates state and runs setup script when requested by arranging representative inputs and asserting the expected result.
     func testDeferredWorkspaceSetupUpdatesStateAndRunsSetupScript() throws {
+        let repo = try makeTempGitRepo(name: "deferred-setup")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo ready > .spaces-setup-marker" }
 
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature", runSetupScript: false)
         let pendingState = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
         XCTAssertEqual(pendingState.status, .pending)
 
@@ -80,15 +82,15 @@ extension OrchestratorTests {
 
     // Tests first launch runs deferred workspace setup automatically by arranging a pending setup state and asserting launch completes setup.
     func testLaunchWorkspaceRunsDeferredSetupAutomatically() throws {
+        let repo = try makeTempGitRepo(name: "deferred-launch-setup")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo ready > .spaces-launch-marker" }
 
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature", runSetupScript: false)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
 
         try orchestrator.launchWorkspace(workspaceID: workspace.id)
@@ -100,15 +102,15 @@ extension OrchestratorTests {
     }
 
     func testLaunchWorkspaceArchivedPendingSetupThrowsArchivedWithoutMutatingSetupState() throws {
+        let repo = try makeTempGitRepo(name: "archived-pending-setup")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let project = try orchestrator.addProject(dir: repo.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "echo ready > .spaces-launch-marker" }
 
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature", runSetupScript: false)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
 
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
@@ -131,7 +133,7 @@ extension OrchestratorTests {
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.setupScript = "echo setup stdout; echo setup stderr >&2; exit 7"
         }
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, runSetupScript: false)
 
         try withEnv(name: SpacesProfile.runtimeDirectoryEnvironmentVariable, value: runtimeDir.path) {
             XCTAssertThrowsError(try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)) { error in
@@ -171,7 +173,7 @@ extension OrchestratorTests {
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.setupScript = "echo setup start; (sleep 2; echo background finished) & echo setup end"
         }
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, runSetupScript: false)
 
         let startedAt = Date()
         try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)
@@ -197,31 +199,33 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
-        _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-branch", branch: "feature-branch", baseBranch: "develop")
+        _ = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch", baseBranch: "develop")
 
         let workspaces = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
-        let feature = try XCTUnwrap(workspaces.first(where: { $0.title == "feature-branch" }))
+        let feature = try XCTUnwrap(workspaces.first(where: { $0.displayName == "feature-branch" }))
         XCTAssertEqual(feature.branch, "feature-branch")
         XCTAssertEqual(feature.baseBranch, "develop")
     }
 
     // Tests list workspaces honors include archived flag by arranging representative inputs and asserting the expected result.
     func testListWorkspacesHonorsIncludeArchivedFlag() throws {
+        let repo = try makeTempGitRepo(name: "list-archived")
         let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let project = try orchestrator.addProject(dir: repo.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
 
         let activeOnly = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false)
-        XCTAssertEqual(activeOnly.map(\.title), ["default"])
+        XCTAssertEqual(activeOnly.count, 1)
+        XCTAssertTrue(try XCTUnwrap(activeOnly.first).isDefault)
 
         let all = try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true)
-        XCTAssertEqual(Set(all.map(\.title)), Set(["default", "feature"]))
+        XCTAssertEqual(all.count, 2)
+        XCTAssertEqual(all.filter { !$0.isDefault }.map(\.id), [workspace.id])
     }
 
     func testAlertsDismissedAttentionItemIDsClearsWhenEmpty() throws {
@@ -236,56 +240,6 @@ extension OrchestratorTests {
         XCTAssertNil(try store.setting(key: SettingsKey.alertsDismissedAttentionItems))
     }
 
-    // Tests workspace name can be updated after creation by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceNameUpdatesWorkspaceRecord() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-
-        try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "feature-auth")
-
-        let updated = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertEqual(updated.title, "feature-auth")
-    }
-
-    // Tests workspace name update allows duplicate titles by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceNameAllowsDuplicateWorkspaceName() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let one = try orchestrator.createWorkspace(projectID: project.id, name: "feature-one")
-        _ = try orchestrator.createWorkspace(projectID: project.id, name: "feature-two")
-
-        XCTAssertNoThrow(try orchestrator.updateWorkspaceName(workspaceID: one.id, name: "feature-two"))
-        XCTAssertEqual(try store.workspace(id: one.id)?.title, "feature-two")
-    }
-
-    // Tests default workspace name cannot be changed by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceNameAllowsDefaultWorkspaceRename() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
-
-        XCTAssertNoThrow(try orchestrator.updateWorkspaceName(workspaceID: defaultWorkspace.id, name: "renamed-default"))
-        let updated = try XCTUnwrap(store.workspace(id: defaultWorkspace.id))
-        XCTAssertEqual(updated.title, "renamed-default")
-        XCTAssertTrue(updated.isDefault)
-    }
-
     // Tests workspace metadata update can change title, branch, directory name, and notes by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceMetadataUpdatesTitleBranchDirectoryNameAndNotes() throws {
         let repo = try makeTempGitRepo(name: "workspace-update-metadata")
@@ -294,14 +248,13 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-start")
 
         try orchestrator.updateWorkspaceMetadata(
-            workspaceID: workspace.id, title: "feature-auth", branch: "feature-auth", directoryName: "feature_auth",
-            notes: .some("Reviewing OAuth flow"))
+            workspaceID: workspace.id, branch: "feature-auth", directoryName: "feature_auth", notes: .some("Reviewing OAuth flow"))
 
         let updated = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertEqual(updated.title, "feature-auth")
+        XCTAssertEqual(updated.displayName, "feature-auth")
         XCTAssertEqual(updated.branch, "feature-auth")
         XCTAssertEqual(updated.dirname, "feature_auth")
         XCTAssertEqual(updated.notes, "Reviewing OAuth flow")
@@ -313,29 +266,6 @@ extension OrchestratorTests {
         XCTAssertFalse(branches.split(separator: "\n").contains("feature-start"))
     }
 
-    // Tests default workspace metadata update allows title override while preserving default protections by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceMetadataAllowsDefaultWorkspaceTitleOverride() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let defaultWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
-
-        try orchestrator.updateWorkspaceMetadata(workspaceID: defaultWorkspace.id, title: "Codex Task", notes: .some("Imported from agent"))
-
-        let updated = try XCTUnwrap(store.workspace(id: defaultWorkspace.id))
-        XCTAssertEqual(updated.title, "Codex Task")
-        XCTAssertEqual(updated.notes, "Imported from agent")
-        XCTAssertTrue(updated.isDefault)
-
-        XCTAssertThrowsError(try orchestrator.archiveWorkspace(workspaceID: defaultWorkspace.id)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Default workspace cannot be archived"))
-        }
-    }
-
     // Tests workspace metadata update can clear notes by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceMetadataClearsNotes() throws {
         let root = try makeTempDirectory()
@@ -344,7 +274,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, notes: .some("Investigating timeout regression"))
 
         try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, notes: .some(nil))
@@ -361,7 +291,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: workspace.id)).isHidden)
@@ -378,7 +308,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let mainWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
+        let mainWorkspace = try XCTUnwrap(store.workspaces(projectID: project.id).first)
 
         XCTAssertEqual(mainWorkspace.branch, "main")
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: mainWorkspace.id, branch: "main-renamed")) { error in
@@ -400,7 +330,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let masterWorkspace = try XCTUnwrap(store.workspace(projectID: project.id, title: "default"))
+        let masterWorkspace = try XCTUnwrap(store.workspaces(projectID: project.id).first)
 
         XCTAssertEqual(masterWorkspace.branch, "master")
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: masterWorkspace.id, branch: "master-renamed")) { error in
@@ -478,7 +408,7 @@ extension OrchestratorTests {
                 }
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes = [ProcessTemplate(name: "api", command: "npm run api")]
         }
@@ -642,7 +572,7 @@ extension OrchestratorTests {
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "sleep 1; echo done > .spaces-launch-wait-marker"
         }
 
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "launch-waits", runSetupScript: false)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, runSetupScript: false)
         let setupThread = WorkspaceSetupThread(orchestrator: orchestrator, workspaceID: workspace.id)
         setupThread.start()
 
@@ -662,8 +592,10 @@ extension OrchestratorTests {
 
     // Tests launch workspace rejects archived workspace by arranging representative inputs and asserting the expected result.
     func testLaunchWorkspaceRejectsArchivedWorkspace() throws {
-        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        // The helper's workspace is the project's single (default) workspace; mark it
+        // archived directly so we can exercise launch's archived-workspace rejection.
+        try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
 
         // Mocked dependencies are present only to satisfy adapter calls; launch should fail before launching anything.
         // Remaining risk: launch behavior when partially archived/misaligned runtime state exists is covered elsewhere.
@@ -683,7 +615,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Setup state is seeded automatically.
         let state = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
@@ -712,7 +644,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Default isHidden is false; setting it to false again should be a no-op.
         try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: false)
@@ -732,29 +664,13 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: "Working on API")
         XCTAssertEqual(try store.workspace(id: workspace.id)?.notes, "Working on API")
 
         try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: nil)
         XCTAssertNil(try store.workspace(id: workspace.id)?.notes)
-    }
-
-    // Tests updateWorkspaceMetadata allows duplicate titles by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceMetadataAllowsDuplicateTitle() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let ws1 = try orchestrator.createWorkspace(projectID: project.id, name: "alpha")
-        _ = try orchestrator.createWorkspace(projectID: project.id, name: "beta")
-
-        XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: ws1.id, title: "beta"))
-        XCTAssertEqual(try store.workspace(id: ws1.id)?.title, "beta")
     }
 
     func testManagedWorkspaceReplacementRejectsDirectoryUnderSymlinkedManagedAncestor() throws {
@@ -779,7 +695,7 @@ extension OrchestratorTests {
         XCTAssertNil(try orchestrator.managedWorkspaceReplacementCandidate(projectID: project.id, directoryName: "feature"))
         XCTAssertThrowsError(
             try orchestrator.createWorkspace(
-                projectID: project.id, name: "Feature", branch: "feature", baseBranch: "main", directoryName: "feature", runSetupScript: false,
+                projectID: project.id, branch: "feature", baseBranch: "main", directoryName: "feature", runSetupScript: false,
                 replaceExistingManagedDirectory: true))
         XCTAssertTrue(FileManager.default.fileExists(atPath: outsideMarker.path))
     }
@@ -800,12 +716,12 @@ extension OrchestratorTests {
         try "owner".write(to: ownerMarker, atomically: true, encoding: .utf8)
         try store.upsert(
             workspace: WorkspaceRecord(
-                id: UUID().uuidString, projectID: project.id, title: "Owned", dir: ownedDir.path, dirname: "owned", branch: "owned",
-                baseBranch: "main", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil))
+                id: UUID().uuidString, projectID: project.id, dir: ownedDir.path, dirname: "owned", branch: "owned", baseBranch: "main",
+                isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil))
 
         XCTAssertThrowsError(
             try orchestrator.createWorkspace(
-                projectID: project.id, name: "Feature", branch: "feature", baseBranch: "main", directoryName: "owned", runSetupScript: false,
+                projectID: project.id, branch: "feature", baseBranch: "main", directoryName: "owned", runSetupScript: false,
                 replaceExistingManagedDirectory: true))
         XCTAssertTrue(FileManager.default.fileExists(atPath: ownerMarker.path))
     }
@@ -841,20 +757,6 @@ extension OrchestratorTests {
         XCTAssertTrue(options.contains("main"))
     }
 
-    // Tests updateWorkspaceMetadata throws for empty title by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceMetadataThrowsForEmptyTitle() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-        XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: "   ")) { error in
-            guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-        }
-    }
-
     // Tests updateWorkspaceMetadata throws for empty branch on git project by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceMetadataThrowsForEmptyBranchOnGitProject() throws {
         let repo = try makeTempGitRepo(name: "empty-branch-metadata")
@@ -863,7 +765,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-start")
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, branch: "  ")) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
@@ -877,7 +779,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-start")
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, directoryName: "")) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
@@ -891,49 +793,12 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
-        let ws1 = try orchestrator.createWorkspace(projectID: project.id, name: "feature", branch: "feature-start")
-        let ws2 = try orchestrator.createWorkspace(projectID: project.id, name: "other", branch: "other-branch")
+        let ws1 = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-start")
+        let ws2 = try orchestrator.createWorkspace(projectID: project.id, branch: "other-branch")
         guard let ws1Dirname = ws1.dirname, let ws2Dirname = ws2.dirname else { return }
         XCTAssertNotEqual(ws1Dirname, ws2Dirname)
         // Try to set ws2's dirname to ws1's dirname - should throw duplicate error
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: ws2.id, directoryName: ws1Dirname)) { error in
-            guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
-        }
-    }
-
-    // Tests suggestedWorkspaceName throws when all available names are exhausted by arranging representative inputs and asserting the expected result.
-    func testSuggestedWorkspaceNameThrowsWhenAllNamesExhausted() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-
-        // Insert workspace records for all known food names to exhaust suggestions
-        let allFoodNames = [
-            "almond", "anchovy", "apple", "apricot", "avocado", "bagel", "bacon", "banana", "basil", "bean", "beef", "beet", "berry", "biscuit",
-            "bread", "broccoli", "brownie", "burger", "burrito", "butter", "cabbage", "cacao", "candy", "cantaloupe", "caramel", "carrot", "cashew",
-            "celery", "cereal", "cherry", "cheddar", "cheesecake", "chili", "chips", "chive", "chocolate", "chutney", "cider", "cinnamon", "clove",
-            "cocoa", "coconut", "coffee", "coleslaw", "cookie", "corn", "couscous", "cracker", "cream", "crouton", "cucumber", "cupcake", "curry",
-            "custard", "danish", "dill", "donut", "dumpling", "eclair", "edamame", "egg", "empanada", "endive", "fajita", "falafel", "fig", "flan",
-            "fries", "garlic", "ginger", "gnocchi", "granola", "grape", "gravy", "grits", "guava", "ham", "hazelnut", "honey", "hummus", "icecream",
-            "jam", "jalapeno", "jelly", "kale", "kebab", "ketchup", "kiwi", "kohlrabi", "lasagna", "leek", "lemon", "lentil", "lettuce", "lime",
-            "lobster", "lychee", "macaroni", "macaron", "mango", "maple", "marshmallow", "mascarpone", "mayo", "meatball", "melon", "mint", "mocha",
-            "molasses", "muffin", "mushroom", "mustard", "nacho", "noodle", "nutmeg", "oat", "omelet", "olive", "onion", "orange", "oreo", "pancake",
-            "papaya", "paprika", "parsnip", "pastry", "peach", "peanut", "pear", "peas", "pecan", "pepper", "pesto", "pho", "pickle", "pie",
-            "pineapple", "pita", "pizza", "plum", "poppy", "popcorn", "pork", "potato", "poutine", "pretzel", "prune", "pudding", "pumpkin", "quiche",
-            "quinoa", "radish", "raisin", "ramen", "relish", "rice", "risotto", "roast", "roll", "saffron", "sage", "salad", "salami", "salsa",
-            "salt", "sardine", "sausage", "scone", "seaweed", "sesame", "shallot", "shrimp", "soup", "sorbet", "soy", "spice", "spinach", "squash",
-            "steak", "stew", "sugar", "sushi", "syrup", "taco", "tamarind", "tapioca", "tea", "toffee", "toast", "tofu", "tomato", "tortilla", "tuna",
-            "turkey", "turnip", "vanilla", "vinegar", "waffle", "walnut", "watermelon", "yams", "yogurt", "ziti", "zucchini",
-        ]
-        for name in allFoodNames {
-            let ws = makeWorkspaceRecord(projectID: project.id, title: name, dir: projectDir.path)
-            try store.upsert(workspace: ws)
-        }
-
-        XCTAssertThrowsError(try orchestrator.suggestedWorkspaceName(projectID: project.id)) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
     }
@@ -946,7 +811,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, branch: "new-branch")) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
@@ -960,7 +825,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         XCTAssertThrowsError(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, directoryName: "newdir")) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
@@ -1003,47 +868,13 @@ extension OrchestratorTests {
         let projectRecord = ProjectRecord(id: tempDir, name: "coverage-test", dir: tempDir, isGitRepo: true, defaultBranch: "main")
         try store.upsert(project: projectRecord)
         let workspaceRecord = WorkspaceRecord(
-            id: UUID().uuidString, projectID: tempDir, title: "default", dir: tempDir, dirname: nil, branch: "main", isDefault: true,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: UUID().uuidString, projectID: tempDir, dir: tempDir, dirname: nil, branch: "main", isDefault: true, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
 
         // removeProject exercises isManagedRepositoryDirectory; the temp path is outside the managed root so nothing gets deleted.
         try orchestrator.removeProject(dir: tempDir)
         XCTAssertNil(try store.project(dir: tempDir))
-    }
-
-    // Tests updateWorkspaceName throws invalidArgument when the new name is empty or whitespace-only.
-    func testUpdateWorkspaceNameRejectsEmptyName() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-
-        XCTAssertThrowsError(try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "")) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Workspace name is required"))
-        }
-        XCTAssertThrowsError(try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "   ")) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Workspace name is required"))
-        }
-    }
-
-    // Tests updateWorkspaceName is a no-op when the trimmed name matches the current name.
-    func testUpdateWorkspaceNameIsNoOpWhenNameIsUnchanged() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-
-        // Renaming to the same name should not throw and should not change the record.
-        XCTAssertNoThrow(try orchestrator.updateWorkspaceName(workspaceID: workspace.id, name: "feature"))
-        let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertEqual(fetched.title, "feature")
     }
 
     // Tests updateWorkspaceMetadata with all-nil arguments is a no-op (covers guard didChange else { return }).
@@ -1054,28 +885,12 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // No optional parameters → didChange stays false → guard else return is hit.
         XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id))
         let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertEqual(fetched.title, "feature")
-    }
-
-    // Tests updateWorkspaceMetadata with the same title as current is a no-op (covers trimmedTitle == workspace.title false branch).
-    func testUpdateWorkspaceMetadataWithSameTitleIsNoOp() throws {
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
-
-        // Same title → trimmedTitle == workspace.title → no change, didChange stays false.
-        XCTAssertNoThrow(try orchestrator.updateWorkspaceMetadata(workspaceID: workspace.id, title: "feature"))
-        let fetched = try XCTUnwrap(store.workspace(id: workspace.id))
-        XCTAssertEqual(fetched.title, "feature")
+        XCTAssertEqual(fetched.displayName, workspace.displayName)
     }
 
     // Tests updateWorkspaceMetadata with notes matching the current (nil) is a no-op (covers notes == workspace.notes false branch).
@@ -1086,7 +901,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // notes: .some(nil) — outer optional is present, inner value is nil (same as current nil notes).
         // notes != workspace.notes → nil != nil → false → didChange stays false → guard else return.

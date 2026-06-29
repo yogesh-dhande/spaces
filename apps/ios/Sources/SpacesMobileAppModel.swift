@@ -384,6 +384,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var pairedDevices: [SpacesMobilePairedDeviceRecord]
     var activeDeviceID: String?
     var overview: SpacesDeviceOverviewPayload?
+    /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
+    /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
+    var daemonStatus: TerminalServiceDaemonStatus?
+    var compatibility: SpacesWireCompatibility?
     var isLoading = false
     var isMutating = false
     var isShowingConnectionSettings = false
@@ -455,7 +459,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             guard let firstSession = sessions.first else { return nil }
             let workspace = firstSession.workspaceID.flatMap { workspaceByID[$0] }
             let projectName = workspace?.projectName ?? firstSession.projectName ?? "Unassigned"
-            let workspaceTitle = workspace?.title ?? firstSession.workspaceTitle ?? "Unassigned"
+            let workspaceTitle = workspace?.displayName ?? firstSession.workspaceTitle ?? "Unassigned"
             let workspaceDirectory = workspace?.dir ?? firstSession.workingDirectory
             let orderedSessions = sessions.sorted(by: sessionSort)
 
@@ -469,6 +473,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         .sorted(by: groupSort)
     }
+
+    /// The active device cannot be used until its daemon is restarted/updated or this app updates.
+    var isActiveDeviceBlocked: Bool {
+        guard let compatibility else { return false }
+        return !compatibility.isCompatible
+    }
+
+    /// Compatible, but the daemon reports an older app version than this client — a non-blocking hint
+    /// that a daemon update is pending and will apply on the next restart.
+    var daemonUpdatePending: Bool {
+        guard compatibility == .compatible, let status = daemonStatus else { return false }
+        return SpacesWireProtocol.isVersion(status.version, olderThan: SpacesMobileAppModel.clientAppVersion)
+    }
+
+    static let clientAppVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
 
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }
@@ -503,18 +522,74 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isLoading = true
         defer { isLoading = false }
         do {
+            // Read compatibility from the overview's inline frozen-core status so the compatible steady
+            // state costs a single round-trip. Only an older daemon (no inline status) or a refresh that
+            // fails entirely falls back to the standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            self.overview = overview
+            if let status = overview.daemonStatus {
+                applyCompatibility(status)
+            } else {
+                await refreshCompatibility()
+            }
+            // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
+            // show the restart/update block, not its stale workspace data.
+            self.overview = isActiveDeviceBlocked ? nil : overview
             connectionNotice = nil
             errorMessage = nil
         } catch is CancellationError {
             return
         } catch {
+            // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
+            // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
+            // incompatible verdict shows the block; otherwise surface the original connection error.
+            await refreshCompatibility()
+            if isActiveDeviceBlocked {
+                overview = nil
+                connectionNotice = nil
+                errorMessage = nil
+                return
+            }
             if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
                 handleAuthenticationFailure(message: recoveryMessage)
                 return
             }
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Requests a restart of the active device's daemon. The caller should already have confirmed the
+    /// restart impact with the user. After the daemon respawns, the next refresh re-runs the handshake.
+    func requestDaemonRestart() async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel)
+            connectionNotice = "Restarting the daemon…"
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func applyCompatibility(_ status: TerminalServiceDaemonStatus) {
+        daemonStatus = status
+        compatibility = SpacesWireCompatibility.evaluate(daemonStatus: status)
+    }
+
+    /// Standalone frozen-core handshake, used only as a fallback when the overview cannot carry the
+    /// inline status (an older daemon) or could not be fetched/decoded at all (incompatible/offline).
+    private func refreshCompatibility() async {
+        do {
+            let status = try await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel)
+            applyCompatibility(status)
+        } catch is CancellationError {
+            return
+        } catch {
+            // Could not read the handshake; leave compatibility unknown rather than blocking.
+            daemonStatus = nil
+            compatibility = nil
         }
     }
 
@@ -531,6 +606,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(deviceState.settings)
         overview = nil
+        daemonStatus = nil
+        compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         pendingPairingLink = nil
@@ -547,6 +624,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
+        daemonStatus = nil
+        compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         errorMessage = nil
@@ -563,6 +642,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         SpacesMobileSettingsStore.save(settings)
         overview = nil
+        daemonStatus = nil
+        compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
         Task { await previousCommandChannel.close() }
@@ -613,7 +694,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     func createWorkspace(
         projectID: String,
-        title: String,
         branch: String?,
         baseBranch: String?,
         directoryName: String?,
@@ -624,7 +704,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         defer { isMutating = false }
         do {
             let response = try await bridgeClient.createWorkspace(
-                projectID: projectID, title: title, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
+                projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
             applyMutationResponse(response)
             isShowingWorkspaceCreateSheet = false
@@ -737,14 +817,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
         guard visibleRowTypes.contains(row.type), visibleRunStates.contains(row.runState) else { return false }
         guard !query.isEmpty else { return true }
-        return [workspace.projectName, workspace.title, workspace.dir, row.title, row.detail].contains { value in
+        return [workspace.projectName, workspace.displayName, workspace.dir, row.title, row.detail].contains { value in
             value.localizedStandardContains(query)
         }
     }
 
     private func workspaceMatchesSearch(_ workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
         guard !query.isEmpty else { return true }
-        return [workspace.projectName, workspace.title, workspace.dir].contains { $0.localizedStandardContains(query) }
+        return [workspace.projectName, workspace.displayName, workspace.dir].contains { $0.localizedStandardContains(query) }
     }
 
     private func terminalSessionMatchesFilters(_ session: SpacesDeviceTerminalSessionSummary, query: String) -> Bool {
@@ -792,7 +872,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             servicePID: 0,
             childPID: nil,
             workspaceID: row.workspaceID,
-            workspaceTitle: workspace?.title,
+            workspaceTitle: workspace?.displayName,
             projectID: workspace?.projectID,
             projectName: workspace?.projectName,
             createdAt: timestamp,

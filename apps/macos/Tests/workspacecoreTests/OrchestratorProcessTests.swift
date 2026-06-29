@@ -57,7 +57,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create a process with a PID that doesn't exist
         let deadProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
@@ -80,7 +80,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create a process that just started (within grace period)
         let newProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
@@ -104,7 +104,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let recentDeadProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
             terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
@@ -159,7 +159,7 @@ extension OrchestratorTests {
         Thread.sleep(forTimeInterval: 0.2)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let zombieProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
             terminalTrackingID: "workspace-session", terminalNativeID: "spaces-terminal", pid: zombiePID, status: .running, logPath: nil,
@@ -183,7 +183,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create a process without a PID (still starting up)
         let noPidProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
@@ -205,7 +205,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create an already-exited process
         let exitedProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
@@ -253,7 +253,7 @@ extension OrchestratorTests {
                 openCapture.modes.append(mode)
             })
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
@@ -289,7 +289,7 @@ extension OrchestratorTests {
                     controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
             })
         let project = makeProjectRecord(dir: projectDir.path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir.path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir.path)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -314,7 +314,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -333,7 +333,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         let sessionID = "spaces-process-session"
@@ -391,7 +391,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -452,7 +452,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -522,7 +522,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -583,7 +583,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1005,7 +1005,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
@@ -1041,7 +1041,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         let sessionID = "spaces-session-stop-1"
@@ -1075,7 +1075,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-session-stop-1"
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
@@ -1102,7 +1102,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "process-session-close-1"
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
@@ -1248,7 +1248,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         let sessionID = "spaces-session-stop-process-1"
         let processID = UUID().uuidString
@@ -1285,7 +1285,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -1313,7 +1313,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         let markerFile = root.appendingPathComponent("stop-marker.txt")
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1332,7 +1332,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = makeProjectRecord(dir: "/nonexistent/project/path")
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: "/nonexistent/project/path/feature")
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/nonexistent/project/path/feature")
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
@@ -1355,7 +1355,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Mark workspace as running with a tracked process.
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
@@ -1382,7 +1382,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Add port definitions so that portDefinitions.count > 0 with no ports allocated yet.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
@@ -1406,7 +1406,7 @@ extension OrchestratorTests {
         let workspaceDir = root.appendingPathComponent("workspace", isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Set a stop script that would fail if the directory doesn't exist.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in settings.stopScript = "echo stopped" }
@@ -1414,7 +1414,7 @@ extension OrchestratorTests {
         // Mark workspace as running so stop can proceed.
         var runningWorkspace = workspace
         runningWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: "/nonexistent/workspace-\(UUID().uuidString)",
+            id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)",
             dirname: workspace.dirname, branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault,
             isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
@@ -1434,7 +1434,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Insert a tracked "editor" window (non-browser, non-Spaces) so lines 702-705 are reached.
         let editorWindow = WindowRecord(
@@ -1444,7 +1444,7 @@ extension OrchestratorTests {
 
         // Mark workspace as running.
         let runningWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, title: workspace.title, dir: projectDir.path, dirname: workspace.dirname,
+            id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname,
             branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
             isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
@@ -1482,7 +1482,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         // Insert a process with a dead PID but very recent startedAt (within 10-second grace)
         let recentStart = ISO8601DateFormatter().string(from: Date())
@@ -1504,7 +1504,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes = [ProcessTemplate(name: "web", command: "sleep 1", onExit: .none)]
@@ -1562,7 +1562,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.updateWorkspaceArchived(id: workspace.id, isArchived: true)
 
         XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id)) { error in

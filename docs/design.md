@@ -68,6 +68,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Keep status indicators small, consistent, and easy to scan.
 - Use color to reinforce meaning, not to carry meaning alone.
 - Surface actionable state near the affected item.
+- Daemon-compatibility uses two distinct surfaces scoped to a single device. A blocking surface replaces that device's detail content with an orange-accented card: warning icon, title, one-line explanation, the restart-impact counts, and a single Restart action (omit the action when the fix is updating the app instead). A quiet variant is a muted "update pending" caption that never blocks. Badge an incompatible or update-pending device inline in the device list/selector so it reads before the user navigates into it. Keep other paired devices fully interactive.
 
 ## Icons And Chips
 - Use icons for obvious actions and state.
@@ -97,14 +98,14 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Draft items should enter editing immediately.
 - Canceling a never-saved draft should remove the row rather than leaving placeholder data behind.
 - Detached modal editors should be reserved for edits that are too large, risky, or complex for inline treatment.
-- For single-value labels such as a workspace title or a connected-device name, rename in place: a right-click context menu (long-press on iOS) offers Rename, which swaps the label for a text field seeded with the current value. Return commits, Esc reverts, and there are no separate Save/Cancel buttons. A title may also enter this state on double-click.
+- For single-value labels such as a connected-device name, rename in place: a right-click context menu (long-press on iOS) offers Rename, which swaps the label for a text field seeded with the current value. Return commits, Esc reverts, and there are no separate Save/Cancel buttons. The label may also enter this state on double-click. Workspace names are not renamed this way: a git workspace shows its branch and a non-git workspace shows its folder name, both read-only.
 
 ## Navigation
 - Navigation should stay quiet, stable, and predictable.
 - Selection should be obvious without becoming loud.
 - Secondary actions in navigation should remain visually subordinate until hover or selection makes them relevant.
 - Navigation rows should prioritize quick scanning over descriptive prose.
-- Example: the current sidebar uses compact single-line project and workspace rows, reserving secondary metadata such as the git branch for the detail views.
+- Example: the current sidebar uses compact single-line project and workspace rows. A git workspace row is labeled with its branch; a non-git project owns a single workspace and collapses to one flat row labeled with its folder name, with no disclosure chevron and no nested workspace row, so the folder name is not duplicated across a header and a child.
 
 ## Overflow Menus
 - Use a trailing `⋯` overflow button for contextual actions that do not deserve persistent visibility.

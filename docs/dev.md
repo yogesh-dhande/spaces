@@ -49,7 +49,7 @@ apps/macos/.build/debug/SpacesApp
 apps/macos/.build/debug/spaces --help
 apps/macos/.build/debug/spacese2e --help
 apps/macos/.build/debug/spaces project list
-apps/macos/.build/debug/spaces workspace create --project <project-id> --branch debug --title "debug"
+apps/macos/.build/debug/spaces workspace create --project <project-id> --branch debug
 apps/macos/.build/debug/spaces workspace restart --workspace <workspace-id>
 ```
 
@@ -78,7 +78,9 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 - `apps/macos/.local/ghosttyvt/lib`
 
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
-By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version, and records a clean source build. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When the downloaded release artifact validates except for a different Xcode build, default setup leaves the download uninstalled and builds locally from the pinned submodule. The `--download-only` mode used by CI and publishing workflows is download-only and fails on an Xcode build mismatch.
+By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version, and records a clean source build. When the worktree-local artifacts do not match, default setup next checks a shared, content-addressed cache and restores from it with a local copy before falling back to a download. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When the downloaded release artifact validates except for a different Xcode build, default setup leaves the download uninstalled and builds locally from the pinned submodule. The `--download-only` mode used by CI and publishing workflows is download-only and fails on an Xcode build mismatch.
+
+The shared cache lives at `$SPACES_GHOSTTY_CACHE_DIR` (default `apps/macos/.local/ghostty-cache`), keyed by `<ghostty-sha>/<xcode-build>-<arch>-<build-optimize>`. Each entry mirrors the installed `ghosttykit`, `ghosttyvt/include`, `ghosttyvt/lib`, and `ghostty-artifacts` trees (the Zig toolchain is not cached) and is validated against the same manifest fields before a restore. Every successful clean setup seeds the cache, so a worktree on a SHA the main checkout already built restores by local copy instead of redownloading or rebuilding. Worktree setup (`spaces.yaml`) points `SPACES_GHOSTTY_CACHE_DIR` at the main checkout (`$SPACES_PROJECT_DIR/apps/macos/.local/ghostty-cache`) so all worktrees share one store. Dirty builds (`--build --allow-dirty`) stay local to their worktree and are never written to the shared cache.
 The setup flow finishes by running `apps/macos/scripts/verify_ghosttykit.sh`, which checks that the artifact declares and exports the embedded terminal APIs that Spaces uses for raw I/O, host rebinding, session state callbacks, renderer attachment, headless session creation, render-frame export, and mirror renderer surfaces. Passive-viewer attachment exports are not part of the required contract.
 
 When a Spaces branch depends on Ghostty fork work, edit and commit the fork change inside the submodule, push it to the fork's `spaces` branch, and update the parent repo's submodule pointer:
@@ -93,7 +95,7 @@ PR checks run `apps/macos/scripts/ensure_ghostty_artifacts.sh`, so existing `gho
 
 ```bash
 git -C apps/macos/vendor/ghostty rev-parse HEAD
-rm -rf apps/macos/.local/ghosttykit apps/macos/.local/ghosttyvt
+rm -rf apps/macos/.local/ghosttykit apps/macos/.local/ghosttyvt apps/macos/.local/ghostty-cache
 apps/macos/scripts/setup_ghostty.sh
 scripts/verify.sh
 ```

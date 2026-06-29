@@ -719,6 +719,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
+    /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon process exits and
+    /// is respawned by launchd `KeepAlive` / systemd `Restart=always` from the updated binary.
+    private let onRestartRequested: (@Sendable () -> Void)?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
@@ -754,7 +757,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(), pairingStore: SpacesDevicePairingStore? = nil,
         onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -764,6 +767,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.onRestartRequested = onRestartRequested
         overviewLoaderForTesting = nil
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
         #if canImport(Network) && canImport(Security)
@@ -781,6 +785,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil
     ) {
@@ -793,6 +798,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.onRestartRequested = onRestartRequested
         self.overviewLoaderForTesting = overviewLoaderForTesting
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
@@ -909,15 +915,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return
         }
         overviewStreamServer = server
-        overviewDatabaseChangeObserver = NotificationCenter.default.addObserver(
-            forName: IPCNotification.databaseDidChange, object: nil, queue: nil
-        ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
+        overviewDatabaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
+            [weak self] _ in self?.scheduleOverviewBroadcast()
+        }
         // Terminal runtime/title/exit state lives outside the database, so it does not
         // raise databaseDidChange. Observe the dedicated terminal-overview signal so
         // those changes still push a fresh overview to subscribers.
-        overviewTerminalChangeObserver = NotificationCenter.default.addObserver(
-            forName: TerminalOverviewSignal.name, object: nil, queue: nil
-        ) { [weak self] _ in self?.scheduleOverviewBroadcast() }
+        overviewTerminalChangeObserver = NotificationCenter.default.addObserver(forName: TerminalOverviewSignal.name, object: nil, queue: nil) {
+            [weak self] _ in self?.scheduleOverviewBroadcast()
+        }
         #if canImport(Network) && canImport(Security)
             overviewDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
@@ -1029,6 +1035,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             onPairingSucceeded?(clientApp)
             return SpacesDeviceAPIResponse(ok: true, message: "Paired iOS client.", result: .issuedAuthToken(.init(authToken: issuedToken)))
         case .ping: return SpacesDeviceAPIResponse(ok: true, message: "pong")
+        case .daemonStatus: return SpacesDeviceAPIResponse(ok: true, message: "Loaded daemon status.", result: .daemonStatus(try loadDaemonStatus()))
+        case .requestDaemonRestart:
+            guard let onRestartRequested else { return SpacesDeviceAPIResponse(ok: false, message: "This daemon cannot restart itself.") }
+            onRestartRequested()
+            return SpacesDeviceAPIResponse(ok: true, message: "spacesd is restarting.")
         case .overview:
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.", result: .overview(try loadOverview(clientApp: request.clientApp)))
@@ -1126,6 +1137,52 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return clientID
     }
 
+    // Frozen-core daemon status: wire protocol numbers plus the restart-impact counts a daemon
+    // restart would destroy. This standalone path runs its own store scan so it works even when the
+    // rest of the protocol is incompatible (the only time a client issues it). The compatible steady
+    // state never reaches here — the same status rides inline on the overview (see `loadOverview`).
+    private func loadDaemonStatus() throws -> TerminalServiceDaemonStatus {
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        var impact = RestartImpactCounts()
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+                impact.accumulate(
+                    runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
+                    agentWindows: try store.agentWindows(workspaceID: workspace.id))
+            }
+        }
+        let liveTerminals = (try? TerminalSessionCatalog.listLiveSessions().count) ?? 0
+        return Self.makeDaemonStatus(activeSessionCount: liveTerminals, impact: impact)
+    }
+
+    /// Restart-impact tallies a daemon restart would destroy. Shared by the standalone frozen-core
+    /// `loadDaemonStatus` and the inline status attached to the overview so both report the same
+    /// counts from whichever scan already loaded the records.
+    private struct RestartImpactCounts {
+        var runningProcesses = 0
+        var activeAgents = 0
+        var waitingAgents = 0
+
+        mutating func accumulate(runningProcesses processes: [RunningProcessRecord], agentWindows: [AgentWindowRecord]) {
+            runningProcesses += processes.filter { $0.status == .running }.count
+            for agent in agentWindows {
+                switch agent.status {
+                case .spinning: activeAgents += 1
+                case .waiting: waitingAgents += 1
+                case .idle, .done: break
+                }
+            }
+        }
+    }
+
+    private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
+        TerminalServiceDaemonStatus(
+            version: AppVersion.current,
+            artifactVersion: ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"].flatMap { $0.isEmpty ? nil : $0 },
+            certificateFingerprint: nil, activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses,
+            activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents)
+    }
+
     private func loadOverview(clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload {
         if let overviewLoaderForTesting { return try overviewLoaderForTesting(clientApp) }
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
@@ -1146,7 +1203,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
         let sessions = mergedTerminalSessions(localSessions)
         let workspaceRows = try loadWorkspaceTerminalRows(store: store, workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
-        return SpacesDeviceOverviewBuilder.build(projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions)
+        // Reuse the records the overview already scanned to tally restart impact, so the inline
+        // handshake costs no extra store work on the refresh hot path.
+        var impact = RestartImpactCounts()
+        for descriptor in workspaces { impact.accumulate(runningProcesses: descriptor.runningProcesses, agentWindows: descriptor.agentWindows) }
+        let daemonStatus = Self.makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
+        return SpacesDeviceOverviewBuilder.build(
+            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions, daemonStatus: daemonStatus)
     }
 
     private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
@@ -1457,9 +1520,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private static func decodePreparedGitProject(handle: String) throws -> WorkspaceOrchestrator.PreparedGitProjectImport {
-        guard let data = Data(base64Encoded: handle) else {
-            throw WorkspaceError.invalidArgument(message: "Invalid prepared git project handle.")
-        }
+        guard let data = Data(base64Encoded: handle) else { throw WorkspaceError.invalidArgument(message: "Invalid prepared git project handle.") }
         return try JSONDecoder().decode(WorkspaceOrchestrator.PreparedGitProjectImport.self, from: data)
     }
 
@@ -1485,17 +1546,49 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func handleCreateWorkspaceRequest(_ request: SpacesDeviceWorkspaceCreateRequest) throws -> SpacesDeviceAPIResponse {
         let projectID = request.projectID
-        let title = request.title
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
         let project = try store.project(id: projectID)
+        // Create the workspace record and worktree synchronously, but leave the setup script
+        // deferred (status `.pending`). A long-running setup script (e.g. a full build) would
+        // otherwise block this request well past the client's request timeout, leaving the New
+        // Workspace form stuck on "Creating...". Running setup in the background lets the response
+        // return immediately so the UI can navigate to the workspace and stream its setup log.
         let workspace = try orchestrator.createWorkspace(
-            projectID: projectID, name: title, branch: normalizedString(request.branch), baseBranch: normalizedString(request.baseBranch),
-            directoryName: normalizedString(request.directoryName), runSetupScript: true, allowRemoteBranchLookup: true,
+            projectID: projectID, branch: normalizedString(request.branch), baseBranch: normalizedString(request.baseBranch),
+            directoryName: normalizedString(request.directoryName), runSetupScript: false, allowRemoteBranchLookup: true,
             allowExistingBranchReuse: request.allowExistingBranchReuse)
         if let notes = normalizedOptionalString(request.notes) { try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes) }
-        let message = "Created workspace '\(workspace.title)'\(project.map { " in \($0.name)" } ?? "")."
+        runWorkspaceSetupInBackground(workspaceID: workspace.id)
+        let message = "Created workspace '\(workspace.displayName)'\(project.map { " in \($0.name)" } ?? "")."
         return try refreshedMutationResponse(message: message, workspaceID: workspace.id)
+    }
+
+    /// Runs a newly created workspace's deferred setup script on a background queue.
+    ///
+    /// Mirrors `finishReservedWorkspaceTerminalLaunchInBackground`: a fresh store and orchestrator
+    /// are created inside the closure so only the `Sendable` workspace ID is captured. The setup
+    /// state machine (`.pending` -> `.running` -> `.succeeded`/`.failed`) and the setup log are
+    /// owned by `runWorkspaceSetup`, so progress and failures remain observable through the normal
+    /// workspace setup detail UI without this request blocking on completion.
+    private func runWorkspaceSetupInBackground(workspaceID: String) {
+        let launcher = builtInTerminalSessionLauncher
+        let terminator = builtInTerminalSessionTerminator
+        let traceEnabled = traceEnabled
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                let orchestrator = WorkspaceOrchestrator(
+                    store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionTerminator: terminator,
+                    builtInTerminalSessionLauncher: launcher)
+                try orchestrator.runWorkspaceSetup(workspaceID: workspaceID)
+            } catch {
+                guard traceEnabled else { return }
+                let message = String(describing: error).replacingOccurrences(of: "\n", with: "\\n")
+                FileHandle.standardOutput.write(
+                    Data("spaces-device-api-trace workspace_background_setup_error workspace=\(workspaceID) error=\(message)\n".utf8))
+            }
+        }
     }
 
     private func handleLaunchWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest) throws -> SpacesDeviceAPIResponse {
@@ -1558,12 +1651,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func handleUpdateWorkspaceMetadataRequest(_ request: SpacesDeviceWorkspaceMetadataUpdateRequest) throws -> SpacesDeviceAPIResponse {
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
-        if request.updatesTitle {
-            guard let title = normalizedString(request.title) else {
-                return SpacesDeviceAPIResponse(ok: false, message: "Workspace title is required.")
-            }
-            try orchestrator.updateWorkspaceName(workspaceID: request.workspaceID, name: title)
-        }
         if request.updatesBranch {
             try orchestrator.updateWorkspaceMetadata(workspaceID: request.workspaceID, branch: normalizedString(request.branch) ?? "")
         }
@@ -1919,8 +2006,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     #if canImport(Network) && canImport(Security)
         private func handleSubscribeRequest(_ request: SpacesDeviceAPIRequest, connection: NWConnection) throws {
             if request.command.isDeviceOverviewSubscription {
-                try relayOverviewSubscription(
-                    connection: connection, installationID: request.clientApp?.installationID ?? "")
+                try relayOverviewSubscription(connection: connection, installationID: request.clientApp?.installationID ?? "")
                 return
             }
             guard let sessionID = request.sessionID else {
@@ -2135,7 +2221,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 }
             }
         }
-
 
         private func closeStreamRelay(connection: NWConnection, cancelNetworkConnection: Bool = true) {
             let key = ObjectIdentifier(connection)

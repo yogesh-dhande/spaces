@@ -51,8 +51,8 @@ protocol ProcessLifecyclePolicyController {
 extension ProcessInfo: ProcessLifecyclePolicyController {}
 
 @MainActor
-public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitViewDelegate,
-    NSWindowDelegate, NSTextFieldDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
+public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitViewDelegate, NSWindowDelegate, NSTextFieldDelegate,
+    NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
 {
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
@@ -82,7 +82,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private enum InlineWorkspaceDetailField {
-        case title
         case branch
         case notes
     }
@@ -194,6 +193,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var deviceSections: [DeviceSection] = []
     var alertsGroups: [AlertsGroup] = []
     var visibleDetailWorkspaceID: String?
+    /// Device whose compatibility block is currently shown in the detail pane (when no workspace is
+    /// selected). Lets the block survive background sidebar reloads instead of being replaced.
+    var visibleCompatibilityBlockDeviceID: String?
 
     var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
@@ -202,9 +204,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     // Clearing any reload blocker (unsaved project settings, an open add form) can
     // happen from several paths; flushing here covers them all so a deferred
     // database/worktree reload is never stranded once the user is idle again.
-    private var projectHasUnsavedChanges = false {
-        didSet { if oldValue, !projectHasUnsavedChanges { flushDeferredSidebarReloadsIfNeeded() } }
-    }
+    private var projectHasUnsavedChanges = false { didSet { if oldValue, !projectHasUnsavedChanges { flushDeferredSidebarReloadsIfNeeded() } } }
     var showingSettings = false
 
     private var hotkeyHandler: EventHandlerRef?
@@ -295,12 +295,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var inlineWorkspaceFieldTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceLabelTagByObjectID: [ObjectIdentifier: Int] = [:]
     private var inlineWorkspaceOutsideClickMonitor: Any?
-    var activeAddWorkspaceFormTag: Int? {
-        didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } }
-    }
-    var activeAddProjectFormTag: Int? {
-        didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } }
-    }
+    var activeAddWorkspaceFormTag: Int? { didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
+    var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
@@ -644,12 +640,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let object = notification.object as? String
         guard let workspaceID = notification.userInfo?[IPCNotification.workspaceIDUserInfoKey] as? String else { return }
         guard let name = notification.userInfo?[IPCNotification.workspaceTargetNameUserInfoKey] as? String else { return }
-        let requestID = (notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestID = (notification.userInfo?[IPCNotification.focusRequestIDUserInfoKey] as? String)?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
         Task { @MainActor [weak self, object, workspaceID, name, requestID] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
-            await self.focusWorkspaceProcess(
-                workspaceID: workspaceID, processName: name, requestID: (requestID?.isEmpty == false) ? requestID : nil)
+            await self.focusWorkspaceProcess(workspaceID: workspaceID, processName: name, requestID: (requestID?.isEmpty == false) ? requestID : nil)
         }
     }
 
@@ -666,15 +661,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The workspace's focusable targets plus the context needed to name and resolve them,
     /// using the same ordering and (all configured) browser sessions as the numbered
     /// shortcuts so by-name focus, the names dump, and Cmd-N stay consistent.
-    private func focusableWindowContext(workspaceID: String)
-        -> (
-            detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
-            targets: [WorkspaceRunShortcutTarget]
-        )?
-    {
-        guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else {
-            return nil
-        }
+    private func focusableWindowContext(workspaceID: String) -> (
+        detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
+        targets: [WorkspaceRunShortcutTarget]
+    )? {
+        guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else { return nil }
         let browserSessions = detail.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:))
         let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: browserSessions)
         return (detail, overview, browserSessions, targets)
@@ -699,9 +690,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// dump IPC lets harnesses read it instead of recomputing it from daemon data.
     func focusableWindowNames(workspaceID: String) -> [String] {
         guard let context = focusableWindowContext(workspaceID: workspaceID) else { return [] }
-        return context.targets.compactMap {
-            Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions)
-        }
+        return context.targets.compactMap { Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions) }
     }
 
     private struct FocusableWindowNamesDump: Codable { let names: [String] }
@@ -727,8 +716,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         guard let context = focusableWindowContext(workspaceID: workspaceID),
             let target = context.targets.first(where: {
-                Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions)
-                    .map { Self.normalizedRunRowName($0) == Self.normalizedRunRowName(name) } ?? false
+                Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
+                    Self.normalizedRunRowName($0) == Self.normalizedRunRowName(name)
+                } ?? false
             })
         else {
             logResult(false)
@@ -788,8 +778,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // success and failure (matching the orchestrator's format) — it is a parsed surface.
         func logCycleMetric(target: String, success: Bool) {
             TerminalPerformance.logWorkspaceMetric(
-                "window_cycle", workspaceID: workspaceID, target: target, elapsedMS: windowShortcutElapsedMS(since: cycleStartedAt),
-                success: success, detail: "direction=\(direction)")
+                "window_cycle", workspaceID: workspaceID, target: target, elapsedMS: windowShortcutElapsedMS(since: cycleStartedAt), success: success,
+                detail: "direction=\(direction)")
         }
         guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else {
             logCycleMetric(target: "none", success: false)
@@ -867,11 +857,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         switch action {
         case .focus(let value), .open(let value): hidesApp = value
         }
-        if hidesApp {
-            hideAfterSuccessfulExternalWindowAction(action)
-        } else {
-            commandPalette.dismissCommandPaletteForBuiltInWindowNavigation()
-        }
+        if hidesApp { hideAfterSuccessfulExternalWindowAction(action) } else { commandPalette.dismissCommandPaletteForBuiltInWindowNavigation() }
     }
 
     private func validCycleSession(workspaceID: String) -> WorkspaceWindowCycle.CycleSession? {
@@ -961,13 +947,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 self.logWorkspaceDetailIPC("workspace_not_found id=\(workspaceID)")
                 return
             }
-            self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.title)")
+            self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.displayName)")
             self.showingAlerts = false
             self.showingSettings = false
             self.selectWorkspace(workspace)
             self.refreshSelection()
             if let window = self.window { self.revealTargetedHotkeyWindow(window) }
-            self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.title)")
+            self.logWorkspaceDetailIPC("selected id=\(workspaceID) title=\(workspace.displayName)")
         }
     }
 
@@ -1871,8 +1857,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Stops an ad hoc built-in terminal session through the owning daemon's Device API.
     private func stopAdHocTerminalSession(sessionID: String) {
-        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID),
-            let device = deviceForWorkspaceMutation(workspaceID: workspaceID)
+        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID), let device = deviceForWorkspaceMutation(workspaceID: workspaceID)
         else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1973,26 +1958,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// sidebar does not stay stale until an unrelated reload. Runs on the next
     /// run-loop turn so the first responder has settled before the guard re-checks.
     private func setupTextInputDidEndEditingObserver() {
-        textInputDidEndEditingObserver = NotificationCenter.default.addObserver(
-            forName: NSText.didEndEditingNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Self.scheduleAfterNextRunLoopTurn { self?.flushDeferredSidebarReloadsIfNeeded() }
-        }
+        textInputDidEndEditingObserver = NotificationCenter.default.addObserver(forName: NSText.didEndEditingNotification, object: nil, queue: .main)
+        { [weak self] _ in Self.scheduleAfterNextRunLoopTurn { self?.flushDeferredSidebarReloadsIfNeeded() } }
     }
 
     /// Flushes sidebar reloads that were deferred because the user was mid-edit.
     /// Reload triggers (the daemon's `databaseDidChange`) are one-shot, so this
     /// runs at natural idle points (forms closing, app re-activation) in place of
     /// the old poll re-check.
-    func flushDeferredSidebarReloadsIfNeeded() {
-        sidebar.flushPendingDatabaseReloadIfNeeded()
-    }
-
+    func flushDeferredSidebarReloadsIfNeeded() { sidebar.flushPendingDatabaseReloadIfNeeded() }
 
     func canReloadAfterBackgroundWorkspaceRefresh() -> Bool {
         !projectHasUnsavedChanges && activeAddWorkspaceFormTag == nil && activeAddProjectFormTag == nil && !isTextInputFocused()
     }
-
 
     private enum AddWorkspaceBranchMode: String {
         case existing
@@ -2001,10 +1979,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private struct WorkspaceCreateInput: Sendable {
         let projectID: String
-        let name: String
         let branch: String?
         let baseBranch: String?
-        let directoryName: String?
         let notes: String?
         let allowRemoteBranchLookup: Bool
         let allowExistingBranchReuse: Bool
@@ -2021,6 +1997,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let localDeviceName: String
         let localPairedDevice: SpacesPairedDeviceRecord
         let localDeviceOverview: SpacesDeviceOverviewPayload
+        let localDaemonStatus: TerminalServiceDaemonStatus?
+        let localCompatibility: SpacesWireCompatibility?
     }
 
     enum SidebarDeviceLoadState: Sendable, Equatable {
@@ -2043,6 +2021,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
         var alertsGroups: [AlertsGroup] = []
         var overview: SpacesDeviceOverviewPayload?
+        /// Frozen-core handshake read for this device, refreshed alongside the overview. `nil` until
+        /// the first successful handshake; drives the per-device compatibility banner and gating.
+        var daemonStatus: TerminalServiceDaemonStatus?
+        var compatibility: SpacesWireCompatibility?
     }
 
     enum BackgroundRefreshFailureAction: Equatable {
@@ -2244,7 +2226,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func effectiveMainWindowVisibilityForHotkeyState() -> Bool {
         Self.effectiveMainWindowVisibilityForHotkeyState(
             rawMainWindowIsVisible: rawMainWindowVisibility(),
-            commandPaletteMainWindowVisibility: commandPalette.commandPaletteMainWindowVisibility ?? commandPalette.pendingCommandPalettePresentation?.mainWindowWasVisible)
+            commandPaletteMainWindowVisibility: commandPalette.commandPaletteMainWindowVisibility
+                ?? commandPalette.pendingCommandPalettePresentation?.mainWindowWasVisible)
     }
 
     static func alertsIconColor(_ tint: AlertsIconTint) -> NSColor {
@@ -2314,9 +2297,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
     }
 
-    nonisolated private static func discardPreparedGitProjectResult(preparedGitProjectHandle: String, device: SpacesPairedDeviceRecord) async -> Result<
-        Void, Error
-    > {
+    nonisolated private static func discardPreparedGitProjectResult(preparedGitProjectHandle: String, device: SpacesPairedDeviceRecord) async
+        -> Result<Void, Error>
+    {
         await Task.detached(priority: .utility) {
             do {
                 _ = try SpacesDeviceClient.discardPreparedGitProject(
@@ -2354,8 +2337,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     items.append(
                         AlertsAttentionEntry(
                             attentionID: "alert:\(deviceID):process:\(process.processID ?? process.id):\(process.exitedAt ?? "unknown")",
-                            icon: "terminal", iconTint: .terminal, label: process.name, detail: process.command, shortcut: "",
-                            processStatus: .exited, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
+                            icon: "terminal", iconTint: .terminal, label: process.name, detail: process.command, shortcut: "", processStatus: .exited,
+                            agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
                             focusRequest: process.processID.map { .workspaceProcess(workspaceID: workspace.id, processID: $0) }))
                 }
             }
@@ -2378,8 +2361,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             groups.append(
                 AlertsGroup(
-                    projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.title, workspaceBranch: workspace.branch,
-                    items: items))
+                    projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.displayName,
+                    workspaceBranch: workspace.branch, items: items))
         }
         groups.sort {
             switch ($0.latestDate, $1.latestDate) {
@@ -2403,14 +2386,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let deviceClientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
                 let localDevice = try SpacesDeviceClient.bootstrapLocalDevice(
                     database: SpacesClientDatabase.defaultDatabase(), clientApp: deviceClientApp)
-                let localOverview = try SpacesDeviceClient.overview(device: localDevice, clientApp: deviceClientApp)
-                let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: localOverview.device.id)) ?? [:]
-                let mapped = deviceSidebarData(from: localOverview.overview, deviceID: localOverview.device.id, projectCollapseStates: collapseStates)
+                // Read compatibility from the overview's inline frozen-core status: the compatible
+                // steady state costs a single round-trip, and only an incompatible/too-old daemon falls
+                // back to the standalone handshake (which stays decodable when the overview would not),
+                // so the local device can show the restart/update block instead of a generic load error.
+                let localResolution = try SpacesDeviceClient.resolveOverview(device: localDevice, clientApp: deviceClientApp)
+                let localDaemonStatus = localResolution.daemonStatus
+                let localCompatibility = localResolution.compatibility
+                // A blocked (incompatible) device has no decodable overview to show; render the block
+                // from an empty snapshot instead.
+                let localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: localDevice.id)) ?? [:]
+                let mapped = deviceSidebarData(from: localOverview, deviceID: localDevice.id, projectCollapseStates: collapseStates)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_local_device_ready",
-                    details: "device=\(localOverview.device.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
-                let alertsGroups = buildOverviewAlertsGroups(from: localOverview.overview, deviceID: localOverview.device.id)
+                    details: "device=\(localDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
+                let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: localDevice.id)
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_alerts_ready",
                     details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
@@ -2419,9 +2411,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return .success(
                     .init(
                         config: config, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
-                        workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups,
-                        localDeviceID: localOverview.device.id, localDeviceName: localOverview.device.name, localPairedDevice: localOverview.device,
-                        localDeviceOverview: localOverview.overview))
+                        workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups, localDeviceID: localDevice.id,
+                        localDeviceName: localDevice.name, localPairedDevice: localDevice, localDeviceOverview: localOverview,
+                        localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility))
             } catch { return .failure(error) }
         }.value
     }
@@ -2439,8 +2431,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let workspacesByProject = model.workspacesByProject.mapValues { workspaces in
             workspaces.map {
                 WorkspaceSummary(
-                    id: $0.id, title: $0.title, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning,
-                    isArchived: $0.isArchived, isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
+                    id: $0.id, branch: $0.branch, baseBranch: $0.baseBranch, dir: $0.dir, isRunning: $0.isRunning, isArchived: $0.isArchived,
+                    isHidden: $0.isHidden, isDefault: $0.isDefault, notes: $0.notes, deviceID: deviceID)
             }
         }
         let workspaceRuntimeStatusByID = model.workspaceRuntimeStatusByID.mapValues { runtime in
@@ -2559,7 +2551,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated private static func localSetupState(from state: SpacesDeviceWorkspaceSetupState?) -> WorkspaceSetupState {
         guard let state else { return WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil) }
         return WorkspaceSetupState(
-            status: localSetupStatus(from: state.status), errorMessage: state.errorMessage, startedAt: state.startedAt, finishedAt: state.finishedAt)
+            status: localSetupStatus(from: state.status), errorMessage: state.errorMessage, startedAt: state.startedAt, finishedAt: state.finishedAt,
+            exitCode: state.exitCode, logPath: state.logPath)
     }
 
     nonisolated private static func runningState(from state: SpacesDeviceRunState) -> RunningProcessState {
@@ -3124,8 +3117,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Maps a single focusable target to a device-agnostic focus resolution.
     nonisolated static func windowShortcutTargetResolution(
-        _ target: WorkspaceRunShortcutTarget, workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel,
-        overview: SpacesDeviceOverviewPayload
+        _ target: WorkspaceRunShortcutTarget, workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload
     ) -> DeviceWindowShortcutResolution {
         switch target.kind {
         case .browser:
@@ -3476,8 +3468,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return hasToken && hasTransportKey
     }
 
-
-
     @objc func alertsRowClicked() { alerts.showAlertsDetail() }
 
     // MARK: - Alerts forwarders
@@ -3520,9 +3510,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func applySidebarProjectExpansionState() { sidebar.applySidebarProjectExpansionState() }
     func updateAlertsSidebarBadge() { sidebar.updateAlertsSidebarBadge() }
     func updateAlertsRowAppearance() { sidebar.updateAlertsRowAppearance() }
-    func refreshSidebarSelectionRows(
-        previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?
-    ) {
+    func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
+    {
         sidebar.refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: currentProjectID, previousWorkspaceID: previousWorkspaceID,
             currentWorkspaceID: currentWorkspaceID)
@@ -3626,7 +3615,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         fputs("spaces: background_refresh_failure source=\(source) error=\(String(describing: error))\n", stderr)
     }
 
-
     private func clearSidebarSelectionForTransientDetail() {
         let previousProjectID = selectedProjectID
         let previousWorkspaceID = selectedWorkspaceID
@@ -3640,7 +3628,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         updateAlertsRowAppearance()
     }
-
 
     /// The id of the device that owns a workspace/project, falling back to the
     /// local device. These give every action its per-row device context so it
@@ -3785,7 +3772,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
     }
 
-
     func refreshSelection() {
         if showingAlerts {
             showAlertsDetail()
@@ -3796,6 +3782,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 showWorkspaceDetail(project: project, workspace: workspace)
                 return
             }
+        }
+        // With nothing else selected, surface a compatibility block so the user can act on it: the
+        // remote device whose block was opened from its caption button (which has no workspace to
+        // select), otherwise the local daemon if it is incompatible.
+        if let blockDeviceID = visibleCompatibilityBlockDeviceID, let verdict = deviceCompatibility(forDeviceID: blockDeviceID), !verdict.isCompatible
+        {
+            showCompatibilityBlock(deviceID: blockDeviceID, verdict: verdict)
+            return
+        }
+        if let verdict = deviceCompatibility(forDeviceID: localDeviceID), !verdict.isCompatible {
+            showCompatibilityBlock(deviceID: localDeviceID, verdict: verdict)
+            return
         }
         showAlertsDetail()
     }
@@ -3835,6 +3833,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         visibleDetailWorkspaceID = nil
+        visibleCompatibilityBlockDeviceID = nil
         showingSettings = false
         showingAlerts = false
         updateAlertsRowAppearance()
@@ -3849,6 +3848,130 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             placeholder.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
         ])
+    }
+
+    /// Wire-protocol verdict for a device section, or `nil` if the device hasn't been handshaken yet.
+    func deviceCompatibility(forDeviceID deviceID: String) -> SpacesWireCompatibility? { deviceSection(id: deviceID)?.compatibility }
+
+    func deviceDaemonStatus(forDeviceID deviceID: String) -> TerminalServiceDaemonStatus? { deviceSection(id: deviceID)?.daemonStatus }
+
+    /// If the device whose compatibility block is currently shown is no longer incompatible (e.g. after
+    /// a restart updated its daemon), drop the obsolete block and re-resolve the detail pane. Called
+    /// from the apply paths after a reload updates a section's verdict.
+    func clearCompatibilityBlockIfResolved(deviceID: String) {
+        guard visibleCompatibilityBlockDeviceID == deviceID else { return }
+        if deviceCompatibility(forDeviceID: deviceID)?.isCompatible == false { return }
+        visibleCompatibilityBlockDeviceID = nil
+        refreshSelection()
+    }
+
+    /// Renders the full-pane compatibility block for an incompatible device, with the restart-impact
+    /// report and a restart action. Switching to a compatible device in the sidebar leaves it.
+    func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
+        clearActiveAddFormStateAndCloseWindows()
+        stopWorkspaceSetupDetailRefreshTimer()
+        visibleDetailWorkspaceID = nil
+        visibleCompatibilityBlockDeviceID = deviceID
+        showingSettings = false
+        showingAlerts = false
+        updateAlertsRowAppearance()
+        activeShortcutCaptureSetting = nil
+        // Clear any prior workspace/project selection so refreshSelection and shortcuts target the block,
+        // not the previously-selected workspace. Suppress the change handler so deselecting does not run
+        // showPlaceholder() and replace the block we are about to render.
+        let previousProjectID = selectedProjectID
+        let previousWorkspaceID = selectedWorkspaceID
+        selectedProjectID = nil
+        selectedWorkspaceID = nil
+        suppressOutlineSelectionChanges = true
+        outlineView.deselectAll(nil)
+        suppressOutlineSelectionChanges = false
+        refreshSidebarSelectionRows(
+            previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        for view in detailContainer.subviews { view.removeFromSuperview() }
+
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        let card = CompatibilityBlockView(
+            verdict: verdict, status: status,
+            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.confirmDaemonRestart(deviceID: deviceID) })
+        card.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 24),
+            card.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 24),
+            card.trailingAnchor.constraint(lessThanOrEqualTo: detailContainer.trailingAnchor, constant: -24),
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
+        ])
+    }
+
+    /// Confirms the restart-impact with the user, then restarts the device's daemon. A remote Linux
+    /// daemon is updated from the signed artifact over SSH (which restarts it); every other device
+    /// restarts through the `requestDaemonRestart` RPC, after which launchd/systemd respawns it.
+    private func confirmDaemonRestart(deviceID: String) {
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        let alert = NSAlert()
+        alert.messageText = "Restart this device's daemon?"
+        alert.informativeText = Self.restartImpactMessage(status: status)
+        alert.addButton(withTitle: "Restart")
+        alert.addButton(withTitle: "Defer")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let device = deviceRecord(forDeviceID: deviceID) else {
+            showDeviceNotLoadedError()
+            return
+        }
+        // The daemon reports its own OS, so route on that rather than probing SSH: a non-Linux daemon
+        // must not run the Linux SSH preflight, or a stale/unavailable SSH path would block restarting a
+        // remote Mac whose Device API is still reachable.
+        let isLinuxDaemon = status?.isLinuxDaemon ?? false
+        Task { @MainActor [weak self] in
+            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    if isLinuxDaemon {
+                        // A remote Linux daemon must be reinstalled from the signed artifact to actually
+                        // update (a plain restart respawns the same old binary); the installer restarts it.
+                        // `false` means the SSH path could not confirm a Linux host, so nothing happened —
+                        // surface that instead of reloading as if it succeeded.
+                        let updated = try SpacesDevicePairingClient.updateRemoteLinuxDaemon(
+                            for: device, appVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey)
+                        guard updated else {
+                            throw NSError(
+                                domain: "SpacesCompatibility", code: 1,
+                                userInfo: [
+                                    NSLocalizedDescriptionKey:
+                                        "Couldn't update this device's daemon over SSH. Check the SSH connection to the device and try again."
+                                ])
+                        }
+                    } else {
+                        // Local or remote Mac: restart through the RPC, applying any update already staged on disk.
+                        try SpacesDeviceClient.requestDaemonRestart(device: device)
+                    }
+                    return .success(())
+                } catch { return .failure(error) }
+            }.value
+            guard let self else { return }
+            if case .failure(let error) = result { self.showError(error) }
+            // Give the daemon a moment to exit and respawn, then re-handshake.
+            try? await Task.sleep(for: .seconds(2))
+            self.requestSidebarReload(forceRemoteRefresh: true)
+        }
+    }
+
+    /// Compatible, but the daemon reports an older app version than this build — a daemon update is
+    /// staged and applies on the next restart. Non-blocking; surfaced as a quiet caption only.
+    static func daemonUpdatePending(status: TerminalServiceDaemonStatus?) -> Bool {
+        guard let status else { return false }
+        return SpacesWireProtocol.isVersion(status.version, olderThan: AppVersion.short)
+    }
+
+    static func restartImpactMessage(status: TerminalServiceDaemonStatus?) -> String {
+        guard let status else { return "Running terminals, processes, and coding agents on this device will stop." }
+        let agents = status.activeAgents + status.waitingAgents
+        var parts: [String] = []
+        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
+        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
+        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
+        guard !parts.isEmpty else { return "No running work will be interrupted." }
+        return "This will stop " + parts.joined(separator: ", ") + ". Defer if you need them to finish first."
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
@@ -4692,6 +4815,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private func closeAddWorkspaceWindow() { addWorkspaceWindow?.performClose(nil) }
 
     private func showAddWorkspaceForm(project: ProjectSummary) {
+        // The new-workspace form is git-only: non-git projects own a single workspace
+        // (the project directory) and offer no way to add more.
+        guard project.isGitRepo else { return }
         clearInlineWorkspaceFieldRefs()
         clearActiveAddWorkspaceFormState()
 
@@ -4702,15 +4828,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         // --- Fields ---
-        let nameField = NSTextField(string: "")
-        nameField.placeholderString = "workspace title"
-        nameField.setAccessibilityIdentifier("add-workspace-title")
         let baseBranchField = NSComboBox()
         baseBranchField.usesDataSource = false
         baseBranchField.completes = true
         baseBranchField.numberOfVisibleItems = 10
         baseBranchField.setAccessibilityIdentifier("add-workspace-base-branch")
-        let baseBranches = project.isGitRepo ? [defaultWorkspaceBaseBranchFast(project: project)].compactMap { $0 } : []
+        let baseBranches = [defaultWorkspaceBaseBranchFast(project: project)].compactMap { $0 }
         baseBranchField.addItems(withObjectValues: baseBranches)
         if let defaultBaseBranch = defaultWorkspaceBaseBranch(project: project, branches: baseBranches) {
             baseBranchField.stringValue = defaultBaseBranch
@@ -4729,13 +4852,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         newBranchField.placeholderString = "new branch name"
         newBranchField.setAccessibilityIdentifier("add-workspace-new-branch")
         newBranchField.delegate = self
-        let directoryNameField = NSTextField(string: "")
-        directoryNameField.placeholderString = "optional: letters, numbers, -, _"
-        directoryNameField.setAccessibilityIdentifier("add-workspace-directory-name")
         let notesField = NSTextField(string: "")
         notesField.placeholderString = "optional: context about what you're working on"
         notesField.setAccessibilityIdentifier("add-workspace-notes")
-        let autoNameState = project.isGitRepo ? AddWorkspaceAutoNameState() : nil
+        let autoNameState = AddWorkspaceAutoNameState()
 
         // --- Content card ---
         let contentStack = NSStackView()
@@ -4743,88 +4863,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         contentStack.alignment = .leading
         contentStack.spacing = 10
 
-        var branchModeSegmented: NSSegmentedControl? = nil
-        var customizeStack: NSView? = nil
-        var customizeButton: NSButton? = nil
+        let modeSegmented = NSSegmentedControl(
+            labels: ["Create branch", "Use existing"], trackingMode: .selectOne, target: self, action: #selector(addWorkspaceBranchModeChanged(_:)))
+        modeSegmented.selectedSegment = 0
+        modeSegmented.setAccessibilityIdentifier("add-workspace-branch-mode")
+        modeSegmented.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        contentStack.addArrangedSubview(modeSegmented)
 
-        if project.isGitRepo {
-            let modeSegmented = NSSegmentedControl(
-                labels: ["Create branch", "Use existing"], trackingMode: .selectOne, target: self,
-                action: #selector(addWorkspaceBranchModeChanged(_:)))
-            modeSegmented.selectedSegment = 0
-            modeSegmented.setAccessibilityIdentifier("add-workspace-branch-mode")
-            branchModeSegmented = modeSegmented
-            modeSegmented.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            contentStack.addArrangedSubview(modeSegmented)
+        let branchInputContainer = NSStackView()
+        branchInputContainer.orientation = .vertical
+        branchInputContainer.spacing = 0
+        branchInputContainer.detachesHiddenViews = true
+        branchInputContainer.addArrangedSubview(newBranchField)
+        branchInputContainer.addArrangedSubview(existingBranchField)
+        constrainFormFieldToFillWidth(newBranchField, in: branchInputContainer)
+        constrainFormFieldToFillWidth(existingBranchField, in: branchInputContainer)
+        existingBranchField.isHidden = true
 
-            let branchInputContainer = NSStackView()
-            branchInputContainer.orientation = .vertical
-            branchInputContainer.spacing = 0
-            branchInputContainer.detachesHiddenViews = true
-            branchInputContainer.addArrangedSubview(newBranchField)
-            branchInputContainer.addArrangedSubview(existingBranchField)
-            constrainFormFieldToFillWidth(newBranchField, in: branchInputContainer)
-            constrainFormFieldToFillWidth(existingBranchField, in: branchInputContainer)
-            existingBranchField.isHidden = true
+        let branchRow = labeledInputRow(label: "Branch", input: branchInputContainer)
+        contentStack.addArrangedSubview(branchRow)
+        constrainFormFieldToFillWidth(branchRow, in: contentStack)
 
-            let branchRow = labeledInputRow(label: "Branch", input: branchInputContainer)
-            contentStack.addArrangedSubview(branchRow)
-            constrainFormFieldToFillWidth(branchRow, in: contentStack)
+        let baseRow = labeledInputRow(label: "Base branch", input: baseBranchField)
+        contentStack.addArrangedSubview(baseRow)
+        constrainFormFieldToFillWidth(baseRow, in: contentStack)
 
-            let customize = NSButton(title: " Customize", target: self, action: #selector(toggleWorkspaceCustomize(_:)))
-            customize.bezelStyle = .inline
-            customize.controlSize = .small
-            customize.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
-            customize.imagePosition = .imageLeading
-            customize.setAccessibilityIdentifier("add-workspace-customize")
-            customizeButton = customize
-            contentStack.addArrangedSubview(customize)
+        let notesRow = labeledInputRow(label: "Notes", input: notesField)
+        contentStack.addArrangedSubview(notesRow)
+        constrainFormFieldToFillWidth(notesRow, in: contentStack)
 
-            let customStack = NSStackView()
-            customStack.orientation = .vertical
-            customStack.alignment = .leading
-            customStack.spacing = 10
-            customStack.isHidden = true
-            let targetRow = labeledInputRow(label: "Base branch", input: baseBranchField)
-            let titleRow = labeledInputRow(label: "Workspace title", input: nameField)
-            let dirRow = labeledInputRow(label: "Directory", input: directoryNameField)
-            let notesRow = labeledInputRow(label: "Notes", input: notesField)
-            customStack.addArrangedSubview(targetRow)
-            customStack.addArrangedSubview(titleRow)
-            customStack.addArrangedSubview(dirRow)
-            customStack.addArrangedSubview(notesRow)
-            constrainFormFieldToFillWidth(targetRow, in: customStack)
-            constrainFormFieldToFillWidth(titleRow, in: customStack)
-            constrainFormFieldToFillWidth(dirRow, in: customStack)
-            constrainFormFieldToFillWidth(notesRow, in: customStack)
-            contentStack.addArrangedSubview(customStack)
-            constrainFormFieldToFillWidth(customStack, in: contentStack)
-            customizeStack = customStack
-        } else {
-            let titleRow = labeledInputRow(label: "Workspace title", input: nameField)
-            contentStack.addArrangedSubview(titleRow)
-            constrainFormFieldToFillWidth(titleRow, in: contentStack)
-
-            let customize = NSButton(title: " Customize", target: self, action: #selector(toggleWorkspaceCustomize(_:)))
-            customize.bezelStyle = .inline
-            customize.controlSize = .small
-            customize.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
-            customize.imagePosition = .imageLeading
-            customizeButton = customize
-            contentStack.addArrangedSubview(customize)
-
-            let customStack = NSStackView()
-            customStack.orientation = .vertical
-            customStack.alignment = .leading
-            customStack.spacing = 10
-            customStack.isHidden = true
-            let notesRow = labeledInputRow(label: "Notes", input: notesField)
-            customStack.addArrangedSubview(notesRow)
-            constrainFormFieldToFillWidth(notesRow, in: customStack)
-            contentStack.addArrangedSubview(customStack)
-            constrainFormFieldToFillWidth(customStack, in: contentStack)
-            customizeStack = customStack
-        }
+        let branchModeSegmented: NSSegmentedControl? = modeSegmented
 
         stack.addArrangedSubview(contentStack)
         constrainFormFieldToFillWidth(contentStack, in: stack)
@@ -4848,22 +4916,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         presentAddWorkspaceWindow(hosting: stack)
 
         createButton.tag = storeAddWorkspaceFields(
-            projectID: project.id, isGitRepo: project.isGitRepo, branchModeSegmented: project.isGitRepo ? branchModeSegmented : nil,
-            existingBranchField: project.isGitRepo ? existingBranchField : nil, newBranchField: project.isGitRepo ? newBranchField : nil,
-            baseBranchField: project.isGitRepo ? baseBranchField : nil, nameField: nameField,
-            directoryNameField: project.isGitRepo ? directoryNameField : nil, notesField: notesField, autoNameState: autoNameState,
-            progressiveInputViews: [], createButton: createButton, customizeStack: customizeStack, customizeButton: customizeButton)
+            projectID: project.id, isGitRepo: project.isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
+            newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
+            createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
         if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
             updateAddWorkspaceBranchInputUI(refs: refs)
             updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: currentAddWorkspaceBranchValue(refs))
         }
-        Task { @MainActor [weak self, weak newBranchField, weak nameField] in
+        Task { @MainActor [weak self, weak newBranchField] in
             await Task.yield()
             guard let self else { return }
-            self.addWorkspaceWindow?.makeFirstResponder(project.isGitRepo ? newBranchField : nameField)
+            self.addWorkspaceWindow?.makeFirstResponder(newBranchField)
         }
-        guard project.isGitRepo else { return }
         let formTag = createButton.tag
         guard let device = deviceRecord(forDeviceID: deviceID(forProjectID: project.id)) else {
             showDeviceNotLoadedError()
@@ -4875,7 +4940,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard activeAddWorkspaceFormTag == formTag else { return }
             guard let baseBranchField else { return }
             guard case .success(let options) = result else { return }
-            autoNameState?.branchOptions = options
+            autoNameState.branchOptions = options
             let currentValue = baseBranchField.stringValue
             baseBranchField.removeAllItems()
             baseBranchField.addItems(withObjectValues: options)
@@ -4910,6 +4975,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
+        // Fully blocked, scoped to the owning device: if its daemon is wire-incompatible, the only
+        // detail surface is the compatibility banner. Other devices' workspaces stay usable.
+        let workspaceDeviceID = deviceID(forWorkspaceID: workspace.id)
+        if let verdict = deviceCompatibility(forDeviceID: workspaceDeviceID), !verdict.isCompatible {
+            showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict)
+            return
+        }
+        visibleCompatibilityBlockDeviceID = nil
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
             prepareWorkspaceDetailContainer(workspaceID: workspace.id)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
@@ -4920,7 +4993,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let setupState = Self.localSetupState(from: deviceWorkspace.setupState)
         prepareWorkspaceDetailContainer(workspaceID: workspace.id)
         if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
-            showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState)
+            showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState, logTail: deviceWorkspace.setupState?.logTail)
             return
         }
         stopWorkspaceSetupDetailRefreshTimer()
@@ -4946,7 +5019,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         statusDot.contentTintColor = isLifecycleRunning ? accentColor : .tertiaryLabelColor
         statusDot.toolTip = isLifecycleRunning ? "Running" : "Stopped"
         statusDot.setContentHuggingPriority(.required, for: .horizontal)
-        let workspaceTitleLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(workspace.title, field: .title))
+        let workspaceTitleLabel = NSTextField(labelWithString: workspace.displayName)
         workspaceTitleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
         workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         workspaceTitleLabel.lineBreakMode = .byTruncatingTail
@@ -4963,47 +5036,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         runtimeWarningIcon.widthAnchor.constraint(equalToConstant: 12).isActive = true
         runtimeWarningIcon.heightAnchor.constraint(equalToConstant: 12).isActive = true
 
-        let workspaceTitleField = NSTextField(string: workspace.title)
-        workspaceTitleField.placeholderString = "Workspace title"
-        workspaceTitleField.delegate = self
-        workspaceTitleField.font = .systemFont(ofSize: 18, weight: .semibold)
-        workspaceTitleField.isHidden = true
-        workspaceTitleField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        workspaceTitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        workspaceTitleField.setAccessibilityIdentifier("workspace-detail-title-input")
-
-        let workspaceTitleSlot = Self.makeInlineEditorSlot(label: workspaceTitleLabel, editor: workspaceTitleField)
-
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
         headerRow.spacing = 8
         headerRow.addArrangedSubview(statusDot)
-        headerRow.addArrangedSubview(workspaceTitleSlot)
+        headerRow.addArrangedSubview(workspaceTitleLabel)
         headerRow.addArrangedSubview(runtimeWarningIcon)
         headerRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let tag = UUID().uuidString.hashValue
-        let refs = InlineWorkspaceDetailFieldRefs(
-            workspaceID: workspace.id, field: .title, valueLabel: workspaceTitleLabel, editorContainer: workspaceTitleField,
-            textField: workspaceTitleField, textView: nil, saveButton: nil, cancelButton: nil, originalValue: workspace.title, isEditing: false)
-        inlineWorkspaceFieldRefsByTag[tag] = refs
-        inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(workspaceTitleField)] = tag
-        inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(workspaceTitleLabel)] = tag
-        workspaceTitleField.toolTip = "Press Return to save, Esc to cancel."
-
-        let titleDoubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
-        titleDoubleClick.numberOfClicksRequired = 2
-        workspaceTitleLabel.addGestureRecognizer(titleDoubleClick)
-        workspaceTitleLabel.toolTip = "Double-click or right-click to rename."
-
-        let titleMenu = NSMenu()
-        let titleRenameItem = NSMenuItem(title: "Rename", action: #selector(beginWorkspaceTitleRename(_:)), keyEquivalent: "")
-        titleRenameItem.target = self
-        titleRenameItem.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
-        titleRenameItem.tag = tag
-        titleMenu.addItem(titleRenameItem)
-        workspaceTitleLabel.menu = titleMenu
 
         // --- Directory subtitle ---
         let dirField = NSTextField(string: workspace.dir)
@@ -5161,7 +5201,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         spinner.startAnimation(nil)
         stack.addArrangedSubview(spinner)
 
-        let title = NSTextField(labelWithString: "Loading \(workspace.title)...")
+        let title = NSTextField(labelWithString: "Loading \(workspace.displayName)...")
         title.font = .systemFont(ofSize: 14, weight: .medium)
         title.textColor = .labelColor
         stack.addArrangedSubview(title)
@@ -5180,7 +5220,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    private func showWorkspaceSetupDetail(project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState) {
+    private func showWorkspaceSetupDetail(project: ProjectSummary, workspace: WorkspaceSummary, setupState: WorkspaceSetupState, logTail: String?) {
         if setupState.status == .running {
             startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: workspace.id)
         } else {
@@ -5193,7 +5233,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let titleLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(workspace.title, field: .title))
+        let titleLabel = NSTextField(labelWithString: workspace.displayName)
         titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
         titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -5253,17 +5293,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         revealButton.isEnabled = isLocalWorkspace(workspace)
         revealButton.setAccessibilityIdentifier("workspace-setup-reveal")
 
+        let hasLogTail = logTail?.isEmpty == false
+        let hasLocalLogFile = isLocalWorkspace(workspace) && setupState.logPath?.isEmpty == false
+
+        // Copy reflects the displayed log content so it works for remote workspaces too; Open opens
+        // the log file on disk, which is only reachable for a local workspace.
         let copyLogButton = actionButton(
             title: "Copy Log", symbol: "doc.on.doc", tooltip: "Copy setup log", action: #selector(copyWorkspaceSetupLog(_:)), primary: false)
-        copyLogButton.identifier = NSUserInterfaceItemIdentifier(setupState.logPath ?? "")
-        copyLogButton.isEnabled = setupState.logPath?.isEmpty == false
+        copyLogButton.isEnabled = hasLogTail
         copyLogButton.setAccessibilityIdentifier("workspace-setup-copy-log")
 
         let openLogButton = actionButton(
             title: "Open Log", symbol: "doc.text.magnifyingglass", tooltip: "Open setup log", action: #selector(openWorkspaceSetupLog(_:)),
             primary: false)
         openLogButton.identifier = NSUserInterfaceItemIdentifier(setupState.logPath ?? "")
-        openLogButton.isEnabled = setupState.logPath?.isEmpty == false
+        openLogButton.isEnabled = hasLocalLogFile
         openLogButton.setAccessibilityIdentifier("workspace-setup-open-log")
 
         let actionRow = NSStackView(views: [runButton, terminalButton, revealButton, copyLogButton, openLogButton])
@@ -5277,7 +5321,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         statusContent.spacing = 8
         statusContent.addArrangedSubview(workspaceSetupMetadataRows(setupState))
         statusContent.addArrangedSubview(actionRow)
-        let logView = workspaceSetupLogTailView(path: setupState.logPath)
+        let logView = workspaceSetupLogTailView(content: logTail)
         statusContent.addArrangedSubview(logView)
         constrainFormFieldToFillWidth(logView, in: statusContent)
 
@@ -5291,8 +5335,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let activeProjectConfig = deviceProjectSummary(projectID: project.id)?.config
             let setupScriptSection = ScriptSection(
                 title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script",
-                value: activeProjectConfig?.setupScript ?? "",
-                subtitle: "Edit the project setup script, then run setup again.")
+                value: activeProjectConfig?.setupScript ?? "", subtitle: "Edit the project setup script, then run setup again.")
             setupScriptSection.onCommit = { [weak self] value in
                 guard let self else { return }
                 do {
@@ -5365,13 +5408,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return row
     }
 
-    private func workspaceSetupLogTailView(path: String?) -> NSView {
+    private func workspaceSetupLogTailView(content: String?) -> NSView {
         let textView = NSTextView()
         textView.isRichText = false
         textView.isEditable = false
         textView.isSelectable = true
         textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        let text = path.flatMap { Self.workspaceSetupLogTail(path: $0, maxBytes: 16_384) } ?? ""
+        let text = content ?? ""
         textView.string = text.isEmpty ? "No setup log output." : text
         textView.setAccessibilityIdentifier("workspace-setup-log-tail")
         workspaceSetupLogTextView = textView
@@ -5414,18 +5457,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .succeeded: return .systemGreen
         case .failed: return .systemRed
         }
-    }
-
-    private static func workspaceSetupLogTail(path: String, maxBytes: UInt64) -> String {
-        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return "" }
-        defer { try? handle.close() }
-        let endOffset = (try? handle.seekToEnd()) ?? 0
-        let startOffset = endOffset > maxBytes ? endOffset - maxBytes : 0
-        try? handle.seek(toOffset: startOffset)
-        guard let data = try? handle.readToEnd() else { return "" }
-        var text = String(decoding: data, as: UTF8.self)
-        if startOffset > 0, let firstNewline = text.firstIndex(of: "\n") { text = "...\n" + String(text[text.index(after: firstNewline)...]) }
-        return text
     }
 
     private func workspaceProcessesSection(
@@ -5908,7 +5939,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         switch field {
         case .notes: return trimmed.isEmpty ? "No notes" : trimmed
-        case .title, .branch: return trimmed
+        case .branch: return trimmed
         }
     }
 
@@ -5922,7 +5953,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     ) -> NSView {
         let automationID: String =
             switch field {
-            case .title: "workspace-detail-title"
             case .branch: "workspace-detail-branch"
             case .notes: "workspace-detail-notes"
             }
@@ -6090,7 +6120,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func normalizeInlineWorkspaceMetadataValue(_ value: String, for field: InlineWorkspaceDetailField) -> String {
         switch field {
-        case .title, .branch: return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .branch: return value.trimmingCharacters(in: .whitespacesAndNewlines)
         case .notes: return value.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
@@ -6106,8 +6136,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let tag = inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] else { return }
         beginInlineWorkspaceMetadataEdit(tag: tag)
     }
-
-    @objc private func beginWorkspaceTitleRename(_ sender: NSMenuItem) { beginInlineWorkspaceMetadataEdit(tag: sender.tag) }
 
     private func beginInlineWorkspaceMetadataEdit(tag: Int) {
         if let refs = inlineWorkspaceFieldRefsByTag[tag], refs.field == .branch, isProtectedBranchName(refs.originalValue) { return }
@@ -6146,12 +6174,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let device = deviceForDaemonStateMutation() {
                 let response: SpacesDeviceAPIResponse
                 switch refs.field {
-                case .title:
-                    let title = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-                    response = try SpacesDeviceClient.updateWorkspaceMetadata(
-                        workspaceID: refs.workspaceID, title: title, updatesTitle: true, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    refs.originalValue = title
                 case .branch:
                     let branch = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
                     response = try SpacesDeviceClient.updateWorkspaceMetadata(
@@ -6441,36 +6463,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return stack
     }
 
-    struct EditorOption {
-        let preference: EditorPreference
-        let displayName: String
-        let bundleName: String
-    }
+    /// Editors offered in settings, filtered to those installed on this Mac. Detection and
+    /// launch both key off the bundle identifier so an app rename (e.g. Windsurf → Devin
+    /// Desktop) does not require a path or display-name update here.
+    func installedEditorOptions() -> [EditorPreference] { [.vscode, .devin, .zed].filter(isEditorInstalled) }
 
-    func installedEditorOptions() -> [EditorOption] {
-        let candidates = [
-            EditorOption(preference: .vscode, displayName: "VS Code", bundleName: "Visual Studio Code.app"),
-            EditorOption(preference: .cursor, displayName: "Cursor", bundleName: "Cursor.app"),
-            EditorOption(preference: .windsurf, displayName: "Windsurf", bundleName: "Windsurf.app"),
-        ]
-        return candidates.filter { isEditorInstalled(bundleName: $0.bundleName) }
-    }
-
-    private func isEditorInstalled(bundleName: String) -> Bool {
-        let applications = URL(fileURLWithPath: "/Applications", isDirectory: true)
-        let userApplications = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
-        let paths = [applications.appendingPathComponent(bundleName).path, userApplications.appendingPathComponent(bundleName).path]
-        return paths.contains { FileManager.default.fileExists(atPath: $0) }
-    }
-
-    func editorDisplayName(_ editor: EditorPreference) -> String {
-        switch editor {
-        case .vscode: return "VS Code"
-        case .cursor: return "Cursor"
-        case .windsurf: return "Windsurf"
-        case .vim: return "Vim"
-        case .none: return "None"
-        }
+    private func isEditorInstalled(_ editor: EditorPreference) -> Bool {
+        guard let bundleID = editor.bundleIdentifier else { return false }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
     }
 
     private func shortcutSettingsRow(setting: ShortcutSetting) -> NSView {
@@ -6952,18 +6952,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func storeAddWorkspaceFields(
         projectID: String, isGitRepo: Bool, branchModeSegmented: NSSegmentedControl?, existingBranchField: NSComboBox?, newBranchField: NSTextField?,
-        baseBranchField: NSComboBox?, nameField: NSTextField, directoryNameField: NSTextField?, notesField: NSTextField?,
-        autoNameState: AddWorkspaceAutoNameState?, progressiveInputViews: [NSView], createButton: NSButton, customizeStack: NSView?,
-        customizeButton: NSButton?
+        baseBranchField: NSComboBox?, notesField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?, createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
             projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
-            newBranchField: newBranchField, baseBranchField: baseBranchField, nameField: nameField, directoryNameField: directoryNameField,
-            notesField: notesField, autoNameState: autoNameState, progressiveInputViews: progressiveInputViews, createButton: createButton,
-            customizeStack: customizeStack, customizeButton: customizeButton)
+            newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
+            createButton: createButton)
         branchModeSegmented?.tag = id
-        customizeButton?.tag = id
         return id
     }
 
@@ -7068,8 +7064,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func copyWorkspaceSetupLog(_ sender: Any) {
-        guard let path = Self.senderIdentifier(sender), !path.isEmpty else { return }
-        let contents = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        // Copy the displayed setup-log content so this works for remote workspaces, whose log file
+        // is not reachable from the client by path.
+        let contents = workspaceSetupLogTextView?.string ?? ""
+        guard !contents.isEmpty, contents != "No setup log output." else { return }
         copyToPasteboard(contents)
     }
 
@@ -7614,9 +7612,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         } catch { return .failure(error) }
     }
 
-    @discardableResult private func beginPreparedGitProjectDiscard(handle: String, repoURL: String?, device: SpacesPairedDeviceRecord)
-        -> Task<Result<Void, Error>, Never>
-    {
+    @discardableResult private func beginPreparedGitProjectDiscard(handle: String, repoURL: String?, device: SpacesPairedDeviceRecord) -> Task<
+        Result<Void, Error>, Never
+    > {
         let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL)
         let previousTask = key.flatMap { preparedGitProjectDiscardTasksByURL[$0]?.task }
         let task = Task<Result<Void, Error>, Never> {
@@ -7681,26 +7679,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func updateAddWorkspaceBranchDerivedFields(refs: AddWorkspaceFieldRefs, branchValue: String) {
-        guard let autoNameState = refs.autoNameState else { return }
-        let trimmedBranch = branchValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedBranch.isEmpty else { return }
-        let currentName = refs.nameField.stringValue
-        if currentName.isEmpty || currentName == autoNameState.lastAutoWorkspaceName {
-            refs.nameField.stringValue = trimmedBranch
-            autoNameState.lastAutoWorkspaceName = trimmedBranch
-        }
-        if let dirField = refs.directoryNameField {
-            let currentDir = dirField.stringValue
-            let sanitized = trimmedBranch.replacing(/[^A-Za-z0-9\-_]/, with: "-").replacing(/\-{2,}/, with: "-").trimmingCharacters(
-                in: CharacterSet(charactersIn: "-"))
-            if currentDir.isEmpty || currentDir == autoNameState.lastAutoDirName {
-                dirField.stringValue = sanitized
-                autoNameState.lastAutoDirName = sanitized
-            }
-        }
-    }
-
     private func updateAddWorkspaceBranchInputUI(refs: AddWorkspaceFieldRefs) {
         let isCreatingBranch = addWorkspaceBranchMode(refs: refs) == .create
         refs.existingBranchField?.isHidden = isCreatingBranch
@@ -7710,7 +7688,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func updateAddWorkspaceProgressiveDisclosure(refs: AddWorkspaceFieldRefs, branchValue: String) {
         guard refs.isGitRepo else { return }
         let hasBranch = !branchValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        for view in refs.progressiveInputViews { view.isHidden = !hasBranch }
         refs.createButton.isEnabled = hasBranch
     }
 
@@ -7732,24 +7709,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    @objc private func toggleWorkspaceCustomize(_ sender: NSButton) {
-        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
-        guard let customizeStack = refs.customizeStack else { return }
-        let expanding = customizeStack.isHidden
-        customizeStack.isHidden = !expanding
-        sender.image = NSImage(systemSymbolName: expanding ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
-    }
-
     @objc private func createWorkspace(_ sender: NSButton) {
         guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
         do {
-            let name = refs.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { throw WorkspaceError.invalidArgument(message: "Workspace title is required.") }
             let baseBranch = refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = currentAddWorkspaceBranchValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-            let directoryName = refs.directoryNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedDirectoryName: String?
-            if let directoryName, directoryName.isEmpty { resolvedDirectoryName = nil } else { resolvedDirectoryName = directoryName }
             let notes = refs.notesField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let resolvedNotes: String?
             if let notes, notes.isEmpty { resolvedNotes = nil } else { resolvedNotes = notes }
@@ -7764,9 +7728,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let workspaceTargetDeviceID = deviceID(forProjectID: refs.projectID)
             if let device = deviceRecord(forDeviceID: workspaceTargetDeviceID) {
                 let input = WorkspaceCreateInput(
-                    projectID: refs.projectID, name: name, branch: branch, baseBranch: baseBranch, directoryName: resolvedDirectoryName,
-                    notes: resolvedNotes, allowRemoteBranchLookup: true, allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing,
-                    replaceExistingManagedDirectory: false)
+                    projectID: refs.projectID, branch: branch, baseBranch: baseBranch, notes: resolvedNotes, allowRemoteBranchLookup: true,
+                    allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing, replaceExistingManagedDirectory: false)
                 let originalTitle = sender.title
                 sender.isEnabled = false
                 sender.title = "Creating..."
@@ -7783,9 +7746,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     }
                     let result = await Self.deviceMutation(device: device) { device in
                         try SpacesDeviceClient.createWorkspace(
-                            projectID: input.projectID, title: input.name, branch: input.branch, baseBranch: input.baseBranch,
-                            directoryName: input.directoryName, notes: input.notes, allowExistingBranchReuse: input.allowExistingBranchReuse,
-                            device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                            projectID: input.projectID, branch: input.branch, baseBranch: input.baseBranch, notes: input.notes,
+                            allowExistingBranchReuse: input.allowExistingBranchReuse, device: device,
+                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                     }
                     switch result {
                     case .success(let response):
@@ -7850,7 +7813,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         updateAddWorkspaceBranchInputUI(refs: refs)
         let branchValue = branchValueOverride ?? currentAddWorkspaceBranchValue(refs)
         updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: branchValue)
-        updateAddWorkspaceBranchDerivedFields(refs: refs, branchValue: branchValue)
     }
 
     public func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -7989,7 +7951,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         alert.alertStyle = .warning
         alert.messageText = "Archive workspace?"
         alert.informativeText =
-            "Are you sure you want to archive \"\(workspace.title)\"? This will remove its git worktree and stop all running processes."
+            "Are you sure you want to archive \"\(workspace.displayName)\"? This will remove its git worktree and stop all running processes."
         let deleteLocalBranchCheckbox = NSButton(checkboxWithTitle: "Delete local branch", target: nil, action: nil)
         let deleteRemoteBranchCheckbox = NSButton(checkboxWithTitle: "Delete remote branch", target: nil, action: nil)
         if project.isGitRepo, let branch = workspace.branch, !branch.isEmpty {
@@ -8154,24 +8116,100 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return true
     }
 
+    /// The configured editor resolved to a launchable CLI, carrying the per-family data a
+    /// remote open needs: VS Code-family editors keep their `EditorRemoteSSHSupport` (for
+    /// extension detection); Zed needs only its CLI path because remoting is built in.
+    private enum EditorLaunchTarget {
+        case vscode(editor: EditorPreference, support: EditorRemoteSSHSupport)
+        case zed(editor: EditorPreference, cliExecutablePath: String)
+
+        var cliExecutablePath: String {
+            switch self {
+            case .vscode(_, let support): return support.cliExecutableURL.path
+            case .zed(_, let cli): return cli
+            }
+        }
+    }
+
     private func openWorkspaceEditor(workspaceID: String) {
         do {
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
             guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
-            let editor = try clientAppConfig().editor
+            let target = try resolveEditorLaunch(try clientAppConfig().editor)
             let deviceID = deviceID(forWorkspaceID: workspaceID)
             if isRemoteDeviceID(deviceID) {
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
                     !sshHost.isEmpty
                 else { throw WorkspaceError.invalidArgument(message: "Remote editor launch requires SSH settings for the paired device.") }
-                try EditorLauncher.openRemote(
-                    editor: editor, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort, directory: workspace.dir)
+                switch target {
+                case .vscode(let editor, let support):
+                    guard ensureRemoteSSHCapability(editor: editor, support: support) else { return }
+                    try EditorLauncher.openRemoteVSCode(
+                        cliExecutablePath: support.cliExecutableURL.path, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
+                        directory: workspace.dir)
+                case .zed(_, let cliExecutablePath):
+                    try EditorLauncher.openRemoteZed(
+                        cliExecutablePath: cliExecutablePath, sshHost: sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
+                        directory: workspace.dir)
+                }
             } else {
-                try EditorLauncher.open(editor: editor, directory: workspace.dir)
+                try EditorLauncher.open(cliExecutablePath: target.cliExecutablePath, directory: workspace.dir)
             }
             reloadData()
             hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
         } catch { showError(error) }
+    }
+
+    /// Resolves the configured editor to a launchable CLI from its installed bundle,
+    /// throwing a clear error when no editor is configured or it is not installed.
+    private func resolveEditorLaunch(_ editor: EditorPreference?) throws -> EditorLaunchTarget {
+        guard let editor, editor != .none, let bundleID = editor.bundleIdentifier else {
+            throw WorkspaceError.configError(message: "Preferred editor is not configured.")
+        }
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
+        }
+        switch editor.family {
+        case .vscode:
+            guard let support = EditorRemoteSSHSupport(appBundleURL: appURL) else {
+                throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
+            }
+            return .vscode(editor: editor, support: support)
+        case .zed:
+            let cli = appURL.appendingPathComponent("Contents/MacOS/cli")
+            guard FileManager.default.isExecutableFile(atPath: cli.path) else {
+                throw WorkspaceError.invalidArgument(message: "\(editor.displayName) is not installed.")
+            }
+            return .zed(editor: editor, cliExecutablePath: cli.path)
+        }
+    }
+
+    /// Ensures the editor can resolve a `vscode-remote://ssh-remote+` workspace before a
+    /// remote open. Returns true to proceed. When the editor ships no SSH-remote extension
+    /// (stock VS Code), prompts the user to install one and returns true only after a
+    /// successful install; the forks bundle their own, so this passes for them.
+    private func ensureRemoteSSHCapability(editor: EditorPreference, support: EditorRemoteSSHSupport) -> Bool {
+        if support.hasRemoteSSHExtension(homeDirectory: FileManager.default.homeDirectoryForCurrentUser) { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\(editor.displayName) needs the Remote-SSH extension"
+        guard let extensionID = editor.installableRemoteSSHExtensionID else {
+            alert.informativeText = "Install an SSH-remote extension in \(editor.displayName) to open remote workspaces over SSH."
+            alert.runModal()
+            return false
+        }
+        alert.informativeText =
+            "Opening a remote workspace runs it over SSH inside \(editor.displayName), which needs its Remote-SSH extension. Install it now?"
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        do {
+            try EditorLauncher.installRemoteSSHExtension(cliExecutablePath: support.cliExecutableURL.path, extensionID: extensionID)
+            return true
+        } catch {
+            showError(error)
+            return false
+        }
     }
 
     private enum WorkspaceTerminalOpenRoute: String {
@@ -8350,8 +8388,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let url = URL(fileURLWithPath: workspace.dir, isDirectory: true)
         if NSWorkspace.shared.open(url) { hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true)) }
     }
-
-
 
     private func optimisticallyArchiveWorkspaceInSidebar(workspaceID: String) -> Bool {
         guard let (project, _) = findWorkspace(id: workspaceID) else { return false }
@@ -8688,7 +8724,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return false
     }
 
-
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
         selectedWorkspaceID: String?, showingAlerts: Bool, direction: Int
@@ -8936,8 +8971,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         -> DeviceWindowShortcutResolution
     {
         switch request {
-        case .workspaceBrowserSession(let workspaceID, let targetURL):
-            return .openURL(workspaceID: workspaceID, targetURL: targetURL)
+        case .workspaceBrowserSession(let workspaceID, let targetURL): return .openURL(workspaceID: workspaceID, targetURL: targetURL)
         case .workspaceProcess(let workspaceID, let processID):
             guard let detail = workspaceDetail(workspaceID, in: overview),
                 let row = detail.processRows.first(where: { ($0.processID ?? $0.id) == processID }), let sessionID = row.sessionID
@@ -8954,12 +8988,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 workspaceID: workspaceID, sessionID: sessionID, fallbackTitle: row.title, fallbackDir: row.workingDirectory, fallbackKind: .shell,
                 overview: overview)
         case .workspaceMissingConfiguredProcess(let workspaceID, let processKey):
-            let templateID = workspaceDetail(workspaceID, in: overview)?.config.processes
-                .first { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey) }?.id
+            let templateID = workspaceDetail(workspaceID, in: overview)?.config.processes.first {
+                normalizedRunRowName($0.name ?? "") == normalizedRunRowName(processKey)
+            }?.id
             return .runProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: templateID)
         case .workspaceAgentLauncher(let workspaceID, let name):
-            let launcherID = workspaceDetail(workspaceID, in: overview)?.config.agentLaunchers
-                .first { normalizedRunRowName($0.name) == normalizedRunRowName(name) }?.id
+            let launcherID = workspaceDetail(workspaceID, in: overview)?.config.agentLaunchers.first {
+                normalizedRunRowName($0.name) == normalizedRunRowName(name)
+            }?.id
             return .runCodingAgent(workspaceID: workspaceID, agentName: name, agentLauncherID: launcherID)
         case .agentWindow(let record):
             guard let detail = workspaceDetail(record.workspaceID, in: overview),
@@ -8986,9 +9022,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated private static func workspaceDetail(_ workspaceID: String, in overview: SpacesDeviceOverviewPayload)
         -> SpacesDeviceWorkspaceDetailViewModel?
-    {
-        overview.workspaces.first(where: { $0.id == workspaceID }).map(SpacesDeviceWorkspaceDetailViewModel.init)
-    }
+    { overview.workspaces.first(where: { $0.id == workspaceID }).map(SpacesDeviceWorkspaceDetailViewModel.init) }
 
     /// The single window-shortcut dispatcher for every device. It executes the resolved
     /// target, then applies the window-shortcut profiling and app-hide handling. The
@@ -9077,8 +9111,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 showError(error)
                 return nil
             }
-        case .noWorkspace, .noMatch:
-            return nil
+        case .noWorkspace, .noMatch: return nil
         }
     }
 
@@ -9197,7 +9230,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-
     private func focusGlobalWindowNavigation(direction: Int) {
         let requestID = UUID().uuidString
         let startedAt = Date()
@@ -9250,9 +9282,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             where workspace.processRows.contains(where: { $0.sessionID == sessionID })
                 || workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID })
                 || workspace.terminalRows.contains(where: { $0.sessionID == sessionID })
-            {
-                return workspace.id
-            }
+            { return workspace.id }
         }
         return nil
     }
@@ -9576,7 +9606,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-
     @objc func showProjectSettings(_ sender: NSButton) {
         guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
         showProjectSettingsDialog(project: project)
@@ -9645,7 +9674,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     public func windowDidResignKey(_ notification: Notification) {
         guard let resignedWindow = notification.object as? NSWindow else { return }
         logHotkeyDebug("window_did_resign_key class=\(type(of: resignedWindow)) title=\(resignedWindow.title) \(hotkeyWindowStateSummary())")
-        if resignedWindow === commandPalette.commandPalettePanel, !commandPalette.isDismissingCommandPalette { commandPalette.dismissCommandPalette() }
+        if resignedWindow === commandPalette.commandPalettePanel, !commandPalette.isDismissingCommandPalette {
+            commandPalette.dismissCommandPalette()
+        }
     }
 
     @objc public func numberOfRows(in tableView: NSTableView) -> Int {
@@ -10221,8 +10252,8 @@ extension AppKitController {
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
-                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
-                                label: label, detail: targetURL, status: .none,
+                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
+                                kind: target.kind, label: label, detail: targetURL, status: .none,
                                 focusRequest: .workspaceBrowserSession(workspaceID: workspace.id, targetURL: targetURL),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceBrowserSession(workspaceID: workspace.id, targetURL: targetURL), detail: targetURL)))
@@ -10231,8 +10262,8 @@ extension AppKitController {
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
-                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
-                                label: process.templateName, detail: process.command, status: .process(process.status),
+                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
+                                kind: target.kind, label: process.templateName, detail: process.command, status: .process(process.status),
                                 focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: processID),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceProcess(workspaceID: workspace.id, processID: processID), detail: process.command)))
@@ -10252,8 +10283,8 @@ extension AppKitController {
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
-                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
-                                label: label, detail: detail, status: .none,
+                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
+                                kind: target.kind, label: label, detail: detail, status: .none,
                                 focusRequest: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceWindow(workspaceID: workspace.id, index: windowListIndex + 1), detail: detail)))
@@ -10262,8 +10293,8 @@ extension AppKitController {
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
-                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
-                                label: processKey, detail: nil, status: .idle,
+                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
+                                kind: target.kind, label: processKey, detail: nil, status: .idle,
                                 focusRequest: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceMissingConfiguredProcess(workspaceID: workspace.id, processKey: processKey))))
@@ -10273,8 +10304,8 @@ extension AppKitController {
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
-                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
-                                label: launcherName, detail: detail, status: .none,
+                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
+                                kind: target.kind, label: launcherName, detail: detail, status: .none,
                                 focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(
                                     for: .workspaceAgentLauncher(workspaceID: workspace.id, name: launcherName), detail: detail)))
@@ -10285,8 +10316,9 @@ extension AppKitController {
                         items.append(
                             CommandPaletteItem(
                                 id: itemID, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspace.id,
-                                workspaceTitle: workspace.title, workspaceBranch: workspace.branch, projectTitle: project.name, kind: target.kind,
-                                label: label, detail: detail, status: .agent(agentWindow.status), focusRequest: .agentWindow(agentWindow),
+                                workspaceTitle: workspace.displayName, workspaceBranch: workspace.branch, projectTitle: project.name,
+                                kind: target.kind, label: label, detail: detail, status: .agent(agentWindow.status),
+                                focusRequest: .agentWindow(agentWindow),
                                 recentFocusIdentity: CommandPaletteItem.recentFocusIdentity(for: .agentWindow(agentWindow), detail: detail)))
                     }
                 }

@@ -12,7 +12,7 @@ final class ProcessOnExitTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.processes.append(ProcessTemplate(name: "api", command: "echo api", onExit: .none))
         }
@@ -44,7 +44,7 @@ final class ProcessOnExitTests: XCTestCase {
             notificationDeliverer: { title, body, subtitle in deliveredNotifications.append((title: title, body: body, subtitle: subtitle)) })
 
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.processes.append(ProcessTemplate(name: "api", command: "sleep 1", onExit: .notify))
         }

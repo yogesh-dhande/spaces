@@ -50,7 +50,7 @@ struct SpacesDeviceOverviewBuilder {
 
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry]
+        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus? = nil
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -70,14 +70,14 @@ struct SpacesDeviceOverviewBuilder {
 
         let workspaceSummaries = workspaces.sorted { lhs, rhs in
             if lhs.project.name != rhs.project.name { return lhs.project.name.localizedStandardCompare(rhs.project.name) == .orderedAscending }
-            return lhs.workspace.title.localizedStandardCompare(rhs.workspace.title) == .orderedAscending
+            return lhs.workspace.displayName.localizedStandardCompare(rhs.workspace.displayName) == .orderedAscending
         }.map { descriptor in
             let runtimeRows = runtimeRows(for: descriptor, availableSessionIDs: availableSessionIDs, sessionsByID: sessionEntriesByID)
             return SpacesDeviceWorkspaceSummary(
                 id: descriptor.workspace.id, projectID: descriptor.project.id, projectName: descriptor.project.name,
-                title: descriptor.workspace.title, branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch,
-                dir: descriptor.workspace.dir, isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived,
-                isHidden: descriptor.workspace.isHidden, isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
+                branch: descriptor.workspace.branch, baseBranch: descriptor.workspace.baseBranch, dir: descriptor.workspace.dir,
+                isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived, isHidden: descriptor.workspace.isHidden,
+                isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
                 sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,
                 setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
@@ -88,8 +88,8 @@ struct SpacesDeviceOverviewBuilder {
             if lhs.workspace.project.name != rhs.workspace.project.name {
                 return lhs.workspace.project.name.localizedStandardCompare(rhs.workspace.project.name) == .orderedAscending
             }
-            if lhs.workspace.workspace.title != rhs.workspace.workspace.title {
-                return lhs.workspace.workspace.title.localizedStandardCompare(rhs.workspace.workspace.title) == .orderedAscending
+            if lhs.workspace.workspace.displayName != rhs.workspace.workspace.displayName {
+                return lhs.workspace.workspace.displayName.localizedStandardCompare(rhs.workspace.workspace.displayName) == .orderedAscending
             }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }.map { row in
@@ -111,7 +111,8 @@ struct SpacesDeviceOverviewBuilder {
         }
 
         return SpacesDeviceOverviewPayload(
-            projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries)
+            projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
+            daemonStatus: daemonStatus)
     }
 
     static func matchedWorkspace(for workingDirectory: String, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {
@@ -136,8 +137,8 @@ struct SpacesDeviceOverviewBuilder {
             id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, state: session.runtimeState.state,
             backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
             servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
-            workspaceTitle: matchedWorkspace?.workspace.title, projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name,
-            createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
+            workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
+            projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
             isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender, daemonEndpoint: matchedWorkspace?.terminalDaemonEndpoint)
@@ -188,7 +189,25 @@ struct SpacesDeviceOverviewBuilder {
     private static func deviceWorkspaceSetupState(_ state: WorkspaceSetupState) -> SpacesDeviceWorkspaceSetupState {
         SpacesDeviceWorkspaceSetupState(
             status: deviceWorkspaceSetupStatus(state.status), errorMessage: state.errorMessage, startedAt: state.startedAt,
-            finishedAt: state.finishedAt)
+            finishedAt: state.finishedAt, exitCode: state.exitCode, logPath: state.logPath, logTail: setupLogTail(state))
+    }
+
+    /// Reads the tail of the setup log for the states that show the setup screen with a log
+    /// (`running` and `failed`). `succeeded` shows the normal workspace detail and `pending` has no
+    /// output yet, so their tails are omitted to keep the overview snapshot small.
+    private static func setupLogTail(_ state: WorkspaceSetupState) -> String? {
+        guard state.status == .running || state.status == .failed else { return nil }
+        guard let path = state.logPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { return nil }
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
+        defer { try? handle.close() }
+        let maxBytes: UInt64 = 16_384
+        let endOffset = (try? handle.seekToEnd()) ?? 0
+        let startOffset = endOffset > maxBytes ? endOffset - maxBytes : 0
+        try? handle.seek(toOffset: startOffset)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+        var text = String(decoding: data, as: UTF8.self)
+        if startOffset > 0, let firstNewline = text.firstIndex(of: "\n") { text = "...\n" + String(text[text.index(after: firstNewline)...]) }
+        return text
     }
 
     private static func deviceWorkspaceSetupStatus(_ status: WorkspaceSetupStatus) -> SpacesDeviceWorkspaceSetupStatus {

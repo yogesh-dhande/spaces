@@ -415,8 +415,8 @@ import workspacecore
 
             let project = ProjectRecord(id: "project-dead-service", name: "Project", dir: projectDir.path, isGitRepo: true, defaultBranch: "main")
             let workspace = WorkspaceRecord(
-                id: "workspace-dead-service", projectID: project.id, title: "Dev", dir: workspaceDir.path, dirname: nil, branch: "main",
-                isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+                id: "workspace-dead-service", projectID: project.id, dir: workspaceDir.path, dirname: nil, branch: "main", isDefault: false,
+                isArchived: false, isRunning: true, lastLaunchedAt: nil)
             try store.upsert(project: project)
             try store.upsert(workspace: workspace)
 

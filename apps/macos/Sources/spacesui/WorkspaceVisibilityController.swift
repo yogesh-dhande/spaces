@@ -15,8 +15,7 @@ import workspacecore
 /// workspaces in the sidebar. `AppKitController` holds a single instance and
 /// delegates the dialog to it. The controller reaches back into the host for
 /// project/device model state and shared device-mutation services via `host`.
-@MainActor
-final class WorkspaceVisibilityController: NSObject {
+@MainActor final class WorkspaceVisibilityController: NSObject {
     unowned let host: AppKitController
 
     init(host: AppKitController) {
@@ -124,7 +123,7 @@ final class WorkspaceVisibilityController: NSObject {
             for workspace in host.workspacesByProject[project.id] ?? [] where !workspace.isArchived {
                 rows.append(
                     WorkspaceVisibilityRow(
-                        workspaceID: workspace.id, deviceID: project.deviceID, title: workspace.title, projectName: project.name,
+                        workspaceID: workspace.id, deviceID: project.deviceID, title: workspace.displayName, projectName: project.name,
                         deviceName: deviceName, branch: workspace.branch ?? "", isHidden: workspace.isHidden))
             }
         }
@@ -229,7 +228,7 @@ final class WorkspaceVisibilityController: NSObject {
                 let alert = NSAlert()
                 alert.alertStyle = .warning
                 alert.messageText = "Hide workspace?"
-                alert.informativeText = "\"\(workspace.title)\" is currently running. Hiding it stops the workspace first."
+                alert.informativeText = "\"\(workspace.displayName)\" is currently running. Hiding it stops the workspace first."
                 alert.addButton(withTitle: "Stop and Hide")
                 alert.addButton(withTitle: "Cancel")
                 guard alert.runModal() == .alertFirstButtonReturn else { return completion(false) }

@@ -324,7 +324,6 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
     public let includeArchived: Bool?
     public let workspaceID: String?
     public let branch: String?
-    public let title: String?
     public let baseBranch: String?
     public let existingBranch: Bool?
     public let terminalSessionID: String?
@@ -336,15 +335,14 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
 
     public init(
         operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
-        branch: String? = nil, title: String? = nil, baseBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil,
-        agentEvent: String? = nil, terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
+        branch: String? = nil, baseBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil, agentEvent: String? = nil,
+        terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
     ) {
         self.operation = operation
         self.projectID = projectID
         self.includeArchived = includeArchived
         self.workspaceID = workspaceID
         self.branch = branch
-        self.title = title
         self.baseBranch = baseBranch
         self.existingBranch = existingBranch
         self.terminalSessionID = terminalSessionID
@@ -375,7 +373,6 @@ public struct TerminalServiceProfileProjectSummary: Codable, Sendable, Equatable
 public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let projectID: String
-    public let title: String
     public let dir: String
     public let runtimePath: String
     public let dirname: String?
@@ -389,12 +386,11 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let notes: String?
 
     public init(
-        id: String, projectID: String, title: String, dir: String, runtimePath: String, dirname: String?, branch: String?, baseBranch: String?,
-        isDefault: Bool, isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        id: String, projectID: String, dir: String, runtimePath: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool,
+        isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
         self.projectID = projectID
-        self.title = title
         self.dir = dir
         self.runtimePath = runtimePath
         self.dirname = dirname
@@ -406,6 +402,12 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
         self.isRunning = isRunning
         self.lastLaunchedAt = lastLaunchedAt
         self.notes = notes
+    }
+
+    /// Name shown to users. Git workspaces show their branch; non-git workspaces show the folder name.
+    public var displayName: String {
+        if let branch, !branch.isEmpty { return branch }
+        return (dir as NSString).lastPathComponent
     }
 }
 
@@ -637,13 +639,81 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public let artifactVersion: String?
     public let certificateFingerprint: String?
     public let activeSessionCount: Int
+    /// Wire-contract version the daemon speaks. Client and daemon must match exactly.
+    public let protocolVersion: Int
+    /// Live tracked processes that a daemon restart would kill (status `running`).
+    public let runningProcesses: Int
+    /// Coding agents actively working (status `spinning`).
+    public let activeAgents: Int
+    /// Coding agents awaiting user input (status `waiting`).
+    public let waitingAgents: Int
+    /// Daemon host OS: `"macOS"` or `"Linux"`. Lets clients tailor restart guidance — e.g. a remote
+    /// Linux daemon must be updated from the Mac app.
+    public let operatingSystem: String
 
-    public init(version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int) {
+    /// Protocol version reported when a peer's status omits the field entirely — i.e. a daemon old
+    /// enough to predate wire-version negotiation. It must compare as incompatible against any real
+    /// `SpacesWireProtocol.version` (which starts at 1) so such a peer is blocked, not mistaken for a
+    /// match. See `unknownProtocolVersion` use in `init(from:)`.
+    public static let unknownProtocolVersion = 0
+
+    public init(
+        version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
+        protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
+        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem
+    ) {
         self.version = version
         self.artifactVersion = artifactVersion
         self.certificateFingerprint = certificateFingerprint
         self.activeSessionCount = activeSessionCount
+        self.protocolVersion = protocolVersion
+        self.runningProcesses = runningProcesses
+        self.activeAgents = activeAgents
+        self.waitingAgents = waitingAgents
+        self.operatingSystem = operatingSystem
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case artifactVersion
+        case certificateFingerprint
+        case activeSessionCount
+        case protocolVersion
+        case runningProcesses
+        case activeAgents
+        case waitingAgents
+        case operatingSystem
+    }
+
+    /// This is the frozen core's contract: its decode must tolerate version skew so an incompatible
+    /// peer can still be negotiated and recovered. Every field decodes with `decodeIfPresent` and a
+    /// default, so a peer whose field set differs (an older build that omits a field this build added,
+    /// or a newer build that adds one) still produces a decodable status instead of throwing
+    /// `keyNotFound` on the very handshake meant to keep working. A missing `protocolVersion` defaults
+    /// to `unknownProtocolVersion`, which `SpacesWireCompatibility` evaluates as incompatible.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? ""
+        artifactVersion = try container.decodeIfPresent(String.self, forKey: .artifactVersion)
+        certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint)
+        activeSessionCount = try container.decodeIfPresent(Int.self, forKey: .activeSessionCount) ?? 0
+        protocolVersion = try container.decodeIfPresent(Int.self, forKey: .protocolVersion) ?? Self.unknownProtocolVersion
+        runningProcesses = try container.decodeIfPresent(Int.self, forKey: .runningProcesses) ?? 0
+        activeAgents = try container.decodeIfPresent(Int.self, forKey: .activeAgents) ?? 0
+        waitingAgents = try container.decodeIfPresent(Int.self, forKey: .waitingAgents) ?? 0
+        operatingSystem = try container.decodeIfPresent(String.self, forKey: .operatingSystem) ?? Self.currentOperatingSystem
+    }
+
+    /// The OS of the process building this status (the daemon's own host).
+    public static var currentOperatingSystem: String {
+        #if os(Linux)
+            "Linux"
+        #else
+            "macOS"
+        #endif
+    }
+
+    public var isLinuxDaemon: Bool { operatingSystem == "Linux" }
 }
 
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {

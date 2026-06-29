@@ -14,11 +14,20 @@ ARTIFACT_RELEASE_PREFIX="ghostty-artifacts-"
 BUILD_SCRIPT_VERSION="2"
 MANIFEST_SCHEMA_VERSION="1"
 VALIDATION_XCODE_BUILD_MISMATCH=42
+VALIDATION_OPTIMIZE_MISMATCH=43
 
 LOCAL_ROOT="$APP_ROOT/.local"
 ARTIFACT_STATE_ROOT="$LOCAL_ROOT/ghostty-artifacts"
 LOCAL_MANIFEST="$ARTIFACT_STATE_ROOT/manifest.json"
 LOCAL_SHA256SUMS="$ARTIFACT_STATE_ROOT/SHA256SUMS"
+
+# Shared, content-addressed artifact cache. Worktrees live outside the main
+# checkout, so their worktree-local .local starts empty; pointing
+# SPACES_GHOSTTY_CACHE_DIR at the main checkout lets a new worktree restore a
+# matching, already-built SHA with a local copy instead of redownloading or
+# rebuilding. spaces.yaml sets the override to "$SPACES_PROJECT_DIR/apps/macos/.local/ghostty-cache".
+# The default keeps manual runs in the main checkout self-seeding.
+GHOSTTY_CACHE_ROOT="${SPACES_GHOSTTY_CACHE_DIR:-$LOCAL_ROOT/ghostty-cache}"
 
 GHOSTTYKIT_ROOT="$LOCAL_ROOT/ghosttykit"
 XCFRAMEWORK_ROOT="$GHOSTTYKIT_ROOT/GhosttyKit.xcframework"
@@ -175,11 +184,12 @@ manifest_matches_current_sha() {
         "$MANIFEST_SCHEMA_VERSION" \
         "$BUILD_SCRIPT_VERSION" \
         "$ZIG_VERSION" \
-        "$(current_xcode_build_version)" <<'PY'
+        "$(current_xcode_build_version)" \
+        "$GHOSTTY_BUILD_OPTIMIZE" <<'PY'
 import json
 import sys
 
-manifest_path, expected_sha, expected_schema, expected_script, expected_zig, expected_xcode_build = sys.argv[1:7]
+manifest_path, expected_sha, expected_schema, expected_script, expected_zig, expected_xcode_build, expected_optimize = sys.argv[1:8]
 try:
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
@@ -195,6 +205,8 @@ if manifest.get("build_script_version") != int(expected_script):
 if manifest.get("zig_version") != expected_zig:
     sys.exit(1)
 if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcode_build:
+    sys.exit(1)
+if manifest.get("build_optimize") != expected_optimize:
     sys.exit(1)
 if manifest.get("dirty") is not False:
     sys.exit(1)
@@ -262,6 +274,125 @@ reuse_local_artifacts_if_valid() {
         echo "==> Local Ghostty artifact manifest is missing"
     fi
     return 1
+}
+
+# Keyed cache entry directory. The key includes the Xcode build version, host
+# architecture, and build-optimize mode alongside the Ghostty SHA so artifacts
+# built against different Xcode toolchains, arches, or optimize modes (e.g.
+# Debug vs ReleaseFast) coexist instead of clobbering each other. The extra
+# fields the manifest tracks (Zig, build-script version, schema) move in lockstep
+# with these, and restore re-validates the cached manifest regardless.
+cache_entry_dir() {
+    local xcode_build arch
+    xcode_build="$(current_xcode_build_version)"
+    arch="$(uname -m)"
+    printf "%s/%s/%s-%s-%s\n" "$GHOSTTY_CACHE_ROOT" "$GHOSTTY_SHA" "${xcode_build:-unknown}" "$arch" "$GHOSTTY_BUILD_OPTIMIZE"
+}
+
+restore_from_cache_if_valid() {
+    local entry
+    entry="$(cache_entry_dir)"
+
+    if ! manifest_matches_current_sha "$entry/ghostty-artifacts/manifest.json"; then
+        return 1
+    fi
+    if [[ ! -d "$entry/ghosttykit" || ! -d "$entry/ghosttyvt" ]]; then
+        return 1
+    fi
+
+    # This function runs with errexit disabled (it is called as `if ! ...`), so
+    # every step that could fail must be checked explicitly. Otherwise a failed
+    # copy or a failed API-contract verification would fall through to the
+    # unconditional success return and accept incompatible artifacts.
+    echo "==> Restoring Ghostty artifacts from cache ($entry)"
+    rm -rf "$GHOSTTYKIT_ROOT" "$GHOSTTYVT_ROOT" "$ARTIFACT_STATE_ROOT"
+    if ! mkdir -p "$LOCAL_ROOT" \
+        || ! cp -R "$entry/ghosttykit" "$GHOSTTYKIT_ROOT" \
+        || ! cp -R "$entry/ghosttyvt" "$GHOSTTYVT_ROOT" \
+        || ! cp -R "$entry/ghostty-artifacts" "$ARTIFACT_STATE_ROOT"; then
+        echo "==> Failed to copy cached Ghostty artifacts; falling through to download"
+        return 1
+    fi
+
+    if ! installed_artifacts_present; then
+        echo "==> Cached Ghostty artifacts are incomplete; falling through to download"
+        return 1
+    fi
+
+    normalize_ghosttykit_static_library
+    if ! verify_ghosttykit_contract; then
+        echo "==> Cached Ghostty artifacts failed API contract verification; falling through to download"
+        return 1
+    fi
+    return 0
+}
+
+# Populate the shared cache from the freshly installed .local. Gated on a valid,
+# clean, current manifest so dirty/experimental builds never reach the shared
+# store. A still-valid entry for the key is left untouched; a stale one is
+# replaced. Only the artifact subtrees are cached (not the Zig toolchain or
+# source checkout under ghosttyvt).
+save_to_cache() {
+    if ! manifest_matches_current_sha "$LOCAL_MANIFEST"; then
+        return 0
+    fi
+    if ! installed_artifacts_present; then
+        return 0
+    fi
+
+    local entry
+    entry="$(cache_entry_dir)"
+    if [[ -d "$entry" ]]; then
+        # Keep a still-valid entry (idempotent), but replace one that has gone
+        # stale for this key (e.g. a setup-script, Zig, or schema bump on the
+        # same Ghostty SHA/Xcode/arch) so worktrees stop falling back to
+        # download/build until the cache is manually cleared.
+        if manifest_matches_current_sha "$entry/ghostty-artifacts/manifest.json"; then
+            return 0
+        fi
+        echo "==> Replacing stale Ghostty cache entry ($entry)"
+        rm -rf "$entry"
+    fi
+
+    echo "==> Saving Ghostty artifacts to cache ($entry)"
+    # This function runs with errexit disabled (it is called as `save_to_cache
+    # || ...`), so the staging copies are checked explicitly. A partial copy
+    # must never be published into the shared cache where later worktrees could
+    # restore it past the minimal presence checks.
+    mkdir -p "$GHOSTTY_CACHE_ROOT" || return 1
+    local staging
+    staging="$(mktemp -d "$GHOSTTY_CACHE_ROOT/.staging.XXXXXX")" || return 1
+
+    if ! mkdir -p "$staging/ghosttyvt" \
+        || ! cp -R "$GHOSTTYKIT_ROOT" "$staging/ghosttykit" \
+        || ! cp -R "$GHOSTTYVT_INCLUDE_ROOT" "$staging/ghosttyvt/include" \
+        || ! cp -R "$GHOSTTYVT_LIB_ROOT" "$staging/ghosttyvt/lib" \
+        || ! cp -R "$ARTIFACT_STATE_ROOT" "$staging/ghostty-artifacts"; then
+        rm -rf "$staging"
+        return 1
+    fi
+
+    if ! mkdir -p "$(dirname "$entry")"; then
+        rm -rf "$staging"
+        return 1
+    fi
+    # Atomic publish: rename only when the destination is still absent so
+    # concurrent worktree setups never observe a half-written entry. A
+    # concurrent publisher winning the race counts as success; any other mv
+    # failure (permissions, a corrupted cache path with a file where the entry
+    # directory belongs) returns nonzero so the caller warns instead of
+    # reporting a seeded cache that was never written.
+    if [[ -d "$entry" ]]; then
+        rm -rf "$staging"
+        return 0
+    fi
+    if ! mv "$staging" "$entry" 2>/dev/null; then
+        rm -rf "$staging"
+        if [[ -d "$entry" ]]; then
+            return 0
+        fi
+        return 1
+    fi
 }
 
 patch_libxev_for_ios_simulator() {
@@ -496,7 +627,9 @@ validate_download_manifest() {
         "$BUILD_SCRIPT_VERSION" \
         "$ZIG_VERSION" \
         "$(current_xcode_build_version)" \
-        "$VALIDATION_XCODE_BUILD_MISMATCH" <<'PY'
+        "$VALIDATION_XCODE_BUILD_MISMATCH" \
+        "$GHOSTTY_BUILD_OPTIMIZE" \
+        "$VALIDATION_OPTIMIZE_MISMATCH" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -511,6 +644,8 @@ expected_script = int(sys.argv[6])
 expected_zig = sys.argv[7]
 expected_xcode_build = sys.argv[8]
 xcode_build_mismatch_status = int(sys.argv[9])
+expected_optimize = sys.argv[10]
+optimize_mismatch_status = int(sys.argv[11])
 assets = [
     "GhosttyKit.xcframework.tar.gz",
     "GhosttyKit-resources.tar.gz",
@@ -562,6 +697,15 @@ if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcod
     )
     xcode_build_mismatch = True
 
+optimize_mismatch = False
+if manifest.get("build_optimize") != expected_optimize:
+    print(
+        f"Ghostty artifact manifest build-optimize mode {manifest.get('build_optimize')} does not match requested mode "
+        f"{expected_optimize}; rebuild locally with --build for that mode or unset SPACES_GHOSTTY_BUILD_OPTIMIZE to use the released mode.",
+        file=sys.stderr,
+    )
+    optimize_mismatch = True
+
 if strict and manifest.get("dirty") is not False:
     print("strict Ghostty artifact setup refuses dirty artifact manifests", file=sys.stderr)
     sys.exit(1)
@@ -590,6 +734,8 @@ for asset in assets:
 
 if xcode_build_mismatch:
     sys.exit(xcode_build_mismatch_status)
+if optimize_mismatch:
+    sys.exit(optimize_mismatch_status)
 PY
 }
 
@@ -627,10 +773,15 @@ download_release_artifacts() {
         validation_status=$?
     fi
 
-    if [[ "$validation_status" -eq "$VALIDATION_XCODE_BUILD_MISMATCH" && "$MODE" == "default" ]]; then
+    if [[ "$MODE" == "default" ]] \
+        && { [[ "$validation_status" -eq "$VALIDATION_XCODE_BUILD_MISMATCH" ]] || [[ "$validation_status" -eq "$VALIDATION_OPTIMIZE_MISMATCH" ]]; }; then
         rm -rf "$tmp_dir"
         trap - EXIT
-        echo "==> Downloaded Ghostty artifacts were built with a different Xcode build; building locally instead"
+        if [[ "$validation_status" -eq "$VALIDATION_OPTIMIZE_MISMATCH" ]]; then
+            echo "==> Downloaded Ghostty artifacts use a different build-optimize mode; building locally instead"
+        else
+            echo "==> Downloaded Ghostty artifacts were built with a different Xcode build; building locally instead"
+        fi
         build_from_source
         return
     fi
@@ -706,7 +857,9 @@ GHOSTTY_SHA="$(resolve_ghostty_sha)"
 case "$MODE" in
     default)
         if ! reuse_local_artifacts_if_valid; then
-            download_release_artifacts
+            if ! restore_from_cache_if_valid; then
+                download_release_artifacts
+            fi
         fi
         ;;
     download)
@@ -719,6 +872,12 @@ case "$MODE" in
         die "unsupported Ghostty setup mode: $MODE"
         ;;
 esac
+
+# Seed the shared cache from the installed artifacts. Runs after every mode
+# (including the fast local-reuse path) so the main checkout populates the cache
+# for worktrees without a separate step. A failure here must not fail an
+# otherwise-complete setup.
+save_to_cache || echo "==> Warning: could not populate Ghostty artifact cache (continuing)"
 
 echo
 echo "Ghostty setup complete."

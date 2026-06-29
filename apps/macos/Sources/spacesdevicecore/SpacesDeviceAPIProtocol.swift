@@ -218,12 +218,24 @@ public struct SpacesDeviceWorkspaceSetupState: Codable, Sendable, Equatable {
     public let errorMessage: String?
     public let startedAt: String?
     public let finishedAt: String?
+    public let exitCode: Int?
+    public let logPath: String?
+    /// Recent setup-log output, captured by the owning daemon. Carried in the overview so a client
+    /// (including a remote one that cannot read the daemon's log file by path) can render live setup
+    /// progress. Populated only while setup is running or after it failed.
+    public let logTail: String?
 
-    public init(status: SpacesDeviceWorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil) {
+    public init(
+        status: SpacesDeviceWorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil,
+        exitCode: Int? = nil, logPath: String? = nil, logTail: String? = nil
+    ) {
         self.status = status
         self.errorMessage = errorMessage
         self.startedAt = startedAt
         self.finishedAt = finishedAt
+        self.exitCode = exitCode
+        self.logPath = logPath
+        self.logTail = logTail
     }
 }
 
@@ -416,7 +428,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let id: String
     public let projectID: String
     public let projectName: String
-    public let title: String
     public let branch: String?
     public let baseBranch: String?
     public let dir: String
@@ -434,8 +445,8 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let terminalRows: [SpacesDeviceWorkspaceTerminalRow]
 
     public init(
-        id: String, projectID: String, projectName: String, title: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool,
-        isArchived: Bool, isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
+        id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isArchived: Bool,
+        isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
         setupState: SpacesDeviceWorkspaceSetupState? = nil, config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
         processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
         terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
@@ -443,7 +454,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.id = id
         self.projectID = projectID
         self.projectName = projectName
-        self.title = title
         self.branch = branch
         self.baseBranch = baseBranch
         self.dir = dir
@@ -465,7 +475,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case id
         case projectID
         case projectName
-        case title
         case branch
         case baseBranch
         case dir
@@ -488,7 +497,6 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         id = try container.decode(String.self, forKey: .id)
         projectID = try container.decode(String.self, forKey: .projectID)
         projectName = try container.decode(String.self, forKey: .projectName)
-        title = try container.decode(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         dir = try container.decode(String.self, forKey: .dir)
@@ -504,6 +512,13 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         processRows = try container.decodeIfPresent([SpacesDeviceWorkspaceProcessRow].self, forKey: .processRows) ?? []
         codingAgentRows = try container.decodeIfPresent([SpacesDeviceWorkspaceCodingAgentRow].self, forKey: .codingAgentRows) ?? []
         terminalRows = try container.decodeIfPresent([SpacesDeviceWorkspaceTerminalRow].self, forKey: .terminalRows) ?? []
+    }
+
+    /// Name shown to users. Git workspaces show their branch; non-git workspaces
+    /// (whose `dir` is the project directory) show the folder name.
+    public var displayName: String {
+        if let branch, !branch.isEmpty { return branch }
+        return (dir as NSString).lastPathComponent
     }
 }
 
@@ -621,19 +636,29 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     public let projects: [SpacesDeviceProjectSummary]
     public let workspaces: [SpacesDeviceWorkspaceSummary]
     public let sessions: [SpacesDeviceTerminalSessionSummary]
+    /// Frozen-core handshake (wire protocol version + restart-impact counts) for the daemon that
+    /// produced this overview. Carried inline so a compatible client reads the compatibility verdict
+    /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
+    /// every refresh. `nil` only when the daemon predates this field; clients fall back to the
+    /// standalone frozen-core `daemonStatus` command (which is also the path used when an
+    /// incompatible daemon's overview cannot decode at all).
+    public let daemonStatus: TerminalServiceDaemonStatus?
 
     public init(
-        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary]
+        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
+        daemonStatus: TerminalServiceDaemonStatus? = nil
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
+        self.daemonStatus = daemonStatus
     }
 
     private enum CodingKeys: String, CodingKey {
         case projects
         case workspaces
         case sessions
+        case daemonStatus
     }
 
     public init(from decoder: any Decoder) throws {
@@ -641,6 +666,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         projects = try container.decodeIfPresent([SpacesDeviceProjectSummary].self, forKey: .projects) ?? []
         workspaces = try container.decodeIfPresent([SpacesDeviceWorkspaceSummary].self, forKey: .workspaces) ?? []
         sessions = try container.decodeIfPresent([SpacesDeviceTerminalSessionSummary].self, forKey: .sessions) ?? []
+        daemonStatus = try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
     }
 }
 
@@ -941,7 +967,6 @@ public struct SpacesDeviceDirectoryListRequest: Codable, Sendable, Equatable {
 
 public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
     public let projectID: String
-    public let title: String
     public let branch: String?
     public let baseBranch: String?
     public let directoryName: String?
@@ -949,11 +974,9 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
     public let allowExistingBranchReuse: Bool
 
     public init(
-        projectID: String, title: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil,
-        allowExistingBranchReuse: Bool = false
+        projectID: String, branch: String?, baseBranch: String?, directoryName: String?, notes: String? = nil, allowExistingBranchReuse: Bool = false
     ) {
         self.projectID = projectID
-        self.title = title
         self.branch = branch
         self.baseBranch = baseBranch
         self.directoryName = directoryName
@@ -963,7 +986,6 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case projectID
-        case title
         case branch
         case baseBranch
         case directoryName
@@ -974,7 +996,6 @@ public struct SpacesDeviceWorkspaceCreateRequest: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         projectID = try container.decode(String.self, forKey: .projectID)
-        title = try container.decode(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         baseBranch = try container.decodeIfPresent(String.self, forKey: .baseBranch)
         directoryName = try container.decodeIfPresent(String.self, forKey: .directoryName)
@@ -1031,25 +1052,21 @@ public struct SpacesDeviceWorkspaceConfigUpdateRequest: Codable, Sendable, Equat
 
 public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
-    public let title: String?
     public let branch: String?
     public let notes: String?
     public let isHidden: Bool?
-    public let updatesTitle: Bool
     public let updatesBranch: Bool
     public let updatesNotes: Bool
     public let updatesHidden: Bool
 
     public init(
-        workspaceID: String, title: String? = nil, branch: String? = nil, notes: String? = nil, updatesTitle: Bool = false,
-        updatesBranch: Bool = false, updatesNotes: Bool = false, isHidden: Bool? = nil, updatesHidden: Bool = false
+        workspaceID: String, branch: String? = nil, notes: String? = nil, updatesBranch: Bool = false, updatesNotes: Bool = false,
+        isHidden: Bool? = nil, updatesHidden: Bool = false
     ) {
         self.workspaceID = workspaceID
-        self.title = title
         self.branch = branch
         self.notes = notes
         self.isHidden = isHidden
-        self.updatesTitle = updatesTitle
         self.updatesBranch = updatesBranch
         self.updatesNotes = updatesNotes
         self.updatesHidden = updatesHidden
@@ -1057,11 +1074,9 @@ public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equ
 
     private enum CodingKeys: String, CodingKey {
         case workspaceID
-        case title
         case branch
         case notes
         case isHidden
-        case updatesTitle
         case updatesBranch
         case updatesNotes
         case updatesHidden
@@ -1070,11 +1085,9 @@ public struct SpacesDeviceWorkspaceMetadataUpdateRequest: Codable, Sendable, Equ
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         workspaceID = try container.decode(String.self, forKey: .workspaceID)
-        title = try container.decodeIfPresent(String.self, forKey: .title)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         isHidden = try container.decodeIfPresent(Bool.self, forKey: .isHidden)
-        updatesTitle = try container.decodeIfPresent(Bool.self, forKey: .updatesTitle) ?? false
         updatesBranch = try container.decodeIfPresent(Bool.self, forKey: .updatesBranch) ?? false
         updatesNotes = try container.decodeIfPresent(Bool.self, forKey: .updatesNotes) ?? false
         updatesHidden = try container.decodeIfPresent(Bool.self, forKey: .updatesHidden) ?? false
@@ -1239,6 +1252,14 @@ public struct SpacesDeviceTerminalLinkChunkRequest: Codable, Sendable, Equatable
 public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case pair(SpacesDevicePairRequest)
     case ping
+    /// Frozen-core command: read the daemon's wire protocol + restart-impact status.
+    /// Its request/result shape is contractually stable so an incompatible client can
+    /// still negotiate versions and read the restart-impact report.
+    case daemonStatus
+    /// Frozen-core command: ask the daemon to restart itself (graceful shutdown; the OS service
+    /// manager respawns it from the updated binary). Used by iOS and remote clients that cannot
+    /// restart the daemon out of band. Contractually stable for the same reason as `daemonStatus`.
+    case requestDaemonRestart
     case overview
     case createProject(SpacesDeviceProjectCreateRequest)
     case prepareGitProject(SpacesDevicePrepareGitProjectRequest)
@@ -1280,6 +1301,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         switch self {
         case .pair: "pair"
         case .ping: "ping"
+        case .daemonStatus: "daemonStatus"
+        case .requestDaemonRestart: "requestDaemonRestart"
         case .overview: "overview"
         case .createProject: "createProject"
         case .prepareGitProject: "prepareGitProject"
@@ -1357,7 +1380,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
-        case .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink, .readTerminalLinkChunk: true
+        case .ping, .daemonStatus, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink,
+            .readTerminalLinkChunk:
+            true
         default: false
         }
     }
@@ -1367,6 +1392,8 @@ extension SpacesDeviceAPICommand: Codable {
     private enum CodingKeys: String, CodingKey {
         case pair
         case ping
+        case daemonStatus
+        case requestDaemonRestart
         case overview
         case createProject
         case prepareGitProject
@@ -1413,6 +1440,12 @@ extension SpacesDeviceAPICommand: Codable {
         case .ping:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .ping
+        case .daemonStatus:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .daemonStatus
+        case .requestDaemonRestart:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .requestDaemonRestart
         case .overview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .overview
@@ -1462,6 +1495,8 @@ extension SpacesDeviceAPICommand: Codable {
         switch self {
         case .pair(let payload): try container.encode(payload, forKey: .pair)
         case .ping: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .ping)
+        case .daemonStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .daemonStatus)
+        case .requestDaemonRestart: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .requestDaemonRestart)
         case .overview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .overview)
         case .createProject(let payload): try container.encode(payload, forKey: .createProject)
         case .prepareGitProject(let payload): try container.encode(payload, forKey: .prepareGitProject)
@@ -1538,6 +1573,7 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
 
 public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case issuedAuthToken(SpacesDeviceIssuedAuthTokenResult)
+    case daemonStatus(TerminalServiceDaemonStatus)
     case overview(SpacesDeviceOverviewPayload)
     case terminalState(GhosttyRemoteSessionStatePayload)
     case workspaceCreateOptions(SpacesDeviceWorkspaceCreateOptions)
@@ -1552,6 +1588,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
 extension SpacesDeviceAPIResult: Codable {
     private enum CodingKeys: String, CodingKey {
         case issuedAuthToken
+        case daemonStatus
         case overview
         case terminalState
         case workspaceCreateOptions
@@ -1571,6 +1608,7 @@ extension SpacesDeviceAPIResult: Codable {
         }
         switch key {
         case .issuedAuthToken: self = .issuedAuthToken(try container.decode(SpacesDeviceIssuedAuthTokenResult.self, forKey: key))
+        case .daemonStatus: self = .daemonStatus(try container.decode(TerminalServiceDaemonStatus.self, forKey: key))
         case .overview: self = .overview(try container.decode(SpacesDeviceOverviewPayload.self, forKey: key))
         case .terminalState: self = .terminalState(try container.decode(GhosttyRemoteSessionStatePayload.self, forKey: key))
         case .workspaceCreateOptions: self = .workspaceCreateOptions(try container.decode(SpacesDeviceWorkspaceCreateOptions.self, forKey: key))
@@ -1587,6 +1625,7 @@ extension SpacesDeviceAPIResult: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .issuedAuthToken(let payload): try container.encode(payload, forKey: .issuedAuthToken)
+        case .daemonStatus(let payload): try container.encode(payload, forKey: .daemonStatus)
         case .overview(let payload): try container.encode(payload, forKey: .overview)
         case .terminalState(let payload): try container.encode(payload, forKey: .terminalState)
         case .workspaceCreateOptions(let payload): try container.encode(payload, forKey: .workspaceCreateOptions)
@@ -1620,6 +1659,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var issuedAuthToken: String? { if case .issuedAuthToken(let payload) = result { payload.authToken } else { nil } }
+
+    public var daemonStatus: TerminalServiceDaemonStatus? { if case .daemonStatus(let payload) = result { payload } else { nil } }
 
     public var sessionState: GhosttyRemoteSessionStatePayload? { if case .terminalState(let payload) = result { payload } else { nil } }
 

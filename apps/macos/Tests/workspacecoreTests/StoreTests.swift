@@ -56,7 +56,7 @@ final class StoreTests: XCTestCase {
         let terminalRemoteStateColumns = try readTableColumns(dbURL: dbURL, table: "terminal_remote_session_states")
         let workspaceForeignKeys = try readSingleInteger(dbURL: dbURL, sql: "SELECT COUNT(*) FROM pragma_foreign_key_list('workspaces')")
         XCTAssertEqual(version, DatabaseSchema.currentVersion)
-        XCTAssertTrue(workspaceColumns.contains("title"))
+        XCTAssertFalse(workspaceColumns.contains("title"))
         XCTAssertTrue(workspaceColumns.contains("notes"))
         XCTAssertTrue(workspaceColumns.contains("is_hidden"))
         XCTAssertFalse(workspaceColumns.contains("host_id"))
@@ -165,8 +165,8 @@ final class StoreTests: XCTestCase {
             dbURL: dbURL,
             sql: """
                 INSERT INTO projects(id, name, dir, is_git) VALUES ('project-1', 'Project', '/tmp/project', 0);
-                INSERT INTO workspaces(id, project_id, title, dir, runtime_path, is_default, is_archived, is_hidden, is_running)
-                VALUES ('workspace-1', 'project-1', 'feature', '/tmp/project/feature', '/tmp/project/feature', 0, 0, 0, 0);
+                INSERT INTO workspaces(id, project_id, dir, runtime_path, is_default, is_archived, is_hidden, is_running)
+                VALUES ('workspace-1', 'project-1', '/tmp/project/feature', '/tmp/project/feature', 0, 0, 0, 0);
                 """)
 
         XCTAssertThrowsError(
@@ -348,7 +348,7 @@ final class StoreTests: XCTestCase {
     func testWorkspaceCollectionsRoundTripAndReplacement() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -421,7 +421,7 @@ final class StoreTests: XCTestCase {
     func testStoreRejectsBlankPortNames() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -438,7 +438,7 @@ final class StoreTests: XCTestCase {
     func testSetWorkspaceProcessesRollsBackReplacementOnFailure() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspaceProcesses(
@@ -497,7 +497,7 @@ final class StoreTests: XCTestCase {
     func testRunningProcessesAndWindowsRoundTrip() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -546,7 +546,7 @@ final class StoreTests: XCTestCase {
     func testSpacesRunningProcessKeepsSessionIDAfterRuntimeTargetIsDeleted() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -573,7 +573,7 @@ final class StoreTests: XCTestCase {
     func testWorkspaceIDForAgentWindowResolvesByYabaiWindowID() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature-agent", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -589,7 +589,7 @@ final class StoreTests: XCTestCase {
     func testWorkspaceIDForTerminalSessionResolvesPreservedAgentSessionIDAfterRuntimeTargetIsDeleted() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature-agent", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -611,7 +611,7 @@ final class StoreTests: XCTestCase {
         let dbURL = root.appendingPathComponent("spaces-test.db")
         let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature-terminal", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -635,7 +635,7 @@ final class StoreTests: XCTestCase {
     func testDeleteWorkspaceRemovesDependentRows() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -670,7 +670,7 @@ final class StoreTests: XCTestCase {
     func testUpsertWorkspaceClearsIgnoredWorktreePath() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.markIgnoredWorktree(path: workspace.dir, projectID: project.id)
         XCTAssertTrue(try store.isIgnoredWorktree(path: workspace.dir))
@@ -683,7 +683,7 @@ final class StoreTests: XCTestCase {
     func testDeleteProjectRemovesProjectWorkspacesAndDependents() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-1", dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["API_PORT"])
@@ -704,7 +704,7 @@ final class StoreTests: XCTestCase {
     func testWorkspaceAndSettingStateUpdatesPersist() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -722,21 +722,6 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.setting(key: "key"))
     }
 
-    // Tests workspace rename persists the workspace title column by arranging representative inputs and asserting the expected result.
-    func testUpdateWorkspaceNameUpdatesTitleColumn() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("workspace-title.db")
-        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
-        let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-
-        try store.updateWorkspaceName(id: workspace.id, name: "renamed")
-
-        XCTAssertEqual(try readSingleText(dbURL: dbURL, sql: "SELECT title FROM workspaces WHERE id = '\(workspace.id)'"), "renamed")
-    }
-
     // Tests project and workspace lookup and ordering by arranging representative inputs and asserting the expected result.
     func testProjectAndWorkspaceLookupAndOrdering() throws {
         let store = try makeTemporaryStore()
@@ -752,16 +737,16 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.projects().map(\.name), ["A Project", "Z Project"])
 
         let defaultWorkspace = WorkspaceRecord(
-            id: "default", projectID: aProject.id, title: "default", dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
             isRunning: false, lastLaunchedAt: nil)
         let archivedWorkspace = WorkspaceRecord(
-            id: "archived", projectID: aProject.id, title: "feature", dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false,
+            id: "archived", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false,
             isArchived: true, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: archivedWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
-        XCTAssertEqual(try store.workspace(projectID: aProject.id, title: "feature")?.id, "archived")
-        XCTAssertEqual(try store.workspace(projectID: aProject.id, title: "feature")?.baseBranch, "develop")
+        XCTAssertEqual(try store.workspace(id: "archived")?.id, "archived")
+        XCTAssertEqual(try store.workspace(id: "archived")?.baseBranch, "develop")
         XCTAssertEqual(try store.workspaces(projectID: aProject.id, includeArchived: false).map(\.id), ["default"])
         XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id, includeArchived: true).map(\.id)), Set(["default", "archived"]))
     }
@@ -770,7 +755,7 @@ final class StoreTests: XCTestCase {
     func testDeleteRunningProcessAndDeleteRunningProcesses() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -872,8 +857,8 @@ final class StoreTests: XCTestCase {
     func testWindowsQueryByWindowID() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspaceA = makeWorkspaceRecord(projectID: project.id, title: "ws-a", dir: project.dir)
-        let workspaceB = makeWorkspaceRecord(projectID: project.id, title: "ws-b", dir: project.dir)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
@@ -902,7 +887,7 @@ final class StoreTests: XCTestCase {
     func testAgentWindowLookupByTerminalSessionID() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -922,7 +907,7 @@ final class StoreTests: XCTestCase {
     func testSpacesAgentKeepsSessionIDAfterRuntimeTargetIsDeleted() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -948,8 +933,8 @@ final class StoreTests: XCTestCase {
     func testAgentWindowsByProviderFiltersCorrectly() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
-        let workspaceB = makeWorkspaceRecord(projectID: project.id, title: "feature-b", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.upsert(workspace: workspaceB)
@@ -975,7 +960,7 @@ final class StoreTests: XCTestCase {
     func testDeleteAgentWindowRemovesSingleRecord() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -1000,7 +985,7 @@ final class StoreTests: XCTestCase {
     func testDeleteAgentWindowsByProviderRemovesOnlyMatchingProvider() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -1022,7 +1007,7 @@ final class StoreTests: XCTestCase {
     func testUpdateAgentWindowStatusPersistsNewStatus() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -1041,7 +1026,7 @@ final class StoreTests: XCTestCase {
     func testWorkspaceSetupStateRoundTrip() throws {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
@@ -1076,21 +1061,21 @@ final class StoreTests: XCTestCase {
         let workspace2Dir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace1 = WorkspaceRecord(
-            id: "ws1", projectID: project.id, title: "feature-1", dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false,
+            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false,
             isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let workspace2 = WorkspaceRecord(
-            id: "ws2", projectID: project.id, title: "feature-2", dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false,
+            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false,
             isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace1)
         try store.upsert(workspace: workspace2)
         let found1 = try store.workspace(dir: workspace1Dir)
         XCTAssertEqual(found1?.id, "ws1")
-        XCTAssertEqual(found1?.title, "feature-1")
+        XCTAssertEqual(found1?.displayName, "feature-1")
         XCTAssertEqual(found1?.dir, workspace1Dir)
         let found2 = try store.workspace(dir: workspace2Dir)
         XCTAssertEqual(found2?.id, "ws2")
-        XCTAssertEqual(found2?.title, "feature-2")
+        XCTAssertEqual(found2?.displayName, "feature-2")
         let notFound = try store.workspace(dir: "/nonexistent/path")
         XCTAssertNil(notFound)
     }
@@ -1101,10 +1086,10 @@ final class StoreTests: XCTestCase {
         let workspaceDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let archived = WorkspaceRecord(
-            id: "archived", projectID: project.id, title: "feature-old", dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
+            id: "archived", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
             isArchived: true, isRunning: false, lastLaunchedAt: nil)
         let active = WorkspaceRecord(
-            id: "active", projectID: project.id, title: "feature-new", dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
+            id: "active", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
             isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: archived)
@@ -1120,10 +1105,10 @@ final class StoreTests: XCTestCase {
         try store.upsert(project: project)
         let branch = "feature-branch"
         let first = WorkspaceRecord(
-            id: "ws-1", projectID: project.id, title: "feature-1", dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch,
+            id: "ws-1", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch,
             isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let second = WorkspaceRecord(
-            id: "ws-2", projectID: project.id, title: "feature-2", dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch,
+            id: "ws-2", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch,
             isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: first)
 
@@ -1135,7 +1120,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: try makeTempDirectory().path)
         try store.upsert(workspace: workspace)
 
         try store.updateWorkspaceBranch(id: workspace.id, branch: "feature/new-name")
@@ -1152,7 +1137,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: try makeTempDirectory().path)
         try store.upsert(workspace: workspace)
 
         try store.updateWorkspaceDirname(id: workspace.id, dirname: "new-feature-dir")

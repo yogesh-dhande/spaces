@@ -109,7 +109,7 @@ import workspacecore
                     return try self.launchBuiltInTerminalSession(launchConfiguration)
                 }
             }.get()
-        })
+        }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
     private let git = RemoteWorkspaceGitClient()
 
     init() throws {
@@ -156,9 +156,9 @@ import workspacecore
             foregroundAgentReconciler.start()
             terminalForegroundAgentReconciler = foregroundAgentReconciler
         #endif
-        databaseChangeObserver = NotificationCenter.default.addObserver(
-            forName: IPCNotification.databaseDidChange, object: nil, queue: nil
-        ) { [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() } }
+        databaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
+            [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() }
+        }
         #if os(macOS)
             databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
@@ -265,6 +265,17 @@ import workspacecore
         TerminalServiceDaemonStatus(
             version: AppVersion.current, artifactVersion: normalizedString(ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"]),
             certificateFingerprint: remoteCertificateFingerprint, activeSessionCount: sessionCores.count)
+    }
+
+    // Frozen-core restart: terminate gracefully after a short grace so the Device API response can
+    // flush, then let launchd `KeepAlive` / systemd `Restart=always` respawn the updated binary.
+    func requestDaemonRestart() {
+        writeStandardError("spacesd: daemon restart requested\n")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(150))
+            shutdown()
+            Self.terminateProcess()
+        }
     }
 
     private func shutdownIfIdle() -> TerminalServiceResponse {
@@ -536,8 +547,7 @@ import workspacecore
                 throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(projectID).")
             }
             let workspace = try orchestrator.createWorkspaceOnDevice(
-                projectID: project.id, name: normalizedProfileArgument(command.title) ?? branch, branch: branch, baseBranch: command.baseBranch,
-                allowExistingBranchReuse: command.existingBranch ?? false)
+                projectID: project.id, branch: branch, baseBranch: command.baseBranch, allowExistingBranchReuse: command.existingBranch ?? false)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
         case .workspaceStart:
             let orchestrator = try makeProfileOrchestrator()
@@ -633,8 +643,8 @@ import workspacecore
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, title: value.title, dir: value.dir, runtimePath: value.runtimePath, dirname: value.dirname,
-            branch: value.branch, baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
+            id: value.id, projectID: value.projectID, dir: value.dir, runtimePath: value.runtimePath, dirname: value.dirname, branch: value.branch,
+            baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
             isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
 
@@ -1269,11 +1279,12 @@ private enum SpacesDaemonMobileCredentialStore {
 
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
-                builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+                builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
+                onRestartRequested: onRestartRequested)
         #endif
     }
 

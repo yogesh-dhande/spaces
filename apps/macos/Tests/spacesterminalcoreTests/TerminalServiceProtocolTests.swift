@@ -26,7 +26,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
             createdAt: "2026-06-11T00:00:00Z")
         let profileCommand = TerminalServiceProfileCommandRequest(
-            operation: .workspaceCreate, projectID: "project-1", branch: "feature", title: "Feature", baseBranch: "main", existingBranch: true,
+            operation: .workspaceCreate, projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true,
             terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true, lineCount: 40)
         let requests = [
             TerminalServiceRequest(command: .ping),
@@ -66,9 +66,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
             profile: TerminalServiceProfileCommandResponse(
                 message: "Created workspace.",
                 workspace: TerminalServiceProfileWorkspaceRecord(
-                    id: "workspace-1", projectID: "project-1", title: "Feature", dir: "/srv/work", runtimePath: "/srv/work", dirname: "feature",
-                    branch: "feature", baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false,
-                    lastLaunchedAt: nil, notes: nil), terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
+                    id: "workspace-1", projectID: "project-1", dir: "/srv/work", runtimePath: "/srv/work", dirname: "feature", branch: "feature",
+                    baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
+                terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
             mobileCredentials: [
                 TerminalServiceMobileCredential(
                     id: "credential-1", installationID: "installation-1", deviceName: "iPhone", platform: "ios", scopes: ["terminal"],

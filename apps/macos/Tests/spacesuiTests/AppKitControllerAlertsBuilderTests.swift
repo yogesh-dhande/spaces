@@ -15,7 +15,7 @@ struct AppKitControllerAlertsBuilderTests {
         processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
-            id: id, projectID: "project-1", projectName: "Project", title: "Title-\(id)", branch: "feature", baseBranch: "main",
+            id: id, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
             dir: "/device/\(id)", isRunning: isRunning, isArchived: isArchived, isHidden: false, isDefault: false, notes: nil, sessionCount: 0,
             assignedPorts: [], setupState: nil, config: SpacesDeviceWorkspaceConfig(), processRows: processRows, codingAgentRows: codingAgentRows,
             terminalRows: [])

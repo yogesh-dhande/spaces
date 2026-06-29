@@ -71,7 +71,7 @@ struct WorkspaceListCommand: ParsableCommand {
             try TerminalService.sendProfileCommand(.init(operation: .workspaceList, projectID: project, includeArchived: includeArchived)).workspaces
             ?? []
         context.output.emitLines(
-            workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\ttitle=\($0.title)" })
+            workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\tname=\($0.displayName)" })
     }
 }
 
@@ -80,7 +80,6 @@ struct WorkspaceCreateCommand: ParsableCommand {
 
     @Option(name: .long, help: "Project ID.") var project: String
     @Option(name: .long, help: "Workspace branch.") var branch: String
-    @Option(name: .long, help: "Workspace title. Defaults to the branch name.") var title: String?
     @Option(name: .long, help: "Base branch for new branch creation.") var baseBranch: String?
     @Flag(name: .long, help: "Use an existing branch instead of creating a new branch.") var existingBranch = false
 
@@ -88,9 +87,7 @@ struct WorkspaceCreateCommand: ParsableCommand {
         let context = CLIContext()
         let workspace = try requireProfileWorkspace(
             try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .workspaceCreate, projectID: project, branch: branch, title: title, baseBranch: baseBranch,
-                    existingBranch: existingBranch)))
+                .init(operation: .workspaceCreate, projectID: project, branch: branch, baseBranch: baseBranch, existingBranch: existingBranch)))
         context.output.emit("Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")")
     }
 }

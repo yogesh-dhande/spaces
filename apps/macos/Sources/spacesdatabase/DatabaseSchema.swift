@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 6
+    public static let currentVersion = 7
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -56,15 +56,18 @@ public enum DatabaseSchema {
                     );
                     """)
         },
+        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop workspace title column", requiresBackup: true) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE workspaces DROP COLUMN title")
+        },
         // Desktop window IDs moved to the client database (client-owned, desktop-local). The
         // daemon never has a desktop session, so this column was only ever written by the GUI.
-        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop daemon-owned desktop window IDs", requiresBackup: true) { database in
+        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "Drop daemon-owned desktop window IDs", requiresBackup: true) { database in
             try executeBatch(database: database, sql: "ALTER TABLE runtime_targets DROP COLUMN window_id;")
         },
         // Browser session windows moved to the client database (client-owned, desktop-local).
         // The daemon never has a desktop session, so these extracted-window columns were only
         // ever written by the GUI's former in-process orchestrator.
-        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "Drop daemon-owned browser extracted window IDs", requiresBackup: true) {
+        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "Drop daemon-owned browser extracted window IDs", requiresBackup: true) {
             database in
             try executeBatch(
                 database: database,
@@ -256,7 +259,6 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
-              title TEXT NOT NULL,
               dir TEXT NOT NULL,
               runtime_path TEXT NOT NULL,
               dirname TEXT,

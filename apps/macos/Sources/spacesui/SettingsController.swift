@@ -278,7 +278,7 @@ import workspacecore
             editorPopUp.item(at: 0)?.isEnabled = false
             for option in options {
                 editorPopUp.addItem(withTitle: option.displayName)
-                editorPopUp.itemArray.last?.representedObject = option.preference
+                editorPopUp.itemArray.last?.representedObject = option
             }
             if let current = currentEditor, let item = editorPopUp.itemArray.first(where: { ($0.representedObject as? EditorPreference) == current })
             {
@@ -296,8 +296,8 @@ import workspacecore
             host.settingsLabeledField(
                 name: "Preferred editor", hint: "Opened when you use the editor shortcut from inside a workspace", control: editorPopUp)
         ]
-        if let current = currentEditor, !options.contains(where: { $0.preference == current }) {
-            let note = host.helpTextLabel("Saved editor \"\(host.editorDisplayName(current))\" is not installed.")
+        if let current = currentEditor, !options.contains(current) {
+            let note = host.helpTextLabel("Saved editor \"\(current.displayName)\" is not installed.")
             editorContentViews.append(note)
         }
         let editorCard = host.formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)

@@ -16,8 +16,7 @@ import workspacecore
 /// `AppKitController` holds a single instance and delegates sidebar interactions to it.
 /// The controller reaches back into the host for shared selection/model state and
 /// services via `host`.
-@MainActor
-final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
+@MainActor final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     unowned let host: AppKitController
 
     init(host: AppKitController) {
@@ -73,6 +72,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         outlineView.onRowMouseDown = { [weak self] row in
             guard let self, let ref = self.host.outlineView.item(atRow: row) as? OutlineItemRef else { return false }
             if case .project(let project) = ref.item {
+                // Git project rows toggle their workspace list; non-git rows act as a
+                // single selectable workspace, so let normal row selection proceed.
+                guard project.isGitRepo else { return false }
                 self.toggleProjectExpanded(projectID: project.id)
                 return true
             }
@@ -122,6 +124,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         if host.showingAlerts || host.showingSettings { return true }
         if let selectedWorkspaceID = host.selectedWorkspaceID { return findWorkspace(id: selectedWorkspaceID) != nil }
         if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID }) }
+        if let blockDeviceID = host.visibleCompatibilityBlockDeviceID {
+            return host.deviceCompatibility(forDeviceID: blockDeviceID)?.isCompatible == false
+        }
         return false
     }
 
@@ -188,12 +193,18 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // sections, so a periodic refresh never makes remote devices vanish and
         // reload. Skip the full outline reload entirely when the local overview is
         // unchanged, so background polls don't collapse expanded projects.
-        let localOutlineUnchanged = host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })?.overview == snapshot.localDeviceOverview
+        // Include the daemon status/compatibility in the unchanged check: when only those change (a
+        // restart resolving a block, or an update-pending state clearing), the caption must still
+        // reload or it keeps showing stale Resolve/update-pending UI.
+        let previousLocalSection = host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })
+        let localOutlineUnchanged =
+            previousLocalSection?.overview == snapshot.localDeviceOverview && previousLocalSection?.compatibility == snapshot.localCompatibility
+            && previousLocalSection?.daemonStatus == snapshot.localDaemonStatus
         let localSection = DeviceSection(
             deviceID: snapshot.localDeviceID, deviceName: snapshot.localDeviceName, isLocal: true, loadState: .loaded,
             device: snapshot.localPairedDevice, projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject,
             workspaceRuntimeStatusByID: snapshot.workspaceRuntimeStatusByID, alertsGroups: snapshot.alertsGroups,
-            overview: snapshot.localDeviceOverview)
+            overview: snapshot.localDeviceOverview, daemonStatus: snapshot.localDaemonStatus, compatibility: snapshot.localCompatibility)
         if let localIndex = host.deviceSections.firstIndex(where: { $0.deviceID == snapshot.localDeviceID }) {
             host.deviceSections[localIndex] = localSection
         } else {
@@ -203,6 +214,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         host.localDeviceName = snapshot.localDeviceName
         host.localPairedDevice = snapshot.localPairedDevice
         host.localDeviceOverview = snapshot.localDeviceOverview
+        // If the local block was showing and the daemon is now compatible, drop the obsolete block
+        // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
+        host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
         rebuildFlatSidebarData()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
@@ -230,11 +244,20 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     /// Adds a section for every paired remote device and fetches each one's overview
     /// independently so a slow or unreachable device never blocks the sidebar.
+    /// A reachable remote device's loaded overview plus its frozen-core handshake result.
+    struct RemoteDeviceLoad: Sendable {
+        /// `nil` when the device is reachable but wire-incompatible (no decodable overview).
+        let overview: SpacesDeviceOverview?
+        let daemonStatus: TerminalServiceDaemonStatus?
+        let compatibility: SpacesWireCompatibility?
+    }
+
     func loadRemoteDeviceSections(forceRefresh: Bool = false) {
         let remotes = host.macPairedDevices()
         var addedSection = false
         for record in remotes where !host.deviceSections.contains(where: { $0.deviceID == record.id }) {
-            host.deviceSections.append(DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
+            host.deviceSections.append(
+                DeviceSection(deviceID: record.id, deviceName: record.name, isLocal: false, loadState: .loading, device: record))
             addedSection = true
         }
         if addedSection {
@@ -263,8 +286,17 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             if !forceRefresh, let last = remoteOverviewFetchInstants[record.id], now - last < freshnessWindow { continue }
             remoteOverviewFetchInstants[record.id] = now
             Task { @MainActor [weak self] in
-                let result: Result<SpacesDeviceOverview, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try SpacesDeviceClient.overview(device: record, clientApp: clientApp)) } catch { return .failure(error) }
+                let result: Result<RemoteDeviceLoad, Error> = await Task.detached(priority: .userInitiated) {
+                    do {
+                        // Read compatibility from the overview's inline frozen-core status: a compatible
+                        // remote costs one round-trip, and only an incompatible/too-old daemon falls back
+                        // to the standalone handshake — which stays decodable when the overview would not,
+                        // so the device is presented as blocked (no overview) rather than offline.
+                        let resolution = try SpacesDeviceClient.resolveOverview(device: record, clientApp: clientApp)
+                        return .success(
+                            RemoteDeviceLoad(
+                                overview: resolution.overview, daemonStatus: resolution.daemonStatus, compatibility: resolution.compatibility))
+                    } catch { return .failure(error) }
                 }.value
                 self?.applyRemoteDeviceSection(deviceID: record.id, result: result)
             }
@@ -317,7 +349,16 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // Build the stream callbacks with a single weak capture so the detached
         // connect task below captures only Sendable values (not `self`).
         let onOverview: @Sendable (SpacesDeviceOverview) -> Void = { [weak self] overview in
-            Task { @MainActor in self?.applyRemoteDeviceSection(deviceID: deviceID, result: .success(overview)) }
+            // A pushed overview comes from a reachable, decodable daemon; read its inline
+            // frozen-core status (if present) so the compatibility verdict rides along, the
+            // same way the polling `resolveOverview` path derives it.
+            let daemonStatus = overview.overview.daemonStatus
+            let compatibility = daemonStatus.map { SpacesWireCompatibility.evaluate(daemonStatus: $0) }
+            Task { @MainActor in
+                self?.applyRemoteDeviceSection(
+                    deviceID: deviceID,
+                    result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)))
+            }
         }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
             Task { @MainActor in self?.handleRemoteOverviewDisconnected(deviceID: deviceID) }
@@ -325,8 +366,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         Task { @MainActor [weak self] in
             // Resolving credentials and connecting block, so do it off the main actor.
             let client = await Task.detached(priority: .userInitiated) { () -> SpacesDeviceAPIOverviewStreamClient? in
-                try? SpacesDeviceClient.subscribeOverview(
-                    device: record, clientApp: clientApp, onOverview: onOverview, onDisconnect: onDisconnect)
+                try? SpacesDeviceClient.subscribeOverview(device: record, clientApp: clientApp, onOverview: onOverview, onDisconnect: onDisconnect)
             }.value
             guard let self else {
                 client?.stop()
@@ -370,15 +410,51 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
-    func applyRemoteDeviceSection(deviceID: String, result: Result<SpacesDeviceOverview, Error>) {
+    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>) {
         guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
         // A background refresh re-fetches each remote; only touch the outline when
         // the device's overview or load state actually changed, so unchanged polls
         // don't collapse expanded projects.
         let wasLoaded = host.deviceSections[index].loadState == .loaded
         switch result {
-        case .success(let overview):
-            if wasLoaded, host.deviceSections[index].overview == overview.overview {
+        case .success(let load):
+            // Compatibility/status can change while the overview stays identical (e.g. after a restart
+            // updates a remote daemon), so the unchanged-check must include them or the badge/block
+            // would keep showing the stale verdict until an unrelated overview change.
+            let statusUnchanged =
+                host.deviceSections[index].compatibility == load.compatibility && host.deviceSections[index].daemonStatus == load.daemonStatus
+            host.deviceSections[index].daemonStatus = load.daemonStatus
+            host.deviceSections[index].compatibility = load.compatibility
+            // If this device's block was showing and it is now compatible, drop the obsolete block.
+            host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
+            guard let overview = load.overview else {
+                // Reachable but wire-incompatible: present an empty loaded section so the sidebar shows
+                // the compatibility badge instead of a generic offline error.
+                // Capture (before clearing) whether a workspace of this device is the current selection —
+                // its detail controls are about to become stale and must switch to the block.
+                let selectedWorkspaceUnderThisDevice =
+                    host.selectedWorkspaceID.map { wsID in
+                        host.deviceSections[index].workspacesByProject.values.contains { $0.contains { $0.id == wsID } }
+                    } ?? false
+                let changed = !wasLoaded || !statusUnchanged || host.deviceSections[index].overview != nil
+                host.deviceSections[index].projects = []
+                host.deviceSections[index].workspacesByProject = [:]
+                host.deviceSections[index].workspaceRuntimeStatusByID = [:]
+                host.deviceSections[index].alertsGroups = []
+                host.deviceSections[index].overview = nil
+                host.deviceSections[index].loadState = .loaded
+                if changed {
+                    rebuildFlatSidebarData()
+                    host.outlineView.reloadData()
+                    applySidebarProjectExpansionState()
+                }
+                if selectedWorkspaceUnderThisDevice, let verdict = load.compatibility {
+                    host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+                }
+                updateAlertsSidebarBadge()
+                return
+            }
+            if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
                 return
             }
@@ -393,7 +469,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             host.deviceSections[index].loadState = .loaded
         case .failure(let error):
             if case .offline = host.deviceSections[index].loadState { return }
+            // Drop the prior verdict so an offline device shows "offline" rather than a stale Resolve
+            // button / restart block from when it was last reachable-but-incompatible.
+            host.deviceSections[index].compatibility = nil
+            host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(error.localizedDescription)
+            host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
         }
         rebuildFlatSidebarData()
         host.outlineView.reloadData()
@@ -442,7 +523,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         if let cached = visibleWorkspacesCache[projectID] { return cached }
         let result = (host.workspacesByProject[projectID] ?? []).filter { isVisibleWorkspace($0) }.sorted { lhs, rhs in
             if lhs.isDefault != rhs.isDefault { return lhs.isDefault }
-            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
         }
         visibleWorkspacesCache[projectID] = result
         return result
@@ -453,7 +534,17 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     /// root stays a flat project list.
     var showsDeviceHeaders: Bool { host.deviceSections.count > 1 }
 
-    func deviceProjects(deviceID: String) -> [ProjectSummary] { host.projects.filter { $0.deviceID == deviceID } }
+    func deviceProjects(deviceID: String) -> [ProjectSummary] {
+        host.projects.filter { project in
+            guard project.deviceID == deviceID else { return false }
+            // A non-git project's row stands in for its single workspace. If that
+            // workspace is hidden it has no visible workspace, so drop the row entirely
+            // (it stays reachable from the Workspace Visibility dialog) rather than
+            // leaving a dead stand-in that selects nothing.
+            if !project.isGitRepo, visibleWorkspaces(projectID: project.id).isEmpty { return false }
+            return true
+        }
+    }
 
     func navigateSidebarSelection(direction: Int) -> Bool {
         guard
@@ -486,12 +577,19 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     }
 
     func selectWorkspace(_ workspace: WorkspaceSummary) {
+        // A non-git project's single workspace has no dedicated row; its project row
+        // stands in for it, so select that row instead of a `.workspace` item.
+        let owningProject = findWorkspace(id: workspace.id)?.0
         for row in 0..<host.outlineView.numberOfRows {
-            if let ref = host.outlineView.item(atRow: row) as? OutlineItemRef {
-                if case .workspace(_, let ws) = ref.item, ws.id == workspace.id {
-                    host.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                    break
-                }
+            guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef else { continue }
+            switch ref.item {
+            case .workspace(_, let ws) where ws.id == workspace.id:
+                host.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                return
+            case .project(let project) where !project.isGitRepo && project.id == owningProject?.id:
+                host.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                return
+            default: continue
             }
         }
     }
@@ -513,13 +611,18 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return showsDeviceHeaders ? host.deviceSections.count : deviceProjects(deviceID: singleDeviceID).count }
         if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceProjects(deviceID: deviceID).count }
-        if case .project(let project) = (item as? OutlineItemRef)?.item { return max(visibleWorkspaces(projectID: project.id).count, 1) }
+        if case .project(let project) = (item as? OutlineItemRef)?.item {
+            // Non-git projects own exactly one workspace (the project directory) and
+            // render as a single flat row, so they expose no expandable children.
+            guard project.isGitRepo else { return 0 }
+            return max(visibleWorkspaces(projectID: project.id).count, 1)
+        }
         return 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         if case .device = (item as? OutlineItemRef)?.item { return true }
-        if case .project = (item as? OutlineItemRef)?.item { return true }
+        if case .project(let project) = (item as? OutlineItemRef)?.item { return project.isGitRepo }
         return false
     }
 
@@ -545,7 +648,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             let workspace =
                 (index >= 0 && index < visible.count ? visible[index] : nil)
                 ?? WorkspaceSummary(
-                    id: "", title: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
+                    id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
         }
         return outlineItemRef(for: .project(host.projects.first ?? Self.placeholderProject))
@@ -567,9 +670,13 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch ref.item {
         case .device(let deviceID): return sidebarSectionRowCell(deviceID: deviceID)
         case .project(let project):
-            return projectRowCell(
-                project: project, isSelected: host.selectedProjectID == project.id && host.selectedWorkspaceID == nil,
-                isExpanded: outlineView.isItemExpanded(ref))
+            // A non-git project row stands in for its single workspace, so it reads as
+            // selected whenever that workspace is the active selection.
+            let isSelected =
+                project.isGitRepo
+                ? host.selectedProjectID == project.id && host.selectedWorkspaceID == nil
+                : host.selectedProjectID == project.id && host.selectedWorkspaceID != nil
+            return projectRowCell(project: project, isSelected: isSelected, isExpanded: outlineView.isItemExpanded(ref))
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: host.selectedWorkspaceID == workspace.id)
         case .emptyProject(let project): return emptyProjectRowCell(project: project)
@@ -585,7 +692,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch section.loadState {
         case .loading: return ("loading…", .tertiaryLabelColor)
         case .offline: return ("offline", sidebarFailedIndicatorColor())
-        case .loaded: return nil
+        case .loaded:
+            // Incompatible devices render an actionable button in the caption (see sidebarSectionRowCell);
+            // a compatible-but-older daemon shows a quiet "update pending" caption.
+            if section.compatibility?.isCompatible == false { return nil }
+            if AppKitController.daemonUpdatePending(status: section.daemonStatus) { return ("update pending", .tertiaryLabelColor) }
+            return nil
         }
     }
 
@@ -608,7 +720,20 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         contentRow.addArrangedSubview(nameLabel)
         contentRow.addArrangedSubview(NSView())
 
-        if let state = deviceSectionLoadStateLabel(deviceID: deviceID) {
+        if let compatibility = host.deviceSections.first(where: { $0.deviceID == deviceID })?.compatibility, !compatibility.isCompatible {
+            // Device headers are non-selectable, so an incompatible device's only affordance is this
+            // caption button, which opens the compatibility block (restart/update) in the detail pane.
+            let button = NSButton(
+                title: compatibility == .clientTooOld ? "Update app" : "Resolve", target: self, action: #selector(compatibilityActionClicked(_:)))
+            button.bezelStyle = .inline
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: 11, weight: .semibold)
+            button.contentTintColor = .systemOrange
+            button.identifier = NSUserInterfaceItemIdentifier("compat:\(deviceID)")
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+            contentRow.addArrangedSubview(button)
+        } else if let state = deviceSectionLoadStateLabel(deviceID: deviceID) {
             let stateLabel = NSTextField(labelWithString: state.text)
             stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
             stateLabel.textColor = state.color
@@ -652,6 +777,20 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         leadingStack.translatesAutoresizingMaskIntoConstraints = false
         leadingStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
         leadingStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // Non-git projects are a single workspace, so surface its running indicator
+        // inline the way a workspace row would.
+        if !project.isGitRepo, let workspace = visibleWorkspaces(projectID: project.id).first {
+            let lifecycleRunning =
+                (host.workspaceRuntimeStatusByID[workspace.id]?.lifecycleState ?? WorkspaceLifecycleState(isRunning: workspace.isRunning)) == .running
+            let statusIcon = NSImageView()
+            statusIcon.translatesAutoresizingMaskIntoConstraints = false
+            statusIcon.image = NSImage(systemSymbolName: lifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
+            statusIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+            statusIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
+            statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
+            statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
+            leadingStack.addArrangedSubview(statusIcon)
+        }
         leadingStack.addArrangedSubview(titleLabel)
 
         let accessoryStack = NSStackView()
@@ -667,16 +806,6 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         let projectActions = AppKitController.sidebarProjectActions(isGitRepo: project.isGitRepo)
         if projectActions.showsSettings { accessoryStack.addArrangedSubview(settingsButton) }
 
-        let chevron = NSImageView()
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        chevron.imageScaling = .scaleNone
-        chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-        chevron.contentTintColor = .tertiaryLabelColor
-        chevron.setContentHuggingPriority(.required, for: .horizontal)
-        chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
-        NSLayoutConstraint.activate([chevron.widthAnchor.constraint(equalToConstant: 14), chevron.heightAnchor.constraint(equalToConstant: 14)])
-
         let contentRow = NSStackView()
         contentRow.orientation = .horizontal
         contentRow.alignment = .centerY
@@ -685,7 +814,19 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         contentRow.addArrangedSubview(leadingStack)
         contentRow.addArrangedSubview(NSView())
         contentRow.addArrangedSubview(accessoryStack)
-        contentRow.addArrangedSubview(chevron)
+        // Only git projects expand into a workspace list, so only they show a chevron.
+        if project.isGitRepo {
+            let chevron = NSImageView()
+            chevron.translatesAutoresizingMaskIntoConstraints = false
+            chevron.imageScaling = .scaleNone
+            chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+            chevron.contentTintColor = .tertiaryLabelColor
+            chevron.setContentHuggingPriority(.required, for: .horizontal)
+            chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
+            NSLayoutConstraint.activate([chevron.widthAnchor.constraint(equalToConstant: 14), chevron.heightAnchor.constraint(equalToConstant: 14)])
+            contentRow.addArrangedSubview(chevron)
+        }
 
         rowBackground.addSubview(contentRow)
         cell.addSubview(rowBackground)
@@ -701,7 +842,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             contentRow.bottomAnchor.constraint(equalTo: rowBackground.bottomAnchor, constant: -3),
         ])
         if projectActions.showsAddWorkspace {
-            let addButton = host.sidebarRowIconButton(symbol: "plus", tooltip: "New workspace in \(project.name)", action: #selector(AppKitController.addWorkspace(_:)))
+            let addButton = host.sidebarRowIconButton(
+                symbol: "plus", tooltip: "New workspace in \(project.name)", action: #selector(AppKitController.addWorkspace(_:)))
             addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
             addButton.setAccessibilityIdentifier("sidebar-project-add-workspace-\(project.id)")
             accessoryStack.addArrangedSubview(addButton)
@@ -768,7 +910,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
         statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
 
-        let nameLabel = NSTextField(labelWithString: workspace.title)
+        let nameLabel = NSTextField(labelWithString: workspace.displayName)
         nameLabel.font = .systemFont(ofSize: 12, weight: .medium)
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.textColor = sidebarPrimaryTextColor(isSelected: isSelected, isArchived: workspace.isArchived)
@@ -856,7 +998,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard let ref = item as? OutlineItemRef else { return 24 }
         switch ref.item {
         case .device: return 30
-        case .project(let project): return host.selectedProjectID == project.id && host.selectedWorkspaceID == nil ? 32 : 30
+        case .project(let project):
+            let isSelected = project.isGitRepo ? host.selectedWorkspaceID == nil : host.selectedWorkspaceID != nil
+            return host.selectedProjectID == project.id && isSelected ? 32 : 30
         case .workspace: return 32
         case .emptyProject: return 28
         }
@@ -900,6 +1044,13 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    @objc private func compatibilityActionClicked(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, raw.hasPrefix("compat:") else { return }
+        let deviceID = String(raw.dropFirst("compat:".count))
+        guard let verdict = host.deviceCompatibility(forDeviceID: deviceID), !verdict.isCompatible else { return }
+        host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+    }
+
     func outlineViewSelectionDidChange(_ notification: Notification) {
         if host.suppressOutlineSelectionChanges { return }
         let row = host.outlineView.selectedRow
@@ -916,22 +1067,35 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             return
         }
         let item = ref.item
+        // Structural rows (devices, empty placeholders) and collapsible git project
+        // headers are not selectable detail targets, so deselect and bail. Non-git
+        // project rows fall through: they stand in for their single workspace.
         switch item {
-        case .project, .device, .emptyProject:
+        case .device, .emptyProject:
             host.suppressOutlineSelectionChanges = true
             host.outlineView.deselectAll(nil)
             host.suppressOutlineSelectionChanges = false
             return
-        case .workspace: break
+        case .project(let project) where project.isGitRepo:
+            host.suppressOutlineSelectionChanges = true
+            host.outlineView.deselectAll(nil)
+            host.suppressOutlineSelectionChanges = false
+            return
+        default: break
         }
 
         let previousProjectID = host.selectedProjectID
         let previousWorkspaceID = host.selectedWorkspaceID
         host.lastSelectedRow = row
         switch item {
-        case .device: return
-        case .project: return
-        case .emptyProject: return
+        case .device, .emptyProject: return
+        case .project(let project):
+            guard let workspace = visibleWorkspaces(projectID: project.id).first else { return }
+            host.selectedProjectID = project.id
+            host.selectedWorkspaceID = workspace.id
+            AppKitController.setClientActiveWorkspaceID(workspace.id)
+            host.showingSettings = false
+            host.showWorkspaceDetail(project: project, workspace: workspace)
         case .workspace(let project, let workspace):
             host.selectedProjectID = project.id
             host.selectedWorkspaceID = workspace.id
@@ -944,9 +1108,8 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             currentWorkspaceID: host.selectedWorkspaceID)
     }
 
-    func refreshSidebarSelectionRows(
-        previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?
-    ) {
+    func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
+    {
         var rowsToReload = IndexSet()
         if let previousProjectID, let previousRow = rowIndex(forProjectID: previousProjectID) { rowsToReload.insert(previousRow) }
         if let currentProjectID, let currentRow = rowIndex(forProjectID: currentProjectID) { rowsToReload.insert(currentRow) }
@@ -997,7 +1160,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             return
         }
         if isCollapsed { host.outlineView.collapseItem(item) } else { host.outlineView.expandItem(item) }
-        if isCollapsed, let selectedWorkspaceID = host.selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID), project.id == projectID {
+        if isCollapsed, let selectedWorkspaceID = host.selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID),
+            project.id == projectID
+        {
             host.selectedWorkspaceID = nil
             host.selectedProjectID = nil
             host.lastSelectedRow = -1
@@ -1059,9 +1224,11 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
-        let mobileButton = host.sidebarRowIconButton(symbol: "desktopcomputer.and.macbook", tooltip: "Devices", action: #selector(AppKitController.showMobileConnection))
+        let mobileButton = host.sidebarRowIconButton(
+            symbol: "desktopcomputer.and.macbook", tooltip: "Devices", action: #selector(AppKitController.showMobileConnection))
         mobileButton.setAccessibilityIdentifier("sidebar-device-pairing")
-        let settingsButton = host.sidebarRowIconButton(symbol: "gearshape", tooltip: "User settings", action: #selector(AppKitController.showSettings))
+        let settingsButton = host.sidebarRowIconButton(
+            symbol: "gearshape", tooltip: "User settings", action: #selector(AppKitController.showSettings))
         let reloadButton = host.sidebarRowIconButton(symbol: "arrow.clockwise", tooltip: "Reload", action: #selector(AppKitController.reloadTapped))
 
         let stack = NSStackView()

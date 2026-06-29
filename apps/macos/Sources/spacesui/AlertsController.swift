@@ -14,8 +14,7 @@ import workspacecore
 /// Owns the Alerts pane's state and behavior. `AppKitController` holds a single
 /// instance and delegates alerts interactions to it. The controller reaches back
 /// into the host for shared window/model/orchestration services via `host`.
-@MainActor
-final class AlertsController: NSObject {
+@MainActor final class AlertsController: NSObject {
     unowned let host: AppKitController
 
     init(host: AppKitController) {
@@ -46,13 +45,9 @@ final class AlertsController: NSObject {
         }
     }
 
-    func alertsAttentionCount() -> Int {
-        buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count }
-    }
+    func alertsAttentionCount() -> Int { buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count } }
 
-    func loadAlertsDismissedAttentionItemIDs() {
-        dismissedAlertsAttentionItemIDs = host.loadDismissedAlertsAttentionItemIDs()
-    }
+    func loadAlertsDismissedAttentionItemIDs() { dismissedAlertsAttentionItemIDs = host.loadDismissedAlertsAttentionItemIDs() }
 
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
         let activeIDs = Set(host.alertsGroups.flatMap { $0.items.map(\.attentionID) })
@@ -79,6 +74,7 @@ final class AlertsController: NSObject {
         host.clearActiveAddFormStateAndCloseWindows()
         host.stopWorkspaceSetupDetailRefreshTimer()
         host.visibleDetailWorkspaceID = nil
+        host.visibleCompatibilityBlockDeviceID = nil
         host.showingSettings = false
         host.showingAlerts = true
         let previousProjectID = host.selectedProjectID
@@ -230,8 +226,8 @@ final class AlertsController: NSObject {
         dismissButton.toolTip = "Dismiss from alerts"
 
         let mainRow = host.windowRow(
-            icon: entry.icon, iconColor: AppKitController.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
-            processStatus: entry.processStatus, agentStatus: entry.agentStatus,
+            icon: entry.icon, iconColor: AppKitController.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail,
+            shortcut: shortcut, processStatus: entry.processStatus, agentStatus: entry.agentStatus,
             automationID: entry.agentStatus == nil ? nil : "alerts-agent-\(AppKitController.automationIdentifierSlug(entry.label))",
             trailingAccessory: dismissButton, action: action)
 

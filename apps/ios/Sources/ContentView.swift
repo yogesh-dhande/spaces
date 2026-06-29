@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var terminalListRefreshGeneration = 0
     @State private var isShowingFilters = false
     @State private var workspaceCreateProjectID: String?
+    @State private var isConfirmingRestart = false
     let model: SpacesMobileAppModel
 
     var body: some View {
@@ -83,6 +84,18 @@ struct ContentView: View {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
             Text(model.errorMessage ?? "")
+        }
+        .confirmationDialog(
+            "Restart this device's daemon?",
+            isPresented: $isConfirmingRestart,
+            titleVisibility: .visible
+        ) {
+            Button("Restart Daemon", role: .destructive) {
+                Task { await model.requestDaemonRestart() }
+            }
+            Button("Defer", role: .cancel) {}
+        } message: {
+            Text(restartConfirmationMessage)
         }
         .task(id: refreshLoopTaskID) {
             guard scenePhase == .active else { return }
@@ -169,7 +182,11 @@ struct ContentView: View {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         homeControls
-                        if model.isLoading && model.overview == nil {
+                        if model.isActiveDeviceBlocked {
+                            // Fully blocked, scoped to this device: the banner in homeControls is the only
+                            // surface. Switch to another paired device or restart this device's daemon.
+                            EmptyView()
+                        } else if model.isLoading && model.overview == nil {
                             ProgressView("Loading workspaces...")
                                 .frame(maxWidth: .infinity, minHeight: 360)
                         } else if projectGroups.isEmpty && model.terminalGroups.isEmpty {
@@ -249,7 +266,34 @@ struct ContentView: View {
     private var homeControls: some View {
         VStack(spacing: 8) {
             deviceSelectorRow
-            searchFilterRow
+            compatibilityBanner
+            if !model.isActiveDeviceBlocked {
+                searchFilterRow
+            }
+        }
+    }
+
+    private var restartConfirmationMessage: String {
+        guard let status = model.daemonStatus else {
+            return "Running terminals, processes, and coding agents on this device will stop."
+        }
+        let agents = status.activeAgents + status.waitingAgents
+        var parts: [String] = []
+        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
+        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
+        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
+        guard !parts.isEmpty else { return "No running work will be interrupted." }
+        return "This will stop " + parts.joined(separator: ", ") + "."
+    }
+
+    @ViewBuilder private var compatibilityBanner: some View {
+        if let compatibility = model.compatibility, !compatibility.isCompatible {
+            CompatibilityBannerView(
+                compatibility: compatibility, daemonStatus: model.daemonStatus, isMutating: model.isMutating
+            ) { isConfirmingRestart = true }
+        } else if model.daemonUpdatePending {
+            CompatibilityBannerView(
+                compatibility: .compatible, daemonStatus: model.daemonStatus, isMutating: model.isMutating, onRestart: {})
         }
     }
 
@@ -286,6 +330,12 @@ struct ContentView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            if model.isActiveDeviceBlocked || model.daemonUpdatePending {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.orange)
+                    .accessibilityLabel(model.isActiveDeviceBlocked ? "Device incompatible" : "Daemon update pending")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
@@ -413,7 +463,7 @@ struct ContentView: View {
 
     private func workspaceHeader(_ group: SpacesMobileWorkspaceGroup) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(group.workspace.title)
+            Text(group.workspace.displayName)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
@@ -807,7 +857,6 @@ private struct WorkspaceCreateSheet: View {
     let projectID: String
 
     @State private var branch = ""
-    @State private var name = ""
 
     private var project: SpacesDeviceProjectSummary? {
         let projects = model.workspaceCreateOptions?.projects ?? model.overview?.projects ?? []
@@ -816,11 +865,10 @@ private struct WorkspaceCreateSheet: View {
 
     private var isGitRepo: Bool { project?.isGitRepo == true }
 
+    // Only git projects support creating workspaces; a non-git project owns a single
+    // workspace (its project directory).
     private var canCreate: Bool {
-        if isGitRepo {
-            return !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        isGitRepo && !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -833,10 +881,9 @@ private struct WorkspaceCreateSheet: View {
                             .autocorrectionDisabled()
                     }
                 } else {
-                    Section("Name") {
-                        TextField("workspace name", text: $name)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                    Section {
+                        Text("Non-git projects have a single workspace for the project directory.")
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -849,12 +896,10 @@ private struct WorkspaceCreateSheet: View {
                     Button(model.isMutating ? "Creating..." : "Create") {
                         Task {
                             let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
                             await model.createWorkspace(
                                 projectID: projectID,
-                                title: isGitRepo ? trimmedBranch : trimmedName,
-                                branch: isGitRepo ? trimmedBranch : nil,
-                                baseBranch: isGitRepo ? project?.defaultBranch : nil,
+                                branch: trimmedBranch,
+                                baseBranch: project?.defaultBranch,
                                 directoryName: nil,
                                 allowExistingBranchReuse: false
                             )

@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   linux-spacesd-artifact:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -37,8 +37,10 @@ jobs:
         include:
           - arch: x86_64
             docker-platform: linux/amd64
+            runner: ubuntu-24.04
           - arch: arm64
             docker-platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -62,12 +64,6 @@ jobs:
             --feed-url "https://usespaces.dev/releases/appcast.xml" \
             --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
             --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
-
-      - name: Set up QEMU for arm64 Docker build
-        if: ${{ matrix.docker-platform == 'linux/arm64' }}
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Build and smoke Linux spacesd artifact
         run: |
@@ -271,7 +267,7 @@ jobs:
           tar -tzf spacesd-ubuntu-24.04-arm64.tar.gz >/dev/null
 
       - name: Install remote artifact signing dependency
-        run: python3 -m pip install --user cryptography
+        run: python3 -m pip install --user --break-system-packages cryptography
 
       - name: Sign remote artifact manifest
         env:
@@ -314,9 +310,33 @@ jobs:
           npm run build
 
       - name: Deploy Firebase Hosting
+        id: firebase_deploy
+        continue-on-error: true
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
           channelId: live
           projectId: spaces-a1814
+
+      - name: Confirm Hosting serves this release
+        if: ${{ steps.firebase_deploy.outcome != 'success' }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # When the built site is unchanged, `firebase deploy` to the live channel returns
+          # HTTP 400 "is the current active version" — a no-op, not a real failure. Tolerate that
+          # case only when the live appcast already serves this release; any other deploy failure
+          # (auth, build, quota) leaves the new version absent and still fails the job.
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            appcast="$(curl -fsSL "https://usespaces.dev/releases/appcast.xml?cb=${GITHUB_RUN_ID}-${attempt}" || true)"
+            if printf '%s' "$appcast" | grep -q "<sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>"; then
+              echo "Live appcast already serves ${VERSION}; treating the unchanged deploy as success."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: live appcast not yet serving ${VERSION}; retrying in 10s…"
+            sleep 10
+          done
+          echo "Firebase Hosting deploy failed and ${VERSION} is not live." >&2
+          exit 1

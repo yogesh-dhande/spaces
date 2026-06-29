@@ -69,13 +69,8 @@ FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
 TEST_REPO="$TMP_ROOT/beacon-status"
 TEST_REPO_2="$TMP_ROOT/scout-errors"
 TEST_REPO_3="${TEST_REPO_3:-$TMP_ROOT/prism-analytics}"
-WORKSPACE_TITLE="Hero Redesign"
 WORKSPACE_BRANCH="redesign-hero"
 WORKSPACE_NOTES="Redesign the landing page hero for clarity and impact"
-PRIMARY_WORKSPACE_TITLE="System Status"
-SECONDARY_WORKSPACE_TITLE="Error Console"
-TERTIARY_WORKSPACE_TITLE="User Analytics"
-SCOUT_BRANCH_WORKSPACE_TITLE="Hero Redesign"
 SCOUT_BRANCH_WORKSPACE_BRANCH="redesign-hero"
 SCOUT_BRANCH_WORKSPACE_NOTES="Redesign the error console hero section"
 MOCK_AGENT_LABEL="Mock Agent"
@@ -928,7 +923,6 @@ seed_fixture() {
   # workspacecore layer so the manual test is reproducible.
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO" \
-    --workspace-title "$PRIMARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SEED_FILE"
 }
@@ -937,7 +931,6 @@ seed_second_fixture() {
   log_step "seeding second project fixture (scout-errors)"
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_2" \
-    --workspace-title "$SECONDARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SECOND_SEED_FILE"
 }
@@ -946,7 +939,6 @@ seed_third_fixture() {
   log_step "seeding third project fixture (prism-analytics)"
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_3" \
-    --workspace-title "$TERTIARY_WORKSPACE_TITLE" \
     --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$THIRD_SEED_FILE"
 }
@@ -1484,7 +1476,7 @@ for window in windows:
 }
 
 lookup_workspace() {
-  "$SPACES_E2E_CLI" lookup-workspace --project-dir "$TEST_REPO" --title "$1" >"$2"
+  "$SPACES_E2E_CLI" lookup-workspace --project-dir "$TEST_REPO" --name "$1" >"$2"
 }
 
 wait_for_workspace_lookup() {
@@ -2057,7 +2049,6 @@ create_workspace_via_gui() {
   # workspace initialization logic against a branch with distinct HTML content.
   "$SPACES_E2E_CLI" create-workspace \
     --project-dir "$TEST_REPO" \
-    --title "$WORKSPACE_TITLE" \
     --existing-branch \
     --branch "$WORKSPACE_BRANCH" \
     --base-branch main \
@@ -2069,7 +2060,6 @@ create_scout_branch_workspace() {
   log_step "creating scout hero-redesign branch workspace"
   "$SPACES_E2E_CLI" create-workspace \
     --project-dir "$TEST_REPO_2" \
-    --title "$SCOUT_BRANCH_WORKSPACE_TITLE" \
     --existing-branch \
     --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
     --base-branch main \
@@ -2113,7 +2103,7 @@ APPLESCRIPT
   local out="$TMP_ROOT/archive-workspace-state.json"
   local deadline=$((SECONDS + 4))
   while (( SECONDS < deadline )); do
-    lookup_workspace "$WORKSPACE_TITLE" "$out" >/dev/null 2>&1 || true
+    lookup_workspace "$WORKSPACE_BRANCH" "$out" >/dev/null 2>&1 || true
     if [[ -f "$out" ]] && [[ "$(json_get "$out" "isArchived")" == "true" ]]; then
       return 0
     fi
@@ -4722,7 +4712,7 @@ run_launch_and_focus_assertions() {
   local workspace_id
   local workspace_title
   workspace_id="$(json_get "$dump_file" "workspace.id")"
-  workspace_title="$(json_get "$dump_file" "workspace.title")"
+  workspace_title="$(json_get "$dump_file" "workspace.name")"
   local terminal_app
   terminal_app="$(json_get "$dump_file" "runningProcesses[0].terminalApp")"
   assert_equals "Spaces" "$terminal_app" "Spaces launch"
@@ -5687,7 +5677,7 @@ run_agent_status_assertions() {
 
   ensure_configured_terminal_host "$host"
   dump_workspace "$workspace_dir" "$dump_file"
-  workspace_title="$(json_get "$dump_file" "workspace.title")"
+  workspace_title="$(json_get "$dump_file" "workspace.name")"
   agent_script="$(mock_agent_launcher_command "$host" "$workspace_dir")"
   set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
 
@@ -5751,7 +5741,7 @@ main() {
   create_scout_branch_workspace
 
   local lookup_file="$TMP_ROOT/workspace.json"
-  wait_for_workspace_lookup "$WORKSPACE_TITLE" "$lookup_file"
+  wait_for_workspace_lookup "$WORKSPACE_BRANCH" "$lookup_file"
   local created_workspace_dir workspace_dir
   created_workspace_dir="$(json_get "$lookup_file" "dir")"
   workspace_dir="$(json_get "$SEED_FILE" "defaultWorkspace.dir")"
@@ -5854,7 +5844,7 @@ EOF
   begin_case "archive branch workspaces"
   "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-beacon-branch.json
   "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$scout_branch_workspace_dir" >/tmp/spaces-e2e-archive-scout-branch.json
-  wait_for_workspace_lookup "$WORKSPACE_TITLE" "$lookup_file"
+  wait_for_workspace_lookup "$WORKSPACE_BRANCH" "$lookup_file"
   assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "beacon branch workspace archived"
   pass_case
 }

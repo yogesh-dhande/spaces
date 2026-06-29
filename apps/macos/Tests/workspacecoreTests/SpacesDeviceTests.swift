@@ -7,9 +7,8 @@ final class SpacesDeviceTests: XCTestCase {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
         let workspace = WorkspaceRecord(
-            id: "workspace-12345678", projectID: project.id, title: "Feature A", dir: try makeTempDirectory().path,
-            runtimePath: "/tmp/spaces/project/feature-a", dirname: "feature-a", branch: "feature/a", isDefault: false, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-12345678", projectID: project.id, dir: try makeTempDirectory().path, runtimePath: "/tmp/spaces/project/feature-a",
+            dirname: "feature-a", branch: "feature/a", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
 
         try store.upsert(workspace: workspace)
@@ -24,11 +23,11 @@ final class SpacesDeviceTests: XCTestCase {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
         let first = WorkspaceRecord(
-            id: "workspace-one", projectID: project.id, title: "One", dir: try makeTempDirectory().path, dirname: "one", branch: "feature/shared",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-one", projectID: project.id, dir: try makeTempDirectory().path, dirname: "one", branch: "feature/shared", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let second = WorkspaceRecord(
-            id: "workspace-two", projectID: project.id, title: "Two", dir: try makeTempDirectory().path, dirname: "two", branch: "feature/shared",
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-two", projectID: project.id, dir: try makeTempDirectory().path, dirname: "two", branch: "feature/shared", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: first)
 
@@ -39,11 +38,11 @@ final class SpacesDeviceTests: XCTestCase {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
         let archived = WorkspaceRecord(
-            id: "workspace-archived", projectID: project.id, title: "Archived", dir: try makeTempDirectory().path, dirname: "archived",
-            branch: "feature/shared", isDefault: false, isArchived: true, isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-archived", projectID: project.id, dir: try makeTempDirectory().path, dirname: "archived", branch: "feature/shared",
+            isDefault: false, isArchived: true, isRunning: false, lastLaunchedAt: nil)
         let active = WorkspaceRecord(
-            id: "workspace-active", projectID: project.id, title: "Active", dir: try makeTempDirectory().path, dirname: "active",
-            branch: "feature/shared", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-active", projectID: project.id, dir: try makeTempDirectory().path, dirname: "active", branch: "feature/shared",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
 
         try store.upsert(workspace: archived)
@@ -55,9 +54,8 @@ final class SpacesDeviceTests: XCTestCase {
     func testPlannerTargetsLocalDeviceDaemon() throws {
         let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace", projectID: project.id, title: "Feature", dir: "/project/.worktrees/feature",
-            runtimePath: "/srv/spaces/project/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false, isRunning: false,
-            lastLaunchedAt: nil)
+            id: "workspace", projectID: project.id, dir: "/project/.worktrees/feature", runtimePath: "/srv/spaces/project/feature", dirname: nil,
+            branch: "feature", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
 
         let selection = SpacesDevicePlanner.selectDevice(
             project: project, workspace: workspace, devicesByID: [SpacesDeviceRecord.localDeviceID: .local()])

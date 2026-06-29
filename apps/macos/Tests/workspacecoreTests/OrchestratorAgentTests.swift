@@ -11,7 +11,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
@@ -44,7 +44,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
@@ -78,7 +78,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.upsertAgentWindow(
@@ -96,7 +96,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let projectDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspaceAgentLaunchers(
@@ -259,7 +259,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
 
         let configured = try orchestrator.registerAgentWindow(
@@ -290,7 +290,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         _ = project
 
         let sessionID = "spaces-agent-session"
@@ -400,7 +400,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "agent-session-close-1"
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsertAgentWindow(
@@ -438,7 +438,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-shell-with-agent-signal"
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
@@ -478,8 +478,8 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let project = makeProjectRecord(dir: parentDir.path)
-        let parentWorkspace = makeWorkspaceRecord(projectID: project.id, title: "parent", dir: parentDir.path)
-        let childWorkspace = makeWorkspaceRecord(projectID: project.id, title: "child", dir: childDir.path)
+        let parentWorkspace = makeWorkspaceRecord(projectID: project.id, dir: parentDir.path)
+        let childWorkspace = makeWorkspaceRecord(projectID: project.id, dir: childDir.path)
         try store.upsert(project: project)
         try store.upsert(workspace: parentWorkspace)
         try store.upsert(workspace: childWorkspace)
@@ -516,7 +516,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-foreground-agent"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -565,7 +565,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-agent-session-exit"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -608,7 +608,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "signal-custom-agent-unknown-foreground"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -660,7 +660,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "signal-agent-pending-foreground"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -703,7 +703,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "signal-agent-first-sample"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -752,7 +752,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "signal-custom-agent-known-foreground"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -790,7 +790,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "detector-row-signal-update"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -848,7 +848,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-foreground-agent-signal"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -888,7 +888,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-foreground-agent-title-refresh"
         let windowsJSON = """
             [{"id":101,"pid":11,"app":"Spaces","title":"live shell title","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]
@@ -929,7 +929,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let firstSessionID = "ad-hoc-foreground-agent-1"
         let secondSessionID = "ad-hoc-foreground-agent-2"
 
@@ -966,7 +966,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
         let sessionID = "ad-hoc-reserved-foreground-agent"
 
@@ -999,7 +999,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "configured-agent-session"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -1030,7 +1030,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id, name: "feature")
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "process-foreground-agent"
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {

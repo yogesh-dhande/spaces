@@ -119,6 +119,31 @@ struct SpacesDeviceAPIClient: Sendable {
         return overview
     }
 
+    /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status.
+    func fetchDaemonStatus(commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> TerminalServiceDaemonStatus {
+        let response = try await sendRequest(
+            .init(command: .daemonStatus, authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            timeout: .seconds(8),
+            commandChannel: commandChannel
+        )
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard let status = response.daemonStatus else {
+            throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return daemon status.")
+        }
+        return status
+    }
+
+    /// Frozen-core restart request: asks the daemon to restart itself (the device's service manager
+    /// respawns it). iOS cannot restart a daemon out of band, so this RPC is the only restart path.
+    func requestDaemonRestart(commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws {
+        let response = try await sendRequest(
+            .init(command: .requestDaemonRestart, authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            timeout: .seconds(8),
+            commandChannel: commandChannel
+        )
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+    }
+
     func fetchWorkspaceCreateOptions(
         projectID: String? = nil,
         commandChannel: SpacesDeviceAPICommandChannel? = nil
@@ -140,7 +165,6 @@ struct SpacesDeviceAPIClient: Sendable {
 
     func createWorkspace(
         projectID: String,
-        title: String,
         branch: String?,
         baseBranch: String?,
         directoryName: String?,
@@ -152,7 +176,6 @@ struct SpacesDeviceAPIClient: Sendable {
                 command: .createWorkspace(
                     .init(
                         projectID: projectID,
-                        title: title,
                         branch: branch,
                         baseBranch: baseBranch,
                         directoryName: directoryName,
