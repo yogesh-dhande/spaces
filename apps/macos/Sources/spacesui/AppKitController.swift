@@ -2213,16 +2213,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
     }
 
-    nonisolated private static func launchConfiguredAgentSnapshot(workspaceID: String, name: String) async -> Result<Void, Error> {
-        await Task.detached(priority: .userInitiated) {
-            do {
-                let orchestrator = try localWorkspaceOrchestrator()
-                _ = try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: name)
-                return .success(())
-            } catch { return .failure(error) }
-        }.value
-    }
-
     nonisolated private static func focusWindowShortcutSnapshot(index: Int, selectedWorkspaceID: String?, alertsFocusRequest: WindowFocusRequest?)
         async -> Result<WindowShortcutExecutionOutcome, Error>
     {
@@ -8948,16 +8938,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             reloadData()
             hideAfterSuccessfulExternalWindowAction(action)
         case .failure(let error): await handleWindowFocusFailure(error)
-        }
-    }
-
-    private func launchConfiguredAgent(workspaceID: String, name: String) async {
-        let result = await Self.launchConfiguredAgentSnapshot(workspaceID: workspaceID, name: name)
-        switch result {
-        case .success:
-            reloadData()
-            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: true))
-        case .failure(let error): showError(error)
         }
     }
 
