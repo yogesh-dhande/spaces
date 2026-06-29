@@ -226,11 +226,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var windowShortcutSpec: HotkeySpec?
     var shortcutButtonsBySetting: [String: NSButton] = [:]
     var activeShortcutCaptureSetting: ShortcutSetting?
-    private var periodicWorkspaceRefreshTask: Task<Void, Never>?
     private var deferredHotkeySelectionRefreshTask: Task<Void, Never>?
     private var activeSpaceSummonCleanupTask: Task<Void, Never>?
-    private var visibleWorkspaceDetailRefreshTask: Task<Void, Never>?
-    private var visibleWorkspaceDetailRefreshWorkspaceID: String?
     private var workspaceSetupDetailRefreshTimer: Timer?
     private var workspaceSetupDetailRefreshWorkspaceID: String?
     private weak var workspaceSetupLogTextView: NSTextView?
@@ -245,7 +242,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var projectSettingsWindow: NSWindow?
     var projectSettingsProjectID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
-    private var lastTrackedWindowCounts: [String: Int] = [:]
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard Self.isRunningFromAppBundle else { return nil }
         return SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
@@ -549,7 +545,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let result = discardActiveAddProjectPreparedSourceSynchronouslyIfNeeded(), case .failure(let error) = result {
             NSLog("spaces: prepared add-project cleanup failed during termination: \(String(describing: error))")
         }
-        periodicWorkspaceRefreshTask?.cancel()
         deferredHotkeySelectionRefreshTask?.cancel()
         sidebar.cancelSidebarReloadTask()
         teardownInlineWorkspaceOutsideClickMonitor()
@@ -1800,7 +1795,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     )
                     self.activeWindowShortcutProfile = nil
                 }
-                self.requestVisibleWorkspaceDetailRefreshIfNeeded(reason: "app_became_active")
                 self.flushDeferredSidebarReloadsIfNeeded()
                 // Catch up on any database change whose IPC signal was missed while
                 // the app was suspended in the background. Reactivation is the one
@@ -1874,27 +1868,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func startPeriodicWorkspaceWindowRefresh() {
-        periodicWorkspaceRefreshTask?.cancel()
-        periodicWorkspaceRefreshTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                let result = await Self.refreshWorkspaceWindowsSnapshot()
-                if Task.isCancelled { break }
-                switch result {
-                case .success(let refreshResult):
-                    let windowCountsChanged = refreshResult.trackedWindowCounts != self.lastTrackedWindowCounts
-                    self.lastTrackedWindowCounts = refreshResult.trackedWindowCounts
-                    if (refreshResult.didMutateDB || windowCountsChanged) && self.canReloadAfterBackgroundWorkspaceRefresh() {
-                        self.requestSidebarReload()
-                    }
-                case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "workspace_window_refresh")
-                }
-                do { try await Task.sleep(for: .seconds(PollingConstants.workspaceWindowRefreshInterval)) } catch { break }
-            }
-        }
-    }
-
     /// Flushes sidebar reloads that were deferred because the user was mid-edit.
     /// Reload triggers (the daemon's `databaseDidChange`) are one-shot, so this
     /// runs at natural idle points (forms closing, app re-activation) in place of
@@ -1912,13 +1885,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private enum AddWorkspaceBranchMode: String {
         case existing
         case create
-    }
-
-    private struct VisibleWorkspaceDetailRefreshOutcome: Sendable {
-        let didMutateWindows: Bool
-        let didUpdateProcesses: Bool
-
-        var didChangeVisibleState: Bool { didMutateWindows || didUpdateProcesses }
     }
 
     private struct WorkspaceCreateInput: Sendable {
@@ -2197,37 +2163,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return .success(
                     try SpacesDeviceClient.workspaceCreateOptions(
                         selectedProjectID: projectID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    /// Builds an in-process orchestrator over the local daemon database, backed by the client
-    /// store for desktop (yabai) window IDs. Window IDs are client/desktop-local, so they are
-    /// read and written through the client database rather than `spaces.db`.
-    nonisolated private static func localWorkspaceOrchestrator() throws -> WorkspaceOrchestrator {
-        let db = try DatabaseLocator.defaultPath()
-        return WorkspaceOrchestrator(store: try SQLiteStore(path: db, desktopWindowIDStore: ClientDesktopWindowIDStore()))
-    }
-
-    nonisolated private static func refreshWorkspaceWindowsSnapshot() async -> Result<WorkspaceOrchestrator.RefreshResult, Error> {
-        await Task.detached(priority: .utility) {
-            do {
-                let orchestrator = try localWorkspaceOrchestrator()
-                let result = try orchestrator.refreshAllWorkspaceWindows()
-                return .success(result)
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func refreshVisibleWorkspaceDetailSnapshot(workspaceID: String) async -> Result<
-        VisibleWorkspaceDetailRefreshOutcome, Error
-    > {
-        await Task.detached(priority: .utility) {
-            do {
-                let orchestrator = try localWorkspaceOrchestrator()
-                let didMutateWindows = try orchestrator.refreshWorkspaceWindows(workspaceID: workspaceID)
-                let didUpdateProcesses = try orchestrator.checkAndUpdateProcessStatuses()
-                return .success(.init(didMutateWindows: didMutateWindows, didUpdateProcesses: didUpdateProcesses))
             } catch { return .failure(error) }
         }.value
     }
@@ -3498,13 +3433,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func startBackgroundServicesIfNeeded() {
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
-        startPeriodicWorkspaceWindowRefresh()
         sidebar.startRemoteOverviewSubscriptions()
     }
 
     private func stopBackgroundServices() {
-        periodicWorkspaceRefreshTask?.cancel()
-        periodicWorkspaceRefreshTask = nil
         sidebar.stopSidebarTasks()
         didStartBackgroundServices = false
     }
@@ -3754,40 +3686,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
         }
         showAlertsDetail()
-    }
-
-    private func requestVisibleWorkspaceDetailRefreshIfNeeded(reason _: String) {
-        guard let workspaceID = selectedWorkspaceID else { return }
-        guard
-            Self.shouldRefreshVisibleWorkspaceDetail(
-                selectedWorkspaceID: selectedWorkspaceID, showingAlerts: showingAlerts, showingSettings: showingSettings,
-                workspaceExists: findWorkspace(id: workspaceID) != nil, mainWindowIsFocused: window?.isKeyWindow == true,
-                commandPaletteIsVisible: commandPalette.commandPalettePanel?.isVisible == true)
-        else { return }
-        if visibleWorkspaceDetailRefreshWorkspaceID == workspaceID, let task = visibleWorkspaceDetailRefreshTask, !task.isCancelled { return }
-
-        visibleWorkspaceDetailRefreshTask?.cancel()
-        visibleWorkspaceDetailRefreshWorkspaceID = workspaceID
-        visibleWorkspaceDetailRefreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await Self.refreshVisibleWorkspaceDetailSnapshot(workspaceID: workspaceID)
-            guard !Task.isCancelled else { return }
-            defer {
-                if self.visibleWorkspaceDetailRefreshWorkspaceID == workspaceID {
-                    self.visibleWorkspaceDetailRefreshWorkspaceID = nil
-                    self.visibleWorkspaceDetailRefreshTask = nil
-                }
-            }
-
-            guard self.selectedWorkspaceID == workspaceID, !self.showingAlerts, !self.showingSettings else { return }
-            switch result {
-            case .success(let outcome):
-                guard outcome.didChangeVisibleState else { return }
-                guard self.canReloadAfterBackgroundWorkspaceRefresh() else { return }
-                self.reloadData()
-            case .failure(let error): self.handleBackgroundRefreshFailure(error, source: "workspace_detail_refresh")
-            }
-        }
     }
 
     private func startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: String) {
