@@ -387,7 +387,7 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
             host.deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-            host.deviceSections[index].alertsGroups = AppKitController.buildRemoteAlertsGroups(from: overview.overview, deviceID: deviceID)
+            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(from: overview.overview, deviceID: deviceID)
             host.deviceSections[index].overview = overview.overview
             host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded

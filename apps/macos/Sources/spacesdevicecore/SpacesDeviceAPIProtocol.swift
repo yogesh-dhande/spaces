@@ -289,6 +289,9 @@ public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
     public let processID: String?
     public let sessionID: String?
     public let runState: SpacesDeviceRunState
+    /// ISO-8601 timestamp the process exited, when known. Drives attention-alert recency without
+    /// the client opening the daemon database.
+    public let exitedAt: String?
     public let canRun: Bool
     public let canStop: Bool
     public let canRestart: Bool
@@ -296,7 +299,8 @@ public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
 
     public init(
         id: String, workspaceID: String, name: String, command: String, templateID: String? = nil, processID: String?, sessionID: String?,
-        runState: SpacesDeviceRunState, canRun: Bool, canStop: Bool, canRestart: Bool, daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
+        runState: SpacesDeviceRunState, exitedAt: String? = nil, canRun: Bool, canStop: Bool, canRestart: Bool,
+        daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -306,6 +310,7 @@ public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
         self.processID = processID
         self.sessionID = sessionID
         self.runState = runState
+        self.exitedAt = exitedAt
         self.canRun = canRun
         self.canStop = canStop
         self.canRestart = canRestart
@@ -324,6 +329,9 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     public let isConfigured: Bool
     public let runState: SpacesDeviceRunState
     public let activityState: SpacesDeviceCodingAgentActivityState
+    /// ISO-8601 timestamp of the agent session's last state change, when known. Drives
+    /// attention-alert recency and dismissal identity without the client opening the daemon database.
+    public let updatedAt: String?
     public let canRun: Bool
     public let canStop: Bool
     public let canRestart: Bool
@@ -331,8 +339,8 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
 
     public init(
         id: String, workspaceID: String, name: String, command: String, launcherID: String? = nil, agentID: String?, sessionID: String?,
-        isConfigured: Bool, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState, canRun: Bool, canStop: Bool,
-        canRestart: Bool, daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
+        isConfigured: Bool, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil,
+        canRun: Bool, canStop: Bool, canRestart: Bool, daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -344,6 +352,7 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
         self.isConfigured = isConfigured
         self.runState = runState
         self.activityState = activityState
+        self.updatedAt = updatedAt
         self.canRun = canRun
         self.canStop = canStop
         self.canRestart = canRestart

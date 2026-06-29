@@ -2011,26 +2011,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func alertsAttentionID(process: RunningProcessRecord) -> String {
-        "process:\(process.id):exited:\(process.exitedAt ?? "unknown")"
-    }
-
-    nonisolated private static func alertsAttentionID(agentWindow: AgentWindowRecord) -> String {
-        "agent:\(agentWindow.id):\(agentWindow.status.rawValue):\(agentWindow.updatedAt)"
-    }
-
     nonisolated static func alertsAttentionAgentWindows(_ agentWindows: [AgentWindowRecord]) -> [AgentWindowRecord] {
         agentWindows.filter { $0.status == .waiting || $0.status == .done }
-    }
-
-    nonisolated private static func alertsFocusRequest(window: WindowRecord, windowListIndex: Int, process: RunningProcessRecord, workspaceID: String)
-        -> WindowFocusRequest
-    {
-        if window.role == "browser", let targetURL = window.targetURL, !targetURL.isEmpty {
-            return .workspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-        }
-        if window.role == "terminal" { return .workspaceProcess(workspaceID: workspaceID, processID: process.id) }
-        return .workspaceWindow(workspaceID: workspaceID, index: windowListIndex)
     }
 
     nonisolated static func deviceMutation(
@@ -2338,135 +2320,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
-    /// Builds attention alerts for a remote device from its overview payload.
-    /// A remote device has no local orchestrator, but its overview already carries
-    /// per-workspace process run states and coding-agent activity states, which is
-    /// exactly what the attention list needs — so alerts aggregate across devices
-    /// without any daemon protocol change.
-    nonisolated static func buildRemoteAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> [AlertsGroup] {
+    /// Builds attention alerts for a device from its overview payload — used for both the local and
+    /// remote devices so alerts aggregate identically across the sidebar without the client ever
+    /// opening `spaces.db`. Window-role styling (browser/editor icons, per-window focus) is
+    /// intentionally absent: desktop windows are client-local and not part of the daemon overview,
+    /// so an exited process shows as a process alert and clicking it focuses the process. Recency
+    /// (and dismissal identity) come from the daemon-supplied `exitedAt`/`updatedAt` timestamps.
+    nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> [AlertsGroup] {
+        let iso8601Formatter = ISO8601DateFormatter()
         var groups: [AlertsGroup] = []
         for workspace in overview.workspaces where !workspace.isArchived {
             var items: [AlertsAttentionEntry] = []
             if workspace.isRunning {
                 for process in workspace.processRows where process.runState == .exited {
+                    let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
                     items.append(
                         AlertsAttentionEntry(
-                            attentionID: "remote:\(deviceID):p:\(process.id)", icon: "terminal", iconTint: .terminal, label: process.name,
-                            detail: process.command, shortcut: "", processStatus: .exited, agentStatus: nil, countsTowardBadge: true, eventDate: nil,
+                            attentionID: "alert:\(deviceID):process:\(process.processID ?? process.id):\(process.exitedAt ?? "unknown")",
+                            icon: "terminal", iconTint: .terminal, label: process.name, detail: process.command, shortcut: "",
+                            processStatus: .exited, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
                             focusRequest: process.processID.map { .workspaceProcess(workspaceID: workspace.id, processID: $0) }))
                 }
             }
-            for agent in workspace.codingAgentRows where agent.activityState == .waiting {
+            for agent in workspace.codingAgentRows where agent.activityState == .waiting || agent.activityState == .done {
+                let eventDate = agent.updatedAt.flatMap { iso8601Formatter.date(from: $0) }
                 items.append(
                     AlertsAttentionEntry(
-                        attentionID: "remote:\(deviceID):a:\(agent.id)", icon: "cpu.fill", iconTint: .warning, label: agent.name, detail: nil,
-                        shortcut: "", processStatus: nil, agentStatus: .waiting, countsTowardBadge: true, eventDate: nil,
+                        attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
+                        icon: "cpu.fill", iconTint: .warning, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
+                        agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue), countsTowardBadge: true, eventDate: eventDate,
                         focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: agent.name)))
             }
             guard !items.isEmpty else { continue }
+            items.sort {
+                switch ($0.eventDate, $1.eventDate) {
+                case (let a?, let b?): return a > b
+                case (nil, _): return false
+                case (_, nil): return true
+                }
+            }
             groups.append(
                 AlertsGroup(
                     projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.title, workspaceBranch: workspace.branch,
                     items: items))
-        }
-        return groups
-    }
-
-    nonisolated private static func buildAlertsGroupsSnapshot(
-        orchestrator: WorkspaceOrchestrator, projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]]
-    ) throws -> [AlertsGroup] {
-        let iso8601Formatter = ISO8601DateFormatter()
-        var groups: [AlertsGroup] = []
-        for project in projects {
-            let workspaces = workspacesByProject[project.id] ?? []
-            for workspace in workspaces {
-                let agentWindowsList = (try? orchestrator.agentWindows(workspaceID: workspace.id)) ?? []
-                let attentionAgentWindows = alertsAttentionAgentWindows(agentWindowsList)
-                guard workspace.isRunning || !attentionAgentWindows.isEmpty else { continue }
-
-                let processes = workspace.isRunning ? ((try? orchestrator.runningProcesses(workspaceID: workspace.id)) ?? []) : []
-                let windows = workspace.isRunning ? ((try? orchestrator.windows(workspaceID: workspace.id)) ?? []) : []
-                let configuredSessions: [BrowserSession] = {
-                    guard workspace.isRunning else { return [] }
-                    return (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? []
-                }()
-                var processByWindowID: [Int: RunningProcessRecord] = [:]
-                for process in processes { if let wid = process.windowID { processByWindowID[wid] = process } }
-                var items: [AlertsAttentionEntry] = []
-                var matchedProcessIDs: Set<String> = []
-
-                for (idx, win) in windows.enumerated() {
-                    guard let wid = win.windowID, let process = processByWindowID[wid] else { continue }
-                    matchedProcessIDs.insert(process.id)
-                    guard process.status == .exited else { continue }
-                    let icon: String
-                    let iconTint: AlertsIconTint
-                    let label: String
-                    let detail: String?
-                    switch win.role {
-                    case "browser":
-                        icon = "globe"
-                        iconTint = .browser
-                        if let name = Self.browserSessionDisplayName(for: win.targetURL, sessions: configuredSessions), let url = win.targetURL {
-                            label = name
-                            detail = url
-                        } else {
-                            label = win.name ?? win.targetURL ?? win.app
-                            detail = win.detail
-                        }
-                    case "terminal":
-                        icon = "terminal"
-                        iconTint = .terminal
-                        label = process.templateName
-                        detail = process.command
-                    default:
-                        icon = "chevron.left.forwardslash.chevron.right"
-                        iconTint = .code
-                        label = win.name ?? win.app
-                        detail = win.detail
-                    }
-                    let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                    items.append(
-                        AlertsAttentionEntry(
-                            attentionID: Self.alertsAttentionID(process: process), icon: icon, iconTint: iconTint, label: label, detail: detail,
-                            shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true, eventDate: eventDate,
-                            focusRequest: Self.alertsFocusRequest(window: win, windowListIndex: idx + 1, process: process, workspaceID: workspace.id))
-                    )
-                }
-
-                for process in processes where !matchedProcessIDs.contains(process.id) {
-                    guard process.status == .exited else { continue }
-                    let eventDate = process.exitedAt.flatMap { iso8601Formatter.date(from: $0) }
-                    items.append(
-                        AlertsAttentionEntry(
-                            attentionID: Self.alertsAttentionID(process: process), icon: "terminal", iconTint: .terminal, label: process.templateName,
-                            detail: process.command, shortcut: "", processStatus: process.status, agentStatus: nil, countsTowardBadge: true,
-                            eventDate: eventDate, focusRequest: .workspaceProcess(workspaceID: workspace.id, processID: process.id)))
-                }
-
-                for agentWin in attentionAgentWindows {
-                    items.append(
-                        AlertsAttentionEntry(
-                            attentionID: Self.alertsAttentionID(agentWindow: agentWin), icon: "cpu.fill", iconTint: .warning,
-                            label: agentWin.label ?? "Coding Agent CLI", detail: nil, shortcut: "", processStatus: nil, agentStatus: agentWin.status,
-                            countsTowardBadge: true, eventDate: iso8601Formatter.date(from: agentWin.updatedAt), focusRequest: .agentWindow(agentWin))
-                    )
-                }
-
-                guard !items.isEmpty else { continue }
-
-                items.sort {
-                    switch ($0.eventDate, $1.eventDate) {
-                    case (let a?, let b?): return a > b
-                    case (nil, _): return false
-                    case (_, nil): return true
-                    }
-                }
-                groups.append(
-                    AlertsGroup(
-                        projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.title, workspaceBranch: workspace.branch,
-                        items: items))
-            }
         }
         groups.sort {
             switch ($0.latestDate, $1.latestDate) {
@@ -2499,8 +2395,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_local_device_ready",
                     details: "device=\(localOverview.device.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
-                let alertsGroups = try buildAlertsGroupsSnapshot(
-                    orchestrator: orchestrator, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject)
+                let alertsGroups = buildOverviewAlertsGroups(from: localOverview.overview, deviceID: localOverview.device.id)
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_alerts_ready",
                     details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
@@ -3815,9 +3710,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             deviceSections[index].overview = overview
             if deviceSections[index].isLocal {
                 localDeviceOverview = overview
-                deviceSections[index].alertsGroups =
-                    (try? Self.buildAlertsGroupsSnapshot(
-                        orchestrator: orchestrator, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject)) ?? []
+                deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
             }
         }
         rebuildFlatSidebarData()
