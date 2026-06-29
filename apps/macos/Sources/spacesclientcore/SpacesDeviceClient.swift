@@ -19,6 +19,24 @@ public struct SpacesDeviceOverview: Sendable, Equatable {
     public var isLocal: Bool { device.id == SpacesPairedDeviceRecord.localDeviceID }
 }
 
+/// Outcome of a compatibility-aware device refresh (`SpacesDeviceClient.resolveOverview`).
+public struct SpacesDeviceOverviewResolution: Sendable {
+    /// The overview to render, or `nil` when the device is reachable but wire-incompatible — the
+    /// caller shows the compatibility block instead of stale workspace data.
+    public let overview: SpacesDeviceOverview?
+    /// The frozen-core status backing the verdict, or `nil` if neither the overview nor the fallback
+    /// handshake could supply one (e.g. a daemon too old to report any status).
+    public let daemonStatus: TerminalServiceDaemonStatus?
+    /// The compatibility verdict, or `nil` when no status was available to evaluate.
+    public let compatibility: SpacesWireCompatibility?
+
+    public init(overview: SpacesDeviceOverview?, daemonStatus: TerminalServiceDaemonStatus?, compatibility: SpacesWireCompatibility?) {
+        self.overview = overview
+        self.daemonStatus = daemonStatus
+        self.compatibility = compatibility
+    }
+}
+
 public enum SpacesDeviceClientError: LocalizedError, Equatable {
     case missingLocalBootstrap
     case missingOverview
@@ -115,6 +133,76 @@ public enum SpacesDeviceClient {
         guard let overview = response.overview else { throw SpacesDeviceClientError.missingOverview }
         return SpacesDeviceOverview(device: device, overview: overview)
     }
+
+    /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status so the
+    /// caller can classify compatibility against this build.
+    public static func daemonStatus(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> TerminalServiceDaemonStatus {
+        try daemonStatus(
+            device: device, clientApp: clientApp, profile: profile,
+            requestProvider: { request, device, clientApp, profile in
+                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
+            })
+    }
+
+    private static func daemonStatus(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
+    ) throws -> TerminalServiceDaemonStatus {
+        let response = try requestProvider(.init(command: .daemonStatus), device, clientApp, profile)
+        guard let status = response.daemonStatus else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return status
+    }
+
+    /// Refreshes a device, reading its compatibility verdict from the overview's inline frozen-core
+    /// status so the common compatible case costs a single round-trip. The standalone `daemonStatus`
+    /// handshake is issued only when the overview cannot carry the verdict: a daemon that predates the
+    /// inline field, or an incompatible daemon whose overview does not decode at all. This is the
+    /// per-refresh hot path; see `docs/implementation.md` (device compatibility handshake).
+    public static func resolveOverview(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceOverviewResolution {
+        try resolveOverview(
+            device: device, clientApp: clientApp, profile: profile,
+            requestProvider: { request, device, clientApp, profile in
+                try SpacesDeviceClient.request(request, device: device, clientApp: clientApp, profile: profile)
+            })
+    }
+
+    static func resolveOverview(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
+    ) throws -> SpacesDeviceOverviewResolution {
+        let payload: SpacesDeviceOverviewPayload
+        do { payload = try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider).overview } catch {
+            // The overview did not decode (a wire-incompatible daemon's payload) or the device is
+            // unreachable. Ask the frozen core, which stays decodable across versions: an incompatible
+            // verdict means "blocked" (render the block, no overview); anything else is a genuine
+            // connection error to surface.
+            if let status = try? daemonStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) {
+                let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
+                if !verdict.isCompatible { return SpacesDeviceOverviewResolution(overview: nil, daemonStatus: status, compatibility: verdict) }
+            }
+            throw error
+        }
+        if let status = payload.daemonStatus {
+            // Steady state: the verdict rode inline on the overview, so no second round-trip is needed.
+            let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
+            let overview = verdict.isCompatible ? SpacesDeviceOverview(device: device, overview: payload) : nil
+            return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
+        }
+        // Older daemon that predates the inline status: keep the overview already fetched and read the
+        // verdict from the standalone frozen-core handshake.
+        let status = try? daemonStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
+        let verdict = status.map(SpacesWireCompatibility.evaluate(daemonStatus:))
+        let overview = (verdict?.isCompatible ?? true) ? SpacesDeviceOverview(device: device, overview: payload) : nil
+        return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
+    }
+
+    /// Frozen-core restart request: asks the daemon to restart itself. The OS service manager
+    /// (launchd `KeepAlive` / systemd `Restart=always`) respawns it from the updated binary.
+    @discardableResult public static func requestDaemonRestart(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse { try request(.init(command: .requestDaemonRestart), device: device, clientApp: clientApp, profile: profile) }
 
     public static func workspaceCreateOptions(
         selectedProjectID: String?, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
@@ -390,8 +478,9 @@ public enum SpacesDeviceClient {
             .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess,
             .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
-        case .pair, .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .updateProjectConfig, .updateWorkspaceConfig,
-            .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe:
+        case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
+            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink,
+            .readTerminalLinkChunk, .subscribe:
             defaultRequestTimeoutSeconds
         }
     }

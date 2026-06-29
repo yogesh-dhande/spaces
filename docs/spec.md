@@ -352,3 +352,10 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Manual downloads may still be published separately, but the in-app updater should not depend on GitHub release APIs.
 - The manual-download DMG should present a single guided installer entry point that installs `Spaces.app`, the required `spaces` CLI, the spacesd daemon, `~/.spaces/bin` helper links, and the per-user LaunchAgent used by built-in terminal commands and remote Mac pairing.
 - `spaces --version` should report the current version.
+
+### Daemon Compatibility and Restart
+- A client app and the daemon on a device can run different versions because they update on their own schedules. As long as they remain compatible, updating the app does not require restarting the daemon, and running terminals, processes, and coding agents keep going uninterrupted.
+- When the running daemon is a compatible-but-older build than the client, the device shows a quiet "update pending" hint; the staged update applies the next time the daemon restarts on its own (reboot, logout, or a manual restart). The app never restarts the daemon automatically in this case.
+- When a device's daemon is too old for the current app, that one device is blocked with an explanation while every other paired device stays usable. If instead the app is too old for the daemon, the block asks the user to update the app.
+- Because restarting a daemon stops its running terminals, processes, and coding agents, the block first reports how many of each would stop and offers Restart or Defer, so the user can wait until critical work finishes. Restarting the local Mac daemon happens in place; a remote Linux daemon is updated and restarted from the Mac app over SSH; a remote Mac restarts itself and updates through its own updater.
+- The iPhone app cannot update a daemon's binary itself. For a remote Linux device it directs the user to update that device from the Spaces Mac app rather than offering a restart that would relaunch the same old build; for other devices it can request a restart to apply an update that is already installed.

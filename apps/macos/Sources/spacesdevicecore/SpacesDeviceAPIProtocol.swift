@@ -627,19 +627,29 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     public let projects: [SpacesDeviceProjectSummary]
     public let workspaces: [SpacesDeviceWorkspaceSummary]
     public let sessions: [SpacesDeviceTerminalSessionSummary]
+    /// Frozen-core handshake (wire protocol version + restart-impact counts) for the daemon that
+    /// produced this overview. Carried inline so a compatible client reads the compatibility verdict
+    /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
+    /// every refresh. `nil` only when the daemon predates this field; clients fall back to the
+    /// standalone frozen-core `daemonStatus` command (which is also the path used when an
+    /// incompatible daemon's overview cannot decode at all).
+    public let daemonStatus: TerminalServiceDaemonStatus?
 
     public init(
-        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary]
+        projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
+        daemonStatus: TerminalServiceDaemonStatus? = nil
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
+        self.daemonStatus = daemonStatus
     }
 
     private enum CodingKeys: String, CodingKey {
         case projects
         case workspaces
         case sessions
+        case daemonStatus
     }
 
     public init(from decoder: any Decoder) throws {
@@ -647,6 +657,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         projects = try container.decodeIfPresent([SpacesDeviceProjectSummary].self, forKey: .projects) ?? []
         workspaces = try container.decodeIfPresent([SpacesDeviceWorkspaceSummary].self, forKey: .workspaces) ?? []
         sessions = try container.decodeIfPresent([SpacesDeviceTerminalSessionSummary].self, forKey: .sessions) ?? []
+        daemonStatus = try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
     }
 }
 
@@ -1176,6 +1187,14 @@ public struct SpacesDeviceTerminalLinkChunkRequest: Codable, Sendable, Equatable
 public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case pair(SpacesDevicePairRequest)
     case ping
+    /// Frozen-core command: read the daemon's wire protocol + restart-impact status.
+    /// Its request/result shape is contractually stable so an incompatible client can
+    /// still negotiate versions and read the restart-impact report.
+    case daemonStatus
+    /// Frozen-core command: ask the daemon to restart itself (graceful shutdown; the OS service
+    /// manager respawns it from the updated binary). Used by iOS and remote clients that cannot
+    /// restart the daemon out of band. Contractually stable for the same reason as `daemonStatus`.
+    case requestDaemonRestart
     case overview
     case createProject(SpacesDeviceProjectCreateRequest)
     case deleteProject(SpacesDeviceProjectReference)
@@ -1211,6 +1230,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         switch self {
         case .pair: "pair"
         case .ping: "ping"
+        case .daemonStatus: "daemonStatus"
+        case .requestDaemonRestart: "requestDaemonRestart"
         case .overview: "overview"
         case .createProject: "createProject"
         case .deleteProject: "deleteProject"
@@ -1276,7 +1297,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
 
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
-        case .ping, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink, .readTerminalLinkChunk: true
+        case .ping, .daemonStatus, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink,
+            .readTerminalLinkChunk:
+            true
         default: false
         }
     }
@@ -1286,6 +1309,8 @@ extension SpacesDeviceAPICommand: Codable {
     private enum CodingKeys: String, CodingKey {
         case pair
         case ping
+        case daemonStatus
+        case requestDaemonRestart
         case overview
         case createProject
         case deleteProject
@@ -1329,6 +1354,12 @@ extension SpacesDeviceAPICommand: Codable {
         case .ping:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .ping
+        case .daemonStatus:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .daemonStatus
+        case .requestDaemonRestart:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .requestDaemonRestart
         case .overview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .overview
@@ -1372,6 +1403,8 @@ extension SpacesDeviceAPICommand: Codable {
         switch self {
         case .pair(let payload): try container.encode(payload, forKey: .pair)
         case .ping: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .ping)
+        case .daemonStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .daemonStatus)
+        case .requestDaemonRestart: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .requestDaemonRestart)
         case .overview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .overview)
         case .createProject(let payload): try container.encode(payload, forKey: .createProject)
         case .deleteProject(let payload): try container.encode(payload, forKey: .deleteProject)
@@ -1445,6 +1478,7 @@ public struct SpacesDeviceMutationResult: Codable, Sendable, Equatable {
 
 public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case issuedAuthToken(SpacesDeviceIssuedAuthTokenResult)
+    case daemonStatus(TerminalServiceDaemonStatus)
     case overview(SpacesDeviceOverviewPayload)
     case terminalState(GhosttyRemoteSessionStatePayload)
     case workspaceCreateOptions(SpacesDeviceWorkspaceCreateOptions)
@@ -1458,6 +1492,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
 extension SpacesDeviceAPIResult: Codable {
     private enum CodingKeys: String, CodingKey {
         case issuedAuthToken
+        case daemonStatus
         case overview
         case terminalState
         case workspaceCreateOptions
@@ -1476,6 +1511,7 @@ extension SpacesDeviceAPIResult: Codable {
         }
         switch key {
         case .issuedAuthToken: self = .issuedAuthToken(try container.decode(SpacesDeviceIssuedAuthTokenResult.self, forKey: key))
+        case .daemonStatus: self = .daemonStatus(try container.decode(TerminalServiceDaemonStatus.self, forKey: key))
         case .overview: self = .overview(try container.decode(SpacesDeviceOverviewPayload.self, forKey: key))
         case .terminalState: self = .terminalState(try container.decode(GhosttyRemoteSessionStatePayload.self, forKey: key))
         case .workspaceCreateOptions: self = .workspaceCreateOptions(try container.decode(SpacesDeviceWorkspaceCreateOptions.self, forKey: key))
@@ -1491,6 +1527,7 @@ extension SpacesDeviceAPIResult: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .issuedAuthToken(let payload): try container.encode(payload, forKey: .issuedAuthToken)
+        case .daemonStatus(let payload): try container.encode(payload, forKey: .daemonStatus)
         case .overview(let payload): try container.encode(payload, forKey: .overview)
         case .terminalState(let payload): try container.encode(payload, forKey: .terminalState)
         case .workspaceCreateOptions(let payload): try container.encode(payload, forKey: .workspaceCreateOptions)
@@ -1523,6 +1560,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var issuedAuthToken: String? { if case .issuedAuthToken(let payload) = result { payload.authToken } else { nil } }
+
+    public var daemonStatus: TerminalServiceDaemonStatus? { if case .daemonStatus(let payload) = result { payload } else { nil } }
 
     public var sessionState: GhosttyRemoteSessionStatePayload? { if case .terminalState(let payload) = result { payload } else { nil } }
 

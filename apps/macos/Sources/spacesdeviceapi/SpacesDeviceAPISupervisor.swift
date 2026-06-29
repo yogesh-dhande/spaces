@@ -8,6 +8,7 @@ import workspacecore
     private let restartInterval: TimeInterval
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
+    private let onRestartRequested: (@Sendable () -> Void)?
 
     private var server: SpacesDeviceAPIServer?
     private var advertiser: (any SpacesDeviceAPIBonjourAdvertising)?
@@ -20,13 +21,15 @@ import workspacecore
         settingsStore: SpacesDeviceAPISettingsStore = SpacesDeviceAPISettingsStore(),
         environment: [String: String] = ProcessInfo.processInfo.environment, restartInterval: TimeInterval = 5,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         self.settingsStore = settingsStore
         self.environment = environment
         self.restartInterval = restartInterval
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.onRestartRequested = onRestartRequested
     }
 
     public func start() {
@@ -109,7 +112,7 @@ import workspacecore
         let createdServer = SpacesDeviceAPIServer(
             host: host, port: port, transportKey: transportKey, certificateFingerprint: certificateFingerprint,
             pairingStoreProtocol: try SpacesDevicePairingStore(), builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-            builtInTerminalSessionLauncher: builtInTerminalSessionLauncher)
+            builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, onRestartRequested: onRestartRequested)
         do {
             try createdServer.start()
             return createdServer

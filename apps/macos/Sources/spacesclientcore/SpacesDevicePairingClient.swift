@@ -187,6 +187,35 @@ public enum SpacesDevicePairingClient {
         #endif
     }
 
+    /// Refreshes a remote **Linux** daemon's binary from the signed release artifact for `appVersion`,
+    /// reusing the pairing install pipeline (manifest + Ed25519 verify, archive + SHA256 verify, scp,
+    /// `install.sh`). The installer restarts the user service into the updated binary, so this both
+    /// updates and restarts the daemon. Returns `false` when the device is not a reachable remote Linux
+    /// host (a remote Mac or missing SSH metadata), so the caller can fall back to the restart RPC.
+    /// Destructive: the restart stops the daemon's terminals, processes, and coding agents — callers
+    /// must confirm the restart impact with the user first. macOS-only (requires SSH).
+    @discardableResult
+    public static func updateRemoteLinuxDaemon(
+        for device: SpacesPairedDeviceRecord, appVersion: String? = nil, remoteArtifactPublicKey: String? = nil
+    ) throws -> Bool {
+        #if canImport(Network)
+            guard let sshHostRaw = device.sshHost else { return false }
+            let sshHost = try normalizedSSHHost(sshHostRaw)
+            let sshUser = normalized(device.sshUser)
+            try validateSSHPort(device.sshPort)
+            let destination = sshDestination(host: sshHost, user: sshUser)
+            try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
+            let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
+            guard probe.operatingSystem == "Linux" else { return false }
+            try installRemoteLinuxSpaces(
+                destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion,
+                remoteArtifactPublicKey: remoteArtifactPublicKey)
+            return true
+        #else
+            return false
+        #endif
+    }
+
     public static func localMacClientInstallationID(profile: SpacesProfile? = nil) -> String {
         let profileRoot = (try? (profile ?? SpacesProfile.current()).rootDirectory) ?? NSHomeDirectory()
         var hash: UInt64 = 14_695_981_039_346_656_037

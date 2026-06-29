@@ -50,7 +50,7 @@ struct SpacesDeviceOverviewBuilder {
 
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry]
+        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus? = nil
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -111,7 +111,8 @@ struct SpacesDeviceOverviewBuilder {
         }
 
         return SpacesDeviceOverviewPayload(
-            projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries)
+            projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
+            daemonStatus: daemonStatus)
     }
 
     static func matchedWorkspace(for workingDirectory: String, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {
