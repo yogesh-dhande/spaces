@@ -39,11 +39,6 @@ final class TerminalLaunchConfigurationCapture: @unchecked Sendable {
     }
 }
 
-final class TerminalFocusCapture: @unchecked Sendable {
-    var sessionIDs: [String] = []
-    var requestIDs: [String?] = []
-}
-
 final class TerminalCloseCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
 final class TerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
@@ -123,7 +118,6 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func makeOrchestratorWithWorkspace(
-        browserWindowScanDebounceInterval: TimeInterval = 10,
         terminalFocusPulseController: TerminalFocusPulseControlling = MockTerminalFocusPulseController(),
         currentDate: @escaping () -> Date = Date.init
     ) throws -> (WorkspaceOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL) {
@@ -133,8 +127,7 @@ final class OrchestratorTests: XCTestCase {
         let dbPath = root.appendingPathComponent("spaces-test.db").path
         let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let orchestrator = WorkspaceOrchestrator(
-            store: store, browserWindowScanDebounceInterval: browserWindowScanDebounceInterval,
-            terminalFocusPulseController: terminalFocusPulseController,
+            store: store, terminalFocusPulseController: terminalFocusPulseController,
             builtInTerminalWindowOpener: { sessionID, _ in
                 try! withSpacesProfileEnvironment(dbPath: dbPath) {
                     let paths = try TerminalSessionPaths.forSession(id: sessionID)

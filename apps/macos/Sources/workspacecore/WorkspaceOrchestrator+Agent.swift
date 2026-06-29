@@ -643,13 +643,6 @@ extension WorkspaceOrchestrator {
         return updated
     }
 
-    public func focusAgentWindow(_ record: AgentWindowRecord) throws {
-        let focused = try focusAgentWindowOrLaunchClaimedLauncher(record, requestID: nil)
-        guard focused else { throw missingTrackedAgentError(record) }
-        rememberNavigationTarget(.agent(record), workspaceID: record.workspaceID)
-        try markWorkspaceRunningIfNeeded(workspaceID: record.workspaceID)
-    }
-
     public func stopCodingAgent(workspaceID: String, agentID: String) throws {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             guard let record = try store.agentWindows(workspaceID: workspaceID).first(where: { $0.id == agentID }) else { return }
@@ -861,33 +854,6 @@ extension WorkspaceOrchestrator {
         }
         if focused, focusedExistingWindow, let windowID { pulseTerminalWindowIfNeeded(windowID: windowID) }
         return focused
-    }
-
-    func focusAgentWindowOrLaunchClaimedLauncher(_ record: AgentWindowRecord, requestID: String?) throws -> Bool {
-        let claimedLauncherID = record.claimedLauncherID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let claimedLauncherName = record.claimedLauncherName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard claimedLauncherID?.isEmpty == false || claimedLauncherName?.isEmpty == false else {
-            return try focusAgentWindowRecord(record, requestID: requestID)
-        }
-        if record.provider == .spaces, !builtInAgentSessionIsStillLive(record), builtInAgentSessionID(for: record) != nil {
-            return try focusAgentWindowRecord(record, requestID: requestID)
-        }
-        if try focusAgentWindowRecord(record, requestID: requestID) { return true }
-        if let claimedLauncherID, !claimedLauncherID.isEmpty {
-            _ = try launchAgentLauncher(workspaceID: record.workspaceID, launcherID: claimedLauncherID)
-        } else if let claimedLauncherName, !claimedLauncherName.isEmpty {
-            _ = try launchAgentLauncher(workspaceID: record.workspaceID, name: claimedLauncherName)
-        } else {
-            return false
-        }
-        return true
-    }
-
-    func missingTrackedAgentError(_ record: AgentWindowRecord) -> WorkspaceError {
-        .missingTrackedWindow(
-            MissingTrackedWindowContext(
-                kind: .codingAgent, workspaceID: record.workspaceID, windowID: record.windowID ?? record.yabaiWindowID,
-                title: record.label ?? "Coding Agent CLI"))
     }
 
 }

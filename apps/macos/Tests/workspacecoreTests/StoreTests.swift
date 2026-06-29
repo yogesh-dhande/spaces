@@ -82,6 +82,9 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("id"))
+        XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_window_id"))
+        XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_window_valid"))
+        XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_target_url"))
         XCTAssertFalse(projectBrowserSessionColumns.contains("id"))
         XCTAssertTrue(workspaceAgentLauncherColumns.contains("id"))
         XCTAssertTrue(projectAgentLauncherColumns.contains("id"))
@@ -369,24 +372,17 @@ final class StoreTests: XCTestCase {
 
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
-            sessions: [
-                BrowserSession(
-                    name: "checkout", url: "https://example.com",
-                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "https://example.com", windowID: 303, isValid: true)), BrowserSession(),
-            ])
+            sessions: [BrowserSession(name: "checkout", url: "https://example.com"), BrowserSession()])
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(sessions.count, 2)
         XCTAssertEqual(sessions[0].name, "checkout")
         XCTAssertEqual(sessions[0].url, "https://example.com")
-        XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
 
         let codexLauncher = AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
         let claudeLauncher = AgentLauncher(id: "launcher-claude", name: "Claude", command: "claude")
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [codexLauncher, claudeLauncher])
         let launchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
         XCTAssertEqual(launchers, [codexLauncher, claudeLauncher])
-        XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
-        XCTAssertEqual(sessions[0].extractedWindow?.isValid, true)
         XCTAssertNil(sessions[1].name)
         XCTAssertNil(sessions[1].url)
 
@@ -900,33 +896,6 @@ final class StoreTests: XCTestCase {
 
         let notFound = try store.windows(windowID: 0)
         XCTAssertTrue(notFound.isEmpty)
-    }
-
-    // Tests workspace browser sessions with extracted window round trips correctly by arranging representative inputs and asserting the expected result.
-    func testWorkspaceBrowserSessionsWithExtractedWindowRoundTrip() throws {
-        let store = try makeTemporaryStore()
-        let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, title: "feature", dir: project.dir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-
-        let extractedWindow = ExtractedBrowserWindowMapping(targetURL: "http://localhost:3000", windowID: 501, isValid: true)
-        let sessions: [BrowserSession] = [
-            BrowserSession(name: "frontend", url: "http://localhost:3000", extractedWindow: extractedWindow),
-            BrowserSession(name: "backend", url: "http://localhost:4000", extractedWindow: nil),
-        ]
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: sessions)
-
-        let loaded = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        XCTAssertEqual(loaded.count, 2)
-        XCTAssertEqual(loaded[0].name, "frontend")
-        XCTAssertEqual(loaded[0].url, "http://localhost:3000")
-        XCTAssertNotNil(loaded[0].extractedWindow)
-        XCTAssertEqual(loaded[0].extractedWindow?.windowID, 501)
-        XCTAssertEqual(loaded[0].extractedWindow?.targetURL, "http://localhost:3000")
-        XCTAssertEqual(loaded[0].extractedWindow?.isValid, true)
-        XCTAssertEqual(loaded[1].name, "backend")
-        XCTAssertNil(loaded[1].extractedWindow)
     }
 
     // Tests agent window lookup by terminal session ID returns the matching record by arranging representative inputs and asserting the expected result.

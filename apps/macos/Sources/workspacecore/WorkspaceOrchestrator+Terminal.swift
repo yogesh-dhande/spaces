@@ -513,29 +513,6 @@ extension WorkspaceOrchestrator {
         terminateBuiltInTerminalSession(builtInTerminalSessionID(for: process))
     }
 
-    func resolvedProcessTerminalFocusTarget(_ process: RunningProcessRecord, workspaceID: String) throws -> ManagedTerminalFocusTarget {
-        let windows = try store.windows(workspaceID: workspaceID)
-        let trackedWindow = windows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
-        let trackedSessionIdentity = trackedWindow?.terminalFocusIdentity
-        let processSessionIdentity = process.terminalFocusIdentity
-        let providerIdentity =
-            trackedSessionIdentity ?? processSessionIdentity ?? trackedWindow?.windowID.map(TerminalTrackingIdentity.window)
-            ?? process.windowID.map(TerminalTrackingIdentity.window)
-        return ManagedTerminalFocusTarget(providerIdentity: providerIdentity, windowID: trackedWindow?.windowID ?? process.windowID)
-    }
-
-    func clearStaleBuiltInTerminalWindowBinding(_ process: RunningProcessRecord, workspaceID: String) throws {
-        let clearedProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-            terminalApp: process.terminalApp, windowID: nil, terminalTrackingID: process.terminalTrackingID,
-            terminalNativeID: process.terminalNativeID, pid: process.pid, status: process.status, logPath: process.logPath,
-            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
-        try store.upsert(runningProcess: clearedProcess)
-        if let trackedWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
-            try clearStaleBuiltInTerminalWindowBinding(trackedWindow)
-        }
-    }
-
     func clearStaleBuiltInTerminalWindowBinding(_ agent: AgentWindowRecord) throws {
         guard agent.provider == .spaces else { return }
         let clearedAgent = AgentWindowRecord(
@@ -547,18 +524,6 @@ extension WorkspaceOrchestrator {
         try store.upsertAgentWindow(clearedAgent)
     }
 
-    func persistBuiltInTerminalWindowBinding(_ process: RunningProcessRecord, workspaceID: String, windowID: Int) throws {
-        let reboundProcess = RunningProcessRecord(
-            id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-            terminalApp: process.terminalApp, windowID: windowID, terminalTrackingID: process.terminalTrackingID,
-            terminalNativeID: process.terminalNativeID, pid: process.pid, status: process.status, logPath: process.logPath,
-            lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
-        try store.upsert(runningProcess: reboundProcess)
-        if let trackedWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
-            try persistBuiltInTerminalWindowBinding(trackedWindow, windowID: windowID)
-        }
-    }
-
     func persistBuiltInTerminalWindowBinding(_ agent: AgentWindowRecord, windowID: Int) throws {
         guard agent.provider == .spaces else { return }
         let reboundAgent = AgentWindowRecord(
@@ -568,14 +533,6 @@ extension WorkspaceOrchestrator {
             }, sessionKey: agent.sessionKey, claimedLauncherID: agent.claimedLauncherID, claimedLauncherName: agent.claimedLauncherName,
             status: agent.status, createdAt: agent.createdAt, updatedAt: nowISO8601())
         try store.upsertAgentWindow(reboundAgent)
-    }
-
-    func persistBuiltInTerminalWindowBinding(_ window: WindowRecord, windowID: Int) throws {
-        let reboundWindow = WindowRecord(
-            id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail, targetURL: window.targetURL,
-            windowID: windowID, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID, role: window.role,
-            orderIndex: window.orderIndex, lastSeenAt: nowISO8601())
-        try store.upsert(window: reboundWindow)
     }
 
     func clearStaleBuiltInTerminalWindowBinding(_ window: WindowRecord) throws {

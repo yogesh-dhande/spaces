@@ -208,18 +208,6 @@ extension WorkspaceOrchestrator {
         return false
     }
 
-    public func focusWorkspaceProcess(workspaceID: String, processID: String, requestID: String? = nil) throws {
-        let focusStartedAt = currentDate()
-        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return }
-        let outcome = try focusWorkspaceProcessOutcome(process, workspaceID: workspaceID, requestID: requestID)
-        guard outcome.focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
-        rememberNavigationTarget(.process(process), workspaceID: workspaceID)
-        try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
-        logPerfMetric(
-            "process_focus", workspaceID: workspaceID, target: process.templateName, detail: "route=\(outcome.route)",
-            elapsedMS: elapsedMS(since: focusStartedAt), success: true)
-    }
-
     func processLaunchCommand(template: ProcessTemplate) throws -> String {
         let trimmed = template.command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw WorkspaceError.invalidArgument(message: "Process command is required.") }
@@ -564,12 +552,6 @@ extension WorkspaceOrchestrator {
         return !fallbackKey.isEmpty && runningProcessMatchKey(name: process.templateName) == fallbackKey
     }
 
-    public func recoverRunningWorkspaceProcessIfPossible(workspaceID: String, processID: String) throws -> Bool {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        guard let process = try store.runningProcesses(workspaceID: workspaceID).first(where: { $0.id == processID }) else { return false }
-        return try recoverRunningProcessTerminalIfPossible(workspaceID: workspaceID, process: process)
-    }
-
     func stopRunningProcess(_ process: RunningProcessRecord, workspaceID: String) throws {
         let closedManagedTerminalWindowID: Int?
         if isManagedTerminalApp(process.terminalApp) {
@@ -595,42 +577,6 @@ extension WorkspaceOrchestrator {
         try store.deleteRunningProcess(id: process.id)
 
         try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
-    }
-
-    func recoverRunningProcessTerminalIfPossible(workspaceID: String, process: RunningProcessRecord) throws -> Bool {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        guard terminalHost(for: process.terminalApp) == .spaces else { return false }
-        let sessionID = process.terminalNativeID ?? process.terminalTrackingID
-        guard let sessionID, !sessionID.isEmpty else { return false }
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else { return false }
-        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { return false }
-        guard runtimeState.state == .starting || runtimeState.state == .running else { return false }
-        guard let pid = resolvedRuntimePID(for: process), isProcessAlive(pid: pid) else { return false }
-        let (_, workspace) = try resolveWorkspace(id: workspaceID)
-        let snapshot = bestEffortYabaiWindowSnapshot()
-        builtInTerminalWindowOpener(sessionID, .owner)
-        let capturedWindowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
-        let now = nowISO8601()
-        try store.upsert(
-            runningProcess: RunningProcessRecord(
-                id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                terminalApp: process.terminalApp, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: pid,
-                status: .running, logPath: process.logPath ?? paths.outputPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
-                exitedAt: nil))
-
-        let existingWindow = try store.windows(workspaceID: workspace.id).first(where: { window in
-            window.role == "terminal" && (window.id == process.id || window.windowID == process.windowID || window.terminalTrackingID == sessionID)
-        })
-        try store.upsert(
-            window: WindowRecord(
-                id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: process.templateName,
-                detail: process.command, targetURL: nil, windowID: capturedWindowID, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                role: "terminal",
-                orderIndex: existingWindow?.orderIndex
-                    ?? Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200),
-                lastSeenAt: now))
-        return true
     }
 
     @discardableResult func launchConfiguredProcess(
@@ -659,76 +605,4 @@ extension WorkspaceOrchestrator {
         return record
     }
 
-    func focusWorkspaceProcessRecord(_ process: RunningProcessRecord, workspaceID: String) throws -> Bool {
-        try focusWorkspaceProcessOutcome(process, workspaceID: workspaceID, requestID: nil).focused
-    }
-
-    func focusWorkspaceProcessOutcome(_ process: RunningProcessRecord, workspaceID: String, requestID: String?) throws
-        -> WorkspaceProcessFocusOutcome
-    {
-        guard isManagedTerminalApp(process.terminalApp) else {
-            return WorkspaceProcessFocusOutcome(focused: false, route: "unavailable", focusedExistingWindow: false)
-        }
-        let target = try resolvedProcessTerminalFocusTarget(process, workspaceID: workspaceID)
-        let focusResult = focusManagedTerminal(
-            terminalApp: process.terminalApp, providerIdentity: target.providerIdentity, windowID: target.windowID, requestID: requestID)
-        let focused: Bool
-        let focusedExistingWindow: Bool
-        let route: String
-        switch focusResult {
-        case .existingWindow:
-            focused = true
-            focusedExistingWindow = true
-            route = "existing_window"
-        case .trackedTerminal:
-            focused = true
-            focusedExistingWindow = target.windowID != nil
-            route = "tracked_terminal"
-        case .sessionRequest:
-            focused = true
-            focusedExistingWindow = false
-            route = "session_request"
-        case .reboundSession(let capturedWindowID):
-            focused = true
-            focusedExistingWindow = false
-            route = "rebound_session"
-            if terminalHost(for: process.terminalApp) == .spaces {
-                if let capturedWindowID {
-                    try persistBuiltInTerminalWindowBinding(process, workspaceID: workspaceID, windowID: capturedWindowID)
-                } else {
-                    try clearStaleBuiltInTerminalWindowBinding(process, workspaceID: workspaceID)
-                }
-            }
-        case .reopenedSession(let capturedWindowID):
-            focused = true
-            focusedExistingWindow = false
-            route = "reopened_session"
-            if terminalHost(for: process.terminalApp) == .spaces {
-                if let capturedWindowID {
-                    try persistBuiltInTerminalWindowBinding(process, workspaceID: workspaceID, windowID: capturedWindowID)
-                } else {
-                    try clearStaleBuiltInTerminalWindowBinding(process, workspaceID: workspaceID)
-                }
-            }
-        case .unavailable:
-            if let trackedWindowID = target.windowID {
-                let fallbackFocused = ((try? yabai.focusWindow(id: trackedWindowID)) ?? false)
-                focused = fallbackFocused
-                focusedExistingWindow = fallbackFocused
-                route = fallbackFocused ? "fallback_window" : "unavailable"
-            } else {
-                focused = false
-                focusedExistingWindow = false
-                route = "unavailable"
-            }
-        }
-        if focused, focusedExistingWindow, let trackedWindowID = target.windowID { pulseTerminalWindowIfNeeded(windowID: trackedWindowID) }
-        return WorkspaceProcessFocusOutcome(focused: focused, route: route, focusedExistingWindow: focusedExistingWindow)
-    }
-
-    func missingTrackedProcessError(_ process: RunningProcessRecord, workspaceID: String) -> WorkspaceError {
-        .missingTrackedWindow(
-            MissingTrackedWindowContext(
-                kind: .process, workspaceID: workspaceID, windowID: process.windowID, processID: process.id, title: process.templateName))
-    }
 }
