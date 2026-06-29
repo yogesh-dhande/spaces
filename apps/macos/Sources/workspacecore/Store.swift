@@ -101,7 +101,7 @@ public final class SQLiteStore {
     public func appConfig() throws -> AppConfig {
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
-        let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
+        let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange.default : PortRange(start: start, end: end)
         return AppConfig(portRange: portRange)
     }
 

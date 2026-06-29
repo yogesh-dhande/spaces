@@ -2378,9 +2378,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         await Task.detached(priority: .userInitiated) {
             do {
                 let snapshotStartedAt = ProcessInfo.processInfo.systemUptime
-                let orchestrator = try localWorkspaceOrchestrator()
-                logStartupSnapshotProfile("sidebar_snapshot_store_ready")
-                let config = try clientAppConfig(base: orchestrator.syncConfig())
+                let config = try clientAppConfig()
                 logStartupSnapshotProfile("sidebar_snapshot_config_ready")
                 // The sidebar shows every paired device at once; the initial snapshot
                 // always loads the local device first, then remote sections stream in
@@ -8135,7 +8133,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         do {
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
             guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
-            let editor = try clientAppConfig(base: orchestrator.appConfig()).editor
+            let editor = try clientAppConfig().editor
             let deviceID = deviceID(forWorkspaceID: workspaceID)
             if isRemoteDeviceID(deviceID) {
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -8726,14 +8724,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return .alerts
     }
 
-    nonisolated static func clientAppConfig(base: AppConfig) throws -> AppConfig {
+    /// The macOS client's app config is just the editor preference (client-local in the client
+    /// database). The port range is daemon-owned and never read by the GUI, so it carries a
+    /// placeholder rather than a daemon-DB read — keeping config sourcing off the orchestrator.
+    nonisolated static func clientAppConfig() throws -> AppConfig {
         let editor = try SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
-        return AppConfig(editor: editor, portRange: base.portRange)
+        return AppConfig(editor: editor, portRange: .default)
     }
 
-    private func clientAppConfig(base: AppConfig) throws -> AppConfig {
+    private func clientAppConfig() throws -> AppConfig {
         let editor = try clientDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
-        return AppConfig(editor: editor, portRange: base.portRange)
+        return AppConfig(editor: editor, portRange: .default)
     }
 
     func clientWindowFocusPulseEnabled() -> Bool {

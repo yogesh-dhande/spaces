@@ -390,7 +390,7 @@ import workspacecore
         if host.configCache?.editor == preference { return }
         do {
             try host.clientDatabase().setSetting(key: SettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
-            host.configCache = try AppKitController.clientAppConfig(base: host.orchestrator.appConfig())
+            host.configCache = try AppKitController.clientAppConfig()
         } catch { host.showError(error) }
     }
 
