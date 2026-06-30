@@ -117,6 +117,65 @@ extension OrchestratorTests {
         XCTAssertNotNil(updated?.exitedAt)
     }
 
+    // A Spaces terminal-backed process can be recorded running before its child PID is persisted
+    // (the launch returns once the session is ready; the child PID lands in terminal runtime state
+    // slightly later). The exit monitor must still see such a process, so runningOwnedProcessPIDs
+    // resolves the PID through runtime state when the DB pid is missing.
+    func testRunningOwnedProcessPIDsResolvesPIDFromRuntimeStateWhenDatabasePIDMissing() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        try withEnv(name: SpacesProfile.runtimeDirectoryEnvironmentVariable, value: runtimeDir.path) {
+            let sessionID = "session-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            // childPID is a live pid (this test process); the DB record carries no pid yet.
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: Int32(getpid()), state: .running,
+                    updatedAt: "2026-05-09T17:00:00Z"), paths: paths)
+            let process = RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: TerminalHost.spaces.appName, windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+            try store.upsert(runningProcess: process)
+
+            XCTAssertTrue(try orchestrator.runningOwnedProcessPIDs().contains(Int(getpid())))
+        }
+    }
+
+    // Without a resolvable runtime PID, a pid-less running record contributes nothing — the monitor
+    // has nothing to observe — rather than inserting a bogus zero/negative pid.
+    func testRunningOwnedProcessPIDsSkipsRecordWithNoResolvablePID() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+            terminalApp: TerminalHost.spaces.appName, windowID: 123, terminalTrackingID: "session-without-runtime-state", pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        try withEnv(name: SpacesProfile.runtimeDirectoryEnvironmentVariable, value: runtimeDir.path) {
+            XCTAssertTrue(try orchestrator.runningOwnedProcessPIDs().isEmpty)
+        }
+    }
+
     func testCheckAndUpdateProcessStatusesTreatsZombiePIDAsExited() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)

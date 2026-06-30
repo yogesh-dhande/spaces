@@ -197,11 +197,15 @@ import workspacecore
         // restart resolving a block, or an update-pending state clearing), the caption must still
         // reload or it keeps showing stale Resolve/update-pending UI.
         let previousLocalSection = host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })
+        // An unreachable local daemon renders as offline (red caption), exactly like a remote device that
+        // fails to load; otherwise the device is loaded. Fold loadState into the unchanged check so a
+        // loaded→offline transition still reloads the caption even when both overviews are empty.
+        let localLoadState = AppKitController.localDeviceLoadState(offlineMessage: snapshot.localOfflineMessage)
         let localOutlineUnchanged =
             previousLocalSection?.overview == snapshot.localDeviceOverview && previousLocalSection?.compatibility == snapshot.localCompatibility
-            && previousLocalSection?.daemonStatus == snapshot.localDaemonStatus
+            && previousLocalSection?.daemonStatus == snapshot.localDaemonStatus && previousLocalSection?.loadState == localLoadState
         let localSection = DeviceSection(
-            deviceID: snapshot.localDeviceID, deviceName: snapshot.localDeviceName, isLocal: true, loadState: .loaded,
+            deviceID: snapshot.localDeviceID, deviceName: snapshot.localDeviceName, isLocal: true, loadState: localLoadState,
             device: snapshot.localPairedDevice, projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject,
             workspaceRuntimeStatusByID: snapshot.workspaceRuntimeStatusByID, alertsGroups: snapshot.alertsGroups,
             overview: snapshot.localDeviceOverview, daemonStatus: snapshot.localDaemonStatus, compatibility: snapshot.localCompatibility)
@@ -228,6 +232,12 @@ import workspacecore
         if !shouldPreserveDetailPane {
             host.refreshSelection()
             host.logStartupProfile("apply_snapshot_selection_ready")
+        } else if !canPreserveDetailPaneAfterSidebarReload() {
+            // The preserve verdict was computed against the pre-reload data; this reload removed what the
+            // detail pane was preserving — e.g. the local daemon went offline and its selected workspace
+            // vanished. Reconcile the pane instead of leaving stale workspace detail/actions visible.
+            host.refreshSelection()
+            host.logStartupProfile("apply_snapshot_selection_reconciled_ready")
         } else if AppKitController.shouldRefreshVisibleWorkspaceDetail(
             selectedWorkspaceID: host.selectedWorkspaceID, showingAlerts: host.showingAlerts, showingSettings: host.showingSettings,
             workspaceExists: host.selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil, mainWindowIsFocused: host.window?.isKeyWindow == true,
@@ -529,10 +539,14 @@ import workspacecore
         return result
     }
 
-    /// True when more than one paired device is present, so the sidebar groups
-    /// projects under per-device header rows. With a single (local) device the
-    /// root stays a flat project list.
-    var showsDeviceHeaders: Bool { host.deviceSections.count > 1 }
+    /// True when the sidebar groups projects under per-device header rows: whenever more than one device
+    /// is paired, or when any section is offline so its "offline" caption — the only surface for an
+    /// unreachable daemon's reason — still has a header row to render in (a single offline local device
+    /// otherwise has no project rows and would show nothing). A single loaded device stays a flat list.
+    var showsDeviceHeaders: Bool {
+        AppKitController.sidebarShowsDeviceHeaders(
+            deviceCount: host.deviceSections.count, hasOfflineSection: host.deviceSections.contains { $0.loadState.isOffline })
+    }
 
     func deviceProjects(deviceID: String) -> [ProjectSummary] {
         host.projects.filter { project in
@@ -740,6 +754,11 @@ import workspacecore
             stateLabel.lineBreakMode = .byTruncatingTail
             stateLabel.setContentHuggingPriority(.required, for: .horizontal)
             stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            // Surface the offline reason (e.g. the daemon startup error) on hover; the caption itself
+            // stays the terse "offline" to match remote devices and avoid widening the sidebar.
+            if case .offline(let message)? = host.deviceSections.first(where: { $0.deviceID == deviceID })?.loadState, !message.isEmpty {
+                stateLabel.toolTip = message
+            }
             contentRow.addArrangedSubview(stateLabel)
         }
 

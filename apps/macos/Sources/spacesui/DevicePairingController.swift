@@ -21,12 +21,46 @@ import workspacecore
 /// action handlers stay on the host (their buttons bind their target to the host) and
 /// forward here; the device-rename text field uses the host's shared `NSControl`
 /// delegate, which routes back into this controller.
-@MainActor
-final class DevicePairingController {
+@MainActor final class DevicePairingController {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
+    init(host: AppKitController) { self.host = host }
+
+    /// Shown when the Device API control endpoint is disabled for this profile by an environment override.
+    /// A relaunch inherits the same environment, so it cannot bring the socket up; the restart action is
+    /// suppressed for this failure. A genuine daemon-down failure (which a relaunch resolves) carries a
+    /// different message.
+    nonisolated static let deviceAPIControlDisabledMessage =
+        "Device API control is unavailable for this profile. Relaunch Spaces without the disabled Device API environment override."
+
+    /// Stable message for a local daemon whose control endpoint is unreachable (the daemon is down), as
+    /// opposed to one that is reachable but returned a real error. `controlResponse(forThrownError:)`
+    /// produces it from a connectivity throw so the restart action can key off it without string-matching
+    /// a variable POSIX error description.
+    nonisolated static let deviceAPIUnreachableMessage = "The local Spaces daemon isn't reachable. Restart it to reconnect."
+
+    /// The Restart Local Daemon action is offered only for failures a relaunch can actually resolve: the
+    /// daemon answered that its Device API is not running, or its control endpoint was unreachable (the
+    /// daemon is down). It is suppressed for the disabled-override case (a relaunch inherits the same
+    /// environment), while a relaunch is already running (so a second click can't start a concurrent
+    /// relaunch), and — crucially — for a reachable daemon that returned a real status/settings error,
+    /// which carries its own message and must surface instead of prompting a session-stopping restart.
+    /// Pure so the gating is directly testable.
+    nonisolated static func localDaemonRestartActionIsAvailable(responseMessage: String, isRelaunching: Bool) -> Bool {
+        guard !isRelaunching else { return false }
+        return responseMessage == SpacesDeviceAPIControlClient.deviceAPINotRunningMessage || responseMessage == deviceAPIUnreachableMessage
+    }
+
+    /// Classifies an error thrown while talking to the local control endpoint into a control response: the
+    /// disabled-override message when the endpoint is deliberately off, the stable unreachable message when
+    /// the endpoint is merely down (so the restart action appears), or the error's own description for any
+    /// other failure (which offers no restart). Nonisolated so the relaunch flow's detached task can reuse it.
+    nonisolated static func controlResponse(forThrownError error: any Error) -> SpacesDeviceAPIControlResponse {
+        if let disabledResponse = deviceAPIDisabledOverrideResponse(for: error) { return disabledResponse }
+        if SpacesDeviceAPIControlClient.isControlEndpointUnavailable(error) {
+            return SpacesDeviceAPIControlResponse(ok: false, message: deviceAPIUnreachableMessage)
+        }
+        return SpacesDeviceAPIControlResponse(ok: false, message: error.localizedDescription)
     }
 
     private struct ClientConnectedDevice: Sendable {
@@ -57,6 +91,7 @@ final class DevicePairingController {
     private weak var remoteDevicePairingStatusLabel: NSTextField?
     private var currentDevicePairingWindow: ClientDevicePairingWindow?
     private var devicePanelStatusMessage: (message: String, isError: Bool)?
+    private var isRelaunchingLocalDaemon = false
     var renamingClientDeviceID: String?
     weak var renamingClientDeviceField: NSTextField?
 
@@ -65,17 +100,19 @@ final class DevicePairingController {
         host.settings.openSettings(section: .devices)
     }
 
-    private func mobileConnectionUnavailableResponse(for error: Error) -> SpacesDeviceAPIControlResponse? {
-        guard SpacesDeviceAPIControlClient.isControlEndpointUnavailable(error) else { return nil }
-        return SpacesDeviceAPIControlResponse(
-            ok: false,
-            message: "Device API control is unavailable for this profile. Relaunch Spaces without the disabled Device API environment override.")
+    /// The disabled-override response applies only when the Device API is actually turned off by the
+    /// environment override: a relaunch inherits the same environment and cannot help, so the restart
+    /// action is suppressed. A control endpoint that is merely unreachable — e.g. the socket is down while
+    /// live terminal sessions blocked the automatic relaunch — is recoverable, so this returns nil and the
+    /// caller keeps the Restart Local Daemon action available.
+    nonisolated static func deviceAPIDisabledOverrideResponse(for error: any Error) -> SpacesDeviceAPIControlResponse? {
+        guard SpacesDeviceAPIControlClient.isControlEndpointUnavailable(error), SpacesDeviceAPIDefaults.isDisabledByEnvironment() else { return nil }
+        return SpacesDeviceAPIControlResponse(ok: false, message: deviceAPIControlDisabledMessage)
     }
 
     func currentDeviceControlResponse() -> SpacesDeviceAPIControlResponse {
         do { return try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() } catch {
-            if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) { return unavailableResponse }
-            return SpacesDeviceAPIControlResponse(ok: false, message: error.localizedDescription)
+            return Self.controlResponse(forThrownError: error)
         }
     }
 
@@ -116,6 +153,9 @@ final class DevicePairingController {
         if let status = devicePanelStatusMessage {
             let statusLabel = host.helpTextLabel(status.message)
             statusLabel.textColor = status.isError ? .systemRed : .secondaryLabelColor
+            // Status messages can carry a long unbreakable path; wrap on characters so the path stays
+            // fully visible across lines rather than being clipped at the (now width-capped) window edge.
+            statusLabel.lineBreakMode = .byCharWrapping
             cards.append(statusLabel)
         }
 
@@ -153,7 +193,22 @@ final class DevicePairingController {
         var rows: [NSView] = []
         let devices = connectedClientDevices(localStatus: response.status, requireLocalStatus: true)
         rows.append(contentsOf: devices.map(connectedDeviceRow(_:)))
-        if !response.ok { rows.append(host.helpTextLabel(response.message)) }
+        if !response.ok {
+            let errorLabel = host.helpTextLabel(response.message)
+            errorLabel.lineBreakMode = .byCharWrapping
+            rows.append(errorLabel)
+            // A non-ok control response means the local daemon (or just its Device API endpoint) is
+            // down/unreachable. Offer a one-click relaunch right next to the error — but only for failures a
+            // relaunch can resolve, and not while a relaunch is already running. This is the only place the
+            // local daemon restart lives; restartLocalDaemon warns before killing if the daemon still reports
+            // live sessions (the Device API can be down while the terminal service is not).
+            if Self.localDaemonRestartActionIsAvailable(responseMessage: response.message, isRelaunching: isRelaunchingLocalDaemon) {
+                let restartButton = host.actionButton(
+                    title: "Restart Local Daemon", symbol: "arrow.clockwise", tooltip: "Relaunch the local spacesd daemon on this Mac",
+                    action: #selector(AppKitController.restartLocalDaemon), primary: true)
+                rows.append(mobilePanelButtonRow([restartButton]))
+            }
+        }
         return mobilePanelSection(icon: "desktopcomputer.and.macbook", title: "Connected Devices", rows: rows)
     }
 
@@ -404,7 +459,7 @@ final class DevicePairingController {
             devicePanelStatusMessage = nil
             showDeviceSettings(response)
         } catch {
-            if let unavailableResponse = mobileConnectionUnavailableResponse(for: error) {
+            if let unavailableResponse = Self.deviceAPIDisabledOverrideResponse(for: error) {
                 showDeviceSettings(unavailableResponse)
             } else {
                 host.showError(error)
@@ -465,6 +520,63 @@ final class DevicePairingController {
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self?.host.requestSidebarReload()
             } catch { self?.setRemoteDevicePairingStatus(error.localizedDescription, isError: true) }
+        }
+    }
+
+    /// Relaunches the local `spacesd` daemon after it failed to start. This is the only local-daemon
+    /// restart entry point. It calls `TerminalService.relaunch` directly (stop-then-start) rather than
+    /// the `requestDaemonRestart` RPC, because a crashed daemon has no reachable control endpoint to
+    /// receive that RPC. On completion it re-renders the Devices pane against an authoritative status
+    /// and reloads the sidebar so the "This Mac" offline caption clears.
+    ///
+    /// The Device API control endpoint can be down while the terminal service still holds live sessions
+    /// (`responseEnsuringCurrentTerminalService` deliberately returns the not-running response instead of
+    /// relaunching in that case, to avoid killing them). A relaunch stops the daemon and every live
+    /// session, so warn-before-kill — matching `confirmDaemonRestart` — whenever any session is live.
+    /// Liveness is read from the terminal service's own session list, the same signal that protective
+    /// path keys off; the Device API status is unreachable here, and its terminal-service ping would
+    /// under-report anyway (it omits process/agent counts), so the warning uses the generic
+    /// unknown-count impact message rather than a precise breakdown. When nothing is live (the daemon is
+    /// fully down) the relaunch proceeds with no prompt.
+    func restartLocalDaemon() {
+        Task { @MainActor [weak self] in
+            guard let self, !self.isRelaunchingLocalDaemon else { return }
+            let hasLiveSessions = await Task.detached(priority: .userInitiated) { !((try? TerminalService.listSessions()) ?? []).isEmpty }.value
+            guard !self.isRelaunchingLocalDaemon else { return }
+            if hasLiveSessions {
+                let alert = NSAlert()
+                alert.messageText = "Restart the local daemon?"
+                alert.informativeText = AppKitController.restartImpactMessage(status: nil)
+                alert.addButton(withTitle: "Restart")
+                alert.addButton(withTitle: "Defer")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+            }
+            self.performLocalDaemonRelaunch()
+        }
+    }
+
+    private func performLocalDaemonRelaunch() {
+        // Mark the relaunch in progress before rendering: the placeholder below is also `ok: false`, so
+        // without this the pane would re-render an active Restart Local Daemon button and a second click
+        // could start a concurrent relaunch against the same daemon (localDaemonRestartActionIsAvailable
+        // suppresses the button while this is set).
+        isRelaunchingLocalDaemon = true
+        devicePanelStatusMessage = (message: "Restarting the local daemon…", isError: false)
+        // The daemon is down, so render the in-progress banner from a placeholder response rather than a
+        // live status query (which would just time out again).
+        renderDeviceSettings(response: SpacesDeviceAPIControlResponse(ok: false, message: "Restarting the local daemon…"))
+        Task { [weak self] in
+            let response = await Task.detached(priority: .userInitiated) { () -> SpacesDeviceAPIControlResponse in
+                do { _ = try TerminalService.relaunch() } catch { return DevicePairingController.controlResponse(forThrownError: error) }
+                do { return try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() } catch {
+                    return DevicePairingController.controlResponse(forThrownError: error)
+                }
+            }.value
+            guard let self else { return }
+            self.isRelaunchingLocalDaemon = false
+            self.devicePanelStatusMessage = nil
+            self.refreshVisibleDeviceSettings(response)
+            self.host.requestSidebarReload(forceRemoteRefresh: true)
         }
     }
 

@@ -59,6 +59,37 @@ import Testing
         #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: nil) == nil)
     }
 
+    @Test func preparedGitProjectCreateFailureRestoresHandleToStillActiveForm() {
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: true, formHasPreparedHandle: false, formTargetsPreparationDevice: true) == .restoreToForm)
+    }
+
+    @Test func preparedGitProjectCreateFailureDiscardsOrphanedClone() {
+        // Form dismissed mid-create, so there is nothing to restore into.
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: false, formHasPreparedHandle: false, formTargetsPreparationDevice: true) == .discardOrphan)
+        // A newer preparation already replaced the handle on the still-active form; the captured
+        // clone is orphaned and discarding it must not clobber the newer one.
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: true, formHasPreparedHandle: true, formTargetsPreparationDevice: true) == .discardOrphan)
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: false, formHasPreparedHandle: true, formTargetsPreparationDevice: true) == .discardOrphan)
+    }
+
+    @Test func preparedGitProjectCreateFailureDiscardsWhenFormSwitchedDevices() {
+        // The user changed the (still-editable) device picker mid-create, so the form now targets a
+        // different daemon than the one the clone was prepared on. Restoring the handle would make
+        // Cancel/retry act on the wrong daemon and orphan the original clone, so discard it on its own
+        // device instead.
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: true, formHasPreparedHandle: false, formTargetsPreparationDevice: false) == .discardOrphan)
+    }
+
     @MainActor @Test func setupScriptReplaceCancelsOpenEditorAndAppliesHydratedValue() {
         let section = ScriptSection(
             title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: "old")

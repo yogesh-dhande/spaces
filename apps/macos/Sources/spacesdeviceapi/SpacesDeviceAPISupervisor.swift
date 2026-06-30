@@ -59,10 +59,7 @@ import workspacecore
             certificateFingerprint: status.certificateFingerprint)
     }
 
-    private var isDisabled: Bool {
-        let value = environment[SpacesDeviceAPIDefaults.disabledEnvironmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value == "1" || value.localizedCaseInsensitiveCompare("true") == .orderedSame
-    }
+    private var isDisabled: Bool { SpacesDeviceAPIDefaults.isDisabledByEnvironment(environment) }
 
     private func startRestartTimer() {
         restartTimer?.invalidate()
@@ -146,14 +143,15 @@ import workspacecore
                 let result = SpacesDeviceAPIControlStatusResult(
                     status: currentStatus, pairingWindow: server?.pairingWindowSnapshot(), devices: try pairedDevices())
                 guard server != nil else {
-                    return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.", result: .status(result))
+                    return SpacesDeviceAPIControlResponse(
+                        ok: false, message: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, result: .status(result))
                 }
                 return SpacesDeviceAPIControlResponse(ok: true, message: "Loaded Device API status.", result: .status(result))
             case .openPairingWindow:
                 startDeviceAPIIfNeeded()
                 guard let server else {
                     return SpacesDeviceAPIControlResponse(
-                        ok: false, message: "Device API is not running.", result: .status(.init(status: try status())))
+                        ok: false, message: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, result: .status(.init(status: try status())))
                 }
                 let currentStatus = try status()
                 let window = server.openPairingWindow(host: pairingLinkHost(for: currentStatus), name: currentStatus.bonjourServiceName)
@@ -182,7 +180,8 @@ import workspacecore
         let clientApp = request.clientApp
         startDeviceAPIIfNeeded()
         guard server != nil else {
-            return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.", result: .status(.init(status: try status())))
+            return SpacesDeviceAPIControlResponse(
+                ok: false, message: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, result: .status(.init(status: try status())))
         }
         let settings = try settingsStore.loadOrCreate()
         let currentStatus = try status()

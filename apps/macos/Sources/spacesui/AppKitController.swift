@@ -1999,13 +1999,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let localDeviceOverview: SpacesDeviceOverviewPayload
         let localDaemonStatus: TerminalServiceDaemonStatus?
         let localCompatibility: SpacesWireCompatibility?
+        // Non-nil when the local daemon could not be reached for this snapshot. Carries the failure
+        // reason so the sidebar can render the local device as offline (mirroring remote devices)
+        // instead of failing the whole snapshot. The overview falls back to an empty payload.
+        let localOfflineMessage: String?
     }
 
     enum SidebarDeviceLoadState: Sendable, Equatable {
         case loading
         case offline(String)
         case loaded
+
+        var isOffline: Bool {
+            if case .offline = self { return true }
+            return false
+        }
     }
+
+    /// The sidebar groups projects under per-device header rows when more than one device is paired, or
+    /// when any section is offline so its "offline" caption (the only surface for an unreachable daemon's
+    /// reason) still has a header row to render in. A single loaded device stays a flat project list.
+    /// Pure so the single-offline-device rule is directly testable.
+    nonisolated static func sidebarShowsDeviceHeaders(deviceCount: Int, hasOfflineSection: Bool) -> Bool { deviceCount > 1 || hasOfflineSection }
+
+    /// Maps the local device's snapshot reachability to a sidebar load state. A non-nil offline message
+    /// (the local daemon could not be reached) renders the local device as offline, exactly like a remote
+    /// device that fails to load; otherwise the device is loaded. Keeping this pure makes the
+    /// parity-with-remote contract directly testable.
+    nonisolated static func localDeviceLoadState(offlineMessage: String?) -> SidebarDeviceLoadState { offlineMessage.map { .offline($0) } ?? .loaded }
 
     /// One paired device's slice of the sidebar. The sidebar shows every paired
     /// device at once; each section loads independently so a slow or unreachable
@@ -2384,19 +2405,67 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // always loads the local device first, then remote sections stream in
                 // independently (see loadRemoteDeviceSections).
                 let deviceClientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-                let localDevice = try SpacesDeviceClient.bootstrapLocalDevice(
-                    database: SpacesClientDatabase.defaultDatabase(), clientApp: deviceClientApp)
-                // Read compatibility from the overview's inline frozen-core status: the compatible
-                // steady state costs a single round-trip, and only an incompatible/too-old daemon falls
-                // back to the standalone handshake (which stays decodable when the overview would not),
-                // so the local device can show the restart/update block instead of a generic load error.
-                let localResolution = try SpacesDeviceClient.resolveOverview(device: localDevice, clientApp: deviceClientApp)
-                let localDaemonStatus = localResolution.daemonStatus
-                let localCompatibility = localResolution.compatibility
-                // A blocked (incompatible) device has no decodable overview to show; render the block
-                // from an empty snapshot instead.
-                let localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
-                let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: localDevice.id)) ?? [:]
+                let database = try SpacesClientDatabase.defaultDatabase()
+                // The local daemon being unreachable is an offline state, not a snapshot failure: degrade to
+                // an empty overview tagged with the reason so the sidebar shows "This Mac" offline the same
+                // way remote devices do, while the rest of the snapshot (config and the paired-device record,
+                // both read from the local database) still loads. This covers both failure points — the
+                // bootstrap call (the daemon never came up) and the overview round-trip (the daemon answered
+                // but its overview failed). A bootstrap failure falls back to the last stored local device
+                // record so "This Mac" still has an identity to render; with no stored record (a first launch
+                // while the daemon is down) there is no device to show, so it stays a genuine snapshot failure.
+                // Only reachability failures degrade to offline: a bootstrap that reaches the daemon but then
+                // fails writing the paired-device record or saving Keychain credentials is a real error, not
+                // an offline state, so it must surface rather than be hidden behind an empty offline sidebar.
+                let localDevice: SpacesPairedDeviceRecord
+                let bootstrapOfflineMessage: String?
+                do {
+                    localDevice = try SpacesDeviceClient.bootstrapLocalDevice(database: database, clientApp: deviceClientApp)
+                    bootstrapOfflineMessage = nil
+                } catch {
+                    guard SpacesDeviceClient.isLocalDaemonUnreachableError(error),
+                        let storedLocalDevice = try? database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID)
+                    else { throw error }
+                    localDevice = storedLocalDevice
+                    bootstrapOfflineMessage = error.localizedDescription
+                }
+                // Read compatibility from the overview's inline frozen-core status: the compatible steady
+                // state costs a single round-trip, and only an incompatible/too-old daemon falls back to the
+                // standalone handshake (which stays decodable when the overview would not), so the local
+                // device can show the restart/update block instead of a generic load error.
+                let localDaemonStatus: TerminalServiceDaemonStatus?
+                let localCompatibility: SpacesWireCompatibility?
+                let localOverview: SpacesDeviceOverviewPayload
+                let localOfflineMessage: String?
+                if let bootstrapOfflineMessage {
+                    // Bootstrap already failed; skip the overview round-trip (it would only fail too) and
+                    // render offline directly from the stored device record.
+                    localDaemonStatus = nil
+                    localCompatibility = nil
+                    localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                    localOfflineMessage = bootstrapOfflineMessage
+                } else {
+                    do {
+                        let localResolution = try SpacesDeviceClient.resolveOverview(device: localDevice, clientApp: deviceClientApp)
+                        localDaemonStatus = localResolution.daemonStatus
+                        localCompatibility = localResolution.compatibility
+                        // A blocked (incompatible) device has no decodable overview to show; render the block
+                        // from an empty snapshot instead.
+                        localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                        localOfflineMessage = nil
+                    } catch {
+                        // Only a reachability failure degrades to offline. An error from a reachable daemon
+                        // (a database/migration failure, an authorization rejection, a malformed overview)
+                        // must surface through the snapshot's failure path, not be hidden behind the offline
+                        // sidebar/restart flow.
+                        guard SpacesDeviceClient.isLocalDaemonUnreachableError(error) else { throw error }
+                        localDaemonStatus = nil
+                        localCompatibility = nil
+                        localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                        localOfflineMessage = error.localizedDescription
+                    }
+                }
+                let collapseStates = (try? database.projectCollapseStates(deviceID: localDevice.id)) ?? [:]
                 let mapped = deviceSidebarData(from: localOverview, deviceID: localDevice.id, projectCollapseStates: collapseStates)
                 let workspaceCount = mapped.workspacesByProject.values.reduce(0) { $0 + $1.count }
                 logStartupSnapshotProfile(
@@ -2413,7 +2482,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         config: config, projects: mapped.projects, workspacesByProject: mapped.workspacesByProject,
                         workspaceRuntimeStatusByID: mapped.workspaceRuntimeStatusByID, alertsGroups: alertsGroups, localDeviceID: localDevice.id,
                         localDeviceName: localDevice.name, localPairedDevice: localDevice, localDeviceOverview: localOverview,
-                        localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility))
+                        localDaemonStatus: localDaemonStatus, localCompatibility: localCompatibility, localOfflineMessage: localOfflineMessage))
             } catch { return .failure(error) }
         }.value
     }
@@ -6217,6 +6286,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         label.textColor = .tertiaryLabelColor
         label.lineBreakMode = .byWordWrapping
         label.maximumNumberOfLines = 0
+        // Without lowered horizontal compression resistance the label's intrinsic width becomes a hard
+        // floor, so a long unbreakable token (e.g. a file path in an error message) forces the whole
+        // container — and the resizable settings window — wider. Let it shrink and wrap instead.
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return label
     }
 
@@ -6977,6 +7050,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc func openDevicePairingWindow() { devicePairing.openDevicePairingWindow() }
     @objc func pairIOSWithConnectedDevice(_ sender: NSButton) { devicePairing.pairIOSWithConnectedDevice(sender) }
     @objc func connectRemoteDeviceFromPairingPanel() { devicePairing.connectRemoteDeviceFromPairingPanel() }
+    @objc func restartLocalDaemon() { devicePairing.restartLocalDaemon() }
     @objc func removeMacPairedDevice(_ sender: NSButton) { devicePairing.removeMacPairedDevice(sender) }
     @objc func beginClientDeviceRename(_ sender: NSMenuItem) { devicePairing.beginClientDeviceRename(sender) }
     func renderDeviceSettings(response: SpacesDeviceAPIControlResponse) { devicePairing.renderDeviceSettings(response: response) }
@@ -7300,9 +7374,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 let config = Self.deviceProjectConfig(from: refs)
                 // The repository was already cloned by prepareGitProject; pass its handle so the
-                // daemon adopts that clone instead of re-cloning. Clear it so Cancel won't discard
-                // the clone now that it's being consumed.
+                // daemon adopts that clone instead of re-cloning. Clear it off the form so Cancel
+                // or a window close during the in-flight create won't discard the clone that is
+                // being consumed; on failure it is restored (or discarded) so it never leaks.
                 let preparedGitProjectHandle = refs.preparedGitProjectHandle
+                let preparedGitURL = refs.preparedGitURL
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
                 refs.gitPreparationID = nil
@@ -7338,7 +7414,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         } else {
                             applyDeviceMutationResponse(response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
                         }
-                    case .failure(let error): showError(error)
+                    case .failure(let error):
+                        restoreOrDiscardPreparedGitProjectAfterCreateFailure(
+                            refs: refs, handle: preparedGitProjectHandle, repoURL: preparedGitURL, device: device)
+                        showError(error)
                     }
                 }
                 return
@@ -7593,6 +7672,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if case .failure(let error) = result { self?.showError(error) }
         }
     }
+
+    /// Adoption of a prepared git clone failed, so the daemon-side clone still exists in the managed
+    /// repo/workspace directories. If the add-project form is still open and hasn't been re-prepared,
+    /// restore the handle to it so Cancel/retry can discard or reuse the clone. Otherwise (the form was
+    /// dismissed mid-create, or a newer preparation replaced the handle) discard the orphaned clone here
+    /// so it never leaks.
+    private func restoreOrDiscardPreparedGitProjectAfterCreateFailure(
+        refs: AddProjectFieldRefs, handle: String?, repoURL: String?, device: SpacesPairedDeviceRecord
+    ) {
+        guard let handle else { return }
+        switch Self.preparedGitProjectCreateFailureAction(
+            isActiveForm: isActiveAddProjectForm(refs), formHasPreparedHandle: refs.preparedGitProjectHandle != nil,
+            formTargetsPreparationDevice: refs.selectedDeviceID == device.id)
+        {
+        case .restoreToForm:
+            refs.preparedGitProjectHandle = handle
+            refs.preparedGitURL = repoURL
+        case .discardOrphan: beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device)
+        }
+    }
+
+    enum PreparedGitProjectCreateFailureAction: Equatable { case restoreToForm, discardOrphan }
+
+    /// Decides what to do with a prepared git clone whose project create failed. Restore the handle to the
+    /// form only when it is still the active form, nothing newer was prepared into it, and the form still
+    /// targets the device the clone was prepared on, so Cancel/retry acts on the right daemon. Otherwise the
+    /// captured clone is orphaned — the form was dismissed, a newer preparation replaced the handle, or the
+    /// user switched the (still-editable) device picker mid-create so the form now points at a different
+    /// daemon — and it must be discarded on its original device so it never leaks or targets the wrong daemon.
+    nonisolated static func preparedGitProjectCreateFailureAction(isActiveForm: Bool, formHasPreparedHandle: Bool, formTargetsPreparationDevice: Bool)
+        -> PreparedGitProjectCreateFailureAction
+    { isActiveForm && !formHasPreparedHandle && formTargetsPreparationDevice ? .restoreToForm : .discardOrphan }
 
     private func discardActiveAddProjectPreparedSourceIfNeeded() {
         guard let activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[activeAddProjectFormTag] else { return }

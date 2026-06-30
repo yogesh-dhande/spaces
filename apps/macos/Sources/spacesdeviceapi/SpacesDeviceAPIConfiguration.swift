@@ -28,6 +28,15 @@ public enum SpacesDeviceAPIDefaults {
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedHost.isEmpty || trimmedHost == "0.0.0.0" || trimmedHost == "::"
     }
+
+    /// True when the Device API is turned off for this process via the `SPACES_DEVICE_API_DISABLED`
+    /// environment override (`1`/`true`). The daemon never creates the control socket in this case, so a
+    /// relaunch that inherits the same environment cannot bring it up — callers use this to distinguish a
+    /// deliberately disabled endpoint from a transiently unreachable one.
+    public static func isDisabledByEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        let value = environment[disabledEnvironmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value == "1" || value.localizedCaseInsensitiveCompare("true") == .orderedSame
+    }
 }
 
 public struct SpacesDeviceAPISettings: Codable, Equatable, Sendable {

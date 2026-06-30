@@ -37,7 +37,15 @@ extension WorkspaceOrchestrator {
         for project in try store.projects() {
             for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
                 for process in try store.runningProcesses(workspaceID: workspace.id) where process.status == .running {
-                    if let pid = process.pid, pid > 0 { pids.insert(pid) }
+                    // A Spaces terminal-backed process can be recorded running before its child PID is
+                    // persisted: the child PID is written to terminal runtime state, not the database, and
+                    // no later databaseDidChange is guaranteed to revisit it. Resolve through runtime state
+                    // when the DB pid is missing so the exit monitor still installs an observer for it.
+                    if let pid = process.pid, pid > 0 {
+                        pids.insert(pid)
+                    } else if let runtimePID = resolvedRuntimePID(for: process), runtimePID > 0 {
+                        pids.insert(runtimePID)
+                    }
                 }
             }
         }

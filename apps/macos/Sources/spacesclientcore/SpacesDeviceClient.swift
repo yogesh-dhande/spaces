@@ -90,6 +90,35 @@ public enum SpacesDeviceClient {
         return record
     }
 
+    /// True when a local-device failure is a daemon-reachability problem rather than an error from a
+    /// reachable daemon. Reachability covers: the control socket being unavailable; the Device API network
+    /// transport failing to connect (timeout/refused/reset); spacesd failing to start at all (startup
+    /// timeout, or a missing executable); and the daemon answering that its Device API is not running.
+    /// Callers degrade these to an offline sidebar. Anything else — a persistence/credential failure after
+    /// a reachable daemon returned a valid bootstrap, or a reachable daemon rejecting the overview with a
+    /// real error (database/migration/authorization/malformed payload) — means spacesd is reachable, so it
+    /// must surface as a real error instead of being hidden behind an offline state.
+    public static func isLocalDaemonUnreachableError(_ error: any Error) -> Bool {
+        if SpacesDeviceAPIControlClient.isControlEndpointUnavailable(error) { return true }
+        // The Device API network transport (used by the overview round-trip) couldn't reach the daemon.
+        if isRetryableLocalDeviceAPIConnectionError(error) { return true }
+        #if os(macOS)
+            // The terminal service couldn't bring spacesd up at all — it timed out starting, or the
+            // executable is missing — so the local daemon is down, the same offline state as an unreachable
+            // socket. These cases exist only in the macOS TerminalService, which is where local bootstrap runs.
+            if let terminalError = error as? TerminalServiceError {
+                switch terminalError {
+                case .serviceStartupTimedOut, .executableNotFound: return true
+                case .requestFailed: return false
+                }
+            }
+        #endif
+        if case SpacesDeviceClientError.requestRejected(let message) = error {
+            return message == SpacesDeviceAPIControlClient.deviceAPINotRunningMessage
+        }
+        return false
+    }
+
     public static func localOverview(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider

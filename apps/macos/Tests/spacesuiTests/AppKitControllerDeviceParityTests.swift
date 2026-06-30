@@ -1,5 +1,6 @@
 import Testing
 import spacesclientcore
+import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
 import workspacecore
@@ -15,6 +16,59 @@ import workspacecore
         let folderProjectActions = AppKitController.sidebarProjectActions(isGitRepo: false)
         #expect(folderProjectActions.showsSettings)
         #expect(!folderProjectActions.showsAddWorkspace)
+    }
+
+    @Test func localDeviceShowsOfflineWhenDaemonUnreachableMirroringRemote() {
+        // An unreachable local daemon must surface as offline (carrying the reason), the same state a
+        // remote device enters when its overview fails to load — not a loaded-but-empty device.
+        let offline = AppKitController.localDeviceLoadState(offlineMessage: "Timed out waiting for spacesd to start.")
+        #expect(offline == .offline("Timed out waiting for spacesd to start."))
+
+        // A reachable daemon (nil message) stays loaded.
+        #expect(AppKitController.localDeviceLoadState(offlineMessage: nil) == .loaded)
+    }
+
+    @Test func singleOfflineLocalDeviceStillRendersADeviceHeaderRow() {
+        // A single loaded device stays a flat project list (no header).
+        #expect(!AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasOfflineSection: false))
+        // A single offline device forces a header row so its "offline" caption/tooltip has somewhere to
+        // render — otherwise it has no project rows and the sidebar would show nothing.
+        #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasOfflineSection: true))
+        // More than one device always groups under headers.
+        #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 2, hasOfflineSection: false))
+
+        #expect(AppKitController.SidebarDeviceLoadState.offline("daemon down").isOffline)
+        #expect(!AppKitController.SidebarDeviceLoadState.loaded.isOffline)
+        #expect(!AppKitController.SidebarDeviceLoadState.loading.isOffline)
+    }
+
+    @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
+        // Known reachability failures a relaunch can resolve — the daemon answered that its Device API is
+        // not running, or its control endpoint was unreachable (daemon down) — offer the action.
+        #expect(
+            DevicePairingController.localDaemonRestartActionIsAvailable(
+                responseMessage: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, isRelaunching: false))
+        #expect(
+            DevicePairingController.localDaemonRestartActionIsAvailable(
+                responseMessage: DevicePairingController.deviceAPIUnreachableMessage, isRelaunching: false))
+
+        // A reachable daemon that returned a real status/settings error carries its own message; restarting
+        // would stop live sessions for nothing, so the action is suppressed and the error surfaces instead.
+        #expect(
+            !DevicePairingController.localDaemonRestartActionIsAvailable(
+                responseMessage: "Overview failed: database disk image is malformed.", isRelaunching: false))
+
+        // The Device API disabled-by-override failure: a relaunch inherits the same environment and cannot
+        // bring the socket up, so the action is suppressed.
+        #expect(
+            !DevicePairingController.localDaemonRestartActionIsAvailable(
+                responseMessage: DevicePairingController.deviceAPIControlDisabledMessage, isRelaunching: false))
+
+        // While a relaunch is already running, the action is suppressed so a second click cannot start a
+        // concurrent relaunch — even for an otherwise relaunch-resolvable failure.
+        #expect(
+            !DevicePairingController.localDaemonRestartActionIsAvailable(
+                responseMessage: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, isRelaunching: true))
     }
 
     @Test func remoteWorkspacePathActionsKeepControlsButUseSSHDependentErrorText() {
