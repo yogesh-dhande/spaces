@@ -289,6 +289,15 @@ final class SpacesClientDatabaseTests: XCTestCase {
         }
     }
 
+    func testFreshDatabaseReportsNoBackups() throws {
+        try withTemporaryProfile { root in
+            let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)
+            let database = try SpacesClientDatabase(path: databaseURL.path)
+
+            XCTAssertEqual(try database.backupURLs(), [])
+        }
+    }
+
     func testFailedMigrationRestoresBackup() throws {
         try withTemporaryProfile { root in
             let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)
@@ -298,10 +307,15 @@ final class SpacesClientDatabaseTests: XCTestCase {
             try SpacesDeviceCredentialStore.saveToken("SECRET-TOKEN", deviceID: record.id)
             defer { try? SpacesDeviceCredentialStore.deleteToken(deviceID: record.id) }
 
-            let failingStep = SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Intentional failure") { _ in
+            let failingStep = SpacesClientMigrationStep(
+                fromVersion: SpacesClientDatabase.currentVersion, toVersion: SpacesClientDatabase.currentVersion + 1,
+                description: "Intentional failure"
+            ) { _ in
                 throw NSError(domain: "SpacesClientDatabaseTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "boom"])
             }
-            XCTAssertThrowsError(try SpacesClientDatabase(path: databaseURL.path, currentVersion: 4, migrationSteps: [failingStep]))
+            XCTAssertThrowsError(
+                try SpacesClientDatabase(
+                    path: databaseURL.path, currentVersion: SpacesClientDatabase.currentVersion + 1, migrationSteps: [failingStep]))
 
             let restored = try SpacesClientDatabase(path: databaseURL.path)
             XCTAssertEqual(try restored.pairedDevice(id: record.id), record)

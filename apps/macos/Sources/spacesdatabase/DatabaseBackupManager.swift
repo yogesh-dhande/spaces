@@ -26,6 +26,7 @@ public struct DatabaseBackupManager: Sendable {
     }
 
     public func existingBackups() throws -> [URL] {
+        guard FileManager.default.fileExists(atPath: backupDirectory.path) else { return [] }
         let urls = try FileManager.default.contentsOfDirectory(
             at: backupDirectory, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])
         return urls.sorted { $0.lastPathComponent > $1.lastPathComponent }

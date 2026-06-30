@@ -129,6 +129,7 @@ case "${1:-}" in
             zig-out/lib
         : > zig-out/include/ghostty/vt.h
         : > zig-out/lib/libghostty-vt.a
+        cp "$SPACES_TEST_FAKE_VT_LIB" "zig-out/lib/$SPACES_TEST_FAKE_VT_LIB_NAME"
         ;;
     *)
         echo "unexpected zig invocation: $*" >&2
@@ -151,6 +152,24 @@ case "$(uname -m)" in
         ;;
 esac
 
+case "$(uname -s)" in
+    Darwin)
+        FAKE_VT_LIB_NAME="libghostty-vt.dylib"
+        FAKE_VT_LIB="$TMP_ROOT/$FAKE_VT_LIB_NAME"
+        printf 'void spaces_fake_ghostty_vt(void) {}\n' > "$TMP_ROOT/fake-vt.c"
+        cc -dynamiclib "$TMP_ROOT/fake-vt.c" -o "$FAKE_VT_LIB"
+        ;;
+    Linux)
+        FAKE_VT_LIB_NAME="libghostty-vt.so"
+        FAKE_VT_LIB="$TMP_ROOT/$FAKE_VT_LIB_NAME"
+        printf 'void spaces_fake_ghostty_vt(void) {}\n' > "$TMP_ROOT/fake-vt.c"
+        cc -shared -fPIC "$TMP_ROOT/fake-vt.c" -o "$FAKE_VT_LIB"
+        ;;
+    *)
+        fail "unsupported test OS: $(uname -s)"
+        ;;
+esac
+
 FAKE_ZIG_BIN="$TEMP_APP_ROOT/.local/ghosttyvt/toolchain/$ZIG_ARCHIVE_NAME/zig"
 mkdir -p "$(dirname "$FAKE_ZIG_BIN")"
 cp "$STUB_BIN/zig" "$FAKE_ZIG_BIN"
@@ -165,6 +184,7 @@ mkdir -p \
     "$RELEASE_BUILD_ROOT/vt/lib"
 : > "$RELEASE_BUILD_ROOT/vt/include/ghostty/vt.h"
 : > "$RELEASE_BUILD_ROOT/vt/lib/libghostty-vt.a"
+cp "$FAKE_VT_LIB" "$RELEASE_BUILD_ROOT/vt/lib/$FAKE_VT_LIB_NAME"
 
 tar -C "$RELEASE_BUILD_ROOT/kit" -czf "$RELEASE_DIR/GhosttyKit.xcframework.tar.gz" "GhosttyKit.xcframework"
 tar -C "$RELEASE_BUILD_ROOT/resources" -czf "$RELEASE_DIR/GhosttyKit-resources.tar.gz" "ghostty" "terminfo"
@@ -220,6 +240,8 @@ SETUP_ENV=(
     "SPACES_TEST_BUILD_LOG=$BUILD_LOG"
     "SPACES_TEST_RELEASE_DIR=$RELEASE_DIR"
     "SPACES_TEST_ZIG_CACHE_DIR=$ZIG_CACHE_DIR"
+    "SPACES_TEST_FAKE_VT_LIB=$FAKE_VT_LIB"
+    "SPACES_TEST_FAKE_VT_LIB_NAME=$FAKE_VT_LIB_NAME"
 )
 
 set +e
