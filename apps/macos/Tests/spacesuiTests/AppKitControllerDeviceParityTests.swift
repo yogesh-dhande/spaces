@@ -364,8 +364,8 @@ import workspacecore
 
     @Test func deviceTerminalOpenRequestPreservesStartingSessionMetadata() {
         let session = SpacesDeviceTerminalSessionSummary(
-            id: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature", state: .starting, backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
+            id: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: nil, state: .starting,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
             projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z",
             isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession)
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [session])
@@ -376,8 +376,8 @@ import workspacecore
             request
                 == AppKitController.DeviceTerminalOpenRequest(
                     workspaceID: "workspace-1", sessionID: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature",
-                    kind: .shell, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
-                    updatedAt: "2026-06-22T12:00:01Z"))
+                    kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
+                    createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
     }
 
     @Test func deviceShortcutResolvesStartingTerminalRowWithSessionMetadata() {
@@ -402,8 +402,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-shell", title: "shell-1",
-                        workingDirectory: "/device/project-feature", kind: .shell, initialState: .starting, servicePID: 321, childPID: nil,
-                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
+                        workingDirectory: "/device/project-feature", kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting,
+                        servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceShortcutResolvesStartingProcessWithSessionMetadata() {
@@ -432,8 +432,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-process", title: "web", workingDirectory: "/device/project-feature",
-                        kind: .process, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
-                        updatedAt: "2026-06-22T12:00:01Z")))
+                        kind: .process, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
+                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceShortcutResolvesStartingAgentWithSessionMetadata() {
@@ -459,8 +459,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-agent", title: "Codex", workingDirectory: "/device/project-feature",
-                        kind: .agent, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
-                        updatedAt: "2026-06-22T12:00:01Z")))
+                        kind: .agent, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
+                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceTerminalControlRequestTranslatesRendererControlPayload() throws {
@@ -480,8 +480,8 @@ import workspacecore
     private func startingSessionSummary(id: String, title: String, rowKind: SpacesDeviceTerminalSessionRowKind) -> SpacesDeviceTerminalSessionSummary
     {
         SpacesDeviceTerminalSessionSummary(
-            id: id, title: title, workingDirectory: "/device/project-feature", state: .starting, backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
+            id: id, title: title, workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: nil, state: .starting,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
             projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z",
             isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: rowKind)
     }

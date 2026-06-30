@@ -63,10 +63,10 @@ import workspacecore
 
             #expect(
                 AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                    paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
+                    hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: false))
             #expect(
                 !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
-                    paths: paths, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
+                    hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
         }
     }
 

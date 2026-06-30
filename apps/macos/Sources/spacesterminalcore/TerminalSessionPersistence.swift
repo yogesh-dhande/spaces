@@ -165,6 +165,26 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
         self.clients = clients
         self.attachments = attachments
     }
+
+    /// Attachments backed by a still-present client. An attachment counts as live only
+    /// when it is not detached, its client is not disconnected, and — for remote clients,
+    /// which can vanish without sending a detach — its lease was refreshed within
+    /// `remoteClientLeaseInterval`. Local window clients have no lease and are always live
+    /// while attached. This is the single source of truth for liveness; the persistence
+    /// query and any off-device consumer both judge attachments through this rule, so an
+    /// expired remote viewer is never mistaken for a live attachment.
+    public func liveAttachments(
+        now: Date = Date(), remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
+    ) -> [TerminalAttachment] {
+        let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
+        let clientsByID = Dictionary(clients.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return attachments.filter { attachment in
+            guard attachment.detachedAt == nil, let client = clientsByID[attachment.clientID], client.disconnectedAt == nil else { return false }
+            guard client.kind != .localWindow else { return true }
+            guard let lastSeenAt = TerminalSessionPersistence.parseISO8601(client.leaseRefreshedAt ?? ""), lastSeenAt >= cutoff else { return false }
+            return true
+        }
+    }
 }
 
 public enum TerminalSessionPersistence {
@@ -360,7 +380,7 @@ public enum TerminalSessionPersistence {
             let clients = try database.queryRows(
                 sql: """
                     SELECT client_id, kind, identity_label, COALESCE(identity_host_name, ''), COALESCE(identity_device_name, ''),
-                           COALESCE(identity_network_address, ''), connected_at, COALESCE(disconnected_at, '')
+                           COALESCE(identity_network_address, ''), connected_at, COALESCE(disconnected_at, ''), lease_refreshed_at
                     FROM terminal_clients
                     WHERE root_directory = ?
                     ORDER BY connected_at, client_id
@@ -589,30 +609,14 @@ public enum TerminalSessionPersistence {
         try readAttachmentSnapshot(paths: paths).attachments.filter { $0.detachedAt == nil }
     }
 
+    /// Live attachments for a session, judged through
+    /// `TerminalSessionAttachmentSnapshot.liveAttachments` so the daemon's own keep-alive
+    /// decisions and off-device consumers apply one lease rule.
     public static func liveAttachments(
         paths: TerminalSessionPaths, now: Date = Date(),
         remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
     ) throws -> [TerminalAttachment] {
-        let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
-            let rows = try database.queryRows(
-                sql: """
-                    SELECT a.id, a.session_id, a.client_id, a.mode, a.attached_at, COALESCE(a.detached_at, ''),
-                           c.kind, COALESCE(c.disconnected_at, ''), c.lease_refreshed_at
-                    FROM terminal_attachments a
-                    JOIN terminal_clients c ON c.root_directory = a.root_directory AND c.client_id = a.client_id
-                    WHERE a.root_directory = ? AND a.detached_at IS NULL
-                    ORDER BY a.attached_at, a.id
-                    """, bindings: [root])
-            let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
-            return try rows.compactMap { row in
-                guard row[7].isEmpty else { return nil }
-                if row[6] != TerminalClientKind.localWindow.rawValue {
-                    guard let lastSeenAt = parseISO8601(row[8]), lastSeenAt >= cutoff else { return nil }
-                }
-                return try decodeAttachment(row: Array(row[0...5]))
-            }
-        }
+        try readAttachmentSnapshot(paths: paths).liveAttachments(now: now, remoteClientLeaseInterval: remoteClientLeaseInterval)
     }
 
     public static func staleRemoteClientIDs(
@@ -853,13 +857,14 @@ public enum TerminalSessionPersistence {
     }
 
     private static func decodeClient(row: [String]) throws -> TerminalClient {
-        guard row.count >= 8 else { throw TerminalSessionPersistenceError.invalidRow("terminal_clients") }
+        guard row.count >= 9 else { throw TerminalSessionPersistenceError.invalidRow("terminal_clients") }
         guard let kind = TerminalClientKind(rawValue: row[1]) else { throw TerminalSessionPersistenceError.invalidValue("kind", row[1]) }
         return TerminalClient(
             id: row[0], kind: kind,
             identity: TerminalClientIdentity(
                 label: row[2], hostName: row[3].isEmpty ? nil : row[3], deviceName: row[4].isEmpty ? nil : row[4],
-                networkAddress: row[5].isEmpty ? nil : row[5]), connectedAt: row[6], disconnectedAt: row[7].isEmpty ? nil : row[7])
+                networkAddress: row[5].isEmpty ? nil : row[5]), connectedAt: row[6], disconnectedAt: row[7].isEmpty ? nil : row[7],
+            leaseRefreshedAt: row[8].isEmpty ? nil : row[8])
     }
 
     private static func decodeAttachment(row: [String]) throws -> TerminalAttachment {
@@ -901,7 +906,11 @@ public enum TerminalSessionPersistence {
         URL(fileURLWithPath: rootDirectory, isDirectory: true).standardizedFileURL.path
     }
 
-    private static func parseISO8601(_ value: String) -> Date? { ISO8601DateFormatter().date(from: value) }
+    /// Parses lease/connection timestamps. Linux daemons emit them with fractional
+    /// seconds (`...00.123Z`) while macOS emits whole-second stamps, so this delegates
+    /// to the timestamp parser that accepts both — a plain ISO8601 formatter returns nil
+    /// for fractional values, which would wrongly expire live remote viewers.
+    fileprivate static func parseISO8601(_ value: String) -> Date? { GhosttyRemoteSessionStateTimestamp.date(from: value) }
 }
 
 extension SpacesSQLiteDatabase {

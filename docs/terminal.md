@@ -55,7 +55,10 @@ Each live session also participates in a service-level control path:
 - If the service restarts and finds a session left in `starting` or `running` by a dead service PID, it marks that session failed and removes the stale `control.sock`.
 
 ## App Client Runtime
-- Built-in Spaces terminals are service-owned, so `SpacesApp` windows attach to sessions through the service control socket and can reconnect after app quit or relaunch.
+- Built-in Spaces terminals are service-owned, so `SpacesApp` windows attach to sessions and can reconnect after app quit or relaunch.
+- The Mac GUI treats terminal session state as device-owned daemon state: launch configuration, runtime state, attachment ownership, and the latest render payload are reached through the owning device's Device API, never by opening the daemon's `spaces.db`. Local and remote terminal windows share one path — a `DeviceTerminalSessionStateModel` (conforming to `TerminalSessionStateProviding`) owns one pinned-TLS session client and one `subscribe` stream per session, seeds launch configuration from the device overview, fetches catch-up state with `state`, and fans its single subscription out to both the window controller (metadata) and `RemoteGhosttySessionHost` (render). `TerminalSessionWindowController` reads only through the injected provider; the host renders only from injected state and writes no local mirror. For the local device this routes through the loopback Device API endpoint rather than the per-session Unix control socket.
+- Only Mac presentation state stays client-side, in `spaces-client.db`: terminal window frames (loaded and saved through `SpacesClientDatabase`), collapsed projects, selected workspace, shortcut settings, and browser/window IDs.
+- An ended session's final render comes from the device `state` response, not a local on-disk cache; there is no remote-state mirror in `spaces.db`.
 - App shutdown does not terminate service-owned terminal sessions. The quit prompt offers a destructive stop-all option for users who want to end every live service session before quitting.
 
 ## First-Party Clients
@@ -79,7 +82,7 @@ Each live session also participates in a service-level control path:
 - `GhosttyMirrorTerminalView` forwards mouse press, release, move, and drag events into the local mirror surface using Ghostty's AppKit coordinate convention and modifier bits. The mirror surface owns selection hit testing, copy selection behavior, and search match navigation.
 - Live terminal find uses a compact overlay owned by the macOS mirror view. Ghostty search action events open and close the overlay and update match counts; query edits call `search:<query>`, navigation calls `navigate_search:next` or `navigate_search:previous`, and `Esc` sends `end_search`.
 - Reopening a built-in window for an existing session reattaches to the same shell session instead of creating a new one.
-- Non-running sessions are treated as read-only even when older attachment rows still name an owner. macOS windows for ended sessions mount the local Ghostty mirror surface from the persisted final render frame and do not take ownership, resize, or send input.
+- Non-running sessions are treated as read-only even when older attachment rows still name an owner. macOS windows for ended sessions mount the local Ghostty mirror surface from the final render frame in the device `state` response and do not take ownership, resize, or send input.
 
 ## Tail and Metadata
 - `spaces terminal tail` reads `output.log`, not a live client window.
