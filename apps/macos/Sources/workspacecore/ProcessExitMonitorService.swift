@@ -4,6 +4,7 @@
 
     import Dispatch
     import Foundation
+    import spacesterminalcore
 
     /// Device-runtime process-exit monitoring, owned by the daemon.
     ///
@@ -18,11 +19,13 @@
     /// The reconcile builds a plain `WorkspaceOrchestrator`, so restart and notify
     /// resolve through the process-wide overrides the daemon installs (its in-process
     /// terminal launcher, and a notification deliverer that forwards to the client).
-    @MainActor
-    public final class ProcessExitMonitorService {
+    @MainActor public final class ProcessExitMonitorService {
         private let databasePath: String
         private let onError: (@Sendable (any Error) -> Void)?
         private var observers: [Int: DispatchSourceProcess] = [:]
+        private var runtimeStateObserver: NSObjectProtocol?
+        private var reconcileInFlight = false
+        private var pendingReconcileIgnoresStartupGrace: Bool?
         // Pids recorded running but already dead before an observer could attach are
         // reconciled once; a pid the reconcile keeps running is not reconciled again,
         // avoiding a loop. Cleared when the pid leaves the running set.
@@ -39,15 +42,24 @@
         public func start() {
             guard !started else { return }
             started = true
-            reconcile(ignoreStartupGracePeriod: false)
+            runtimeStateObserver = NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main) {
+                [weak self] _ in Task { @MainActor in self?.reconcileThenRefresh() }
+            }
+            requestReconcileThenRefresh(ignoreStartupGracePeriod: false)
             refreshObservers()
         }
 
         public func stop() {
             started = false
+            if let runtimeStateObserver {
+                NotificationCenter.default.removeObserver(runtimeStateObserver)
+                self.runtimeStateObserver = nil
+            }
             for source in observers.values { source.cancel() }
             observers.removeAll()
             reconciledDeadPIDs.removeAll()
+            pendingReconcileIgnoresStartupGrace = nil
+            reconcileInFlight = false
         }
 
         /// Reconciles the installed observers to the currently-running owned pids.
@@ -107,25 +119,45 @@
             observers[pid] = source
         }
 
-        private func reconcileThenRefresh() {
-            reconcile(ignoreStartupGracePeriod: true)
-            // The reconcile may have applied restart/exit policies that changed the
-            // running set, so reattach observers to the current children.
-            refreshObservers()
-        }
+        private func reconcileThenRefresh() { requestReconcileThenRefresh(ignoreStartupGracePeriod: true) }
 
-        private func reconcile(ignoreStartupGracePeriod: Bool) {
+        private func requestReconcileThenRefresh(ignoreStartupGracePeriod: Bool) {
+            guard started else { return }
+            if reconcileInFlight {
+                pendingReconcileIgnoresStartupGrace = (pendingReconcileIgnoresStartupGrace ?? false) || ignoreStartupGracePeriod
+                return
+            }
+            reconcileInFlight = true
             let databasePath = databasePath
             let onError = onError
-            Task.detached(priority: .utility) {
+            Task { @MainActor [weak self] in
+                var ignoresStartupGrace = ignoreStartupGracePeriod
+                while true {
+                    await Self.reconcile(databasePath: databasePath, onError: onError, ignoreStartupGracePeriod: ignoresStartupGrace)
+                    guard let self, self.started else { return }
+                    guard let pendingIgnoresStartupGrace = self.pendingReconcileIgnoresStartupGrace else {
+                        self.reconcileInFlight = false
+                        // The reconcile may have applied restart/exit policies that changed the
+                        // running set, so reattach observers to the current children.
+                        self.refreshObservers()
+                        return
+                    }
+                    self.pendingReconcileIgnoresStartupGrace = nil
+                    ignoresStartupGrace = pendingIgnoresStartupGrace
+                }
+            }
+        }
+
+        private nonisolated static func reconcile(databasePath: String, onError: (@Sendable (any Error) -> Void)?, ignoreStartupGracePeriod: Bool)
+            async
+        {
+            await Task.detached(priority: .utility) {
                 do {
                     let store = try SQLiteStore(path: databasePath)
                     let orchestrator = WorkspaceOrchestrator(store: store)
                     _ = try orchestrator.checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: ignoreStartupGracePeriod)
-                } catch {
-                    onError?(error)
-                }
-            }
+                } catch { onError?(error) }
+            }.value
         }
 
         /// Returns nil on a transient store error so the caller can distinguish "no

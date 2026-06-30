@@ -84,12 +84,7 @@ extension WorkspaceOrchestrator {
         let formatter = ISO8601DateFormatter()
         var didUpdate = false
         for process in processes where process.status == .running {
-            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
-                now.timeIntervalSince(startedAt) < 10.0
-            {
-                continue
-            }
-            if let runtimeState = resolvedBuiltInSessionRuntimeState(for: process), runtimeState.state != .running {
+            if let runtimeState = resolvedBuiltInSessionRuntimeState(for: process), !runtimeState.state.isInteractive {
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
                     terminalApp: process.terminalApp, windowID: process.windowID, terminalTrackingID: process.terminalTrackingID,
@@ -99,6 +94,11 @@ extension WorkspaceOrchestrator {
                 try store.upsert(runningProcess: updatedProcess)
                 didUpdate = true
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
+                continue
+            }
+            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
+                now.timeIntervalSince(startedAt) < 10.0
+            {
                 continue
             }
             guard let pid = resolvedRuntimePID(for: process) else { continue }

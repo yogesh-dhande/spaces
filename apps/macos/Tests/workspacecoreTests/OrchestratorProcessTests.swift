@@ -176,6 +176,154 @@ extension OrchestratorTests {
         }
     }
 
+    func testCheckAndUpdateProcessStatusesHonorsExitedRuntimeStateInsideStartupGrace() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "session-\(UUID().uuidString)"
+        let processID = UUID().uuidString
+        let process = RunningProcessRecord(
+            id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+            windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        let exitedAt = ISO8601DateFormatter().string(from: Date())
+        try writeTerminalSessionFixture(
+            sessionID: sessionID, workspace: workspace, kind: .process,
+            runtimeState: .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil, state: .exited,
+                updatedAt: exitedAt, exitedAt: exitedAt))
+
+        XCTAssertTrue(try orchestrator.checkAndUpdateProcessStatuses())
+        let updated = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first { $0.id == processID })
+        XCTAssertEqual(updated.status, .exited)
+        XCTAssertNotNil(updated.exitedAt)
+    }
+
+    func testCheckAndUpdateProcessStatusesKeepsStartingRuntimeStateRunningAfterStartupGrace() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "session-\(UUID().uuidString)"
+        let processID = UUID().uuidString
+        let process = RunningProcessRecord(
+            id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+            windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20.0)), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        try writeTerminalSessionFixture(
+            sessionID: sessionID, workspace: workspace, kind: .process,
+            runtimeState: .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil,
+                state: .starting, updatedAt: ISO8601DateFormatter().string(from: Date())))
+
+        XCTAssertFalse(try orchestrator.checkAndUpdateProcessStatuses())
+        let updated = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first { $0.id == processID })
+        XCTAssertEqual(updated.status, .running)
+        XCTAssertNil(updated.exitedAt)
+    }
+
+    #if os(macOS)
+        @MainActor func testProcessExitMonitorRuntimeStateExitReconcilesPIDLessProcessInsideStartupGrace() throws {
+            let root = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let databasePath = root.appendingPathComponent("spaces-test.db").path
+            let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+            try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+
+            try withEnvironmentValues([
+                SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDir.path,
+            ]) {
+                let store = try SQLiteStore(path: databasePath)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let projectDir = root.appendingPathComponent("project", isDirectory: true)
+                try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+                let project = try orchestrator.addProject(dir: projectDir.path)
+                let workspace = try orchestrator.createWorkspace(projectID: project.id)
+                let sessionID = "session-\(UUID().uuidString)"
+                let processID = UUID().uuidString
+                let process = RunningProcessRecord(
+                    id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+                    windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+                try store.upsert(runningProcess: process)
+
+                let monitor = ProcessExitMonitorService(databasePath: databasePath)
+                monitor.start()
+                defer { monitor.stop() }
+
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                let exitedAt = ISO8601DateFormatter().string(from: Date())
+                try TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(getpid()), childPID: nil, state: .exited,
+                        updatedAt: exitedAt, exitedAt: exitedAt), paths: paths)
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+
+                let updated = try waitForRunningProcess(store: store, workspaceID: workspace.id, processID: processID) { $0.status == .exited }
+                XCTAssertEqual(updated.status, .exited)
+                XCTAssertNotNil(updated.exitedAt)
+            }
+        }
+
+        @MainActor func testProcessExitMonitorRuntimeStatePIDReconcilesPIDLessProcessInsideStartupGrace() throws {
+            let root = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let databasePath = root.appendingPathComponent("spaces-test.db").path
+            let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+            try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+
+            try withEnvironmentValues([
+                SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDir.path,
+            ]) {
+                let store = try SQLiteStore(path: databasePath)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let projectDir = root.appendingPathComponent("project", isDirectory: true)
+                try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+                let project = try orchestrator.addProject(dir: projectDir.path)
+                let workspace = try orchestrator.createWorkspace(projectID: project.id)
+                let sessionID = "session-\(UUID().uuidString)"
+                let processID = UUID().uuidString
+                let process = RunningProcessRecord(
+                    id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+                    windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+                try store.upsert(runningProcess: process)
+
+                let monitor = ProcessExitMonitorService(databasePath: databasePath)
+                monitor.start()
+                defer { monitor.stop() }
+
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                try TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(getpid()), childPID: Int32(getpid()), state: .running,
+                        updatedAt: ISO8601DateFormatter().string(from: Date())), paths: paths)
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+
+                let updated = try waitForRunningProcess(store: store, workspaceID: workspace.id, processID: processID) {
+                    $0.pid == Int(getpid()) && $0.status == .running
+                }
+                XCTAssertEqual(updated.pid, Int(getpid()))
+                XCTAssertEqual(updated.status, .running)
+            }
+        }
+    #endif
+
     func testCheckAndUpdateProcessStatusesTreatsZombiePIDAsExited() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1627,5 +1775,18 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id)) { error in
             XCTAssertTrue(error.localizedDescription.contains("archived"))
         }
+    }
+
+    private func waitForRunningProcess(
+        store: SQLiteStore, workspaceID: String, processID: String, timeout: TimeInterval = 2.0, matching predicate: (RunningProcessRecord) -> Bool
+    ) throws -> RunningProcessRecord {
+        let deadline = Date().addingTimeInterval(timeout)
+        var latest: RunningProcessRecord?
+        repeat {
+            latest = try store.runningProcesses(workspaceID: workspaceID).first { $0.id == processID }
+            if let latest, predicate(latest) { return latest }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        } while Date() < deadline
+        return try XCTUnwrap(latest)
     }
 }
