@@ -298,7 +298,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var inlineWorkspaceOutsideClickMonitor: Any?
     var activeAddWorkspaceFormTag: Int? { didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
-    private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
+    private var preparedGitProjectDiscardTasksByDeviceAndURL: [String: PreparedGitProjectDiscardEntry] = [:]
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     var showingAlerts = false
@@ -4797,11 +4797,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func projectDeviceChanged(_ sender: NSPopUpButton) {
         guard let tag = activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[tag] else { return }
-        refs.selectedDeviceID = (sender.selectedItem?.representedObject as? String) ?? localProjectCreationDeviceID()
+        let selectedDeviceID = (sender.selectedItem?.representedObject as? String) ?? localProjectCreationDeviceID()
+        guard refs.selectedDeviceID != selectedDeviceID else { return }
+        refs.selectedDeviceID = selectedDeviceID
+        discardPreparedAddProjectGitSourceIfNeeded(refs)
         // The folder lives on the chosen device, so re-validate any typed path there.
         refs.preparedLocalDirectoryPath = nil
         refs.directoryCompletions = []
-        updateAddProjectProgressiveDisclosure(refs)
+        updateAddProjectSourceUI(refs)
         scheduleAddProjectDirectoryPreview(refs)
         scheduleAddProjectDirectorySuggestions(refs)
     }
@@ -7423,8 +7426,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // being consumed; on failure it is restored (or discarded) so it never leaks.
                 let preparedGitProjectHandle = refs.preparedGitProjectHandle
                 let preparedGitURL = refs.preparedGitURL
+                if refs.sourceSegmented.selectedSegment == 1 {
+                    guard
+                        Self.preparedGitProjectMatchesCurrentSelection(
+                            preparedGitProjectHandle: preparedGitProjectHandle, preparedGitURL: preparedGitURL,
+                            preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: gitURL ?? "", selectedDeviceID: refs.selectedDeviceID,
+                            currentPreparationID: refs.gitPreparationID)
+                    else { throw WorkspaceError.invalidArgument(message: "Clone the Git repository before creating the project.") }
+                }
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
+                refs.preparedGitDeviceID = nil
                 refs.gitPreparationID = nil
                 let originalTitle = sender.title
                 sender.isEnabled = false
@@ -7486,7 +7498,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
         let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let gitPrepared = refs.preparedGitProjectHandle != nil && refs.preparedGitURL == repoURL
+        let gitPrepared = Self.preparedGitProjectMatchesCurrentSelection(
+            preparedGitProjectHandle: refs.preparedGitProjectHandle, preparedGitURL: refs.preparedGitURL,
+            preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: repoURL, selectedDeviceID: refs.selectedDeviceID,
+            currentPreparationID: refs.gitPreparationID)
         let gitPreparing = refs.gitPreparationID != nil
         // The daemon clones the repo and returns its spaces.yaml config to pre-fill the form, so the
         // Clone step is shown for git sources on any device (local or remote).
@@ -7507,24 +7522,37 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             // A git source is prepared once the daemon has cloned it (handle held), so the form is
             // populated from spaces.yaml and Create can adopt the existing clone.
-            return refs.gitPreparationID == nil && refs.preparedGitProjectHandle != nil && refs.preparedGitURL == repoURL
+            return Self.preparedGitProjectMatchesCurrentSelection(
+                preparedGitProjectHandle: refs.preparedGitProjectHandle, preparedGitURL: refs.preparedGitURL,
+                preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: repoURL, selectedDeviceID: refs.selectedDeviceID,
+                currentPreparationID: refs.gitPreparationID)
         }
         let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return !directoryPath.isEmpty && refs.preparedLocalDirectoryPath == directoryPath
     }
 
     nonisolated static func preparedGitProjectResultMatchesActiveRequest(
-        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentPreparationID: UUID?,
-        completionPreparationID: UUID
-    ) -> Bool { isActiveForm && selectedSegment == 1 && currentRepoURL == requestedRepoURL && currentPreparationID == completionPreparationID }
+        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentDeviceID: String, requestedDeviceID: String,
+        currentPreparationID: UUID?, completionPreparationID: UUID
+    ) -> Bool {
+        isActiveForm && selectedSegment == 1 && currentRepoURL == requestedRepoURL && currentDeviceID == requestedDeviceID
+            && currentPreparationID == completionPreparationID
+    }
+
+    nonisolated static func preparedGitProjectMatchesCurrentSelection(
+        preparedGitProjectHandle: String?, preparedGitURL: String?, preparedGitDeviceID: String?, currentRepoURL: String, selectedDeviceID: String,
+        currentPreparationID: UUID?
+    ) -> Bool {
+        currentPreparationID == nil && preparedGitProjectHandle != nil && preparedGitURL == currentRepoURL && preparedGitDeviceID == selectedDeviceID
+    }
 
     nonisolated static func localProjectPreviewResultMatchesActiveRequest(
         isActiveForm: Bool, selectedSegment: Int, currentDirectoryPath: String, requestedDirectoryPath: String
     ) -> Bool { isActiveForm && selectedSegment == 0 && currentDirectoryPath == requestedDirectoryPath }
 
-    nonisolated static func preparedGitProjectDiscardKey(repoURL: String?) -> String? {
+    nonisolated static func preparedGitProjectDiscardKey(repoURL: String?, deviceID: String) -> String? {
         guard let key = repoURL?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
-        return key
+        return "\(deviceID)\n\(key)"
     }
 
     private func isActiveAddProjectForm(_ refs: AddProjectFieldRefs) -> Bool {
@@ -7597,6 +7625,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func prepareAddProjectGitSource(_ refs: AddProjectFieldRefs) {
         let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedDeviceID = refs.selectedDeviceID
         guard !repoURL.isEmpty else {
             showError(WorkspaceError.invalidArgument(message: "Git repository URL is required."))
             return
@@ -7605,11 +7634,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             updateAddProjectSourceUI(refs)
             return
         }
-        if refs.preparedGitProjectHandle != nil, refs.preparedGitURL == repoURL {
+        if Self.preparedGitProjectMatchesCurrentSelection(
+            preparedGitProjectHandle: refs.preparedGitProjectHandle, preparedGitURL: refs.preparedGitURL,
+            preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: repoURL, selectedDeviceID: requestedDeviceID,
+            currentPreparationID: refs.gitPreparationID)
+        {
             updateAddProjectSourceUI(refs)
             return
         }
-        guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else {
+        guard let device = deviceRecord(forDeviceID: requestedDeviceID) else {
             showDeviceNotLoadedError()
             return
         }
@@ -7634,17 +7667,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             // Discard any repository prepared earlier for this form before preparing a new one.
             if let previousHandle = refs.preparedGitProjectHandle {
-                let discardResult = await beginPreparedGitProjectDiscard(handle: previousHandle, repoURL: refs.preparedGitURL, device: device).value
+                guard let preparedDeviceID = refs.preparedGitDeviceID, let preparedDevice = deviceRecord(forDeviceID: preparedDeviceID) else {
+                    refs.preparedGitProjectHandle = nil
+                    refs.preparedGitURL = nil
+                    refs.preparedGitDeviceID = nil
+                    showDeviceNotLoadedError()
+                    return
+                }
+                let discardResult = await beginPreparedGitProjectDiscard(handle: previousHandle, repoURL: refs.preparedGitURL, device: preparedDevice).value
                 if case .failure(let error) = discardResult {
                     refs.preparedGitProjectHandle = nil
                     refs.preparedGitURL = nil
+                    refs.preparedGitDeviceID = nil
                     showError(error)
                     return
                 }
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
+                refs.preparedGitDeviceID = nil
             }
-            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL), case .failure(let error) = discardResult {
+            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL, deviceID: requestedDeviceID), case .failure(let error) = discardResult {
                 showError(error)
                 return
             }
@@ -7656,6 +7698,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .failure(let error):
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
+                refs.preparedGitDeviceID = nil
                 showError(error)
                 return
             case .success(let result): preparation = result
@@ -7666,6 +7709,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .failure(let error):
                     refs.preparedGitProjectHandle = nil
                     refs.preparedGitURL = nil
+                    refs.preparedGitDeviceID = nil
                     showError(error)
                     return
                 case .success(let result): preparation = result
@@ -7675,7 +7719,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 Self.preparedGitProjectResultMatchesActiveRequest(
                     isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
                     currentRepoURL: refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), requestedRepoURL: repoURL,
-                    currentPreparationID: refs.gitPreparationID, completionPreparationID: preparationID)
+                    currentDeviceID: refs.selectedDeviceID, requestedDeviceID: requestedDeviceID, currentPreparationID: refs.gitPreparationID,
+                    completionPreparationID: preparationID)
             else {
                 // The form moved on while cloning; discard the clone we just made.
                 if let handle = preparation.preparedGitProjectHandle {
@@ -7689,6 +7734,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             refs.preparedGitProjectHandle = handle
             refs.preparedGitURL = repoURL
+            refs.preparedGitDeviceID = requestedDeviceID
             hydrateAddProjectSettings(refs, from: config)
         }
     }
@@ -7706,9 +7752,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func discardPreparedAddProjectGitSourceIfNeeded(_ refs: AddProjectFieldRefs) {
         guard let handle = refs.preparedGitProjectHandle else { return }
         let repoURL = refs.preparedGitURL
-        let device = deviceRecord(forDeviceID: refs.selectedDeviceID)
+        let device = refs.preparedGitDeviceID.flatMap { deviceRecord(forDeviceID: $0) }
         refs.preparedGitProjectHandle = nil
         refs.preparedGitURL = nil
+        refs.preparedGitDeviceID = nil
         guard let device else { return }
         let discardTask = beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device)
         Task { @MainActor [weak self] in
@@ -7733,6 +7780,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .restoreToForm:
             refs.preparedGitProjectHandle = handle
             refs.preparedGitURL = repoURL
+            refs.preparedGitDeviceID = device.id
         case .discardOrphan: beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device)
         }
     }
@@ -7756,10 +7804,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func discardActiveAddProjectPreparedSourceSynchronouslyIfNeeded() -> Result<Void, Error>? {
         guard let activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[activeAddProjectFormTag],
-            let handle = refs.preparedGitProjectHandle, let device = deviceRecord(forDeviceID: refs.selectedDeviceID)
+            let handle = refs.preparedGitProjectHandle, let deviceID = refs.preparedGitDeviceID, let device = deviceRecord(forDeviceID: deviceID)
         else { return nil }
         refs.preparedGitProjectHandle = nil
         refs.preparedGitURL = nil
+        refs.preparedGitDeviceID = nil
         do {
             _ = try SpacesDeviceClient.discardPreparedGitProject(
                 preparedGitProjectHandle: handle, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -7770,25 +7819,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @discardableResult private func beginPreparedGitProjectDiscard(handle: String, repoURL: String?, device: SpacesPairedDeviceRecord) -> Task<
         Result<Void, Error>, Never
     > {
-        let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL)
-        let previousTask = key.flatMap { preparedGitProjectDiscardTasksByURL[$0]?.task }
+        let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: device.id)
+        let previousTask = key.flatMap { preparedGitProjectDiscardTasksByDeviceAndURL[$0]?.task }
         let task = Task<Result<Void, Error>, Never> {
             if let previousTask { _ = await previousTask.value }
             return await Self.discardPreparedGitProjectResult(preparedGitProjectHandle: handle, device: device)
         }
         guard let key else { return task }
         let id = UUID()
-        preparedGitProjectDiscardTasksByURL[key] = PreparedGitProjectDiscardEntry(id: id, task: task)
+        preparedGitProjectDiscardTasksByDeviceAndURL[key] = PreparedGitProjectDiscardEntry(id: id, task: task)
         Task { @MainActor [weak self] in
             _ = await task.value
-            guard let self, self.preparedGitProjectDiscardTasksByURL[key]?.id == id else { return }
-            self.preparedGitProjectDiscardTasksByURL[key] = nil
+            guard let self, self.preparedGitProjectDiscardTasksByDeviceAndURL[key]?.id == id else { return }
+            self.preparedGitProjectDiscardTasksByDeviceAndURL[key] = nil
         }
         return task
     }
 
-    private func activePreparedGitProjectDiscardResult(repoURL: String) async -> Result<Void, Error>? {
-        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL), let entry = preparedGitProjectDiscardTasksByURL[key] else { return nil }
+    private func activePreparedGitProjectDiscardResult(repoURL: String, deviceID: String) async -> Result<Void, Error>? {
+        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: deviceID),
+            let entry = preparedGitProjectDiscardTasksByDeviceAndURL[key]
+        else { return nil }
         return await entry.task.value
     }
 

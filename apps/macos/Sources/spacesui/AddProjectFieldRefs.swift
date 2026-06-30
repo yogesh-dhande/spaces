@@ -21,6 +21,7 @@ import workspacecore
     /// Opaque handle to the repository cloned by the daemon's prepareGitProject command, held so
     /// Create can adopt that clone (no re-clone) and Cancel can discard it.
     var preparedGitProjectHandle: String?
+    var preparedGitDeviceID: String?
     var gitPreparationID: UUID?
     var directorySuggestionTask: Task<Void, Never>?
     var directoryPreviewTask: Task<Void, Never>?
