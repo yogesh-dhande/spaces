@@ -2048,6 +2048,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var compatibility: SpacesWireCompatibility?
     }
 
+    /// Whether the current sidebar selection points at a workspace or project owned by `section`. Used
+    /// when a device transitions to offline: its rows are about to drop out of the merged sidebar data,
+    /// so a selection under it leaves a stale detail pane that must be reconciled. A selected workspace's
+    /// project is always under the same device, so the workspace check alone suffices when one is selected.
+    nonisolated static func sidebarSelectionBelongsToDeviceSection(
+        selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection
+    ) -> Bool {
+        if let selectedWorkspaceID {
+            return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } }
+        }
+        if let selectedProjectID {
+            return section.projects.contains { $0.id == selectedProjectID }
+        }
+        return false
+    }
+
     enum BackgroundRefreshFailureAction: Equatable {
         case deferredSetup
         case logOnly
@@ -2370,7 +2386,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
                         icon: "cpu.fill", iconTint: .warning, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
                         agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue), countsTowardBadge: true, eventDate: eventDate,
-                        focusRequest: .workspaceAgentLauncher(workspaceID: workspace.id, name: agent.name)))
+                        // The alert is for an existing waiting/done agent, so activating it must focus that
+                        // agent's session — not `.workspaceAgentLauncher`, which resolves to a fresh launch and
+                        // would start a second agent. Mirror `agentWindows(from:)` so the `.agentWindow`
+                        // resolution finds the row by `agentID`/`id` and opens its session.
+                        focusRequest: .agentWindow(
+                            AgentWindowRecord(
+                                id: agent.agentID ?? agent.id, workspaceID: workspace.id, provider: .spaces, label: agent.name,
+                                terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: agent.launcherID,
+                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState),
+                                createdAt: agent.updatedAt ?? "", updatedAt: agent.updatedAt ?? ""))))
             }
             guard !items.isEmpty else { continue }
             items.sort {

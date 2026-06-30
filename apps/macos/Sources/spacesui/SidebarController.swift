@@ -11,6 +11,19 @@ import spacesterminalui
 import systembridge
 import workspacecore
 
+/// Reason carried into the offline load state when a remote overview stream closes without an
+/// underlying transport error (a graceful server-side close), so the offline caption still has a
+/// non-empty tooltip explaining why the device went offline.
+private enum RemoteOverviewDisconnectError: LocalizedError {
+    case streamClosed
+
+    var errorDescription: String? {
+        switch self {
+        case .streamClosed: return "The connection to this device closed."
+        }
+    }
+}
+
 /// Owns the left-hand project/workspace/device outline tree (an `NSOutlineView`) and
 /// its state, plus the sidebar's data load/merge pipeline and the Alerts row chrome.
 /// `AppKitController` holds a single instance and delegates sidebar interactions to it.
@@ -370,8 +383,8 @@ import workspacecore
                     result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)))
             }
         }
-        let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] _ in
-            Task { @MainActor in self?.handleRemoteOverviewDisconnected(deviceID: deviceID) }
+        let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] error in
+            Task { @MainActor in self?.handleRemoteOverviewDisconnected(deviceID: deviceID, error: error) }
         }
         Task { @MainActor [weak self] in
             // Resolving credentials and connecting block, so do it off the main actor.
@@ -400,11 +413,17 @@ import workspacecore
         }
     }
 
-    private func handleRemoteOverviewDisconnected(deviceID: String) {
+    private func handleRemoteOverviewDisconnected(deviceID: String, error: (any Error)?) {
         // Ignore disconnects for subscriptions we intentionally removed.
         guard remoteOverviewSubscriptions[deviceID] != nil else { return }
         remoteOverviewSubscriptions[deviceID] = nil
         guard remoteOverviewSubscriptionsEnabled else { return }
+        // An established stream dropping means the remote daemon or network went away. With no
+        // periodic remote refresh to fall back on, transition the section to offline now — the same
+        // way a failed pull does — so the sidebar shows the offline caption instead of stale
+        // projects/alerts, then schedule the delayed reconnect. A graceful stream close carries no
+        // error, so fall back to a descriptive reason for the offline tooltip.
+        applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
         scheduleRemoteOverviewReconnect()
     }
 
@@ -426,6 +445,10 @@ import workspacecore
         // the device's overview or load state actually changed, so unchanged polls
         // don't collapse expanded projects.
         let wasLoaded = host.deviceSections[index].loadState == .loaded
+        // Set when this call marks the device offline while a workspace/project of that device was the
+        // current selection: its rows drop out of the merged sidebar data below, so the detail pane is
+        // left stale and must fall back to the alerts view (see the end of this method).
+        var selectionInvalidatedByOffline = false
         switch result {
         case .success(let load):
             // Compatibility/status can change while the overview stays identical (e.g. after a restart
@@ -479,6 +502,24 @@ import workspacecore
             host.deviceSections[index].loadState = .loaded
         case .failure(let error):
             if case .offline = host.deviceSections[index].loadState { return }
+            // Capture (before the rebuild drops this device's rows from the merged data) whether the
+            // current selection belongs to this device, so the offline transition can reconcile a now-
+            // stale detail pane.
+            selectionInvalidatedByOffline = AppKitController.sidebarSelectionBelongsToDeviceSection(
+                selectedWorkspaceID: host.selectedWorkspaceID, selectedProjectID: host.selectedProjectID,
+                section: host.deviceSections[index])
+            // Drop the offline device's cached rows and overview. The merged sidebar data already excludes
+            // non-loaded sections, but the section's `overview` is still searched directly by id-based
+            // lookups (e.g. `clientWorkspaceID(forTerminalSession:)`); leaving it populated lets an offline
+            // remote's workspace/session ids resolve through the stale overview while `deviceID(forWorkspaceID:)`
+            // falls back to the local daemon, misrouting terminal cleanup to the wrong device. Clearing here
+            // (as the reachable-but-incompatible branch above already does) keeps offline devices out of every
+            // overview lookup from one place.
+            host.deviceSections[index].projects = []
+            host.deviceSections[index].workspacesByProject = [:]
+            host.deviceSections[index].workspaceRuntimeStatusByID = [:]
+            host.deviceSections[index].alertsGroups = []
+            host.deviceSections[index].overview = nil
             // Drop the prior verdict so an offline device shows "offline" rather than a stale Resolve
             // button / restart block from when it was last reachable-but-incompatible.
             host.deviceSections[index].compatibility = nil
@@ -490,6 +531,14 @@ import workspacecore
         host.outlineView.reloadData()
         applySidebarProjectExpansionState()
         updateAlertsSidebarBadge()
+        // Rebuild the Alerts detail when either:
+        //  (a) the offline device owned the current selection — its rows are gone from the merged data, so
+        //      the workspace/project detail pane is stale and would misroute follow-up actions to the local
+        //      daemon; fall back to the Alerts view, which clears the invalid selection; or
+        //  (b) the Alerts pane is already visible — its cards and `alertsFocusRequestMap` were built from the
+        //      pre-rebuild groups and would keep showing (and routing clicks to) the now-removed device's
+        //      alerts until the user navigates away.
+        if selectionInvalidatedByOffline || host.showingAlerts { host.showAlertsDetail() }
     }
 
     /// Recomputes the flat, id-keyed sidebar dictionaries as the union of every

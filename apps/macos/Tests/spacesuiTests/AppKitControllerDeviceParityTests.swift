@@ -288,6 +288,80 @@ import workspacecore
                 == .runProcess(workspaceID: "workspace-1", processKey: "web", processTemplateID: "process-web"))
     }
 
+    @Test func offlineTransitionDetectsSelectionOwnedByTheDevice() {
+        // When a device goes offline its rows drop from the merged sidebar data; a selection under it
+        // must be detected so the detail pane can fall back to the alerts view instead of misrouting
+        // follow-up actions to the local daemon.
+        let section = AppKitController.DeviceSection(
+            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil,
+            projects: [ProjectSummary(id: "proj-r", name: "R", dir: "/r", isGitRepo: true, defaultBranch: "main", deviceID: "remote")],
+            workspacesByProject: [
+                "proj-r": [
+                    WorkspaceSummary(id: "ws-r", branch: "feature", dir: "/r/feature", isRunning: true, isArchived: false, isDefault: false, deviceID: "remote")
+                ]
+            ])
+
+        // A workspace selection under the device is detected.
+        #expect(
+            AppKitController.sidebarSelectionBelongsToDeviceSection(
+                selectedWorkspaceID: "ws-r", selectedProjectID: "proj-r", section: section))
+        // A selection on another device is left alone.
+        #expect(
+            !AppKitController.sidebarSelectionBelongsToDeviceSection(
+                selectedWorkspaceID: "ws-local", selectedProjectID: "proj-local", section: section))
+        // A project (header) selection with no workspace selected is detected by project id.
+        #expect(
+            AppKitController.sidebarSelectionBelongsToDeviceSection(
+                selectedWorkspaceID: nil, selectedProjectID: "proj-r", section: section))
+        #expect(
+            !AppKitController.sidebarSelectionBelongsToDeviceSection(
+                selectedWorkspaceID: nil, selectedProjectID: "proj-local", section: section))
+        // No selection never triggers reconciliation.
+        #expect(
+            !AppKitController.sidebarSelectionBelongsToDeviceSection(
+                selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
+    }
+
+    @Test func waitingAgentAlertResolvesToFocusingItsSessionNotANewLaunch() {
+        // Regression: an attention alert for a waiting/done agent must focus that agent's existing
+        // session, not resolve to `.runCodingAgent` (which would start a second agent). Build the
+        // alert through the real overview path, then resolve its focus request end to end.
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [
+                SpacesDeviceWorkspaceSummary(
+                    id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
+                    dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
+                    config: SpacesDeviceWorkspaceConfig(agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")]),
+                    codingAgentRows: [
+                        SpacesDeviceWorkspaceCodingAgentRow(
+                            id: "row-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "launcher-codex",
+                            agentID: "agent-1", sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .waiting,
+                            updatedAt: "2026-06-28T09:00:00Z", canRun: false, canStop: true, canRestart: true)
+                    ])
+            ], sessions: [])
+
+        let groups = AppKitController.buildOverviewAlertsGroups(from: overview, deviceID: "local")
+        guard let focusRequest = groups.first?.items.first?.focusRequest else {
+            Issue.record("expected an agent attention alert with a focus request")
+            return
+        }
+        guard case .agentWindow(let record) = focusRequest else {
+            Issue.record("expected the agent alert to focus an existing agent window, got \(focusRequest)")
+            return
+        }
+        #expect(record.id == "agent-1")
+        #expect(record.workspaceID == "workspace-1")
+
+        // Resolving it opens the agent's terminal session instead of launching another agent.
+        #expect(
+            AppKitController.windowFocusResolution(for: focusRequest, overview: overview)
+                == .openTerminal(
+                    AppKitController.DeviceTerminalOpenRequest(
+                        workspaceID: "workspace-1", sessionID: "session-agent", title: "Codex", workingDirectory: "/device/project-feature",
+                        kind: .agent)))
+    }
+
     @Test func deviceTerminalOpenRequestPreservesStartingSessionMetadata() {
         let session = SpacesDeviceTerminalSessionSummary(
             id: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature", state: .starting, backend: .ghosttyEmbedded,
