@@ -1342,7 +1342,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, windowID: $0.windowID)
+                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID)
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
@@ -1352,7 +1352,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             agentWindows: try orchestrator.agentWindows(workspaceID: workspace.id).map {
                 AgentWindowPayload(
                     id: $0.id, label: $0.label, provider: $0.provider.rawValue, status: $0.status.rawValue, terminalTrackingID: $0.terminalTrackingID,
-                    terminalNativeID: $0.terminalNativeID, windowID: $0.windowID, yabaiWindowID: $0.yabaiWindowID)
+                    terminalNativeID: $0.terminalNativeID)
             })
         try emitJSON(payload)
     }
@@ -1532,17 +1532,15 @@ private struct SurfaceSnapshotCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "surface-snapshot")
 
     @Option(name: .long) var spacesPID: Int32?
-    @Flag(name: .long) var includeYabaiFocusedWindow = false
 
     func run() throws {
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         let frontmostPID = frontmostApplication.map { Int($0.processIdentifier) }
-        let focusedWindowID = includeYabaiFocusedWindow ? (try? YabaiAdapter().focusedWindow()?.id) : nil
         let spacesSurface = spacesPID.map { snapshotSpacesSurface(pid: $0, frontmostPID: frontmostPID) }
         try emitJSON(
             SurfaceSnapshotPayload(
                 frontmostProcessID: frontmostPID, frontmostApplicationName: frontmostApplication?.localizedName,
-                frontmostApplicationBundleID: frontmostApplication?.bundleIdentifier, yabaiFocusedWindowID: focusedWindowID ?? nil,
+                frontmostApplicationBundleID: frontmostApplication?.bundleIdentifier,
                 spaces: spacesSurface))
     }
 }
@@ -1932,7 +1930,6 @@ private struct RunningProcessPayload: Codable {
     let terminalApp: String?
     let terminalTrackingID: String?
     let terminalNativeID: String?
-    let windowID: Int?
 }
 
 private struct WindowPayload: Codable {
@@ -1953,15 +1950,12 @@ private struct AgentWindowPayload: Codable {
     let status: String
     let terminalTrackingID: String?
     let terminalNativeID: String?
-    let windowID: Int?
-    let yabaiWindowID: Int?
 }
 
 private struct SurfaceSnapshotPayload: Codable {
     let frontmostProcessID: Int?
     let frontmostApplicationName: String?
     let frontmostApplicationBundleID: String?
-    let yabaiFocusedWindowID: Int?
     let spaces: SpacesSurfacePayload?
 }
 
@@ -2154,7 +2148,7 @@ private func emitJSON<T: Encodable>(_ value: T) throws {
 // desktop focus through an in-process orchestrator just like the app — must inject the same client
 // store. Without it the harness would neither persist captured window IDs nor read them back.
 private func makeOrchestrator() throws -> WorkspaceOrchestrator {
-    try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath(), desktopWindowIDStore: ClientDesktopWindowIDStore()))
+    try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath()))
 }
 
 /// Resolves a workspace directory to its stable id from the store. The harness uses this

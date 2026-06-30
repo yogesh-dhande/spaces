@@ -20,5 +20,7 @@
     <string>JnyOq/Dp/ylfUizbX5a5WwXWFEI3nmV1qQJWmtnlAH4=</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Spaces opens and focuses your workspace browser sessions in Google Chrome.</string>
 </dict>
 </plist>

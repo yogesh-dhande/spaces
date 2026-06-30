@@ -100,35 +100,9 @@ const faqItems: FaqItem[] = [
     answer: (
       <ul className="ml-4 list-disc space-y-1">
         <li>macOS 14 Sonoma or later</li>
-        <li>
-          <a
-            href="https://github.com/asmvik/yabai"
-            className="text-accent hover:underline"
-          >
-            yabai
-          </a>{" "}
-          — an open-source window manager used for window tracking and focus switching
-        </li>
+        <li>Google Chrome, used for browser sessions</li>
         <li>Spaces ships its own terminal, so workspaces do not depend on external terminal apps.</li>
       </ul>
-    ),
-  },
-  {
-    question: "What is yabai? Why does it need accessibility permissions?",
-    answer: (
-      <>
-        <a
-          href="https://github.com/asmvik/yabai"
-          className="text-accent hover:underline"
-        >
-          yabai
-        </a>{" "}
-        is an open-source macOS window management utility. Spaces uses it to bring
-        the right window to the front when you switch workspaces. macOS requires
-        accessibility permissions before any app can programmatically control
-        windows on behalf of other processes — yabai uses this to perform focus
-        switching on Spaces&apos;s behalf.
-      </>
     ),
   },
   {

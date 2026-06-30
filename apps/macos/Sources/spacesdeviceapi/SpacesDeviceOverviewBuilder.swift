@@ -435,15 +435,15 @@ struct SpacesDeviceOverviewBuilder {
     }
 
     private static func terminalTrackingKey(_ process: RunningProcessRecord) -> String? {
-        terminalSessionID(for: process).map { "terminal:\($0)" } ?? process.windowID.map { "window:\($0)" }
+        terminalSessionID(for: process).map { "terminal:\($0)" }
     }
 
     private static func terminalTrackingKey(_ agent: AgentWindowRecord) -> String? {
-        terminalSessionID(for: agent).map { "terminal:\($0)" } ?? (agent.yabaiWindowID ?? agent.windowID).map { "window:\($0)" }
+        terminalSessionID(for: agent).map { "terminal:\($0)" }
     }
 
     private static func terminalTrackingKey(_ window: WindowRecord) -> String? {
-        terminalSessionID(for: window).map { "terminal:\($0)" } ?? window.windowID.map { "window:\($0)" }
+        terminalSessionID(for: window).map { "terminal:\($0)" }
     }
 
     private static func terminalDetail(for agent: AgentWindowRecord, windows: [WindowRecord]) -> String? {

@@ -18,9 +18,7 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 
 ## Requirements
 - macOS 14+
-- `yabai`
 - Google Chrome
-- Accessibility permission (handled via the in-app setup flow on first launch)
 
 ## macOS App and CLI
 
@@ -522,7 +520,7 @@ For the combined smoke lane:
 apps/macos/Tests/e2e.sh all
 ```
 
-This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.
+This suite is manual by design. It drives the real app, `spaces`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.
 
 Primary coverage:
 - adding and archiving a workspace

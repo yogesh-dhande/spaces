@@ -118,16 +118,15 @@ final class OrchestratorTests: XCTestCase {
     }
 
     func makeOrchestratorWithWorkspace(
-        terminalFocusPulseController: TerminalFocusPulseControlling = MockTerminalFocusPulseController(),
         currentDate: @escaping () -> Date = Date.init
     ) throws -> (WorkspaceOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL) {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let dbPath = root.appendingPathComponent("spaces-test.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(
-            store: store, terminalFocusPulseController: terminalFocusPulseController,
+            store: store,
             builtInTerminalWindowOpener: { sessionID, _ in
                 try! withSpacesProfileEnvironment(dbPath: dbPath) {
                     let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -208,105 +207,6 @@ final class OrchestratorTests: XCTestCase {
         defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
         try run()
     }
-
-    static let orchestratorYabaiMockScript = """
-        #!/bin/bash
-        # Mock `yabai` CLI used by orchestrator tests.
-        # Coverage intent:
-        # - space/display/window query payloads
-        # - focus success/failure and focused-window toggles via env vars
-        # Residual risk: real yabai output and timing can differ significantly under live desktops.
-        args="$*"
-
-        sleep_ms() {
-          local value="$1"
-          if [[ -z "$value" || "$value" == "0" ]]; then
-            return
-          fi
-          local cap="${MOCK_TEST_DELAY_CAP_MS:-25}"
-          if [[ "$value" =~ ^[0-9]+$ && "$cap" =~ ^[0-9]+$ && "$value" -gt "$cap" ]]; then
-            value="$cap"
-          fi
-          perl -e "select(undef, undef, undef, $value / 1000);"
-        }
-
-        focused_id="${YABAI_FOCUSED_ID:-101}"
-        focused_app="${YABAI_FOCUSED_APP:-Spaces}"
-        focused_title="${YABAI_FOCUSED_TITLE:-focused}"
-        focused_json="{\\"id\\":${focused_id},\\"pid\\":11,\\"app\\":\\"${focused_app}\\",\\"title\\":\\"${focused_title}\\",\\"space\\":1,\\"display\\":1,\\"is-sticky\\":false,\\"is-hidden\\":false,\\"is-visible\\":true,\\"is-native-fullscreen\\":false}"
-        query_log_file="${YABAI_QUERY_LOG_FILE:-}"
-
-        if [[ "$args" == *"query --displays"* ]]; then
-          if [[ -n "$query_log_file" ]]; then
-            echo "query --displays" >> "$query_log_file"
-          fi
-          echo '[{"index":1},{"index":2}]'
-          exit 0
-        fi
-
-        if [[ "$args" == *"query --spaces"* ]]; then
-          if [[ -n "$query_log_file" ]]; then
-            echo "query --spaces" >> "$query_log_file"
-          fi
-          echo '[{"index":3,"display":2},{"index":2,"display":1},{"index":1,"display":1}]'
-          exit 0
-        fi
-
-        if [[ "$args" == *"query --windows --window"* ]]; then
-          if [[ -n "$query_log_file" ]]; then
-            echo "query --windows --window" >> "$query_log_file"
-          fi
-          if [[ "${YABAI_FOCUSED_NONE:-}" == "1" ]]; then
-            echo "no focused window" >&2
-            exit 1
-          fi
-          echo "$focused_json"
-          exit 0
-        fi
-
-        if [[ "$args" == *"query --windows"* ]]; then
-          if [[ -n "$query_log_file" ]]; then
-            echo "query --windows" >> "$query_log_file"
-          fi
-          if [[ -n "${YABAI_WINDOWS_JSON:-}" ]]; then
-            echo "$YABAI_WINDOWS_JSON"
-          else
-            echo '[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":202,"pid":22,"app":"Google Chrome","title":"docs","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]'
-          fi
-          exit 0
-        fi
-
-        if [[ "$args" == *"window --focus"* ]]; then
-          id="${@: -1}"
-          if [[ "$id" == "999" || ",${YABAI_FOCUS_FAIL_IDS:-}," == *",${id},"* ]]; then
-            echo "focus failed" >&2
-            exit 1
-          fi
-          sleep_ms "${MOCK_YABAI_FOCUS_DELAY_MS:-0}"
-          if [[ -n "${YABAI_FOCUS_LOG_FILE:-}" ]]; then
-            echo "$id" >> "$YABAI_FOCUS_LOG_FILE"
-          fi
-          echo "ok"
-          exit 0
-        fi
-
-        if [[ "$args" == *"window --close"* ]]; then
-          id="${@: -1}"
-          if [[ -n "${YABAI_CLOSE_LOG_FILE:-}" ]]; then
-            echo "$id" >> "$YABAI_CLOSE_LOG_FILE"
-          fi
-          echo "ok"
-          exit 0
-        fi
-
-        if [[ "$args" == *"window --minimize"* ]]; then
-          echo "ok"
-          exit 0
-        fi
-
-        echo "unhandled command: $args" >&2
-        exit 1
-        """
 
     static let orchestratorOsaScriptMock = """
         #!/bin/bash

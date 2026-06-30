@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Manual real-system E2E coverage for Spaces.
 # This script intentionally runs outside XCTest so it can drive the real app,
-# the built-in Spaces terminal runtime, Chrome, and yabai on an interactive desktop session.
+# the built-in Spaces terminal runtime, and Chrome on an interactive desktop session.
 
 ROOT_DIR="$(cd "$(dirname "$0")/../../.." && pwd -P)"
 source "$ROOT_DIR/scripts/spaces-e2e-env.sh"
@@ -471,76 +471,30 @@ close_existing_spaces_instances() {
 
 hide_all_visible_windows() {
   log_step "hiding visible windows for a clean recording background"
-  yabai -m query --windows | python3 -c '
-import json
-import sys
-
-windows = json.load(sys.stdin)
-for window in windows:
-    if (
-        window.get("is-visible")
-        and not window.get("is-minimized")
-        and window.get("role") == "AXWindow"
-        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
-    ):
-        print(window["id"])
-' | while IFS= read -r window_id; do
-    yabai -m window "$window_id" --minimize >/dev/null 2>&1 || true
-  done
-
-  yabai -m query --windows | python3 -c '
-import json
-import sys
-
-windows = json.load(sys.stdin)
-seen = set()
-for window in windows:
-    app = (window.get("app") or "").strip()
-    if (
-        app
-        and window.get("is-visible")
-        and not window.get("is-minimized")
-        and window.get("role") == "AXWindow"
-        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
-        and app not in seen
-    ):
-        seen.add(app)
-        print(app)
-' | while IFS= read -r app_name; do
+  # The runtime no longer exposes desktop window ids, so enumerate visible foreground
+  # application processes via System Events and hide each one. This is a best-effort clean
+  # background precondition for screen recording; no test asserts on it, so failures and any
+  # windows that survive the hide are tolerated.
+  local app_name
+  while IFS= read -r app_name; do
+    [[ -n "$app_name" ]] || continue
     osascript - "$app_name" <<'APPLESCRIPT' >/dev/null 2>&1 || true
 on run argv
   set targetApp to item 1 of argv
   tell application targetApp to hide
 end run
 APPLESCRIPT
-  done
-
-  local remaining
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    remaining="$(
-      yabai -m query --windows | python3 -c '
-import json
-import sys
-
-windows = json.load(sys.stdin)
-for window in windows:
-    if (
-        window.get("is-visible")
-        and not window.get("is-minimized")
-        and window.get("role") == "AXWindow"
-        and window.get("subrole") in {"AXStandardWindow", "AXDialog"}
-    ):
-        print((window.get("app") or "") + "\t" + str(window.get("id") or ""))
-'
-    )"
-    if [[ -z "$remaining" ]]; then
-      return 0
-    fi
-    sleep 0.2
-  done
-
-  log_debug "visible windows remained after hide:\n$remaining"
+  done < <(
+    osascript <<'APPLESCRIPT' 2>/dev/null || true
+tell application "System Events"
+  set out to ""
+  repeat with proc in (every application process whose visible is true and background only is false)
+    set out to out & (name of proc) & linefeed
+  end repeat
+  return out
+end tell
+APPLESCRIPT
+  )
 }
 
 start_screen_recording() {
@@ -1462,19 +1416,6 @@ dump_focusable_window_names() {
   "$SPACES_E2E_CLI" focusable-window-names --workspace-dir "$1" >"$2"
 }
 
-spaces_main_window_id() {
-  yabai -m query --windows | python3 -c '
-import json, sys
-windows = json.load(sys.stdin)
-for window in windows:
-    title = window.get("title") or ""
-    app = window.get("app") or ""
-    if title == "Spaces" and app in {"Spaces", "SpacesApp"}:
-        print(window["id"])
-        break
-'
-}
-
 lookup_workspace() {
   "$SPACES_E2E_CLI" lookup-workspace --project-dir "$TEST_REPO" --name "$1" >"$2"
 }
@@ -2005,12 +1946,6 @@ ui_show_workspace_detail() {
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
     raise_spaces_main_window "$SPACES_PID"
-    local main_window_id
-    main_window_id="$(spaces_main_window_id)"
-    if [[ -n "$main_window_id" ]]; then
-      yabai -m window --focus "$main_window_id" >/dev/null 2>&1 || true
-      raise_spaces_main_window "$SPACES_PID"
-    fi
     if [[ "$(frontmost_pid 2>/dev/null || true)" == "$SPACES_PID" && "$(spaces_main_window_visible)" == "1" ]] && spaces_splitter_ready; then
       return 0
     fi
@@ -2261,27 +2196,25 @@ tell application "Google Chrome" to activate
 APPLESCRIPT
 }
 
-focus_yabai_window_if_present() {
+# Brings the Chrome window with the given AppleScript window id to the front (Chrome window
+# ids are Chrome-level ids, not desktop window ids). A no-op when no id is supplied.
+chrome_focus_window_if_present() {
   local window_id="${1:-}"
   [[ -n "$window_id" ]] || return 0
-  yabai -m window --focus "$window_id" >/dev/null 2>&1 || true
-}
-
-yabai_focused_window_id() {
-  python3 - <<'PY'
-import json, subprocess
-try:
-    result = subprocess.run(
-        ["yabai", "-m", "query", "--windows", "--window"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    data = json.loads(result.stdout or "{}")
-    print(data.get("id", ""))
-except Exception:
-    print("")
-PY
+  osascript - "$window_id" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  set targetId to (item 1 of argv) as integer
+  tell application "Google Chrome"
+    repeat with w in windows
+      if (id of w) is targetId then
+        set index of w to 1
+        exit repeat
+      end if
+    end repeat
+    activate
+  end tell
+end run
+APPLESCRIPT
 }
 
 wait_for_chrome_window_focus() {
@@ -2292,9 +2225,9 @@ wait_for_chrome_window_focus() {
   while (( SECONDS < deadline )); do
     assert_no_spaces_modal_dialog
     activate_google_chrome
-    focus_yabai_window_if_present "$window_id"
+    chrome_focus_window_if_present "$window_id"
     if [[ -n "$window_id" ]] \
-      && [[ "$(yabai_focused_window_id)" == "$window_id" ]] \
+      && [[ "$(chrome_front_window_id)" == "$window_id" ]] \
       && [[ "$(chrome_front_url)" == "$expected_url" ]]
     then
       return 0
@@ -2616,12 +2549,8 @@ wait_for_spaces_terminal_frontmost_session() {
 }
 
 surface_snapshot_json() {
-  local include_yabai="${1:-}"
-  local timeout_seconds="${2:-$SURFACE_SNAPSHOT_TIMEOUT_SECONDS}"
+  local timeout_seconds="${1:-$SURFACE_SNAPSHOT_TIMEOUT_SECONDS}"
   local -a args=("$SPACES_E2E_CLI" surface-snapshot --spaces-pid "$SPACES_PID")
-  if [[ "$include_yabai" == "include-yabai" ]]; then
-    args+=(--include-yabai-focused-window)
-  fi
   python3 - "$timeout_seconds" "${args[@]}" <<'PY'
 import subprocess
 import sys
@@ -2656,16 +2585,15 @@ $python_body
 PY
 }
 
-wait_for_surface_snapshot_python_mode_optional() {
-  local include_yabai="$1"
-  local label="$2"
-  local python_body="$3"
-  shift 3
+wait_for_surface_snapshot_python_optional() {
+  local label="$1"
+  local python_body="$2"
+  shift 2
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   local snapshot_file="$TMP_ROOT/surface-snapshot.json"
   local snapshot_failures=0
   while (( SECONDS < deadline )); do
-    if surface_snapshot_json "$include_yabai" >"$snapshot_file"; then
+    if surface_snapshot_json >"$snapshot_file"; then
       if surface_snapshot_condition_matches "$snapshot_file" "$python_body" "$@"; then
         return 0
       fi
@@ -2678,7 +2606,7 @@ wait_for_surface_snapshot_python_mode_optional() {
     fi
     sleep "$SURFACE_POLL_INTERVAL_SECONDS"
   done
-  if surface_snapshot_json "$include_yabai" "$ACTION_TIMEOUT_SECONDS" >"$snapshot_file"; then
+  if surface_snapshot_json "$ACTION_TIMEOUT_SECONDS" >"$snapshot_file"; then
     if surface_snapshot_condition_matches "$snapshot_file" "$python_body" "$@"; then
       return 0
     fi
@@ -2686,24 +2614,12 @@ wait_for_surface_snapshot_python_mode_optional() {
   return 1
 }
 
-wait_for_surface_snapshot_python_mode() {
-  local label="$2"
-  if wait_for_surface_snapshot_python_mode_optional "$@"; then
+wait_for_surface_snapshot_python() {
+  local label="$1"
+  if wait_for_surface_snapshot_python_optional "$@"; then
     return 0
   fi
   fail "timed out waiting for surface snapshot condition: $label"
-}
-
-wait_for_surface_snapshot_python_optional() {
-  wait_for_surface_snapshot_python_mode_optional "" "$@"
-}
-
-wait_for_surface_snapshot_python() {
-  wait_for_surface_snapshot_python_mode "" "$@"
-}
-
-wait_for_surface_snapshot_python_with_yabai() {
-  wait_for_surface_snapshot_python_mode "include-yabai" "$@"
 }
 
 wait_for_spaces_front_window_title() {
@@ -4489,44 +4405,11 @@ wait_for_terminal_session_live_render() {
   fail "timed out waiting for live terminal render: $label session=$session_id"
 }
 
-workspace_window_id_by_name() {
-  local workspace_dir="$1"
-  local target_name="$2"
-  local out_file="$TMP_ROOT/workspace-window-id.json"
-  dump_workspace "$workspace_dir" "$out_file" >/dev/null 2>>"$DEBUG_LOG" || return 0
-  python3 - "$out_file" "$target_name" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-target = sys.argv[2]
-for window in data.get("windows", []):
-    if (window.get("name") or "") == target:
-        print(window.get("windowID") or "")
-        break
-PY
-}
-
-wait_for_workspace_window_id_by_name() {
-  local workspace_dir="$1"
-  local target_name="$2"
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    local window_id
-    window_id="$(workspace_window_id_by_name "$workspace_dir" "$target_name")"
-    if [[ -n "$window_id" ]]; then
-      printf '%s\n' "$window_id"
-      return 0
-    fi
-    sleep 0.2
-  done
-  fail "timed out waiting for tracked window id: $target_name"
-}
-
 # Strictly verifies the cycle focused a browser session's dedicated Chrome window: Chrome is
 # the frontmost app, its front window is that specific window (by Chrome window id), and its
-# active tab is the session URL. A Chrome window's AppleScript id is NOT yabai's window id, so
-# the desktop-side check is "Chrome is frontmost" rather than a yabai window-id match; the
-# exact window is pinned by the Chrome window id the caller captured for that URL.
+# active tab is the session URL. A Chrome window's AppleScript id is a Chrome-level id, not a
+# desktop window id, so the desktop-side check is "Chrome is frontmost"; the exact window is
+# pinned by the Chrome window id the caller captured for that URL.
 wait_for_browser_cycle_target_focus() {
   local docs_window_id="$1"
   local docs_url="$2"
@@ -4559,7 +4442,7 @@ wait_for_cycle_target_focus() {
       wait_for_browser_cycle_target_focus "$docs_window_id" "${cycle_target#browser:}" "$cycle_target"
       ;;
     terminal:*|process:*|agent:*)
-      local target_name target_session_id target_window_id
+      local target_name target_session_id
       target_name="$(extract_cycle_window_title "$cycle_target")"
       target_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$target_name" "$TMP_ROOT/cycle-focus-target.json" || true)"
       if [[ -z "$target_session_id" ]]; then
@@ -4575,14 +4458,20 @@ wait_for_cycle_target_focus() {
         fi
         assert_no_spaces_modal_dialog
       else
-        target_window_id="$(wait_for_workspace_window_id_by_name "$workspace_dir" "$target_name")"
-        wait_for_surface_snapshot_python_with_yabai \
-          "window cycle target focus $target_window_id" \
-          'expected_window_id = sys.argv[2]
-spaces = data.get("spaces") or {}
-ok = str(data.get("yabaiFocusedWindowID") or "") == expected_window_id and not spaces.get("modalVisible")
-raise SystemExit(0 if ok else 1)' \
-          "$target_window_id"
+        # Terminal/process/agent targets are tracked by terminal session id in the thin client.
+        # Without a session id we can no longer pin the exact desktop window (the runtime no
+        # longer exposes per-window desktop ids), so verify the cycle at least brought the
+        # Spaces app frontmost with no modal blocking it.
+        wait_for_surface_snapshot_python \
+          "window cycle target focus $target_name" \
+          'spaces = data.get("spaces") or {}
+spaces_pid = spaces.get("processID")
+ok = (
+    spaces_pid is not None
+    and data.get("frontmostProcessID") == spaces_pid
+    and not spaces.get("modalVisible")
+)
+raise SystemExit(0 if ok else 1)'
       fi
       ;;
     *)
@@ -5071,7 +4960,7 @@ PY
       fi
       run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
       activate_google_chrome
-      focus_yabai_window_if_present "$docs_window_id"
+      chrome_focus_window_if_present "$docs_window_id"
   transition_pause "$host seed docs focus for cycling"
   browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
   wait_for_condition "chrome_front_url" "$browser_docs_url"
@@ -5712,7 +5601,6 @@ main() {
   require_cmd python3
   require_cmd sqlite3
   require_cmd uv
-  require_cmd yabai
 
   build_binaries
   cleanup_existing_fixture_projects

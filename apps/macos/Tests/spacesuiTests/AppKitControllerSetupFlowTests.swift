@@ -1,22 +1,22 @@
 import Foundation
 import Testing
+import systembridge
 
 @testable import spacesui
 
 @Suite struct AppKitControllerSetupFlowTests {
-    @Test func startupSetupFlowShowsStartupSplash() { #expect(AppKitController.shouldShowStartupSplashBeforeSetup(entryContext: .appLaunch)) }
-
-    @Test func deferredSetupFlowSkipsStartupSplash() {
-        #expect(!AppKitController.shouldShowStartupSplashBeforeSetup(entryContext: .deferredRequirement))
+    @MainActor @Test func chromeAutomationSetupBlocksWhenDeniedOrUndetermined() {
+        #expect(AppKitController.requiresChromeAutomationSetup(.denied))
+        #expect(AppKitController.requiresChromeAutomationSetup(.notDetermined))
     }
 
-    @Test func startupSetupFlowDefersChecksUntilSplashCanRender() {
-        #expect(AppKitController.shouldDeferSetupChecksUntilAfterSplash(entryContext: .appLaunch))
+    @MainActor @Test func chromeAutomationSetupDoesNotBlockWhenGrantedOrUnavailable() {
+        // Granted needs no setup; `unavailable` (Chrome absent or permission unverifiable) must not
+        // lock a user out of the app over a permission that cannot be granted.
+        #expect(!AppKitController.requiresChromeAutomationSetup(.granted))
+        #expect(!AppKitController.requiresChromeAutomationSetup(.unavailable))
     }
 
-    @Test func deferredSetupFlowRunsChecksImmediately() {
-        #expect(!AppKitController.shouldDeferSetupChecksUntilAfterSplash(entryContext: .deferredRequirement))
-    }
 
     @Test func passiveDesktopControlRecoveryIgnoresUnrelatedTermination() {
         #expect(!AppKitController.shouldAttemptDesktopControlRecovery(passiveOwnerPID: 101, terminatedApplicationPID: 202))
@@ -31,16 +31,16 @@ import Testing
         #expect(AppKitController.shouldAttemptDesktopControlRecovery(passiveOwnerPID: 101, terminatedApplicationPID: 101))
     }
 
-    @MainActor @Test func backgroundRefreshRoutesOnlyYabaiSocketFailuresToSetup() {
-        let yabaiSocketError = NSError(
-            domain: "spaces.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "yabai-msg: failed to connect to socket"])
+    @MainActor @Test func backgroundRefreshFailuresAreLoggedOnly() {
+        let connectionError = NSError(
+            domain: "spaces.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "failed to connect to socket"])
         let decodeError = NSError(domain: "spaces.tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "remote state could not be decoded"])
 
-        #expect(AppKitController.backgroundRefreshFailureAction(for: yabaiSocketError) == .deferredSetup)
+        #expect(AppKitController.backgroundRefreshFailureAction(for: connectionError) == .logOnly)
         #expect(AppKitController.backgroundRefreshFailureAction(for: decodeError) == .logOnly)
     }
 
-    @MainActor @Test func startupSetupFlowSchedulesChecksAfterRunLoopTurn() async {
+    @MainActor @Test func schedulesWorkAfterRunLoopTurn() async {
         var didRun = false
         await withCheckedContinuation { continuation in
             AppKitController.scheduleAfterNextRunLoopTurn {

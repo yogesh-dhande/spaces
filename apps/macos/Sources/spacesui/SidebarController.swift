@@ -234,6 +234,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // If the local block was showing and the daemon is now compatible, drop the obsolete block
         // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
         host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
+        tearDownBrowserSessionsForLocallyStoppedWorkspaces(
+            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID)
         rebuildFlatSidebarData()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
@@ -263,6 +265,34 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
         if host.showingAlerts { host.showAlertsDetail() }
         loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh)
+    }
+
+    /// Closes browser-session tabs for local-device workspaces that the daemon now reports as no
+    /// longer running, comparing the previous local-section runtime state against the just-fetched
+    /// snapshot. This reload is the only channel through which the GUI learns about stop/archive
+    /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
+    /// diff those externally-stopped workspaces would leave their dedicated Chrome tabs and the
+    /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/archive handlers
+    /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
+    /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
+    private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
+        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus]
+    ) {
+        guard let previous else { return }
+        for workspaceID in Self.workspaceIDsTransitionedToNotRunning(previous: previous, current: current) {
+            host.closeLocalBrowserSessionWindows(workspaceID: workspaceID)
+        }
+    }
+
+    /// Workspace ids that were running in `previous` but are no longer running in `current` — either
+    /// reported stopped or absent entirely (deleted/archived out of the runtime map). Pure so the
+    /// transition contract can be unit-tested without Chrome or the client store.
+    nonisolated static func workspaceIDsTransitionedToNotRunning(
+        previous: [String: WorkspaceRuntimeStatus], current: [String: WorkspaceRuntimeStatus]
+    ) -> [String] {
+        previous.compactMap { workspaceID, previousStatus in
+            previousStatus.lifecycleState == .running && current[workspaceID]?.lifecycleState != .running ? workspaceID : nil
+        }
     }
 
     /// Adds a section for every paired remote device and fetches each one's overview

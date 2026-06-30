@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Spaces installed, permissions configured, and your environment verified. Spaces guides you through any missing prerequisites with a step-by-step in-app setup flow on first launch.",
+      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch.",
   },
   {
     href: "/docs/getting-started",

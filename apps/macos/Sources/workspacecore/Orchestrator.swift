@@ -185,7 +185,6 @@ public final class WorkspaceOrchestrator {
     struct SpacesTerminalSessionHandle {
         let sessionID: String
         let childPID: Int?
-        let windowID: Int?
         let outputPath: String
     }
 
@@ -218,11 +217,7 @@ public final class WorkspaceOrchestrator {
     }
 
     enum ManagedTerminalFocusResult {
-        case existingWindow
-        case trackedTerminal
         case sessionRequest
-        case reboundSession(windowID: Int?)
-        case reopenedSession(windowID: Int?)
         case unavailable
     }
 
@@ -243,7 +238,6 @@ public final class WorkspaceOrchestrator {
 
     public let store: SQLiteStore
     let git: GitClient
-    let yabai: YabaiAdapter
     let currentDate: () -> Date
     let notificationDeliverer: (String, String, String?) -> Void
     let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
@@ -251,34 +245,25 @@ public final class WorkspaceOrchestrator {
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
-    let windowFocusPulseEnabledProvider: () throws -> Bool
-    let windowFocusPulseColorProvider: () throws -> (r: Int, g: Int, b: Int)
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
     let workspaceSetupLock = NSLock()
     var workspaceSetupInFlight: Set<String> = []
-    let terminalFocusPulseController: TerminalFocusPulseControlling
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
-        yabai: YabaiAdapter = .init(), terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, windowFocusPulseEnabledProvider: (() throws -> Bool)? = nil,
-        windowFocusPulseColorProvider: (() throws -> (r: Int, g: Int, b: Int))? = nil, currentDate: @escaping () -> Date = Date.init
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
-        self.yabai = yabai
         self.workspacesRootDirectoryURL = workspacesRootDirectory
-        self.terminalFocusPulseController = terminalFocusPulseController
         self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
-        self.windowFocusPulseEnabledProvider = windowFocusPulseEnabledProvider ?? { SettingsKey.defaultWindowFocusPulseEnabled }
-        self.windowFocusPulseColorProvider = windowFocusPulseColorProvider ?? { SettingsKey.windowFocusPulseColor(from: nil) }
         #if canImport(Darwin)
             self.builtInTerminalWindowOpener =
                 builtInTerminalWindowOpener ?? { sessionID, mode in
@@ -902,14 +887,8 @@ public final class WorkspaceOrchestrator {
         }
 
         var index = 0
-        let browserWindowIDsWithTarget = Set(
-            newWindows.compactMap { window -> Int? in
-                guard window.role == "browser", window.targetURL != nil else { return nil }
-                return window.windowID
-            })
         var seenKeys = Set<String>()
         let uniqueWindows = newWindows.filter { window in
-            if window.role == "browser", window.targetURL == nil, let id = window.windowID, browserWindowIDsWithTarget.contains(id) { return false }
             let key = windowTrackingKey(window)
             if seenKeys.contains(key) { return false }
             seenKeys.insert(key)
@@ -942,7 +921,6 @@ public final class WorkspaceOrchestrator {
             runtimeManifest: runtimePlan.manifest)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
-        var closedManagedTerminalWindowIDs = Set<Int>()
         var closedBuiltInTerminalSessionIDs = Set<String>()
         var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         for process in processes {
@@ -951,7 +929,6 @@ public final class WorkspaceOrchestrator {
                     terminateBuiltInTerminalSession(sessionID)
                     closedBuiltInTerminalSessionIDs.insert(sessionID)
                 }
-                if let windowID = process.windowID { closedManagedTerminalWindowIDs.insert(windowID) }
             } else if let pid = resolvedRuntimePID(for: process) {
                 terminateProcessGroup(pid: pid)
             }
@@ -971,21 +948,15 @@ public final class WorkspaceOrchestrator {
                 skippedStopScriptBecauseWorkspaceDirectoryMissing = true
             }
         }
-        for window in windows {
-            if window.role == "browser" {
-                closeTrackedBrowserTab(window)
-                continue
+        // Browser windows are client-owned (the app tracks each session's Chrome window) and
+        // are never closed by the daemon on stop; only Spaces-managed terminal sessions are
+        // terminated by session id here.
+        for window in windows where window.role == "terminal" && isManagedTerminalApp(window.app) {
+            guard let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) else { continue }
+            if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
+                terminateBuiltInTerminalSession(sessionID)
+                closedBuiltInTerminalSessionIDs.insert(sessionID)
             }
-            if window.role == "terminal", isManagedTerminalApp(window.app) {
-                if let windowID = window.windowID, closedManagedTerminalWindowIDs.contains(windowID) { continue }
-                guard let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) else { continue }
-                if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
-                    terminateBuiltInTerminalSession(sessionID)
-                    closedBuiltInTerminalSessionIDs.insert(sessionID)
-                }
-                continue
-            }
-            if let id = window.windowID { _ = try? yabai.closeWindow(id: id) }
         }
         if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
@@ -1252,36 +1223,8 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
         _ = try indexedWorkspaceWindows(workspaceID: workspaceID)
-        let refreshedTerminalTitles = try refreshUnmanagedTerminalWindowTitles(workspaceID: workspaceID)
         let pruned = try pruneMissingWindows(workspaceID: workspaceID)
-        return refreshedTerminalTitles > 0 || pruned > 0
-    }
-
-    @discardableResult private func refreshUnmanagedTerminalWindowTitles(workspaceID: String) throws -> Int {
-        let windows = try store.windows(workspaceID: workspaceID)
-        let processWindowIDs = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.windowID))
-        let terminalWindowsToRefresh = windows.filter { window in
-            guard window.role == "terminal", let windowID = window.windowID else { return false }
-            return !processWindowIDs.contains(windowID)
-        }
-        guard !terminalWindowsToRefresh.isEmpty else { return 0 }
-
-        let liveWindowsByID = Dictionary(uniqueKeysWithValues: try yabai.listWindows().map { ($0.id, $0) })
-        var refreshedCount = 0
-        for window in terminalWindowsToRefresh {
-            guard let windowID = window.windowID, let liveWindow = liveWindowsByID[windowID] else { continue }
-            let refreshedName = window.name
-            let refreshedDetail = preservesForegroundAgentCommandDetail(window) ? window.detail : liveWindow.title
-            let refreshedApp = isManagedTerminalApp(window.app) ? TerminalHost.spaces.appName : liveWindow.app
-            guard window.name != refreshedName || window.detail != refreshedDetail || window.app != refreshedApp else { continue }
-            let refreshedWindow = WindowRecord(
-                id: window.id, workspaceID: window.workspaceID, app: refreshedApp, name: refreshedName, detail: refreshedDetail,
-                targetURL: window.targetURL, windowID: windowID, terminalTrackingID: window.terminalTrackingID,
-                terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
-            try store.upsert(window: refreshedWindow)
-            refreshedCount += 1
-        }
-        return refreshedCount
+        return pruned > 0
     }
 
     public func refreshAllWorkspaceWindows() throws -> RefreshResult {
@@ -1405,7 +1348,7 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: reservation.windowRecordID, workspaceID: reservation.workspaceID, app: reservation.appName, name: reservation.title,
-                    detail: nil, targetURL: nil, windowID: session.windowID ?? existingWindow?.windowID, terminalTrackingID: session.sessionID,
+                    detail: nil, targetURL: nil, windowID: existingWindow?.windowID, terminalTrackingID: session.sessionID,
                     terminalNativeID: session.sessionID, role: "terminal", orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspaceID: reservation.workspaceID, launchedAtFallback: reservation.createdAt)
             return session.sessionID
@@ -1473,18 +1416,6 @@ public final class WorkspaceOrchestrator {
             }
             return map.mapValues { value in value.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending } }
         }()
-        let processesByWindowID: [Int: [RunningProcessRecord]] = {
-            var map: [String: [RunningProcessRecord]] = [:]
-            for process in processes {
-                guard let windowID = process.windowID else { continue }
-                map[String(windowID), default: []].append(process)
-            }
-            return Dictionary(
-                uniqueKeysWithValues: map.compactMap { key, value in
-                    guard let windowID = Int(key) else { return nil }
-                    return (windowID, value.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending })
-                })
-        }()
         var matchedProcessIDs = Set<String>()
 
         var targets: [WorkspaceNavigationTarget] = []
@@ -1498,14 +1429,10 @@ public final class WorkspaceOrchestrator {
         for window in windows where window.role != "browser" {
             let windowTerminalID = terminalTargetID(window: window)
             let windowProcesses: [RunningProcessRecord]
-            if window.role == "terminal" {
-                if let matchedByWindowID = processesByWindowID[window.windowID ?? -1], !matchedByWindowID.isEmpty {
-                    windowProcesses = matchedByWindowID
-                } else if let windowTerminalID, let matchedByTerminalID = processesByTerminalID[windowTerminalID], !matchedByTerminalID.isEmpty {
-                    windowProcesses = matchedByTerminalID
-                } else {
-                    windowProcesses = []
-                }
+            if window.role == "terminal", let windowTerminalID, let matchedByTerminalID = processesByTerminalID[windowTerminalID],
+                !matchedByTerminalID.isEmpty
+            {
+                windowProcesses = matchedByTerminalID
             } else {
                 windowProcesses = []
             }
@@ -1720,14 +1647,6 @@ public final class WorkspaceOrchestrator {
 
     static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
 
-    public func listSpaceOptions() throws -> [SpaceOption] {
-        let spaces = try yabai.listSpaces()
-        return spaces.map { SpaceOption(displayIndex: $0.display, spaceIndex: $0.index) }.sorted { lhs, rhs in
-            if lhs.displayIndex == rhs.displayIndex { return lhs.spaceIndex < rhs.spaceIndex }
-            return lhs.displayIndex < rhs.displayIndex
-        }
-    }
-
     public func alertsDismissedAttentionItemIDs() throws -> Set<String> {
         guard let raw = try store.setting(key: SettingsKey.alertsDismissedAttentionItems), !raw.isEmpty else { return [] }
         guard let data = raw.data(using: .utf8) else { return [] }
@@ -1928,92 +1847,40 @@ public final class WorkspaceOrchestrator {
         var keyChanged: Bool { previousKey != updatedKey }
     }
 
+    /// Prunes tracked terminal rows whose Spaces session has ended. Browser windows are
+    /// client-owned and never pruned here; terminal liveness is determined entirely by the
+    /// session id, so there is no desktop-window enumeration.
     @discardableResult private func pruneMissingWindows(workspaceID: String) throws -> Int {
-        let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
         let agentWindows = try store.agentWindows(workspaceID: workspaceID)
         var prunedTerminalTrackingKeys = Set<String>()
-        var prunedTerminalWindowIDs = Set<Int>()
         var pruned = 0
-        for window in windows {
-            guard let id = window.windowID else {
-                if managedTrackedTerminalWindowIsStillLive(window: window) { continue }
-                if window.role == "terminal", let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
-                try store.deleteWindow(id: window.id)
-                pruned += 1
-                continue
-            }
-            if !existingIDs.contains(id) {
-                if managedTrackedTerminalWindowIsStillLive(window: window) {
-                    if builtInTrackedWindowBelongsToAgent(window) {
-                        try clearStaleBuiltInTerminalWindowBinding(window)
-                        pruned += 1
-                    }
-                    continue
-                }
-                if window.role == "browser" { continue }
-                if window.role == "terminal" {
-                    prunedTerminalWindowIDs.insert(id)
-                    if let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
-                }
-                try store.deleteWindow(id: window.id)
-                pruned += 1
-            }
+        for window in windows where window.role != "browser" {
+            if managedTrackedTerminalWindowIsStillLive(window: window) { continue }
+            if window.role == "terminal", let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
+            try store.deleteWindow(id: window.id)
+            pruned += 1
         }
         pruned += try pruneOrphanedAgentWindows(
-            workspaceID: workspaceID, agents: agentWindows, prunedTerminalTrackingKeys: prunedTerminalTrackingKeys,
-            prunedTerminalWindowIDs: prunedTerminalWindowIDs)
+            workspaceID: workspaceID, agents: agentWindows, prunedTerminalTrackingKeys: prunedTerminalTrackingKeys)
         return pruned
     }
 
     private func windowTrackingKey(_ window: WindowRecord) -> String {
-        let idPart = window.windowID.map(String.init) ?? "none"
-        if window.role == "browser" { return "browser:\(idPart):\(window.targetURL ?? "")" }
-        if window.role == "terminal", window.windowID == nil {
+        if window.role == "browser" { return "browser:\(window.targetURL ?? "")" }
+        if window.role == "terminal" {
             let app = window.app.lowercased()
             if let terminalNativeID = window.terminalNativeID, !terminalNativeID.isEmpty { return "terminal:\(app):native:\(terminalNativeID)" }
             if let terminalTrackingID = window.terminalTrackingID, !terminalTrackingID.isEmpty {
                 return "terminal:\(app):tracking:\(terminalTrackingID)"
             }
         }
-        return "\(window.role):\(idPart)"
+        return "\(window.role):none"
     }
 
     static func nextWindowOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
         let maxIndex = existing.filter { $0.role == role }.map(\.orderIndex).max() ?? (orderOffset - 1)
         return max(maxIndex + 1, orderOffset)
-    }
-
-    private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
-        -> [WindowRecord]
-    { try captureNewWindows(snapshot: snapshot, role: role, appNames: [appName], workspaceID: workspaceID, orderOffset: orderOffset) }
-
-    private func captureCreatedAppWindow(snapshot: [YabaiWindow], appName: String) throws -> YabaiWindow? {
-        let previousIDs = Set(snapshot.map(\.id))
-        return try yabai.listWindows().first(where: { $0.app == appName && !previousIDs.contains($0.id) })
-    }
-
-    private func captureCreatedAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
-        try captureCreatedAppWindow(snapshot: snapshot, appName: appName)?.id
-    }
-
-    func bestEffortYabaiWindowSnapshot() -> [YabaiWindow] { (try? yabai.listWindows()) ?? [] }
-
-    func bestEffortCaptureNewAppWindowID(snapshot: [YabaiWindow], appName: String) -> Int? {
-        try? captureCreatedAppWindowID(snapshot: snapshot, appName: appName)
-    }
-
-    private func captureNewWindows(snapshot: [YabaiWindow], role: String, appNames: Set<String>, workspaceID: String, orderOffset: Int) throws
-        -> [WindowRecord]
-    {
-        let after = try yabai.listWindows()
-        let snapshotIDs = Set(snapshot.map(\.id))
-        let created = after.filter { !snapshotIDs.contains($0.id) && appNames.contains($0.app) }
-        return created.enumerated().map { idx, win in
-            WindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceID, app: win.app, name: win.title, detail: win.title, windowID: win.id, role: role,
-                orderIndex: orderOffset + idx, lastSeenAt: nowISO8601())
-        }
     }
 
     func runtimeDirectory() throws -> String { try SpacesProfile.current().runtimeDirectory }

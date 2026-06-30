@@ -7,7 +7,7 @@ Spaces is a macOS Swift app and CLI built around a shared orchestration layer.
 
 Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
-- yabai is the source of truth for window IDs and cross-app window focus.
+- The macOS client tracks and focuses windows itself: its own AppKit windows for Spaces terminals, Chrome AppleScript window IDs for browser sessions, Spaces terminal session IDs for processes and coding agents, and process IDs for cleaning up non-terminal processes.
 - Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
 - Store startup accepts only the current app schema and fails closed for unsupported schema versions.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
@@ -34,7 +34,6 @@ flowchart LR
   terminalservice --> terminalfiles["terminal session files"]
   terminalservice --> ghostty["libghostty runtime"]
 
-  systembridge --> yabai["yabai"]
   systembridge --> chrome["Chrome AppleScript"]
 ```
 
@@ -58,7 +57,6 @@ flowchart TD
     app["Spaces.app / spacesui"]
     clientDB[("<profile-root>/Client/spaces-client.db")]
     keychain["Keychain\npaired-device tokens"]
-    yabai["yabai"]
     chrome["Google Chrome"]
     ssh["OpenSSH\nterminal, browser forward, editor"]
   end
@@ -83,7 +81,6 @@ flowchart TD
 
   app --> clientDB
   app --> keychain
-  app --> yabai
   app --> chrome
   app -->|Device API JSON\nTLS pinned daemon identity + paired-client token| spacesd
   iosApp --> iosContainer
@@ -125,7 +122,7 @@ flowchart TD
 - `spacesterminalghostty`: embedded libghostty integration and app-side host adapters; details live in [terminal.md](terminal.md).
 - `spacesterminalui`: native terminal-session window controllers owned by the Spaces app; details live in [terminal.md](terminal.md).
 - `workspacecore`: core orchestration, lifecycle, validation, persistence coordination, environment building, and the shared `AppVersion` constants consumed by both the GUI and CLI. Those constants are generated from `apps/macos/AppVersion.plist`, which is also used to generate the app bundle `Info.plist`.
-- `systembridge`: system adapters for shell commands, yabai, Chrome, and related OS integrations.
+- `systembridge`: system adapters for shell commands, Chrome, and related OS integrations.
 
 ### Terminal Architecture Reference
 - Built-in terminal ownership, session layout, Ghostty compatibility, macOS and iOS rendering, Device API terminal behavior, scroll rendering, CLI controls, and terminal validation live in [terminal.md](terminal.md). This document references terminal modules only where they connect to non-terminal systems.
@@ -191,7 +188,7 @@ flowchart TD
 ### Database
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, terminal window frames, desktop (yabai) window IDs, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
+- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, terminal window frames, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` records the canonical schema version. The active daemon schema is version `3`.
@@ -211,6 +208,13 @@ flowchart TD
 - Duplicate app launch for the same profile fails fast and reports the existing owner pid, executable path, and profile root.
 - Desktop-global control such as Carbon hotkey registration uses a separate user-global lease shared by every profile.
 - When another profile already owns that lease, the second app loads normally in passive mode, keeps local in-app shortcuts, and suppresses desktop-global listeners until the lease becomes available.
+
+### Chrome Automation Permission Gate
+- Browser-session focus drives Google Chrome through AppleScript / Apple Events, so macOS requires the Automation privacy permission for Spaces to control Chrome. The app bundle declares `NSAppleEventsUsageDescription` (the consent-prompt copy) in its `Info.plist`.
+- `systembridge/ChromeAutomationPermission.swift` reads the current authorization without sending a scripting command by calling `AEDeterminePermissionToAutomateTarget` for bundle id `com.google.Chrome`. It distinguishes granted, denied, and undecided states, and reports an unavailable result when Chrome is not installed or the status cannot be determined.
+- `AppKitController.requiresChromeAutomationSetup(_:)` gates launch on that status. A missing-but-decidable permission presents the blocking `spacesui/ChromeAutomationSetupController.swift` screen before the main workspace UI; a granted permission, or an unavailable result, loads straight into the main UI.
+- The gate treats "unavailable" as do-not-block by design: there is nothing the user can grant when Chrome is absent or the state is indeterminate, so blocking would be a dead end. Chrome's macOS consent prompt then surfaces the first time a browser session is focused.
+- The setup screen's Grant Access action raises the system consent prompt only while the permission is undecided; once denied, macOS suppresses re-prompts, so the screen routes the user to System Settings ▸ Privacy & Security ▸ Automation via a deep link plus a Recheck action. The controller polls the permission and advances to the main UI as soon as it reads granted, so granting in System Settings needs no relaunch.
 
 ### Migration Rules
 - Fresh installs create the latest schema directly and record the current schema version.
@@ -620,13 +624,6 @@ erDiagram
     INTEGER window_id
   }
 
-  desktop_window_ids {
-    TEXT device_id PK
-    TEXT workspace_id PK
-    TEXT runtime_target_id PK
-    INTEGER window_id
-  }
-
   browser_session_window_ids {
     TEXT device_id PK
     TEXT workspace_id PK
@@ -642,17 +639,15 @@ erDiagram
   runtime_targets ||--o{ runtime_target_events : records
 ```
 
-Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`), `desktop_window_ids` (desktop/yabai window IDs, keyed by `device_id`+`workspace_id`+`runtime_target_id`), and `browser_session_window_ids` (the dedicated Chrome window opened for a browser session, keyed by `device_id`+`workspace_id`+resolved `target_url`).
+Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`), and `browser_session_window_ids` (the dedicated Chrome window opened for a browser session, keyed by `device_id`+`workspace_id`+resolved `target_url`).
 
-`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not yet read or written. They were scaffolded for the thin-client split; the desktop window-ID portion of that split now ships as `desktop_window_ids` (see [Window-ID ownership](#window-id-ownership)).
+`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not read or written. They were scaffolded for the thin-client split and are inert.
 
 ### Window-ID ownership
 
-Desktop window identity (`window_id`/yabai window IDs) is a client/desktop concern: a yabai window ID only means anything on the device's own desktop, and the session-less daemon (no yabai) never owns one. So window IDs live entirely in the client database (`desktop_window_ids`), keyed by `device_id` + `workspace_id` + the daemon-owned `runtime_target_id`, and recorded only for the local device.
+There is no desktop/window-manager window identity. Spaces windows are owned by the app's own AppKit layer, and terminals, processes, and coding agents are tracked by terminal session id — not by any desktop window id. The daemon `runtime_targets` table carries pure runtime/terminal identity (`tracking_id`, `type`, `app`, `order_index`) with no `window_id` column, and the device overview emits no window IDs, so a remote viewer carries none (correct, since it cannot focus another desktop's windows).
 
-The daemon `runtime_targets` table carries pure runtime/terminal identity (`tracking_id`, `type`, `app`, `order_index`) with no `window_id` column, and the overview emits no window IDs — a remote viewer carries none, which is correct since it cannot focus another desktop's windows. The `runtime_target_id`-keyed `desktop_window_ids` table overlays captured window IDs onto a process-local `SQLiteStore` through a client-database-backed `DesktopWindowIDStore` (`ClientDesktopWindowIDStore` in `spacesclientcore`, conforming to the `systembridge` protocol), keeping desktop window identity out of the daemon database for any process that still resolves windows through the store.
-
-A workspace browser session is itself a client/desktop concept: the GUI opens one dedicated Chrome window per session, records that window's id in the client `browser_session_window_ids` table (keyed by `device_id` + `workspace_id` + the resolved `target_url`) through `ClientBrowserWindowIDStore`, and re-focuses that specific window by id thereafter — opening a fresh dedicated window only when the tracked one is gone. This is the client-state replacement for the daemon's former `workspace_browser_sessions.extracted_window_id`; the daemon, which never has a desktop session, no longer persists any browser window identity. Focusing by the tracked window id (rather than scanning every Chrome window for the URL) keeps focus on the session's own window and never on an unrelated window that happens to have the same URL open.
+The one window id that remains is a browser session's own Chrome window id, which is a client/desktop concept: the GUI opens one dedicated Chrome window per session, records that window's id in the client `browser_session_window_ids` table (keyed by `device_id` + `workspace_id` + the resolved `target_url`) through `ClientBrowserWindowIDStore`, and re-focuses that specific window by id thereafter — opening a fresh dedicated window only when the tracked one is gone. This is the client-state replacement for the daemon's former `workspace_browser_sessions.extracted_window_id`; the daemon, which never has a desktop session, persists no browser window identity. When a workspace stops (or restarts or is archived), the GUI closes that workspace's browser-session tabs in their tracked windows — only the matching tab, never the whole window, so any other tabs the user opened there survive — and clears the `browser_session_window_ids` rows; a stale window id is left alone unless the tracked URL is still present. Cleanup gates on Chrome already running (checked via `NSRunningApplication`, not Apple Events), so tearing down a workspace never relaunches a Chrome the user has quit; the tracking rows are cleared regardless. The cleanup runs from two disjoint triggers so it covers every initiator: the GUI's own stop/restart/archive handlers fire it eagerly (the only reliable signal for a restart's transient stop), and the sidebar's daemon-driven reload diffs the previous local runtime state against each fresh overview and fires it for any local workspace that transitioned to not-running — the channel through which stop/archive actions taken outside this GUI (the CLI, MCP, the Device API, or another device) reach the client. The teardown is idempotent (clearing the rows), so a workspace seen by both triggers closes nothing the second time. Focusing by the tracked window id (rather than scanning every Chrome window for the URL) keeps focus on the session's own window and never on an unrelated window that happens to have the same URL open.
 
 ### Projects
 Projects persist:
@@ -708,12 +703,12 @@ This separation lets template edits coexist with current runtime state and per-w
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
 
 ### Runtime Target Model
-- `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, durable terminal `tracking_id`, ordering, and display metadata. The desktop (yabai) window ID is not stored here — it is client/desktop-local and lives in the client database (see [Window-ID ownership](#window-id-ownership)).
+- `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, durable terminal `tracking_id`, ordering, and display metadata. It carries no window id; runtime items are correlated and focused by terminal session id (see [Window-ID ownership](#window-id-ownership)).
 - `browser_targets` extends browser runtime targets with the configured target URL and the last resolved URL.
 - `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` when the session is focusable and stores agent-session state: provider, display label, status, provider session key, claimed launcher identity, durable Spaces `terminal_session_id`, and timestamps.
-- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces agent signal` for that event.
+- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, and the full set of environment key names seen by `spaces agent signal` for that event.
 - `running_processes` is the canonical process-status record. Each row links to a `runtime_target` when focusable and stores process runtime state such as template identity, command, PID, status, log path, durable Spaces `terminal_session_id`, and timestamps.
-- Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live yabai `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
+- Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
 - Configured process and coding-agent rows group by their reserved workspace slot and use `terminal_session_id` as the durable Spaces terminal session identity for focus, restart, final-frame viewing, and mobile overview. The linked runtime target's `tracking_id` mirrors the focusable terminal target while a window or terminal target exists. Replacement launch paths terminate and close the prior Spaces-backed session before deleting or rebinding the runtime row, which prevents orphaned configured sessions from reappearing as ad-hoc mobile rows. Exit and missing-window prune paths preserve configured coding-agent rows and their `terminal_session_id`; ad-hoc agent rows remain tied to their tracked terminal target and are removed when that target disappears.
 
 ### Data Modeling Guidelines
@@ -722,11 +717,11 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - The `terminal_session_id` columns on `running_processes` and `agent_sessions` are deliberate durable Spaces session ownership fields. Keep them aligned with the matching Spaces terminal launch and use `runtime_targets.tracking_id` for focus/window correlation.
 - Agent-session records should describe logical session state, not terminal rendering implementation details. Provider-specific terminal metadata should stay in terminal persistence or event payloads unless the configured row needs a stable session identity.
 - Running-process records should describe process runtime and configured slot ownership, not terminal rendering internals. Process rows should link to the relevant runtime target for focus behavior instead of owning window-specific fields.
-- When a process or agent needs focus identity before yabai has reconciled a live window, seed or reuse a `runtime_target` record. When it needs durable final-frame or restart identity, persist the Spaces terminal session ID on the process or agent row.
+- When a process or agent needs focus identity before a live window has been reconciled, seed or reuse a `runtime_target` record. When it needs durable final-frame or restart identity, persist the Spaces terminal session ID on the process or agent row.
 - Provider-specific naming should be avoided in shared schema. Generic fields such as `provider` and `session_key` are acceptable when the same concept exists across providers; fields named for one product should be treated as transitional and refactored away.
 - Add abstractions only when current behavior needs them. Extensibility matters, but speculative tables or fields should not be added before a real workflow requires them.
 - Prefer event history for debugging destructive transitions over piling more `last_*` and `*_reason` fields onto canonical state rows. When a target or session is rebound, detached, or pruned, the system should leave an inspectable event trail.
-- Distinguish the durable Spaces session identity used for replay, focus, and runtime correlation from transient window IDs that yabai may refresh over time.
+- Correlate and focus runtime items by the durable Spaces terminal session identity (used for replay, focus, and runtime correlation) rather than by transient OS window handles.
 - Persist final render-state payloads by terminal session ID. Those rows are independent of live control sockets so ended sessions can be reopened by stable identity without replaying `output.log`.
 
 ### Referential Integrity
@@ -753,7 +748,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 4. Close and terminate any prior Spaces-backed configured process sessions that occupy the same workspace slots.
 5. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
 6. Leave configured browser sessions unopened until the user focuses them.
-7. Capture new terminal windows through yabai and persist the mapping.
+7. Track the new built-in terminal windows and persist the mapping.
 
 ### Workspace Stop or Archive
 1. Stop tracked processes.
@@ -775,7 +770,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Reconciliation may degrade runtime health, but it should not silently promote or demote workspace lifecycle state.
 - Sidebar snapshot refresh can update the backing lists in the background without rebuilding the active detail pane when the current selection is still valid.
 - These passes should not block the main UI thread.
-- Workspace window tracking and setup prerequisite checks retain their existing interval-based passes; their inputs are multi-source and have no single event to observe.
+- Workspace window tracking retains its existing interval-based pass; its inputs are multi-source and have no single event to observe.
 
 ## Environment and Process Model
 - Named port definitions are allocated per workspace and exposed as environment variables. Workspace-settings saves preserve existing allocations where possible, allocate newly added definitions immediately, and release removed definitions without waiting for the next launch.
@@ -784,9 +779,8 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Built-in `Spaces` terminal sessions own their process lifetime directly through the session backend for launch, stop, recovery, and reopen.
 - Configured process restart closes the old native Spaces terminal window and terminates the old service session before the replacement session is recorded as current. The process row remains the configured slot; the terminal session identity changes only through that explicit replacement path.
 - Immediate process-start failures should be surfaced from the recent built-in session output itself so launch errors report the real command failure instead of a follow-on recovery error.
-- Core external dependencies that the GUI invokes directly, such as `yabai` and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
+- Core external dependencies that the GUI invokes directly, such as `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
-- Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
 - Each `ProcessTemplate` stores name, command, kind, and on-exit behavior. Persisted `execution_mode` values are ignored.
 - Process commands are validated as non-empty shell command strings.
 - Process launch exports the workspace environment, including named ports and `SPACES_*` directory variables, then executes the command through the user's resolved login shell.
@@ -794,31 +788,30 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Configured coding-agent launchers also run as shell strings through an inner interactive login shell so user shell PATH setup and tool bootstrap from files such as `.zshrc` are available.
 
 ## Window and Focus Architecture
-- yabai provides stable window identity and cross-app focusing.
-- Chrome integration adds browser-specific behavior on top of yabai for selecting the intended browser target.
+- The Spaces app owns window identity and cross-app focusing itself: it tracks and focuses its own AppKit terminal windows and activates Chrome for browser sessions.
+- Chrome integration adds browser-specific behavior for selecting the intended browser target.
 - Browser sessions are stored as workspace configuration and only become tracked windows after an explicit focus action opens them.
-- Browser-session focus uses two identity layers. `WindowRecord.windowID` stores the live yabai window ID for cross-app focus and reconciliation, while Chrome tab targeting uses Chrome's own window ID plus tab index gathered from a live tab scan.
+- Browser-session focus targets Chrome directly: `WindowRecord.windowID` stores the Chrome window ID for the session's dedicated window, and Chrome tab targeting uses that window ID plus a tab index gathered from a live tab scan.
 - Browser-session matching is URL-based and tolerant of equivalent host forms. Focus, recovery, and browser-row naming all normalize scheme, host, port, and path so `google.com` and `www.google.com` resolve to the same configured session while still preferring the most specific matching session prefix.
 - For remote runtime plans, configured browser URLs that resolve to a named localhost service port are rewritten to a Mac-owned SSH local forward before Chrome focus or recovery. `BrowserSSHForwardManager` owns the `ssh -L` process keyed by host and remote port; unrelated URLs and unnamed ports keep their configured address.
-- Browser-session focus from a built-in terminal first tries a scanned Chrome window and tab identity for the target URL, verifies that the activated tab still belongs to the requested session, then falls back to the broader URL-scan path and finally to yabai when browser-specific targeting cannot resolve the session.
+- Browser-session focus from a built-in terminal first tries a scanned Chrome window and tab identity for the target URL, verifies that the activated tab still belongs to the requested session, then falls back to the broader URL-scan path when browser-specific targeting cannot resolve the session.
 - Browser-session recovery and extracted-window reuse use the same normalized URL matcher as direct focus so reopened browser windows remain attached to the intended configured session even when Chrome canonicalizes the visible URL.
 - GUI and harness workspace focus resolve explicit names instead of numeric window indexes. Those names come from the same workspace-level focus model used for browser sessions, running processes, and agent terminals, and the names must stay unique within a workspace.
 - The production CLI stays path-based: commands target the current working directory by default or accept an explicit workspace path argument.
-- Terminal focus pulsing is terminal-agnostic: Spaces queries the target yabai window and briefly presents an AppKit overlay aligned to that window instead of mutating terminal-specific appearance settings.
 - Tracked windows are persisted so Spaces can refocus or clean up only the windows it owns.
 - Direct focus requests auto-recover stale browser-session windows by reopening and re-tracking them, while process and generic window failures still surface typed missing-window errors to the GUI.
 - Browser-session existence is not polled during background refresh; stale browser mappings are detected on demand when the user focuses that session.
 - Window cycling is built from a dedicated workspace target list rather than raw visible windows. The ordered target set is assembled from tracked browser rows first, then live process-backed terminal targets, then remaining tracked terminal rows, then orphaned process rows, and finally agent rows. A process-backed built-in terminal contributes one logical cycle target even though process runtime and terminal window state are persisted separately.
-- Current-cycle resolution prefers built-in terminal identity before external probing. When the active surface is a built-in Spaces terminal, the hotkey path passes the session identity directly into the orchestrator so cycle resolution can skip the generic yabai focused-window probe. Otherwise the orchestrator resolves the current target from the focused yabai window ID, then from the remembered navigation cursor, and finally from the frontmost Chrome URL when the active app is Chrome.
+- Current-cycle resolution prefers built-in terminal identity before external probing. When the active surface is a built-in Spaces terminal, the hotkey path passes the session identity directly into the orchestrator so cycle resolution can skip the generic focused-window probe. Otherwise the orchestrator resolves the current target from the focused desktop window, then from the remembered navigation cursor, and finally from the frontmost Chrome URL when the active app is Chrome.
 - Cycle order is frozen for a short-lived cycle session. After the first `next` or `previous`, the orchestrator snapshots the ordered target cursor list, advances within that snapshot, and reuses it for subsequent presses until the cycle session expires or focus moves outside the tracked cycle flow.
-- Window cycling is tolerant of stale tracked yabai IDs and keeps advancing until it finds the next live target.
+- Window cycling is tolerant of stale tracked window IDs and keeps advancing until it finds the next live target.
 - Built-in terminal and agent targets do not use the same hide path as external targets. Cycling or focusing into a Spaces-owned terminal keeps the main window available and dismisses only the command palette if it is open, while external browser or editor focus still uses the hide-after-success flow.
-- Built-in process and agent focus prefer the live native window when a tracked yabai window ID exists and only reopen the session when no live native window can be focused.
+- Built-in process and agent focus prefer the live native window when a tracked window ID exists and only reopen the session when no live native window can be focused.
 - Ended built-in process and agent focus uses the persisted Spaces terminal session identity when one exists. Focus opens or raises that ended session for final-frame viewing; it does not use focus recovery to create a replacement session.
 - Reconciliation is required because window state can drift outside the app.
 
 ### Terminal Integration Contract
-- Terminal-specific launch, focus, replay, recovery, ownership, rendering, and control rules live in [terminal.md](terminal.md). The window and focus architecture here records only the shared yabai and workspace-target constraints that apply across target types.
+- Terminal-specific launch, focus, replay, recovery, ownership, rendering, and control rules live in [terminal.md](terminal.md). The window and focus architecture here records only the shared window and workspace-target constraints that apply across target types.
 
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.
@@ -865,7 +858,6 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 
 ## External Dependencies
 - macOS 14+
-- yabai for window identity and focus
 - built-in terminal dependencies and Ghostty fork requirements are documented in [terminal.md](terminal.md)
 - Google Chrome for browser-session automation
 - SQLite for local persistence

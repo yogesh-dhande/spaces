@@ -147,9 +147,7 @@ extension OrchestratorTests {
 
         // No tracked windows and workspace is not running — refresh should report no DB mutation.
         var result: WorkspaceOrchestrator.RefreshResult?
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { result = try orchestrator.refreshAllWorkspaceWindows() }
-        }
+        result = try orchestrator.refreshAllWorkspaceWindows()
 
         let refreshResult = try XCTUnwrap(result)
         XCTAssertFalse(refreshResult.didMutateDB)

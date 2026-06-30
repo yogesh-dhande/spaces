@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -76,6 +76,11 @@ public enum DatabaseSchema {
                     ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_window_id;
                     ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_target_url;
                     """)
+        },
+        // Runtime-target events recorded a desktop window id alongside each event. Desktop window
+        // tracking is gone, so the column is never written; drop it to match the runtime model.
+        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "Drop runtime-target event window IDs", requiresBackup: true) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE runtime_target_events DROP COLUMN window_id;")
         },
     ]
 
@@ -410,7 +415,6 @@ public enum DatabaseSchema {
               event_type TEXT NOT NULL,
               source TEXT NOT NULL,
               message TEXT,
-              window_id INTEGER,
               created_at TEXT NOT NULL,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
             );

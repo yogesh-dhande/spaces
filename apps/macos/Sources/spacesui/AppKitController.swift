@@ -276,7 +276,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
-    var setupManager: SetupManager?
+    var chromeAutomationSetupController: ChromeAutomationSetupController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
     private var didLogFirstStartupInteraction = false
@@ -462,8 +462,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard let self else { return }
                 self.buildShellWindow()
                 self.logStartupProfile("shell_window_ready")
-                self.enterSetupFlow()
-                self.logStartupProfile("setup_started")
+                self.startWorkspaceUIAfterPermissionCheck()
                 self.ensureMainWindowVisibleOnLaunch()
             }
         }
@@ -2998,14 +2997,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let existingOrder = result[targetID] ?? Int.max
             result[targetID] = min(existingOrder, window.orderIndex)
         }
-        let terminalOrderByWindowID: [Int: Int] = windows.reduce(into: [:]) { result, window in
-            guard window.role == "terminal", let windowID = window.windowID else { return }
-            let existingOrder = result[windowID] ?? Int.max
-            result[windowID] = min(existingOrder, window.orderIndex)
-        }
         func processOrder(_ process: RunningProcessRecord) -> Int {
             if let targetID = process.terminalTrackingKey, let order = terminalOrderByTargetID[targetID] { return order }
-            if let windowID = process.windowID, let order = terminalOrderByWindowID[windowID] { return order }
             return Int.max
         }
         let processesByTerminalID: [String: [RunningProcessRecord]] = {
@@ -3024,35 +3017,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             return map
         }()
-        let processesByWindowID: [Int: [RunningProcessRecord]] = {
-            var map: [Int: [RunningProcessRecord]] = [:]
-            for process in processes {
-                guard let windowID = process.windowID else { continue }
-                map[windowID, default: []].append(process)
-            }
-            for (windowID, list) in map {
-                map[windowID] = list.sorted { lhs, rhs in
-                    let lhsOrder = processOrder(lhs)
-                    let rhsOrder = processOrder(rhs)
-                    if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
-                    if lhs.templateName != rhs.templateName {
-                        return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
-                    }
-                    return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
-                }
-            }
-            return map
-        }()
         let agentTerminalIDs = Set(agentWindows.flatMap { agentTerminalTrackingKeys(for: $0) })
-        let agentWindowIDs = Set(agentWindows.compactMap { $0.yabaiWindowID ?? $0.windowID })
         let eligibleProcesses = processes.filter { process in
-            let claimedByTerminalID = process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
-            let claimedByWindowID = process.windowID.map(agentWindowIDs.contains) ?? false
-            return !claimedByTerminalID && !claimedByWindowID
+            !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false)
         }
         let agentClaimedProcessKeys = Set(
             processes.filter { process in
-                (process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) || (process.windowID.map(agentWindowIDs.contains) ?? false)
+                process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
             }.map { processRuntimeKey(name: $0.templateName) })
         var processQueuesByKey: [String: [RunningProcessRecord]] = [:]
         for process in eligibleProcesses { processQueuesByKey[processRuntimeKey(name: process.templateName), default: []].append(process) }
@@ -3090,19 +3061,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         for (windowIdx, window) in windows.enumerated() where window.role != "browser" {
             let windowProcesses: [RunningProcessRecord]
             if window.role == "terminal" {
-                let linkedByTrackingID = window.terminalTrackingKey.flatMap { processesByTerminalID[$0] } ?? []
-                let linkedByWindowID = window.windowID.flatMap { processesByWindowID[$0] } ?? []
-                var seen = Set<String>()
-                windowProcesses = (linkedByTrackingID + linkedByWindowID).filter { seen.insert($0.id).inserted }
+                windowProcesses = window.terminalTrackingKey.flatMap { processesByTerminalID[$0] } ?? []
             } else {
                 windowProcesses = []
             }
-            let isAgentClaimedWindow =
-                (window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) || (window.windowID.map(agentWindowIDs.contains) ?? false)
+            let isAgentClaimedWindow = window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
             let nonAgentWindowProcesses = windowProcesses.filter { process in
-                let claimedByTerminalID = process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
-                let claimedByWindowID = process.windowID.map(agentWindowIDs.contains) ?? false
-                return !claimedByTerminalID && !claimedByWindowID
+                !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false)
             }
             if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
             if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
@@ -3412,41 +3377,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func makeStartupLoadingContentView() -> NSView {
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 10
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let spinner = NSProgressIndicator()
-        spinner.style = .spinning
-        spinner.controlSize = .regular
-        spinner.startAnimation(nil)
-        spinner.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(spinner)
-
-        let title = NSTextField(labelWithString: "Starting Spaces…")
-        title.font = .systemFont(ofSize: 14, weight: .medium)
-        title.textColor = .labelColor
-        stack.addArrangedSubview(title)
-
-        let detail = NSTextField(labelWithString: "Checking dependencies and loading workspace data.")
-        detail.font = .systemFont(ofSize: 12)
-        detail.textColor = .secondaryLabelColor
-        detail.alignment = .center
-        stack.addArrangedSubview(detail)
-
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: content.centerXAnchor), stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-        ])
-        return content
-    }
-
     /// Builds the split view layout + footer and sets it as window.contentView.
     private func buildMainWindowContent() {
         let splitView = NSSplitView()
@@ -3636,65 +3566,73 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         didStartBackgroundServices = false
     }
 
-    enum SetupFlowEntryContext {
-        case appLaunch
-        case deferredRequirement
-    }
-
-    nonisolated static func shouldShowStartupSplashBeforeSetup(entryContext: SetupFlowEntryContext) -> Bool { entryContext == .appLaunch }
-    nonisolated static func shouldDeferSetupChecksUntilAfterSplash(entryContext: SetupFlowEntryContext) -> Bool {
-        shouldShowStartupSplashBeforeSetup(entryContext: entryContext)
-    }
     nonisolated static func scheduleAfterNextRunLoopTurn(_ action: @escaping @MainActor () -> Void) {
         RunLoop.main.perform { Task { @MainActor in action() } }
     }
 
-    private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil, entryContext: SetupFlowEntryContext = .appLaunch) {
-        stopBackgroundServices()
-        setupManager?.stop()
-        let mgr = SetupManager()
-        setupManager = mgr
-        let startSetupChecks = { [weak self] in
-            guard let self, self.setupManager === mgr else { return }
-            guard let setupView = mgr.begin(preferredInitialCheckID: preferredInitialCheckID) else { return }
-            self.window.contentView = setupView
+    /// Whether launch should block on the Chrome Automation permission screen. Spaces focuses
+    /// browser sessions by scripting Chrome, so a denied or not-yet-decided grant blocks the main
+    /// UI. An `unavailable` reading (Chrome not installed / permission unverifiable) does not block
+    /// — there is nothing to grant — and a `granted` reading proceeds straight to the workspace UI.
+    static func requiresChromeAutomationSetup(_ status: ChromeAutomationStatus) -> Bool {
+        switch status {
+        case .denied, .notDetermined: return true
+        case .granted, .unavailable: return false
         }
-        if Self.shouldShowStartupSplashBeforeSetup(entryContext: entryContext) {
-            // Show a neutral startup view before running setup checks so launch never
-            // presents an empty window while the app decides between onboarding and
-            // the normal workspace UI.
-            window.contentView = makeStartupLoadingContentView()
-        }
-        mgr.onComplete = { [weak self] in
-            self?.logStartupProfile("setup_complete")
-            self?.setupManager = nil
-            self?.buildMainWindowContent()
-            self?.logStartupProfile("main_content_ready")
-            self?.showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Spaces is preparing your workspace data.")
-            self?.logStartupProfile("loading_placeholder_ready")
-            Task { @MainActor [weak self] in await self?.sidebar.loadInitialSidebarData() }
-        }
-        if Self.shouldDeferSetupChecksUntilAfterSplash(entryContext: entryContext) {
-            Self.scheduleAfterNextRunLoopTurn { startSetupChecks() }
+    }
+
+    /// Decides at launch whether to show the blocking Chrome Automation permission screen or open
+    /// straight to the workspace UI.
+    private func startWorkspaceUIAfterPermissionCheck() {
+        if Self.requiresChromeAutomationSetup(ChromeAutomationPermission.status()) {
+            enterChromeAutomationSetupFlow()
         } else {
-            startSetupChecks()
+            presentMainWorkspaceUI()
         }
     }
 
-    func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
-        guard Self.shouldRouteToDeferredSetup(for: error) else { return false }
-        enterSetupFlow(preferredInitialCheckID: .yabaiServiceRunning, entryContext: .deferredRequirement)
-        return true
+    /// Builds the main split-view content and kicks off the initial sidebar load. Shared by the
+    /// normal launch path and the Chrome Automation setup screen's completion handler.
+    private func presentMainWorkspaceUI() {
+        chromeAutomationSetupController?.stop()
+        chromeAutomationSetupController = nil
+        buildMainWindowContent()
+        logStartupProfile("main_content_ready")
+        showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Spaces is preparing your workspace data.")
+        logStartupProfile("loading_placeholder_ready")
+        Task { @MainActor [weak self] in await self?.sidebar.loadInitialSidebarData() }
     }
 
-    static func shouldRouteToDeferredSetup(for error: Error) -> Bool {
-        if case WorkspaceError.yabaiUnavailable(let message) = error { return message.localizedStandardContains("failed to connect to socket") }
-        let message = error.localizedDescription
-        return message.localizedStandardContains("yabai-msg") && message.localizedStandardContains("failed to connect to socket")
+    /// Presents the blocking permission screen and advances to the workspace UI once the user
+    /// grants Chrome Automation. The controller polls so granting via System Settings (where macOS
+    /// no longer offers an in-app prompt after a denial) advances the app without a restart.
+    private func enterChromeAutomationSetupFlow() {
+        logStartupProfile("chrome_automation_setup_started")
+        chromeAutomationSetupController?.stop()
+        let controller = ChromeAutomationSetupController()
+        chromeAutomationSetupController = controller
+        // Capture `controller` weakly: it owns `onGranted`, so a strong capture would retain the
+        // controller (and its view hierarchy) past the point where `presentMainWorkspaceUI` clears
+        // `chromeAutomationSetupController`, leaking a setup controller each time the flow is shown.
+        controller.onGranted = { [weak self, weak controller] in
+            guard let self, let controller, self.chromeAutomationSetupController === controller else { return }
+            self.logStartupProfile("chrome_automation_setup_complete")
+            self.presentMainWorkspaceUI()
+        }
+        window.contentView = controller.begin()
+    }
+
+    /// The app has no prerequisite/onboarding flow: background-refresh failures are always
+    /// logged rather than routed to a setup screen. Retained so call sites that previously
+    /// short-circuited on a deferred-setup requirement keep a single, explicit no-op.
+    func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
+        _ = error
+        return false
     }
 
     static func backgroundRefreshFailureAction(for error: Error) -> BackgroundRefreshFailureAction {
-        shouldRouteToDeferredSetup(for: error) ? .deferredSetup : .logOnly
+        _ = error
+        return .logOnly
     }
 
     func handleBackgroundRefreshFailure(_ error: Error, source: String) {
@@ -5715,7 +5653,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     guard $0.role == "terminal" else { return false }
                     if let trackingID = agentWindow.terminalTrackingID, !trackingID.isEmpty, $0.terminalTrackingID == trackingID { return true }
                     if let nativeID = agentWindow.terminalNativeID, !nativeID.isEmpty, $0.terminalNativeID == nativeID { return true }
-                    if let windowID = agentWindow.yabaiWindowID ?? agentWindow.windowID, $0.windowID == windowID { return true }
                     return false
                 })
             else { return }
@@ -8039,7 +7976,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sender?.isEnabled = true
             if let result {
                 switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+                case .success(let response):
+                    // Restart goes through the daemon stop path; the daemon does not own the
+                    // client-side dedicated Chrome windows, so close them here too for a clean
+                    // restarted state (a later browser focus then opens a fresh window).
+                    self.closeLocalBrowserSessionWindows(workspaceID: id)
+                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
                 case .failure(let error): showError(error)
                 }
             } else {
@@ -8065,12 +8007,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sender?.isEnabled = true
             if let result {
                 switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+                case .success(let response):
+                    self.closeLocalBrowserSessionWindows(workspaceID: id)
+                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
                 case .failure(let error): showError(error)
                 }
             } else {
                 showDeviceNotLoadedError()
             }
+        }
+    }
+
+    /// Closes the workspace browser-session tabs the app opened (in their dedicated Chrome windows)
+    /// and clears their tracking rows. Browser-session windows are client/desktop-local, so the
+    /// daemon cannot close them when a workspace stops — the GUI tears them down here. A no-op when
+    /// the workspace has no tracked browser windows (e.g. a remote workspace, whose browser sessions
+    /// open a URL without a dedicated tracked window).
+    ///
+    /// Called from two disjoint triggers: the GUI's own stop/restart/archive handlers (eager, and
+    /// the only reliable signal for a restart's transient stop), and the sidebar's daemon-observed
+    /// transition diff (the net for stop/archive initiated outside this GUI — CLI, MCP, the Device
+    /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
+    /// re-observes the same stopped workspace finds nothing to close.
+    func closeLocalBrowserSessionWindows(workspaceID: String) {
+        Task.detached(priority: .utility) {
+            let store = ClientBrowserWindowIDStore()
+            guard let tracked = try? store.windowIDs(workspaceID: workspaceID), !tracked.isEmpty else { return }
+            let chrome = ChromeAdapter()
+            // Gate on `isRunning()` (a no-Apple-Events check) so stopping a workspace never launches
+            // Chrome: if the user already quit Chrome, the tracked tabs are gone — scripting Chrome
+            // would only relaunch it. Just clear the tracking rows below.
+            if chrome.isRunning() {
+                // Close only the session's matching tab, never the whole window: the window may hold
+                // other tabs the user opened, and a tracked id can be stale (Chrome reuses window
+                // ids after a restart) so the URL must still match.
+                for entry in tracked { _ = try? chrome.closeMatchingTabsInWindow(windowID: entry.windowID, urlPrefix: entry.targetURL) }
+            }
+            try? store.clearAll(workspaceID: workspaceID)
         }
     }
 
@@ -8132,6 +8105,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch result {
                 case .success(let response):
                     button?.isEnabled = true
+                    self.closeLocalBrowserSessionWindows(workspaceID: id)
                     applyDeviceMutationResponse(response, selectedProjectID: project.id)
                 case .failure(let error):
                     requestSidebarReload()
@@ -8931,17 +8905,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func clientAppConfig() throws -> AppConfig {
         let editor = try clientDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
         return AppConfig(editor: editor, portRange: .default)
-    }
-
-    func clientWindowFocusPulseEnabled() -> Bool {
-        guard let raw = try? clientDatabase().setting(key: SettingsKey.windowFocusPulseEnabled) else {
-            return SettingsKey.defaultWindowFocusPulseEnabled
-        }
-        return raw != "0"
-    }
-
-    func clientWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
-        SettingsKey.windowFocusPulseColor(from: try? clientDatabase().setting(key: SettingsKey.windowFocusPulseColor))
     }
 
     private func clientActiveWorkspaceID() -> String? { try? clientDatabase().setting(key: SettingsKey.activeWorkspaceID) }

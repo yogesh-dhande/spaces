@@ -2,7 +2,6 @@ import AppKit
 import Foundation
 import XCTest
 import spacesterminalcore
-import systembridge
 import workspacecore
 
 func makeTempDirectory() throws -> URL {
@@ -29,53 +28,7 @@ extension XCTestCase {
         addTeardownBlock { for (name, value) in originalValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
         setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
         setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
-        // Desktop window IDs live outside spaces.db in production (client-owned). The in-memory
-        // store mirrors that: window IDs round-trip through it instead of the daemon database.
-        return try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
-    }
-}
-
-/// Test double for the client-owned desktop window-ID store. Mirrors the production contract:
-/// window IDs are keyed by the runtime-target id and resolved on read.
-final class InMemoryDesktopWindowIDStore: DesktopWindowIDStore, @unchecked Sendable {
-    private struct Key: Hashable {
-        let workspaceID: String
-        let runtimeTargetID: String
-    }
-
-    private let lock = NSLock()
-    private var windowIDs: [Key: Int] = [:]
-    private var order: [Key] = []  // most-recently-updated last
-
-    func desktopWindowID(workspaceID: String, runtimeTargetID: String) throws -> Int? {
-        lock.lock()
-        defer { lock.unlock() }
-        return windowIDs[Key(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)]
-    }
-
-    func setDesktopWindowID(workspaceID: String, runtimeTargetID: String, windowID: Int) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        let key = Key(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
-        windowIDs[key] = windowID
-        order.removeAll { $0 == key }
-        order.append(key)
-    }
-
-    func clearDesktopWindowID(workspaceID: String, runtimeTargetID: String) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        let key = Key(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
-        windowIDs[key] = nil
-        order.removeAll { $0 == key }
-    }
-
-    func desktopWindowMatches(windowID: Int) throws -> [(workspaceID: String, runtimeTargetID: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return order.reversed().compactMap { key in
-            windowIDs[key] == windowID ? (workspaceID: key.workspaceID, runtimeTargetID: key.runtimeTargetID) : nil
-        }
+        return try SQLiteStore(path: dbURL.path)
     }
 }
 
@@ -90,14 +43,30 @@ func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir:
         id: id, projectID: projectID, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
 }
 
-final class MockTerminalFocusPulseController: TerminalFocusPulseControlling, @unchecked Sendable {
-    var pulseCallCount = 0
-    var pulsedWindowIDs: [Int] = []
-    var pulseColors: [(r: Int, g: Int, b: Int)] = []
+/// Seeds the tracked terminal-session window that a live Spaces terminal session creates before any
+/// agent hook fires. In the session-based model the agent correlates to this existing window (matched
+/// by session id) instead of minting its own dedicated row, so the agent label is not auto-suffixed
+/// against a window it just created for itself.
+func seedTerminalSessionWindow(store: SQLiteStore, workspaceID: String, sessionID: String) throws {
+    try store.upsert(
+        window: WindowRecord(
+            id: UUID().uuidString, workspaceID: workspaceID, app: TerminalHost.spaces.appName, name: sessionID, detail: nil, targetURL: nil,
+            windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+}
 
-    func pulse(windowID: Int, color: (r: Int, g: Int, b: Int), yabai _: YabaiAdapter) {
-        pulseCallCount += 1
-        pulsedWindowIDs.append(windowID)
-        pulseColors.append(color)
-    }
+/// Marks a built-in terminal session as live for window-reconciliation purposes. Window liveness is
+/// session-based: a control socket must be present, an active owner attachment must exist, and the
+/// service PID must be alive. Tests that exercise `refreshWorkspaceWindows` must establish those session
+/// artifacts for the window to survive reconciliation. The session's runtime state (with a live
+/// `servicePID`) must already be written by the caller.
+func markBuiltInSessionLive(sessionID: String, attachedAt: String = "2026-06-06T00:00:00Z") throws {
+    let paths = try TerminalSessionPaths.forSession(id: sessionID)
+    try paths.ensureDirectories()
+    _ = FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+    let client = TerminalClient(
+        id: "owner-\(sessionID)", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+        connectedAt: attachedAt)
+    let attachment = TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: attachedAt)
+    try TerminalSessionPersistence.writeAttachmentSnapshot(
+        TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]), paths: paths)
 }

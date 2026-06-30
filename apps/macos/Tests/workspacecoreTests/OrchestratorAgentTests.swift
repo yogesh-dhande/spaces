@@ -52,7 +52,7 @@ extension OrchestratorTests {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session",
-                codexThreadID: nil, windowID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+                codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
         let launches = TerminalLaunchConfigurationCapture()
         let terminated = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -84,7 +84,7 @@ extension OrchestratorTests {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-review",
-                codexThreadID: nil, windowID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+                codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
         let orchestrator = WorkspaceOrchestrator(store: store)
 
         XCTAssertThrowsError(try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-review")) { error in
@@ -105,7 +105,7 @@ extension OrchestratorTests {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session",
-                codexThreadID: nil, windowID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+                codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
@@ -170,14 +170,10 @@ extension OrchestratorTests {
         }
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                    let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
-                    XCTAssertEqual(record.label, "Codex")
-                    XCTAssertEqual(record.provider, .spaces)
-                    XCTAssertEqual(record.terminalTrackingID, record.terminalNativeID)
-                }
-            }
+            let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
+            XCTAssertEqual(record.label, "Codex")
+            XCTAssertEqual(record.provider, .spaces)
+            XCTAssertEqual(record.terminalTrackingID, record.terminalNativeID)
         }
 
         XCTAssertEqual(openCapture.modes, [.owner])
@@ -226,20 +222,19 @@ extension OrchestratorTests {
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex --dangerously-skip-permissions")]
         }
+        // The pre-existing (stale) agent owns a live session window; seed it so the stale row keeps its
+        // configured "Codex" label and is matched/replaced on relaunch.
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "stale-session")
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "stale-session", terminalNativeID: "stale-session",
             status: .idle, claimedLauncherName: "Codex")
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                    let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
-                    XCTAssertEqual(record.label, "Codex")
-                    XCTAssertEqual(record.provider, .spaces)
-                    XCTAssertEqual(record.terminalTrackingID, record.terminalNativeID)
-                    XCTAssertNotEqual(record.terminalTrackingID, "stale-session")
-                }
-            }
+            let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
+            XCTAssertEqual(record.label, "Codex")
+            XCTAssertEqual(record.provider, .spaces)
+            XCTAssertEqual(record.terminalTrackingID, record.terminalNativeID)
+            XCTAssertNotEqual(record.terminalTrackingID, "stale-session")
         }
 
         XCTAssertEqual(openCapture.modes, [.owner])
@@ -261,6 +256,11 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
+        // A live Spaces terminal session already owns its tracked window before an agent hook fires;
+        // the agent correlates to that window instead of minting its own (which would otherwise make
+        // the dedup suffix the agent against a window it just created for itself).
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "session-a")
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "session-b")
 
         let configured = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "session-a", terminalNativeID: "session-a",
@@ -285,7 +285,7 @@ extension OrchestratorTests {
     func testRefreshWorkspaceWindowsKeepsBuiltInAgentTerminalWindowAfterOwnerCloses() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -297,7 +297,7 @@ extension OrchestratorTests {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
-                terminalNativeID: sessionID, codexThreadID: nil, windowID: 202, status: .spinning, createdAt: "now", updatedAt: "now"))
+                terminalNativeID: sessionID, codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -318,9 +318,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: timestamp)
             try TerminalSessionPersistence.detachClient(id: ownerClient.id, paths: paths, detachedAt: timestamp)
 
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-            }
+            _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
         }
 
         let windows = try orchestrator.windows(workspaceID: workspace.id)
@@ -329,7 +327,6 @@ extension OrchestratorTests {
         let agents = try store.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(agents.map(\.id), ["agent-codex"])
         XCTAssertEqual(agents.first?.terminalTrackingID, sessionID)
-        XCTAssertNil(agents.first?.windowID)
     }
 
     func testUpdateProjectConfigRejectsDuplicateConfiguredCodingAgentNames() throws {
@@ -391,7 +388,7 @@ extension OrchestratorTests {
     func testUserClosedBuiltInTerminalSessionLeavesOwningAgentRunning() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -406,7 +403,7 @@ extension OrchestratorTests {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
-                terminalNativeID: sessionID, codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
+                terminalNativeID: sessionID, codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
         try store.upsert(
             window: WindowRecord(
                 id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Codex", detail: nil, targetURL: nil,
@@ -431,7 +428,7 @@ extension OrchestratorTests {
     func testUserClosedAdHocShellSessionStopsEvenWhenAgentRegistered() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
@@ -473,7 +470,7 @@ extension OrchestratorTests {
         let parentDir = root.appendingPathComponent("project", isDirectory: true)
         let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
         try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
@@ -486,12 +483,12 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: childWorkspace.id, templateName: "api", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "process-session", terminalNativeID: "process-session",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "process-session", terminalNativeID: "process-session",
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-1", workspaceID: childWorkspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session",
-                terminalNativeID: "agent-session", codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
+                terminalNativeID: "agent-session", codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try writeTerminalSessionFixture(
@@ -511,7 +508,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsPromotesAndKeepsAdHocShellSession() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -560,7 +557,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsMarksExitedAdHocAgentSessionDone() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -603,7 +600,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentAcrossTransientAndRealForegrounds() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -655,7 +652,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsPreservesSignalAgentAcrossShellForeground() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -698,7 +695,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsDoesNotRecordSignalIdentityFromFirstNonShellSample() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -747,7 +744,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsPreservesSignalLabelOnKnownForeground() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -785,7 +782,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsKeepsSignaledDetectorRowAfterForegroundChanges() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -843,7 +840,7 @@ extension OrchestratorTests {
     func testUpdateAgentWindowStatusPreservesAdHocDetectedTerminalNameAndDetail() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -883,16 +880,13 @@ extension OrchestratorTests {
     func testRefreshWorkspaceWindowsPreservesAdHocDetectedAgentForegroundCommandDetail() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let sessionID = "ad-hoc-foreground-agent-title-refresh"
-        let windowsJSON = """
-            [{"id":101,"pid":11,"app":"Spaces","title":"live shell title","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]
-            """
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try writeTerminalSessionFixture(
@@ -903,19 +897,16 @@ extension OrchestratorTests {
                     foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
                     foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
                     foregroundDisplayCommand: "codex --model gpt-5"))
+            try markBuiltInSessionLive(sessionID: sessionID)
             try store.upsert(
                 window: WindowRecord(
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                    windowID: 101, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
             XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
 
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
-                    _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
-                }
-            }
+            _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
         }
 
         XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
@@ -924,7 +915,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsSuffixesDuplicateAdHocLabels() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -961,7 +952,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -994,7 +985,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsPreservesConfiguredLauncherRowOnUnknownForeground() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1025,7 +1016,7 @@ extension OrchestratorTests {
     func testReconcileTerminalForegroundAgentClassificationsSkipsConfiguredProcessSession() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1044,7 +1035,7 @@ extension OrchestratorTests {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: "process-1", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                    windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                    terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
                     lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
@@ -1062,16 +1053,10 @@ extension OrchestratorTests {
                 terminalTrackingID: "workspace-session", role: "terminal", orderIndex: 201, lastSeenAt: "now"))
         let agentRecord = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "workspace-session",
-            codexThreadID: nil, windowID: 501, yabaiWindowID: 501, status: .spinning, createdAt: "now", updatedAt: "now")
+            codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
         try store.upsertAgentWindow(agentRecord)
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(
-                name: "YABAI_WINDOWS_JSON",
-                value:
-                    #"[{"id":501,"pid":11,"app":"Spaces","title":"Claude Code","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-            ) { try orchestrator.restartWorkspace(workspaceID: workspace.id) }
-        }
+        try orchestrator.restartWorkspace(workspaceID: workspace.id)
 
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "Agent window records should be cleared during restart")
     }

@@ -1,19 +1,16 @@
 import Foundation
 
 public enum ExecutableTool: Sendable {
-    case yabai
     case git
 
     var commandName: String {
         switch self {
-        case .yabai: "yabai"
         case .git: "git"
         }
     }
 
     var preferredAbsolutePaths: [String] {
         switch self {
-        case .yabai: ["/opt/homebrew/bin/yabai", "/usr/local/bin/yabai", "/opt/local/bin/yabai", "/usr/bin/yabai"]
         case .git: ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git", "/opt/local/bin/git"]
         }
     }

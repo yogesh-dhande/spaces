@@ -102,80 +102,21 @@ extension WorkspaceOrchestrator {
 
     func isManagedTerminalApp(_ appName: String?) -> Bool { terminalHost(for: appName) != nil }
 
-    func resolvedFocusIdentity(for window: WindowRecord, workspaceID: String) -> TerminalTrackingIdentity? {
-        if let terminalHost = terminalHost(for: window.app), terminalHost == .spaces, let focusIdentity = window.terminalFocusIdentity {
-            return focusIdentity
-        }
-        if let sessionID = window.terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
-        guard window.role == "terminal" else { return nil }
-        if let windowID = window.windowID {
-            if let processIdentity = try? store.runningProcesses(workspaceID: workspaceID).first(where: {
-                $0.windowID == windowID && $0.terminalApp == window.app && $0.terminalFocusIdentity != nil
-            })?.terminalFocusIdentity {
-                return processIdentity
-            }
-            if let agentIdentity = try? store.agentWindows(workspaceID: workspaceID).first(where: {
-                $0.provider == .spaces && window.app == TerminalHost.spaces.appName && (($0.yabaiWindowID ?? $0.windowID) == windowID)
-                    && $0.terminalFocusIdentity != nil
-            })?.terminalFocusIdentity {
-                return agentIdentity
-            }
-            return .window(windowID)
-        }
-        return nil
-    }
-
-    func focusManagedTerminal(terminalApp: String?, providerIdentity: TerminalTrackingIdentity?, windowID: Int?, requestID: String? = nil)
+    /// Requests focus for a Spaces-managed terminal by session id. Focus is delegated to the
+    /// client over IPC (the daemon has no window server), so this only routes the request and
+    /// reports whether a session identity was available.
+    func focusManagedTerminal(terminalApp: String?, providerIdentity: TerminalTrackingIdentity?, requestID: String? = nil)
         -> ManagedTerminalFocusResult
     {
         guard terminalHost(for: terminalApp) == .spaces else { return .unavailable }
+        guard case .session(let sessionID)? = providerIdentity else { return .unavailable }
         let startedAt = currentDate()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        if case .session(let sessionID)? = providerIdentity {
-            builtInTerminalWindowFocuser(sessionID, requestID)
-            guard requestID == nil else {
-                logTerminalPerfMetric(
-                    "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=session_request\(requestDetail)",
-                    elapsedMS: elapsedMS(since: startedAt), success: true)
-                return .sessionRequest
-            }
-            if let capturedWindowID = try? captureSummonedBuiltInTerminalWindowID(appName: TerminalHost.spaces.appName) {
-                if capturedWindowID != windowID {
-                    logTerminalPerfMetric(
-                        "built_in_terminal_focus_route", target: "session=\(sessionID)",
-                        detail: "stage=rebound_session window=\(capturedWindowID)\(requestDetail)", elapsedMS: elapsedMS(since: startedAt),
-                        success: true)
-                    return .reboundSession(windowID: capturedWindowID)
-                }
-                logTerminalPerfMetric(
-                    "built_in_terminal_focus_route", target: "session=\(sessionID)",
-                    detail: "stage=existing_window window=\(capturedWindowID)\(requestDetail)", elapsedMS: elapsedMS(since: startedAt), success: true)
-                return .existingWindow
-            }
-            if windowID != nil {
-                logTerminalPerfMetric(
-                    "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=reopened_session window=nil\(requestDetail)",
-                    elapsedMS: elapsedMS(since: startedAt), success: true)
-                return .reopenedSession(windowID: nil)
-            }
-            logTerminalPerfMetric(
-                "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=session_request\(requestDetail)",
-                elapsedMS: elapsedMS(since: startedAt), success: true)
-            return .sessionRequest
-        }
-        if let windowID, (try? yabai.focusWindow(id: windowID)) ?? false {
-            logTerminalPerfMetric(
-                "built_in_terminal_focus_route", target: "window=\(windowID)", detail: "stage=existing_window\(requestDetail)",
-                elapsedMS: elapsedMS(since: startedAt), success: true)
-            return .existingWindow
-        }
-        return .unavailable
-    }
-
-    func pulseTerminalWindowIfNeeded(windowID: Int) {
-        guard (try? windowFocusPulseEnabledProvider()) ?? SettingsKey.defaultWindowFocusPulseEnabled else { return }
-        let color = (try? windowFocusPulseColorProvider()) ?? SettingsKey.windowFocusPulseColor(from: nil)
-        terminalFocusPulseController.pulse(windowID: windowID, color: color, yabai: yabai)
+        builtInTerminalWindowFocuser(sessionID, requestID)
+        logTerminalPerfMetric(
+            "built_in_terminal_focus_route", target: "session=\(sessionID)", detail: "stage=session_request\(requestDetail)",
+            elapsedMS: elapsedMS(since: startedAt), success: true)
+        return .sessionRequest
     }
 
     func shellSingleQuoted(_ raw: String) -> String { "'\(raw.replacingOccurrences(of: "'", with: "'\\''"))'" }
@@ -225,7 +166,6 @@ extension WorkspaceOrchestrator {
             sessionID: sessionID, backend: backend, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory,
             shell: terminalShellPathOverride() ?? "/bin/zsh", command: command, createdAt: nowISO8601(), workspaceID: workspaceID, kind: kind)
 
-        let snapshot = bestEffortYabaiWindowSnapshot()
         builtInTerminalWindowOpener(sessionID, showMode)
         let waitStartedAt = currentDate()
         let sessionSummary: TerminalServiceSessionSummary
@@ -243,16 +183,10 @@ extension WorkspaceOrchestrator {
             builtInTerminalWindowCloser(sessionID)
             throw error
         }
-        let windowCaptureDeadline = Date().addingTimeInterval(2)
-        var windowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
-        while windowID == nil, Date() < windowCaptureDeadline {
-            Thread.sleep(forTimeInterval: 0.05)
-            windowID = bestEffortCaptureNewAppWindowID(snapshot: snapshot, appName: TerminalHost.spaces.appName)
-        }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         let refreshedRuntimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return SpacesTerminalSessionHandle(
-            sessionID: sessionID, childPID: (refreshedRuntimeState?.childPID ?? sessionSummary.childPID).map(Int.init), windowID: windowID,
+            sessionID: sessionID, childPID: (refreshedRuntimeState?.childPID ?? sessionSummary.childPID).map(Int.init),
             outputPath: sessionSummary.outputPath)
     }
 
@@ -294,12 +228,6 @@ extension WorkspaceOrchestrator {
             return true
         }
         return builtInSessionLaunchIsPendingBeforeOwnerAttachment(sessionID: sessionID)
-    }
-
-    func builtInTrackedWindowBelongsToAgent(_ window: WindowRecord) -> Bool {
-        guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
-        guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
-        return builtInSessionBelongsToAgent(sessionID: sessionID, workspaceID: window.workspaceID)
     }
 
     func builtInSessionIsStillLive(sessionID: String) -> Bool {
@@ -352,10 +280,6 @@ extension WorkspaceOrchestrator {
         ((try? store.runningProcesses(workspaceID: workspaceID)) ?? []).contains { ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID }
     }
 
-    func builtInSessionBelongsToAgent(sessionID: String, workspaceID: String) -> Bool {
-        ((try? store.agentWindows(workspaceID: workspaceID)) ?? []).contains { ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID }
-    }
-
     func builtInSessionBelongsToConfiguredAgent(sessionID: String, workspaceID: String) -> Bool {
         switch terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind {
         case .agent: return true
@@ -367,11 +291,6 @@ extension WorkspaceOrchestrator {
     func builtInSessionHasActiveAttachments(sessionID: String) -> Bool {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
         return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).isEmpty == false
-    }
-
-    func captureSummonedBuiltInTerminalWindowID(appName: String) throws -> Int? {
-        if let focused = try? yabai.focusedWindow(), focused.app == appName { return focused.id }
-        return try yabai.listWindows().filter { $0.app == appName }.sorted { $0.id > $1.id }.first?.id
     }
 
     func resolvedBuiltInSessionRuntimePID(for process: RunningProcessRecord) -> Int? {
@@ -513,42 +432,11 @@ extension WorkspaceOrchestrator {
         terminateBuiltInTerminalSession(builtInTerminalSessionID(for: process))
     }
 
-    func clearStaleBuiltInTerminalWindowBinding(_ agent: AgentWindowRecord) throws {
-        guard agent.provider == .spaces else { return }
-        let clearedAgent = AgentWindowRecord(
-            id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label, runtimeTargetID: agent.runtimeTargetID,
-            terminalTarget: agent.terminalTrackingID.map {
-                TerminalTargetRecord(runtimeTargetID: agent.runtimeTargetID, windowID: nil, trackingID: $0)
-            }, sessionKey: agent.sessionKey, claimedLauncherID: agent.claimedLauncherID, claimedLauncherName: agent.claimedLauncherName,
-            status: agent.status, createdAt: agent.createdAt, updatedAt: nowISO8601())
-        try store.upsertAgentWindow(clearedAgent)
-    }
-
-    func persistBuiltInTerminalWindowBinding(_ agent: AgentWindowRecord, windowID: Int) throws {
-        guard agent.provider == .spaces else { return }
-        let reboundAgent = AgentWindowRecord(
-            id: agent.id, workspaceID: agent.workspaceID, provider: agent.provider, label: agent.label, runtimeTargetID: agent.runtimeTargetID,
-            terminalTarget: agent.terminalTrackingID.map {
-                TerminalTargetRecord(runtimeTargetID: agent.runtimeTargetID, windowID: windowID, trackingID: $0)
-            }, sessionKey: agent.sessionKey, claimedLauncherID: agent.claimedLauncherID, claimedLauncherName: agent.claimedLauncherName,
-            status: agent.status, createdAt: agent.createdAt, updatedAt: nowISO8601())
-        try store.upsertAgentWindow(reboundAgent)
-    }
-
-    func clearStaleBuiltInTerminalWindowBinding(_ window: WindowRecord) throws {
-        let clearedWindow = WindowRecord(
-            id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail, targetURL: window.targetURL,
-            windowID: nil, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID, role: window.role,
-            orderIndex: window.orderIndex, lastSeenAt: nowISO8601())
-        try store.upsert(window: clearedWindow)
-    }
-
     func matchesTrackedTerminalWindow(_ window: WindowRecord, process: RunningProcessRecord) -> Bool {
         guard window.role == "terminal", window.app == process.terminalApp else { return false }
         if window.id == process.id { return true }
         if let terminalID = process.terminalNativeID, !terminalID.isEmpty, window.terminalNativeID == terminalID { return true }
         if let terminalID = process.terminalTrackingID, !terminalID.isEmpty, window.terminalTrackingID == terminalID { return true }
-        if let windowID = process.windowID, window.windowID == windowID { return true }
         return false
     }
 }

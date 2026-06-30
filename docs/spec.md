@@ -27,7 +27,7 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
 - Browser sessions are lazy bookmarks that open into dedicated Chrome windows only when focused.
   Some workspaces may carry many useful URLs, but opening all of them during launch or restart is wasteful when the user may only need a subset in a given session.
 - Focus a browser session by activating its tracked Chrome window and selecting the tab whose URL matches the session, falling back to the first tab when no match is found.
-  Matching by URL keeps focus on the intended page even when the user reorders tabs or appends new ones during normal browsing in that window. The yabai focus path selects the first tab; terminal-driven focus selects the URL-matching tab.
+  Matching by URL keeps focus on the intended page even when the user reorders tabs or appends new ones during normal browsing in that window.
 - Built-in terminal window close detaches the native window from owned runtimes.
   Closing a process or coding-agent Spaces terminal window leaves the runtime running and recoverable through focus. Closing an ad hoc Spaces terminal window stops that ad hoc session. Explicit Stop and Restart controls own process and coding-agent runtime termination.
 - Keep workspace lifecycle separate from runtime health.
@@ -87,18 +87,18 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - a coding-agent terminal hosting a configured or detected coding agent
 - an ad hoc terminal the user opens directly (for example through `New terminal`), rooted at the workspace directory
 
-## Onboarding
-- On launch, the main window should immediately show a neutral loading state while Spaces checks prerequisites and loads workspace data, so startup never presents a blank window.
-- On launch, Spaces blocks only on the cheap prerequisite checks needed for its default runtime path: yabai installed.
+## Startup
+- On launch, the main window should immediately show a neutral loading state while Spaces loads workspace data, so startup never presents a blank window.
+- Spaces focuses workspace browser sessions by scripting Google Chrome through Apple Events, which macOS gates under the Automation privacy permission ("Spaces wants to control Google Chrome"). This Automation permission is the only first-run prerequisite; there is no Accessibility requirement and no other onboarding or setup step.
+- When that permission is missing — not yet granted, or previously denied — first launch shows a blocking "Allow Spaces to control Google Chrome" setup screen before the main workspace UI. The screen offers:
+  - a Grant Access button that raises the macOS consent prompt while the permission is still undecided, and
+  - an Open System Settings button that deep-links to System Settings ▸ Privacy & Security ▸ Automation for the case where the permission was denied (macOS does not re-prompt after a denial), alongside a Recheck action.
+  - The screen polls the permission and auto-advances to the workspace UI the moment access is granted, so granting through System Settings does not require relaunching Spaces.
+- When Google Chrome is not installed, or the permission state cannot be determined, Spaces does not block and opens straight to the main UI, because there is nothing to grant. The macOS Automation prompt then appears the first time a browser session is focused.
 - Installed builds should default to one shared profile rooted at `~/.spaces/`, while repo-local development builds should default to one profile per git worktree. (Profile and environment-override mechanics live in [implementation.md](implementation.md).)
 - App launch should not stall on the user's shell startup files while resolving command locations.
-- During first-run setup, Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
+- Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
 - Workspace processes launch, stop, recover, and reopen through Spaces-owned built-in terminal sessions.
-- The slower yabai readiness step, including service-running and Accessibility validation, should be deferred until the setup flow is actually shown or another yabai-backed action needs it.
-- If a deferred yabai readiness check fails during startup, Spaces should switch into the setup flow at the yabai step instead of surfacing a raw shell error dialog.
-- If a blocking launch prerequisite fails, the main window shows a guided setup flow starting at the first failing step.
-- The setup flow should poll and recover automatically once the missing prerequisite is fixed.
-- If all prerequisites pass, the main UI should load without an extra setup window.
 - Launching a second app instance for the same profile should fail immediately and identify the existing owner process.
 - Launching a different profile while another Spaces instance already owns desktop-global control should still load profile data and windows, but it should start in passive mode with local in-app shortcuts only and a compact status that global shortcuts are unavailable.
 
@@ -152,7 +152,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - `spaces terminal` sessions should remain owned by a per-user `spacesd` daemon so they can survive `SpacesApp` quit and reopen against the same live shell session as long as the service remains alive and the session lifetime is still valid.
 - `spaces terminal command` should create persistent service-owned sessions so commands started before a native Spaces window attaches remain discoverable through `terminal list` and controllable through the terminal CLI.
 - The spacesd daemon should start the first-party Device API listener on launch, keep a stable endpoint while it is running, and advertise nearby pairing metadata with Bonjour when the platform supports it.
-- The Mac user settings open as a floating dialog window with a two-panel layout: a header bar with the Settings title and a close control, a left navigation list of General, Shortcuts, Devices, and MCP sections, and the selected section's content in the right panel. The dialog floats over the main window, leaving the current sidebar selection and detail pane untouched. The General section holds the preferred editor and window focus pulse controls, and the Shortcuts section holds the keyboard shortcut editor. The preferred editor picker lists whichever of VS Code, Devin Desktop, and Zed are installed, and notes when a previously saved editor is no longer installed. The MCP section shows per-client `spaces mcp` configuration in tabs for Claude Code and Codex, using the resolved CLI path; the configuration is a read-only block the user selects to copy.
+- The Mac user settings open as a floating dialog window with a two-panel layout: a header bar with the Settings title and a close control, a left navigation list of General, Shortcuts, Devices, and MCP sections, and the selected section's content in the right panel. The dialog floats over the main window, leaving the current sidebar selection and detail pane untouched. The General section holds the preferred editor control, and the Shortcuts section holds the keyboard shortcut editor. The preferred editor picker lists whichever of VS Code, Devin Desktop, and Zed are installed, and notes when a previously saved editor is no longer installed. The MCP section shows per-client `spaces mcp` configuration in tabs for Claude Code and Codex, using the resolved CLI path; the configuration is a read-only block the user selects to copy.
 - The Mac sidebar should expose a Devices action next to user settings; it opens the settings dialog on the Devices section. The Devices section lists connected daemons, includes the local Mac daemon when it is available, lets the user choose the active daemon for the home surface, offers a per-device QR pairing window for iPhone and iPad clients, and includes an SSH target form for connecting this Mac to a remote daemon. If the local daemon is unavailable, the section shows the failure inline (instead of a system error) and offers a Restart Local Daemon control that relaunches it and re-checks status. Because the daemon's Device API can be down while its terminals are still live, the control first warns that running terminals, processes, and coding agents will stop and asks the user to confirm whenever any live session exists; it skips the prompt when nothing is running. Long failure messages wrap within the window rather than widening it.
 - A device's default name is its machine name. Connected devices can be renamed from either client: right-click a connected device (long-press on iOS) and choose Rename to edit the name in place, then press Return to save or Esc to cancel. Removing a connected device asks for confirmation before disconnecting and forgetting its pairing.
 - Built-in process windows should keep a compact metadata header instead of expanding to fit full exported environment wrappers.
@@ -180,7 +180,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The iOS terminal viewport should use the available terminal width and size to the visible render area above the software keyboard and accessory toolbar so bottom rows and the prompt remain visible with long terminal content.
 - iOS terminal scrollback should follow touch movement proportionally, with small swipes producing small precise scroll changes instead of discrete one-row jumps.
 - iOS terminal taps should open Ghostty-detected links before applying tap-to-focus behavior. Non-media web links open externally. Image and video links, including readable Mac file paths exposed by the paired bridge and direct HTTPS media URLs, preview inside Spaces with an `Open In` action.
-- Ad hoc built-in terminal windows opened from Spaces, including the `New terminal` shortcut path, should remain listed in the workspace detail view even before their native yabai window ID has been backfilled.
+- Ad hoc built-in terminal windows opened from Spaces, including the `New terminal` shortcut path, should remain listed in the workspace detail view even before their native window ID has been backfilled.
 - Opening a built-in `Spaces` terminal from the app should not block the sidebar window while the session backend becomes ready; session bootstrap latency may still exist, but the workspace UI should stay interactive during that wait.
 - Opening a local built-in `Spaces` terminal window from a reserved workspace-terminal session should present immediately with a preparing state while the shell and live renderer become available. Input and terminal controls remain disabled until the session publishes control and subscription availability.
 - When Spaces focuses an already-open built-in process window from the normal workspace flow, the owner attachment should still belong to that client and remain ready for input without restarting the session.
@@ -243,13 +243,11 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
   - `Stopped` workspaces can still have stale tracked runtime leftovers that need cleanup or recovery
 
 ## Window Management and Focus
-- Workspaces map to captured window sets managed through yabai.
+- Workspaces map to a tracked set of dedicated windows.
 - Spaces should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
 - When focusing an already-open browser session, Spaces should activate Chrome and select the tab whose URL matches the session, falling back to the first tab in that tracked window when no matching tab is found.
 - Terminal focus should land on the intended dedicated process or agent session.
-- Focusing a tracked external window should flash a short semitransparent overlay on top of the target window.
-- The focus-pulse overlay color should be configured from the GUI settings panel.
 - After the GUI focuses or opens an external window, Spaces should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Spaces should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.
 - If tracked windows become stale during next/previous window cycling, Spaces should skip them and continue to the next live target.

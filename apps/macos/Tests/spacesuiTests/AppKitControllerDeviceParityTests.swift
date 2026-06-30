@@ -208,7 +208,7 @@ import workspacecore
         let runningProcesses = [
             RunningProcessRecord(
                 id: "running-web", workspaceID: "workspace-1", templateID: "process-web", templateName: "web", command: "npm run dev",
-                terminalApp: "Spaces", windowID: nil, terminalTrackingID: "session-web", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalApp: "Spaces", terminalTrackingID: "session-web", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil)
         ]
 

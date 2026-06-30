@@ -38,7 +38,6 @@ import workspacecore
     var settingsSectionRowViews: [SettingsSection: SettingsSidebarRowView] = [:]
     private weak var mcpConfigTextView: NSTextView?
     private weak var mcpConfigHintLabel: NSTextField?
-    private weak var pulseColorWell: NSColorWell?
 
     /// Opens user settings as a floating dialog on the given section. The dialog floats over the
     /// main window, so the current sidebar selection and detail pane are left untouched.
@@ -55,7 +54,6 @@ import workspacecore
     func handleSettingsWindowClosed() {
         settingsSectionContentContainer = nil
         settingsSectionRowViews.removeAll()
-        pulseColorWell = nil
     }
 
     private func presentSettingsWindow() {
@@ -305,39 +303,7 @@ import workspacecore
         }
         let editorCard = host.formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
 
-        let pulseEnabledCheckbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(windowPulseEnabledChanged(_:)))
-        pulseEnabledCheckbox.state = host.clientWindowFocusPulseEnabled() ? .on : .off
-
-        let (pulseR, pulseG, pulseB) = host.clientWindowFocusPulseColor()
-        let colorWell = NSColorWell()
-        colorWell.color = NSColor(red: CGFloat(pulseR) / 255, green: CGFloat(pulseG) / 255, blue: CGFloat(pulseB) / 255, alpha: 1)
-        colorWell.translatesAutoresizingMaskIntoConstraints = false
-        colorWell.target = self
-        colorWell.action = #selector(windowPulseColorChanged(_:))
-        colorWell.widthAnchor.constraint(equalToConstant: 36).isActive = true
-        colorWell.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        pulseColorWell = colorWell
-
-        let resetColorButton = host.actionButton(
-            title: "Reset", symbol: nil, tooltip: "Reset to default color (\(SettingsKey.defaultWindowFocusPulseColor))",
-            action: #selector(resetWindowPulseColor(_:)), primary: false)
-        resetColorButton.target = self
-        let colorControlRow = NSStackView()
-        colorControlRow.orientation = .horizontal
-        colorControlRow.alignment = .centerY
-        colorControlRow.spacing = 8
-        colorControlRow.addArrangedSubview(colorWell)
-        colorControlRow.addArrangedSubview(resetColorButton)
-
-        let pulseCard = host.formSectionCard(
-            icon: "eye", title: "Window focus pulse", subtitle: "Briefly overlays focused terminal windows when focus moves to them",
-            contentViews: [
-                host.settingsSettingRow(
-                    name: "Enable focus pulse", hint: "Tints the border so the focused window is obvious", control: pulseEnabledCheckbox),
-                host.settingsSettingRow(name: "Pulse color", hint: "Default \(SettingsKey.defaultWindowFocusPulseColor)", control: colorControlRow),
-            ])
-
-        return [editorCard, pulseCard]
+        return [editorCard]
     }
 
     private func shortcutsSettingsCards() -> [NSView] {
@@ -397,25 +363,4 @@ import workspacecore
         } catch { host.showError(error) }
     }
 
-    @objc private func windowPulseEnabledChanged(_ sender: NSButton) {
-        do { try host.clientDatabase().setSetting(key: SettingsKey.windowFocusPulseEnabled, value: sender.state == .on ? "1" : "0") } catch {
-            host.showError(error)
-        }
-    }
-
-    @objc private func resetWindowPulseColor(_ sender: NSButton) {
-        let color = SettingsKey.windowFocusPulseColor(from: nil)
-        do {
-            try host.clientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: SettingsKey.defaultWindowFocusPulseColor)
-            pulseColorWell?.color = NSColor(red: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: 1)
-        } catch { host.showError(error) }
-    }
-
-    @objc private func windowPulseColorChanged(_ sender: NSColorWell) {
-        guard let rgb = sender.color.usingColorSpace(.deviceRGB) else { return }
-        let r = Int((rgb.redComponent * 255).rounded())
-        let g = Int((rgb.greenComponent * 255).rounded())
-        let b = Int((rgb.blueComponent * 255).rounded())
-        do { try host.clientDatabase().setSetting(key: SettingsKey.windowFocusPulseColor, value: "\(r),\(g),\(b)") } catch { host.showError(error) }
-    }
 }
