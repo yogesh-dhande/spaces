@@ -42,6 +42,47 @@ import workspacecore
         #expect(!AppKitController.SidebarDeviceLoadState.loading.isOffline)
     }
 
+    @Test func remoteOverviewSubscriptionsRequireLoadedCompatibleOverview() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+
+        let compatible = AppKitController.DeviceSection(
+            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, overview: overview, compatibility: .compatible)
+        #expect(AppKitController.remoteOverviewSubscriptionIsEligible(section: compatible))
+        #expect(AppKitController.remoteOverviewSubscriptionIsDesired(section: compatible, isReconnectCandidate: false))
+
+        let noInlineStatus = AppKitController.DeviceSection(
+            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, overview: overview)
+        #expect(AppKitController.remoteOverviewSubscriptionIsEligible(section: noInlineStatus))
+        #expect(AppKitController.remoteOverviewSubscriptionIsDesired(section: noInlineStatus, isReconnectCandidate: false))
+
+        let incompatible = AppKitController.DeviceSection(
+            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, compatibility: .daemonTooOld)
+        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: incompatible))
+        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: incompatible, isReconnectCandidate: false))
+
+        let incompatibleWithOverview = AppKitController.DeviceSection(
+            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, overview: overview,
+            compatibility: .clientTooOld)
+        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: incompatibleWithOverview))
+        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: incompatibleWithOverview, isReconnectCandidate: true))
+
+        let loading = AppKitController.DeviceSection(
+            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loading, device: nil, overview: overview, compatibility: .compatible
+        )
+        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: loading))
+        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: loading, isReconnectCandidate: true))
+
+        let offlineRetryCandidate = AppKitController.DeviceSection(
+            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .offline("The connection to this device closed."), device: nil)
+        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: offlineRetryCandidate, isReconnectCandidate: false))
+        #expect(AppKitController.remoteOverviewSubscriptionIsDesired(section: offlineRetryCandidate, isReconnectCandidate: true))
+
+        let local = AppKitController.DeviceSection(
+            deviceID: "local", deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, overview: overview, compatibility: .compatible)
+        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: local))
+        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: local, isReconnectCandidate: true))
+    }
+
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
         // Known reachability failures a relaunch can resolve — the daemon answered that its Device API is
         // not running, or its control endpoint was unreachable (daemon down) — offer the action.
@@ -297,29 +338,22 @@ import workspacecore
             projects: [ProjectSummary(id: "proj-r", name: "R", dir: "/r", isGitRepo: true, defaultBranch: "main", deviceID: "remote")],
             workspacesByProject: [
                 "proj-r": [
-                    WorkspaceSummary(id: "ws-r", branch: "feature", dir: "/r/feature", isRunning: true, isArchived: false, isDefault: false, deviceID: "remote")
+                    WorkspaceSummary(
+                        id: "ws-r", branch: "feature", dir: "/r/feature", isRunning: true, isArchived: false, isDefault: false, deviceID: "remote")
                 ]
             ])
 
         // A workspace selection under the device is detected.
-        #expect(
-            AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: "ws-r", selectedProjectID: "proj-r", section: section))
+        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: "ws-r", selectedProjectID: "proj-r", section: section))
         // A selection on another device is left alone.
         #expect(
             !AppKitController.sidebarSelectionBelongsToDeviceSection(
                 selectedWorkspaceID: "ws-local", selectedProjectID: "proj-local", section: section))
         // A project (header) selection with no workspace selected is detected by project id.
-        #expect(
-            AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: nil, selectedProjectID: "proj-r", section: section))
-        #expect(
-            !AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: nil, selectedProjectID: "proj-local", section: section))
+        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-r", section: section))
+        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-local", section: section))
         // No selection never triggers reconciliation.
-        #expect(
-            !AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
+        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
     }
 
     @Test func waitingAgentAlertResolvesToFocusingItsSessionNotANewLaunch() {
@@ -332,7 +366,9 @@ import workspacecore
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
                     dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
-                    config: SpacesDeviceWorkspaceConfig(agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")]),
+                    config: SpacesDeviceWorkspaceConfig(agentLaunchers: [
+                        SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
+                    ]),
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "row-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "launcher-codex",
@@ -365,9 +401,10 @@ import workspacecore
     @Test func deviceTerminalOpenRequestPreservesStartingSessionMetadata() {
         let session = SpacesDeviceTerminalSessionSummary(
             id: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: nil, state: .starting,
-            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
-            projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z",
-            isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession)
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1",
+            workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:01Z", isControlAvailable: false, isSubscriptionAvailable: false,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession)
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [session])
 
         let request = AppKitController.deviceTerminalOpenRequest(workspaceID: "workspace-fallback", sessionID: "session-starting", overview: overview)
@@ -481,8 +518,9 @@ import workspacecore
     {
         SpacesDeviceTerminalSessionSummary(
             id: id, title: title, workingDirectory: "/device/project-feature", shell: "/bin/zsh", command: nil, state: .starting,
-            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1", workspaceTitle: "Feature",
-            projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z",
-            isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: rowKind)
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 321, childPID: nil, workspaceID: "workspace-1",
+            workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z",
+            updatedAt: "2026-06-22T12:00:01Z", isControlAvailable: false, isSubscriptionAvailable: false,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: rowKind)
     }
 }

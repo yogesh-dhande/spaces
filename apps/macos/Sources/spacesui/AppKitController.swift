@@ -354,6 +354,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let kind: Kind
         let workspaceID: String
+        let deviceID: String
         let sessionID: String
         let title: String
         let processID: String?
@@ -1149,9 +1150,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The overview session summary for a session and the device that owns it,
     /// when the session is currently surfaced in a loaded device overview.
-    private func terminalSessionSummaryMatch(sessionID: String)
-        -> (device: SpacesPairedDeviceRecord, summary: SpacesDeviceTerminalSessionSummary)?
-    {
+    private func terminalSessionSummaryMatch(sessionID: String) -> (device: SpacesPairedDeviceRecord, summary: SpacesDeviceTerminalSessionSummary)? {
         for section in deviceSections {
             guard let summary = section.overview?.sessions.first(where: { $0.id == sessionID }) else { continue }
             guard let device = deviceForMutation(deviceID: section.deviceID) else { continue }
@@ -1197,9 +1196,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// carries only title/cwd/runtime — this bootstraps the local device when it is unloaded
     /// and fetches a fresh overview to read the session's persisted shell/command/title,
     /// matching the launch configuration the old DB-backed path read directly.
-    private func resolveSessionSummaryMatch(sessionID: String)
-        -> (device: SpacesPairedDeviceRecord, summary: SpacesDeviceTerminalSessionSummary)?
-    {
+    private func resolveSessionSummaryMatch(sessionID: String) -> (device: SpacesPairedDeviceRecord, summary: SpacesDeviceTerminalSessionSummary)? {
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         if localPairedDevice == nil {
             guard let device = try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) else { return nil }
@@ -1208,8 +1205,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         guard let device = terminalSessionOwningDevice(sessionID: sessionID) else { return nil }
         guard
-            let summary = try? SpacesDeviceClient.resolveOverview(device: device, clientApp: clientApp)
-                .overview?.overview.sessions.first(where: { $0.id == sessionID })
+            let summary = try? SpacesDeviceClient.resolveOverview(device: device, clientApp: clientApp).overview?.overview.sessions.first(where: {
+                $0.id == sessionID
+            })
         else { return nil }
         return (device, summary)
     }
@@ -1238,9 +1236,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard
             let launchConfiguration = seedLaunchConfiguration
                 ?? summaryMatch.map({ Self.terminalSessionLaunchConfiguration(sessionID: sessionID, summary: $0.summary) })
-        else {
-            throw Self.terminalSessionNotFoundError()
-        }
+        else { throw Self.terminalSessionNotFoundError() }
         let initialRuntimeState =
             seedInitialRuntimeState ?? summaryMatch.map { Self.terminalSessionRuntimeState(sessionID: sessionID, summary: $0.summary) }
         return try DeviceTerminalSessionStateModel(
@@ -1250,9 +1246,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @discardableResult private func openTerminalSessionWindow(
-        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil,
-        seedDevice: SpacesPairedDeviceRecord? = nil, seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil,
-        seedInitialRuntimeState: TerminalSessionRuntimeState? = nil
+        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, seedDevice: SpacesPairedDeviceRecord? = nil,
+        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil
     ) -> Int? {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
@@ -1290,7 +1285,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let detachClientAction: @Sendable (String) throws -> Void = { clientID in
                     if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
                     let response = try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender, applyState: applyControlState)
+                        sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender,
+                        applyState: applyControlState)
                     guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
                 }
                 let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse = { text, appendNewline in
@@ -1307,17 +1303,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
                     }
                     return try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID), requestSender: requestSender, applyState: applyControlState)
+                        sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID),
+                        requestSender: requestSender, applyState: applyControlState)
                 }
                 let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                     try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender, applyState: applyControlState)
+                        sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
+                        applyState: applyControlState)
                 }
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: mode, performInitialRefresh: false,
-                    sendInputAction: sendInputAction,
-                    sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-                    detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                    sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction,
+                    attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                     onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
@@ -1507,7 +1504,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         let startedAt = Date()
         let workspaceLookupStartedAt = Date()
-        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID) else {
+        guard let workspaceMatch = clientWorkspaceMatch(forTerminalSession: sessionID) else {
             let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID) != nil
             logTerminalRuntimeControlsRefresh(
                 sessionID: sessionID, startedAt: startedAt, cause: cause, requestID: requestID,
@@ -1515,6 +1512,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 runtimeStateMS: 0, descriptorBuildMS: 0, descriptorChanged: descriptorChanged, success: false)
             return nil
         }
+        let workspaceID = workspaceMatch.workspaceID
         let workspaceLookupMS = windowShortcutElapsedMS(since: workspaceLookupStartedAt)
 
         // The runtime-controls descriptor is built from the workspace's overview rows
@@ -1537,8 +1535,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let runtimeStateMS = windowShortcutElapsedMS(since: runtimeStateStartedAt)
         let descriptorBuildStartedAt = Date()
         let descriptor = Self.terminalRuntimeControlDescriptor(
-            sessionID: sessionID, workspaceID: workspaceID, settings: settings, runningProcesses: runningProcesses, agentWindows: agentWindows,
-            trackedWindows: trackedWindows, isSessionRunning: isSessionRunning)
+            sessionID: sessionID, workspaceID: workspaceID, deviceID: workspaceMatch.deviceID, settings: settings, runningProcesses: runningProcesses,
+            agentWindows: agentWindows, trackedWindows: trackedWindows, isSessionRunning: isSessionRunning)
         let descriptorBuildMS = windowShortcutElapsedMS(since: descriptorBuildStartedAt)
         let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID[sessionID] != descriptor
         if let descriptor {
@@ -1604,7 +1602,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     static func terminalRuntimeControlDescriptor(
-        sessionID: String, workspaceID: String, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
+        sessionID: String, workspaceID: String, deviceID: String, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
         agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord], isSessionRunning: Bool
     ) -> TerminalRuntimeControlDescriptor? {
         guard let normalizedSessionID = normalizedTerminalSessionID(sessionID) else { return nil }
@@ -1614,7 +1612,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let processKey = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName)
             let isRunning = process.status != .exited && isSessionRunning
             return TerminalRuntimeControlDescriptor(
-                kind: .process, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: process.id,
+                kind: .process, workspaceID: workspaceID, deviceID: deviceID, sessionID: normalizedSessionID, title: title, processID: process.id,
                 processTemplateID: template?.id, processKey: processKey, agentID: nil, agentLauncherID: nil, agentLauncherName: nil,
                 canRun: template != nil && !isRunning, canStop: true, canRestart: template != nil)
         }
@@ -1625,8 +1623,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let title = trimmedNonEmpty(launcher?.name) ?? codingAgentDisplayName(label: agent.label, runtimeWindowTitle: windowTitle)
             let isRunning = agent.status != .done && isSessionRunning
             return TerminalRuntimeControlDescriptor(
-                kind: .codingAgent, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
-                processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
+                kind: .codingAgent, workspaceID: workspaceID, deviceID: deviceID, sessionID: normalizedSessionID, title: title, processID: nil,
+                processTemplateID: nil, processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
                 canRun: launcher != nil && !isRunning, canStop: true, canRestart: launcher != nil)
         }
 
@@ -1635,8 +1633,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail)
             } ?? "Terminal"
         return TerminalRuntimeControlDescriptor(
-            kind: .workspaceTerminal, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
-            processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true, canRestart: false)
+            kind: .workspaceTerminal, workspaceID: workspaceID, deviceID: deviceID, sessionID: normalizedSessionID, title: title, processID: nil,
+            processTemplateID: nil, processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true,
+            canRestart: false)
     }
 
     private static func configuredProcessTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
@@ -1707,7 +1706,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func runTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForDaemonStateMutation() {
+        if let device = deviceForMutation(deviceID: descriptor.deviceID) {
             performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_run", descriptor: descriptor, device: device) { device in
                 switch descriptor.kind {
                 case .process:
@@ -1733,7 +1732,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func stopTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForDaemonStateMutation() {
+        if let device = deviceForMutation(deviceID: descriptor.deviceID) {
             performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_stop", descriptor: descriptor, device: device) { device in
                 switch descriptor.kind {
                 case .process:
@@ -1758,7 +1757,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func restartTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForDaemonStateMutation() {
+        if let device = deviceForMutation(deviceID: descriptor.deviceID) {
             performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_restart", descriptor: descriptor, device: device) { device in
                 switch descriptor.kind {
                 case .process:
@@ -2081,19 +2080,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var compatibility: SpacesWireCompatibility?
     }
 
+    /// A remote overview stream is valid only after the compatibility-aware pull path has loaded a
+    /// normal overview. Reachable-but-incompatible devices intentionally have no overview so their
+    /// compatibility block stays visible instead of being replaced by an unsupported stream failure.
+    nonisolated static func remoteOverviewSubscriptionIsEligible(section: DeviceSection) -> Bool {
+        guard !section.isLocal, section.loadState == .loaded, section.overview != nil else { return false }
+        return section.compatibility?.isCompatible != false
+    }
+
+    /// Normal subscription opens require a loaded compatible overview. Offline retry candidates are
+    /// different: a failed pull or dropped stream has no overview, but the stream sends a fresh overview
+    /// immediately on connect and is the recovery path.
+    nonisolated static func remoteOverviewSubscriptionIsDesired(section: DeviceSection, isReconnectCandidate: Bool) -> Bool {
+        if remoteOverviewSubscriptionIsEligible(section: section) { return true }
+        guard isReconnectCandidate, !section.isLocal, section.loadState.isOffline else { return false }
+        return section.compatibility?.isCompatible != false
+    }
+
     /// Whether the current sidebar selection points at a workspace or project owned by `section`. Used
     /// when a device transitions to offline: its rows are about to drop out of the merged sidebar data,
     /// so a selection under it leaves a stale detail pane that must be reconciled. A selected workspace's
     /// project is always under the same device, so the workspace check alone suffices when one is selected.
-    nonisolated static func sidebarSelectionBelongsToDeviceSection(
-        selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection
-    ) -> Bool {
-        if let selectedWorkspaceID {
-            return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } }
-        }
-        if let selectedProjectID {
-            return section.projects.contains { $0.id == selectedProjectID }
-        }
+    nonisolated static func sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection)
+        -> Bool
+    {
+        if let selectedWorkspaceID { return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } } }
+        if let selectedProjectID { return section.projects.contains { $0.id == selectedProjectID } }
         return false
     }
 
@@ -2427,8 +2439,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             AgentWindowRecord(
                                 id: agent.agentID ?? agent.id, workspaceID: workspace.id, provider: .spaces, label: agent.name,
                                 terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: agent.launcherID,
-                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState),
-                                createdAt: agent.updatedAt ?? "", updatedAt: agent.updatedAt ?? ""))))
+                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
+                                updatedAt: agent.updatedAt ?? ""))))
             }
             guard !items.isEmpty else { continue }
             items.sort {
@@ -2816,8 +2828,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         init(
             workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind, shell: String? = nil,
-            command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil, createdAt: String? = nil,
-            updatedAt: String? = nil
+            command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
+            createdAt: String? = nil, updatedAt: String? = nil
         ) {
             self.workspaceID = workspaceID
             self.sessionID = sessionID
@@ -9513,16 +9525,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Resolves the workspace owning a terminal session from the overview (sessions and
     /// process/agent/terminal rows all carry both the session id and workspace id),
-    /// replacing the orchestrator's daemon-DB lookup. Searches every paired device's
-    /// overview so mirrored remote sessions resolve too.
-    func clientWorkspaceID(forTerminalSession sessionID: String) -> String? {
-        for overview in deviceSections.compactMap({ $0.overview }) {
-            if let workspaceID = overview.sessions.first(where: { $0.id == sessionID })?.workspaceID { return workspaceID }
+    /// replacing the orchestrator's daemon-DB lookup. The private match also carries
+    /// the owning device so terminal-window actions do not depend on sidebar selection.
+    func clientWorkspaceID(forTerminalSession sessionID: String) -> String? { clientWorkspaceMatch(forTerminalSession: sessionID)?.workspaceID }
+
+    private func clientWorkspaceMatch(forTerminalSession sessionID: String) -> (workspaceID: String, deviceID: String)? {
+        for section in deviceSections {
+            guard let overview = section.overview else { continue }
+            if let workspaceID = overview.sessions.first(where: { $0.id == sessionID })?.workspaceID { return (workspaceID, section.deviceID) }
             for workspace in overview.workspaces
             where workspace.processRows.contains(where: { $0.sessionID == sessionID })
                 || workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID })
                 || workspace.terminalRows.contains(where: { $0.sessionID == sessionID })
-            { return workspace.id }
+            { return (workspace.id, section.deviceID) }
         }
         return nil
     }

@@ -19,8 +19,7 @@ import workspacecore
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload? { try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) }
     func refreshState() {}
     func startStateStream(
-        onUpdate _: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect _: @escaping @MainActor ((any Error)?) -> Void
+        onUpdate _: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect _: @escaping @MainActor ((any Error)?) -> Void
     ) {}
 }
 
@@ -29,8 +28,7 @@ import workspacecore
 func persistenceBackedAttachAction(_ paths: TerminalSessionPaths) -> @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void {
     { client, mode in
         let sessionID =
-            (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths))?.sessionID
-            ?? (paths.rootDirectory as NSString).lastPathComponent
+            (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths))?.sessionID ?? (paths.rootDirectory as NSString).lastPathComponent
         try TerminalSessionPersistence.attachClient(
             sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: ISO8601DateFormatter().string(from: Date()))
     }
@@ -47,7 +45,6 @@ func persistenceBackedLoadWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
 func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void {
     { frame, mode in try TerminalSessionPersistence.writeWindowFrame(frame, mode: mode, paths: paths) }
 }
-
 
 // Some tests resolve the active profile through the process-global SPACES_DB_PATH, so this suite pins an
 // isolated database root for its lifetime and runs serialized to keep that override race-free.
@@ -100,10 +97,11 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             status: .exited, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: "2026-06-05T00:00:00Z")
 
         let descriptor = AppKitController.terminalRuntimeControlDescriptor(
-            sessionID: "session-frontend", workspaceID: "workspace-1", settings: WorkspaceSettings(processes: [template]),
+            sessionID: "session-frontend", workspaceID: "workspace-1", deviceID: "device-a", settings: WorkspaceSettings(processes: [template]),
             runningProcesses: [process], agentWindows: [], trackedWindows: [], isSessionRunning: false)
 
         #expect(descriptor?.kind == .process)
+        #expect(descriptor?.deviceID == "device-a")
         #expect(descriptor?.title == "frontend")
         #expect(descriptor?.processTemplateID == "template-frontend")
         #expect(descriptor?.processKey == "frontend")
@@ -120,10 +118,11 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             status: .done, createdAt: "2026-06-05T00:00:00Z", updatedAt: "2026-06-05T00:00:00Z")
 
         let descriptor = AppKitController.terminalRuntimeControlDescriptor(
-            sessionID: "session-codex", workspaceID: "workspace-1", settings: WorkspaceSettings(agentLaunchers: [launcher]), runningProcesses: [],
-            agentWindows: [agent], trackedWindows: [], isSessionRunning: false)
+            sessionID: "session-codex", workspaceID: "workspace-1", deviceID: "device-a", settings: WorkspaceSettings(agentLaunchers: [launcher]),
+            runningProcesses: [], agentWindows: [agent], trackedWindows: [], isSessionRunning: false)
 
         #expect(descriptor?.kind == .codingAgent)
+        #expect(descriptor?.deviceID == "device-a")
         #expect(descriptor?.title == "Codex Renamed")
         #expect(descriptor?.agentLauncherID == "launcher-codex")
         #expect(descriptor?.canRun == true)
@@ -139,10 +138,11 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             claimedLauncherName: launcher.name, status: .done, createdAt: "2026-06-05T00:00:00Z", updatedAt: "2026-06-05T00:00:00Z")
 
         let descriptor = AppKitController.terminalRuntimeControlDescriptor(
-            sessionID: "session-codex", workspaceID: "workspace-1", settings: WorkspaceSettings(agentLaunchers: [launcher]), runningProcesses: [],
-            agentWindows: [agent], trackedWindows: [], isSessionRunning: false)
+            sessionID: "session-codex", workspaceID: "workspace-1", deviceID: "device-a", settings: WorkspaceSettings(agentLaunchers: [launcher]),
+            runningProcesses: [], agentWindows: [agent], trackedWindows: [], isSessionRunning: false)
 
         #expect(descriptor?.kind == .codingAgent)
+        #expect(descriptor?.deviceID == "device-a")
         #expect(descriptor?.canRun == false)
         #expect(descriptor?.canStop == true)
         #expect(descriptor?.canRestart == false)
@@ -240,7 +240,13 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let controller = TerminalSessionWindowController(sessionID: "session-shortcuts", paths: .init(rootDirectory: root.path), stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)), attachClientAction: persistenceBackedAttachAction(.init(rootDirectory: root.path)), detachClientAction: persistenceBackedDetachAction(.init(rootDirectory: root.path)), loadWindowFrameAction: persistenceBackedLoadWindowFrame(.init(rootDirectory: root.path)), saveWindowFrameAction: persistenceBackedSaveWindowFrame(.init(rootDirectory: root.path)))
+        let controller = TerminalSessionWindowController(
+            sessionID: "session-shortcuts", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: persistenceBackedAttachAction(.init(rootDirectory: root.path)),
+            detachClientAction: persistenceBackedDetachAction(.init(rootDirectory: root.path)),
+            loadWindowFrameAction: persistenceBackedLoadWindowFrame(.init(rootDirectory: root.path)),
+            saveWindowFrameAction: persistenceBackedSaveWindowFrame(.init(rootDirectory: root.path)))
 
         #expect(AppKitController.shouldBypassLocalShortcutMonitor(for: controller.window))
         #expect(!AppKitController.shouldBypassLocalShortcutMonitor(for: NSWindow()))
@@ -349,7 +355,9 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             paths: paths)
 
         let controller = TerminalSessionWindowController(
-            sessionID: "session-1", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths), preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in }, loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
+            sessionID: "session-1", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in },
+            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
 
         let selected = AppKitController.liveTerminalSessionWindowController(controller)
 
@@ -372,7 +380,9 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             paths: paths)
 
         let controller = TerminalSessionWindowController(
-            sessionID: "session-2", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths), preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in }, loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
+            sessionID: "session-2", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in },
+            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
         controller.closeForSessionTermination()
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
 
@@ -397,7 +407,9 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             paths: paths)
 
         let controller = TerminalSessionWindowController(
-            sessionID: "session-3", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths), preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in }, loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
+            sessionID: "session-3", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in },
+            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
 
         let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-3")
 
@@ -421,7 +433,9 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             paths: paths)
 
         let controller = TerminalSessionWindowController(
-            sessionID: "session-4", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths), preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in }, loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
+            sessionID: "session-4", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in },
+            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
         controller.closeForSessionTermination()
         controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
 
@@ -456,7 +470,9 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
             paths: paths)
 
         let controller = TerminalSessionWindowController(
-            sessionID: "session-5", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths), preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in }, loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
+            sessionID: "session-5", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+            preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in },
+            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
 
         let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-5")
 

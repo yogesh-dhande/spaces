@@ -866,6 +866,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
             id: sessionID,
             title: row.title,
             workingDirectory: row.workingDirectory,
+            shell: "",
+            command: nil,
             state: terminalSessionState(for: row.runState),
             backend: .ghosttyEmbedded,
             lifetimePolicy: .persistent,

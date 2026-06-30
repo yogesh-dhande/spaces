@@ -405,6 +405,8 @@
                 id: id,
                 title: "api",
                 workingDirectory: "/repo/feature",
+                shell: "/bin/zsh",
+                command: nil,
                 state: state,
                 backend: .ghosttyEmbedded,
                 lifetimePolicy: .persistent,
