@@ -268,6 +268,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.performTerminalSessionWindowShortcut, #selector(handlePerformTerminalSessionWindowShortcutIPC(_:))),
         (IPCNotification.focusTerminalSessionWindow, #selector(handleFocusTerminalSessionWindowIPC(_:))),
         (IPCNotification.databaseDidChange, #selector(handleDatabaseDidChangeIPC(_:))),
+        (TerminalOverviewSignal.name, #selector(handleTerminalOverviewDidChangeIPC(_:))),
         (IPCNotification.deliverUserNotification, #selector(handleDeliverUserNotificationIPC(_:))),
     ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
@@ -571,6 +572,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let self, self.didStartBackgroundServices, self.matchesProfileIPCObject(object) else { return }
             self.sidebar.handleDatabaseDidChange()
         }
+    }
+
+    @objc private nonisolated func handleTerminalOverviewDidChangeIPC(_ notification: Notification) {
+        let object = notification.object as? String
+        Task { @MainActor [weak self, object] in
+            guard let self else { return }
+            guard
+                Self.shouldReloadSidebarForTerminalOverviewSignal(
+                    didStartBackgroundServices: self.didStartBackgroundServices, notificationObject: object,
+                    profileObject: self.ipcNotificationObject)
+            else { return }
+            self.sidebar.handleLocalTerminalOverviewDidChange()
+        }
+    }
+
+    nonisolated static func shouldReloadSidebarForTerminalOverviewSignal(
+        didStartBackgroundServices: Bool, notificationObject: String?, profileObject: String
+    ) -> Bool {
+        didStartBackgroundServices && notificationObject == profileObject
     }
 
     @objc private nonisolated func handleShowMainWindowIPC(_ notification: Notification) {
@@ -1963,10 +1983,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Flushes sidebar reloads that were deferred because the user was mid-edit.
-    /// Reload triggers (the daemon's `databaseDidChange`) are one-shot, so this
-    /// runs at natural idle points (forms closing, app re-activation) in place of
-    /// the old poll re-check.
-    func flushDeferredSidebarReloadsIfNeeded() { sidebar.flushPendingDatabaseReloadIfNeeded() }
+    /// Reload triggers are one-shot, so this runs at natural idle points (forms
+    /// closing or app re-activation) in place of the old poll re-check.
+    func flushDeferredSidebarReloadsIfNeeded() { sidebar.flushPendingSidebarSignalReloadIfNeeded() }
 
     func canReloadAfterBackgroundWorkspaceRefresh() -> Bool {
         !projectHasUnsavedChanges && activeAddWorkspaceFormTag == nil && activeAddProjectFormTag == nil && !isTextInputFocused()

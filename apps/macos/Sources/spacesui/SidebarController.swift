@@ -24,6 +24,26 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 }
 
+private enum RemoteOverviewDisconnectReason {
+    case error(any Error)
+    case streamClosed
+
+    init(_ error: (any Error)?) {
+        if let error {
+            self = .error(error)
+        } else {
+            self = .streamClosed
+        }
+    }
+
+    var loadError: any Error {
+        switch self {
+        case .error(let error): return error
+        case .streamClosed: return RemoteOverviewDisconnectError.streamClosed
+        }
+    }
+}
+
 /// Owns the left-hand project/workspace/device outline tree (an `NSOutlineView`) and
 /// its state, plus the sidebar's data load/merge pipeline and the Alerts row chrome.
 /// `AppKitController` holds a single instance and delegates sidebar interactions to it.
@@ -45,6 +65,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     typealias AlertsGroup = AppKitController.AlertsGroup
     typealias SidebarArrowSelectionTarget = AppKitController.SidebarArrowSelectionTarget
 
+    enum RemoteOverviewDisconnectAction: Equatable {
+        case ignoreIntentionalRemoval
+        case recordStartupDisconnect
+        case markOffline
+    }
+
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     /// Memoized filtered+sorted visible workspaces per project. `visibleWorkspaces`
     /// is on the NSOutlineView data-source hot path (queried per row); caching keeps
@@ -61,14 +87,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Devices with a subscription open in flight, so rapid refreshes don't start
     /// duplicate connections.
     private var remoteOverviewSubscribing: Set<String> = []
+    /// Disconnects observed while `subscribeOverview` is still returning. These
+    /// are real stream drops, not intentional removals, so the opener consumes
+    /// them before deciding whether to retain the returned client.
+    private var remoteOverviewStartupDisconnects: [String: RemoteOverviewDisconnectReason] = [:]
     private var remoteOverviewSubscriptionsEnabled = false
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
     private var pendingSidebarReloadFailureMessage: String?
     private var pendingSidebarReloadForceRemoteRefresh = false
-    /// Set when a database-change signal arrives while the user is mid-edit;
+    /// Set when an overview-affecting signal arrives while the user is mid-edit;
     /// flushed at idle points so a deferred change is not lost.
-    private var pendingDatabaseReload = false
+    private var pendingSidebarSignalReload = false
 
     // Alerts sidebar row
     private var alertsRowView: NSView?
@@ -101,7 +131,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Cancels in-flight reload state. Called from the host's background-service
     /// teardown and termination paths.
     func stopSidebarTasks() {
-        pendingDatabaseReload = false
+        pendingSidebarSignalReload = false
         sidebarReloadTask?.cancel()
         sidebarReloadTask = nil
         pendingSidebarReloadRequest = false
@@ -111,23 +141,25 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func cancelSidebarReloadTask() { sidebarReloadTask?.cancel() }
 
-    /// Reloads sidebar metadata after a database write, signaled by whichever
-    /// process committed it (`IPCNotification.databaseDidChange`). Catches external
-    /// CLI/daemon edits (for example title changes) that no other event-driven
-    /// reload would observe. Driven by the writer, so there is no polling and no
-    /// file-watch feedback loop from the app's own reads.
+    /// Reloads sidebar metadata after the owning daemon reports overview-affecting
+    /// state changed. Database-backed writes arrive through `databaseDidChange`;
+    /// terminal title/exit/runtime metadata arrives through `TerminalOverviewSignal`.
+    /// Driven by the writer, so there is no polling and no file-watch feedback loop
+    /// from the app's own reads.
     func handleDatabaseDidChange() {
         guard host.canReloadAfterBackgroundWorkspaceRefresh() else {
-            pendingDatabaseReload = true
+            pendingSidebarSignalReload = true
             return
         }
         requestSidebarReload()
     }
 
-    /// Flushes a database-driven reload deferred while the user was mid-edit.
-    func flushPendingDatabaseReloadIfNeeded() {
-        guard pendingDatabaseReload, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
-        pendingDatabaseReload = false
+    func handleLocalTerminalOverviewDidChange() { handleDatabaseDidChange() }
+
+    /// Flushes a signal-driven reload deferred while the user was mid-edit.
+    func flushPendingSidebarSignalReloadIfNeeded() {
+        guard pendingSidebarSignalReload, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
+        pendingSidebarSignalReload = false
         requestSidebarReload()
     }
 
@@ -198,7 +230,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false) {
         host.logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
-        pendingDatabaseReload = false
+        pendingSidebarSignalReload = false
         host.commandPalette.invalidateCommandPaletteCache()
         host.configCache = snapshot.config
         host.loadShortcutSpecs()
@@ -346,6 +378,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let clients = remoteOverviewSubscriptions
         remoteOverviewSubscriptions.removeAll()
         remoteOverviewSubscribing.removeAll()
+        remoteOverviewStartupDisconnects.removeAll()
         for client in clients.values { client.stop() }
     }
 
@@ -360,8 +393,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             remoteOverviewSubscriptions[id] = nil
             client.stop()
         }
+        for id in remoteOverviewSubscribing where !desiredIDs.contains(id) {
+            remoteOverviewStartupDisconnects[id] = nil
+        }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in remotes where remoteOverviewSubscriptions[record.id] == nil && !remoteOverviewSubscribing.contains(record.id) {
+            remoteOverviewStartupDisconnects[record.id] = nil
             remoteOverviewSubscribing.insert(record.id)
             openRemoteOverviewSubscription(record: record, clientApp: clientApp)
         }
@@ -395,6 +432,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 client?.stop()
                 return
             }
+            let startupDisconnect = self.remoteOverviewStartupDisconnects.removeValue(forKey: deviceID)
             self.remoteOverviewSubscribing.remove(deviceID)
             guard let client else {
                 // The connect attempt failed (remote offline at launch or still
@@ -403,6 +441,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 // uses so the remote section recovers on its own rather than staying
                 // stale until an unrelated sidebar reload.
                 self.scheduleRemoteOverviewReconnect()
+                return
+            }
+            if let startupDisconnect {
+                client.stop()
+                guard self.remoteOverviewSubscriptionsEnabled, self.host.macPairedDevices().contains(where: { $0.id == deviceID }) else { return }
+                self.applyRemoteOverviewDisconnect(deviceID: deviceID, reason: startupDisconnect)
                 return
             }
             guard self.remoteOverviewSubscriptionsEnabled, self.host.macPairedDevices().contains(where: { $0.id == deviceID }) else {
@@ -414,16 +458,35 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     private func handleRemoteOverviewDisconnected(deviceID: String, error: (any Error)?) {
-        // Ignore disconnects for subscriptions we intentionally removed.
-        guard remoteOverviewSubscriptions[deviceID] != nil else { return }
-        remoteOverviewSubscriptions[deviceID] = nil
+        switch Self.remoteOverviewDisconnectAction(
+            hasStoredSubscription: remoteOverviewSubscriptions[deviceID] != nil, isOpeningSubscription: remoteOverviewSubscribing.contains(deviceID))
+        {
+        case .ignoreIntentionalRemoval:
+            return
+        case .recordStartupDisconnect:
+            remoteOverviewStartupDisconnects[deviceID] = RemoteOverviewDisconnectReason(error)
+            return
+        case .markOffline:
+            remoteOverviewSubscriptions[deviceID] = nil
+            applyRemoteOverviewDisconnect(deviceID: deviceID, reason: RemoteOverviewDisconnectReason(error))
+        }
+    }
+
+    nonisolated static func remoteOverviewDisconnectAction(hasStoredSubscription: Bool, isOpeningSubscription: Bool) -> RemoteOverviewDisconnectAction
+    {
+        if hasStoredSubscription { return .markOffline }
+        if isOpeningSubscription { return .recordStartupDisconnect }
+        return .ignoreIntentionalRemoval
+    }
+
+    private func applyRemoteOverviewDisconnect(deviceID: String, reason: RemoteOverviewDisconnectReason) {
         guard remoteOverviewSubscriptionsEnabled else { return }
         // An established stream dropping means the remote daemon or network went away. With no
         // periodic remote refresh to fall back on, transition the section to offline now — the same
         // way a failed pull does — so the sidebar shows the offline caption instead of stale
         // projects/alerts, then schedule the delayed reconnect. A graceful stream close carries no
         // error, so fall back to a descriptive reason for the offline tooltip.
-        applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
+        applyRemoteDeviceSection(deviceID: deviceID, result: .failure(reason.loadError))
         scheduleRemoteOverviewReconnect()
     }
 
