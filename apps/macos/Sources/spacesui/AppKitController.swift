@@ -1279,14 +1279,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     remoteClientStore.set(client.id)
                     let response = try Self.sendDeviceTerminalControl(
                         sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
-                        requestSender: requestSender, applyState: applyControlState)
+                        requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                     guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
                 }
                 let detachClientAction: @Sendable (String) throws -> Void = { clientID in
                     if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
                     let response = try Self.sendDeviceTerminalControl(
                         sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender,
-                        applyState: applyControlState)
+                        refreshStateAfterControl: true, applyState: applyControlState)
                     guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
                 }
                 let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse = { text, appendNewline in
@@ -1309,7 +1309,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                     try Self.sendDeviceTerminalControl(
                         sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
-                        applyState: applyControlState)
+                        refreshStateAfterControl: true, applyState: applyControlState)
                 }
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: mode, performInitialRefresh: false,
@@ -1401,13 +1401,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// the control response. When the response carries session state (notably a
     /// successful takeover), it is applied to the state model immediately so the
     /// window reflects the new owner without waiting for the live subscription.
-    nonisolated private static func sendDeviceTerminalControl(
+    ///
+    /// Attachment-changing controls (attach/detach, and takeover when the daemon
+    /// omits the post-takeover render) do not echo session state, so
+    /// `refreshStateAfterControl` fetches the post-control state and applies the new
+    /// ownership directly. This forces the state model off its pre-control attachment
+    /// snapshot at once rather than depending on the live subscription to redeliver
+    /// the change — the subscription may be connecting or reconnecting during window
+    /// open/close, which would otherwise leave the window showing the wrong owner (or
+    /// retrying attachments) until another stream event arrives. The follow-up fetch
+    /// is best-effort: the control already succeeded, and a stale-by-emission payload
+    /// is dropped by the model, so a failed refresh falls back to the subscription
+    /// instead of failing the completed control.
+    nonisolated static func sendDeviceTerminalControl(
         sessionID: String, request: TerminalControlRequest, requestSender: RemoteGhosttyTerminalServiceRequestSender,
-        applyState: @Sendable (GhosttyRemoteSessionStatePayload) -> Void
+        refreshStateAfterControl: Bool = false, applyState: @Sendable (GhosttyRemoteSessionStatePayload) -> Void
     ) throws -> TerminalControlResponse {
         let response = try requestSender(TerminalServiceRequest(command: .control(.init(sessionID: sessionID, controlRequest: request))))
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        if let sessionState = response.sessionState { applyState(sessionState) }
+        if let sessionState = response.sessionState {
+            applyState(sessionState)
+        } else if refreshStateAfterControl,
+            let stateResponse = try? requestSender(TerminalServiceRequest(command: .state(.init(sessionID: sessionID)))),
+            let sessionState = stateResponse.sessionState
+        {
+            applyState(sessionState)
+        }
         return response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message)
     }
 

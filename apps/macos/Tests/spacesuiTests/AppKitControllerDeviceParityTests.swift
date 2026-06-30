@@ -514,6 +514,85 @@ import workspacecore
         #expect(request.resizeSerial == 3)
     }
 
+    @Test func attachControlRefreshesSessionStateWhenResponseOmitsIt() throws {
+        // The Device API does not echo session state for attach/detach controls, so the
+        // control helper must fetch the post-control state and apply the new ownership
+        // immediately instead of waiting for the live subscription to redeliver it.
+        let refreshedSnapshot = attachmentSnapshot(ownerID: "mac-window")
+        let refreshedState = sessionStatePayload(attachmentSnapshot: refreshedSnapshot)
+        let recorder = ControlRequestRecorder(stateResponseSnapshot: refreshedState)
+        let applied = AppliedStateBox()
+
+        let response = try AppKitController.sendDeviceTerminalControl(
+            sessionID: "session-1",
+            request: TerminalControlRequest(
+                command: "attach",
+                client: TerminalClient(id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
+                attachmentMode: .owner),
+            requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
+
+        #expect(response.ok)
+        #expect(recorder.issuedStateFetch)
+        #expect(applied.payload?.attachmentSnapshot == refreshedSnapshot)
+    }
+
+    @Test func sendControlDoesNotFetchStateWhenRefreshNotRequested() throws {
+        // Input controls (send/key) carry no ownership change, so the helper must not
+        // pay for a follow-up state fetch and must leave the cached state untouched.
+        let recorder = ControlRequestRecorder(stateResponseSnapshot: nil)
+        let applied = AppliedStateBox()
+
+        let response = try AppKitController.sendDeviceTerminalControl(
+            sessionID: "session-1", request: TerminalControlRequest(command: "send", text: "ls", clientID: "mac-window", appendNewline: true),
+            requestSender: recorder.send, refreshStateAfterControl: false, applyState: { applied.store($0) })
+
+        #expect(response.ok)
+        #expect(!recorder.issuedStateFetch)
+        #expect(applied.payload == nil)
+    }
+
+    private func sessionStatePayload(attachmentSnapshot: TerminalSessionAttachmentSnapshot) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-06-22T12:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil)
+    }
+
+    private func attachmentSnapshot(ownerID: String) -> TerminalSessionAttachmentSnapshot {
+        let client = TerminalClient(id: ownerID, kind: .localWindow, identity: .init(label: ownerID), connectedAt: "2026-06-22T12:00:00Z")
+        return TerminalSessionAttachmentSnapshot(
+            clients: [client],
+            attachments: [TerminalAttachment(sessionID: "session-1", clientID: ownerID, mode: .owner, attachedAt: "2026-06-22T12:00:00Z")])
+    }
+
+    /// Records whether the helper issued the follow-up `.state` fetch and replies to it
+    /// with a fixed snapshot, so a test can assert the post-control refresh behavior.
+    private final class ControlRequestRecorder: @unchecked Sendable {
+        private let stateResponseSnapshot: GhosttyRemoteSessionStatePayload?
+        private(set) var issuedStateFetch = false
+
+        init(stateResponseSnapshot: GhosttyRemoteSessionStatePayload?) { self.stateResponseSnapshot = stateResponseSnapshot }
+
+        var send: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse {
+            { [self] request in
+                switch request.command {
+                case .control:
+                    return TerminalServiceResponse(ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
+                case .state:
+                    issuedStateFetch = true
+                    return TerminalServiceResponse(ok: true, message: "", sessionState: stateResponseSnapshot)
+                default:
+                    return TerminalServiceResponse(ok: false, message: "unexpected command")
+                }
+            }
+        }
+    }
+
+    private final class AppliedStateBox: @unchecked Sendable {
+        private(set) var payload: GhosttyRemoteSessionStatePayload?
+        func store(_ payload: GhosttyRemoteSessionStatePayload) { self.payload = payload }
+    }
+
     private func startingSessionSummary(id: String, title: String, rowKind: SpacesDeviceTerminalSessionRowKind) -> SpacesDeviceTerminalSessionSummary
     {
         SpacesDeviceTerminalSessionSummary(
