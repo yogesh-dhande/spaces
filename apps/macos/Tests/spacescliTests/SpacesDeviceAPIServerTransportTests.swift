@@ -1023,7 +1023,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 private final class AlwaysAuthorizedDevicePairingStore: SpacesDevicePairingStoreProtocol {
     let authToken = "valid-token"
 
-    func issueToken(for _: SpacesDeviceClientApp) throws -> String { authToken }
+    func issueToken(for _: SpacesDeviceClientApp, presentedToken _: String?) throws -> String { authToken }
     func listDevices() throws -> [SpacesDevicePairedClient] { [] }
     func revoke(installationID _: String) throws {}
     func removeAll() throws {}

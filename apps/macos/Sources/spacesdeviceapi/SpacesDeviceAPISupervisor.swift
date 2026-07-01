@@ -185,7 +185,7 @@ import workspacecore
         }
         let settings = try settingsStore.loadOrCreate()
         let currentStatus = try status()
-        let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
+        let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp, presentedToken: request.presentedToken)
         let bootstrap = SpacesDeviceAPILocalClientBootstrap(
             deviceID: "local", name: currentStatus.bonjourServiceName, platform: "macos", host: SpacesDeviceAPIDefaults.loopbackHost,
             port: currentStatus.port, certificateFingerprint: currentStatus.certificateFingerprint, authToken: authToken,

@@ -129,7 +129,7 @@ PY
   port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$TMP_ROOT/pairing-window.json")"
   transport_key="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["transportKey"])' "$TMP_ROOT/pairing-window.json")"
   request_json="$(cat "$TMP_ROOT/pair-request.json")"
-  response="$("$SPACES_E2E_BIN" mobile-request --host "$host" --port "$port" --transport-key "$transport_key" --request-json "$request_json")"
+  response="$("$SPACES_E2E_BIN" mobile-request --host "$host" --port "$port" --transport-key="$transport_key" --request-json "$request_json")"
   printf '%s' "$response" >"$TMP_ROOT/pair-response.json"
 }
 
@@ -170,7 +170,7 @@ local_device_parity() {
     --spacese2e "$SPACES_E2E_BIN" \
     --host "$host" \
     --port "$port" \
-    --transport-key "$transport_key" \
+    --transport-key="$transport_key" \
     --auth-token "$auth_token" \
     --project-dir "$project_dir" \
     --label "local-device" \

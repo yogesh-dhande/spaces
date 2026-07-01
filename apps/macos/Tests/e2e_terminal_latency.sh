@@ -360,10 +360,16 @@ def first_mac_frame_apply_after_submit(session_id: str, submit_ns: int) -> tuple
 
 
 def extract_session_id(output: str) -> str:
-    match = re.search(r"^Started terminal session ([0-9A-Fa-f-]{36})(?:\s|$)", output, re.MULTILINE)
-    if not match:
-        raise RuntimeError(f"failed to parse session id from: {output}")
-    return match.group(1).upper()
+    # `spacese2e start-terminal-session` emits the created session as JSON, matching
+    # the remote latency compare harness which reads the same `id` field.
+    try:
+        session = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"failed to parse session id from: {output}") from error
+    session_id = (session.get("id") or session.get("sessionID") or "")
+    if not session_id:
+        raise RuntimeError(f"missing session id in: {output}")
+    return session_id.upper()
 
 
 def control_socket_path(session_id: str) -> Path:

@@ -28,7 +28,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             let database = try SpacesClientDatabase(path: root.appendingPathComponent("Client/spaces-client.db").path)
             let clientApp = SpacesDeviceClient.macOSClientApp(installationID: "client-test", deviceName: "Test Mac")
             let probe = DeviceOverviewRetryProbe()
-            let bootstrap: SpacesDeviceClient.LocalBootstrapProvider = { _ in
+            let bootstrap: SpacesDeviceClient.LocalBootstrapProvider = { _, _ in
                 probe.bootstrapCount += 1
                 return Self.localBootstrapResponse(port: probe.bootstrapCount == 1 ? 11_111 : 22_222)
             }
@@ -186,6 +186,39 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                     id: "terminal-shell", workspaceID: "workspace-1", title: "shell", workingDirectory: dir, sessionID: "session-shell",
                     runState: .running, canOpenTerminal: true, canStop: true)
             ])
+    }
+
+    func testEnsureLocalDeviceCredentialsBootstrapsWhenMissingAndSkipsWhenPresent() throws {
+        try withClientSecretDirectory { root in
+            let database = try SpacesClientDatabase(path: root.appendingPathComponent("Client/spaces-client.db").path)
+            let clientApp = SpacesDeviceClient.macOSClientApp(installationID: "client-test", deviceName: "Test Mac")
+            let probe = DeviceOverviewRetryProbe()
+            let bootstrap: SpacesDeviceClient.LocalBootstrapProvider = { _, _ in
+                probe.bootstrapCount += 1
+                return Self.localBootstrapResponse(port: 12_345)
+            }
+            let local = SpacesPairedDeviceRecord.localDeviceID
+
+            // Missing local credentials self-heal by re-bootstrapping and persisting them.
+            XCTAssertFalse(try SpacesDeviceCredentialStore.hasTransportKey(deviceID: local))
+            XCTAssertNotNil(try SpacesDeviceClient.ensureLocalDeviceCredentials(database: database, clientApp: clientApp, bootstrap: bootstrap))
+            XCTAssertEqual(probe.bootstrapCount, 1)
+            XCTAssertTrue(try SpacesDeviceCredentialStore.hasTransportKey(deviceID: local))
+            XCTAssertTrue(try SpacesDeviceCredentialStore.hasToken(deviceID: local))
+
+            // Present credentials cost no daemon round-trip.
+            XCTAssertNil(try SpacesDeviceClient.ensureLocalDeviceCredentials(database: database, clientApp: clientApp, bootstrap: bootstrap))
+            XCTAssertEqual(probe.bootstrapCount, 1)
+
+            // A missing auth token alone (transport key still present) also re-bootstraps, so a local
+            // request is not left sending an unauthenticated (401) call.
+            try SpacesDeviceCredentialStore.deleteToken(deviceID: local)
+            XCTAssertTrue(try SpacesDeviceCredentialStore.hasTransportKey(deviceID: local))
+            XCTAssertFalse(try SpacesDeviceCredentialStore.hasToken(deviceID: local))
+            XCTAssertNotNil(try SpacesDeviceClient.ensureLocalDeviceCredentials(database: database, clientApp: clientApp, bootstrap: bootstrap))
+            XCTAssertEqual(probe.bootstrapCount, 2)
+            XCTAssertTrue(try SpacesDeviceCredentialStore.hasToken(deviceID: local))
+        }
     }
 
     private func withClientSecretDirectory(_ body: (URL) throws -> Void) throws {
