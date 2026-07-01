@@ -580,8 +580,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let self else { return }
             guard
                 Self.shouldReloadSidebarForTerminalOverviewSignal(
-                    didStartBackgroundServices: self.didStartBackgroundServices, notificationObject: object,
-                    profileObject: self.ipcNotificationObject)
+                    didStartBackgroundServices: self.didStartBackgroundServices, notificationObject: object, profileObject: self.ipcNotificationObject
+                )
             else { return }
             self.sidebar.handleLocalTerminalOverviewDidChange()
         }
@@ -589,9 +589,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldReloadSidebarForTerminalOverviewSignal(
         didStartBackgroundServices: Bool, notificationObject: String?, profileObject: String
-    ) -> Bool {
-        didStartBackgroundServices && notificationObject == profileObject
-    }
+    ) -> Bool { didStartBackgroundServices && notificationObject == profileObject }
 
     @objc private nonisolated func handleShowMainWindowIPC(_ notification: Notification) {
         let object = notification.object as? String
@@ -809,13 +807,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // when it currently has an open Chrome tab. Scan Chrome once (when any browser is
         // configured) for the open tab URLs and the frontmost tab URL; the latter resolves
         // the current target when no built-in terminal session is focused.
+        let shouldReadFrontmostChromeURL = Self.shouldUseFocusedChromeWindowForWorkspaceLookup(
+            frontmostApplicationBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         let chromeState: (openTabURLs: [String], frontmostURL: String?) =
             detail.config.resolvedBrowserSessions.isEmpty
             ? ([], nil)
             : await Task.detached(priority: .userInitiated) {
                 let chrome = ChromeAdapter()
                 guard chrome.isAvailable() else { return ([], nil) }
-                return ((try? chrome.allTabs())?.map(\.url) ?? [], try? chrome.frontmostActiveTabURL())
+                let frontmostURL = shouldReadFrontmostChromeURL ? (try? chrome.frontmostActiveTabURL()) : nil
+                return ((try? chrome.allTabs())?.map(\.url) ?? [], frontmostURL)
             }.value
         let openBrowserSessions = detail.config.resolvedBrowserSessions.filter { session in
             guard let url = session.url, !url.isEmpty else { return false }
@@ -2071,15 +2072,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// when a device transitions to offline: its rows are about to drop out of the merged sidebar data,
     /// so a selection under it leaves a stale detail pane that must be reconciled. A selected workspace's
     /// project is always under the same device, so the workspace check alone suffices when one is selected.
-    nonisolated static func sidebarSelectionBelongsToDeviceSection(
-        selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection
-    ) -> Bool {
-        if let selectedWorkspaceID {
-            return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } }
-        }
-        if let selectedProjectID {
-            return section.projects.contains { $0.id == selectedProjectID }
-        }
+    nonisolated static func sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection)
+        -> Bool
+    {
+        if let selectedWorkspaceID { return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } } }
+        if let selectedProjectID { return section.projects.contains { $0.id == selectedProjectID } }
         return false
     }
 
@@ -2413,8 +2410,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             AgentWindowRecord(
                                 id: agent.agentID ?? agent.id, workspaceID: workspace.id, provider: .spaces, label: agent.name,
                                 terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: agent.launcherID,
-                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState),
-                                createdAt: agent.updatedAt ?? "", updatedAt: agent.updatedAt ?? ""))))
+                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
+                                updatedAt: agent.updatedAt ?? ""))))
             }
             guard !items.isEmpty else { continue }
             items.sort {
@@ -7532,8 +7529,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     nonisolated static func preparedGitProjectResultMatchesActiveRequest(
-        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentDeviceID: String, requestedDeviceID: String,
-        currentPreparationID: UUID?, completionPreparationID: UUID
+        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentDeviceID: String,
+        requestedDeviceID: String, currentPreparationID: UUID?, completionPreparationID: UUID
     ) -> Bool {
         isActiveForm && selectedSegment == 1 && currentRepoURL == requestedRepoURL && currentDeviceID == requestedDeviceID
             && currentPreparationID == completionPreparationID
@@ -7674,7 +7671,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     showDeviceNotLoadedError()
                     return
                 }
-                let discardResult = await beginPreparedGitProjectDiscard(handle: previousHandle, repoURL: refs.preparedGitURL, device: preparedDevice).value
+                let discardResult = await beginPreparedGitProjectDiscard(handle: previousHandle, repoURL: refs.preparedGitURL, device: preparedDevice)
+                    .value
                 if case .failure(let error) = discardResult {
                     refs.preparedGitProjectHandle = nil
                     refs.preparedGitURL = nil
@@ -7686,7 +7684,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 refs.preparedGitURL = nil
                 refs.preparedGitDeviceID = nil
             }
-            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL, deviceID: requestedDeviceID), case .failure(let error) = discardResult {
+            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL, deviceID: requestedDeviceID),
+                case .failure(let error) = discardResult
+            {
                 showError(error)
                 return
             }
@@ -9355,6 +9355,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: Bool) -> Bool { appIsActive }
 
+    nonisolated static func shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: String?) -> Bool {
+        frontmostApplicationBundleIdentifier == "com.google.Chrome"
+    }
+
+    nonisolated static func activeWorkspaceIDForGlobalNavigation(appIsActive: Bool, activeWorkspaceID: String?) -> String? {
+        appIsActive ? activeWorkspaceID : nil
+    }
+
     nonisolated static func preferredWorkspaceIDForGlobalNavigation(
         focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?, rememberedTerminalSessionWorkspaceID: String?,
         activeWorkspaceID: String?
@@ -9497,6 +9505,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// window, by matching the frontmost tab URL to a configured browser session in the
     /// overview. A focused built-in terminal is resolved earlier by its session id.
     func clientWorkspaceIDForFocusedWindow() -> String? {
+        guard
+            Self.shouldUseFocusedChromeWindowForWorkspaceLookup(
+                frontmostApplicationBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        else { return nil }
         let chrome = ChromeAdapter()
         guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
         var best: (workspaceID: String, prefixLength: Int)?
@@ -9564,7 +9576,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil, rememberedTerminalSessionWorkspaceID == nil {
             let lookupStartedAt = Date()
-            activeWorkspaceID = clientActiveWorkspaceID()
+            activeWorkspaceID = Self.activeWorkspaceIDForGlobalNavigation(appIsActive: NSApp.isActive, activeWorkspaceID: clientActiveWorkspaceID())
             activeWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
             activeWorkspaceStatus = activeWorkspaceID == nil ? "miss" : "hit"
         }
