@@ -1039,7 +1039,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
-            self.openTerminalSessionWindow(sessionID: sessionID, mode: mode, requestID: requestID)
+            await self.openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: mode, requestID: requestID)
         }
     }
 
@@ -1077,7 +1077,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_focus_ipc_received", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: requestID.map { "request_id=\($0)" } ?? "")
-            self.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID)
+            await self.focusTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, requestID: requestID)
         }
     }
 
@@ -1148,13 +1148,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    struct TerminalSessionSummaryMatch: Sendable, Equatable {
+        let device: SpacesPairedDeviceRecord
+        let summary: SpacesDeviceTerminalSessionSummary
+    }
+
+    typealias TerminalSessionOverviewResolver = @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> SpacesDeviceOverviewResolution
+
     /// The overview session summary for a session and the device that owns it,
     /// when the session is currently surfaced in a loaded device overview.
-    private func terminalSessionSummaryMatch(sessionID: String) -> (device: SpacesPairedDeviceRecord, summary: SpacesDeviceTerminalSessionSummary)? {
+    private func terminalSessionSummaryMatch(sessionID: String) -> TerminalSessionSummaryMatch? {
         for section in deviceSections {
             guard let summary = section.overview?.sessions.first(where: { $0.id == sessionID }) else { continue }
             guard let device = deviceForMutation(deviceID: section.deviceID) else { continue }
-            return (device, summary)
+            return TerminalSessionSummaryMatch(device: device, summary: summary)
         }
         return nil
     }
@@ -1193,38 +1200,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// session can be created while the overview subscription is still stale. In both cases
     /// the loaded overview lacks the session. Rather than fabricate a placeholder
     /// shell/command — which the later Device API state payload never corrects, since it
-    /// carries only title/cwd/runtime — this bootstraps the local device when it is unloaded
-    /// and fetches a fresh overview to read the session's persisted shell/command/title,
-    /// matching the launch configuration the old DB-backed path read directly.
-    private func resolveSessionSummaryMatch(sessionID: String) -> (device: SpacesPairedDeviceRecord, summary: SpacesDeviceTerminalSessionSummary)? {
+    /// carries only title/cwd/runtime — this bootstraps the local device when it is unloaded,
+    /// then fetches a fresh overview off the main actor to read the session's persisted
+    /// shell/command/title, matching the launch configuration the old DB-backed path read directly.
+    private func resolveSessionSummaryMatch(sessionID: String) async -> TerminalSessionSummaryMatch? {
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         if localPairedDevice == nil {
-            guard let device = try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) else { return nil }
+            guard
+                let device = await Task.detached(
+                    priority: .userInitiated, operation: { try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) }
+                ).value
+            else { return nil }
             localPairedDevice = device
             localDeviceID = device.id
         }
         guard let device = terminalSessionOwningDevice(sessionID: sessionID) else { return nil }
-        guard
-            let summary = try? SpacesDeviceClient.resolveOverview(device: device, clientApp: clientApp).overview?.overview.sessions.first(where: {
-                $0.id == sessionID
-            })
-        else { return nil }
-        return (device, summary)
+        return await Self.resolveSessionSummaryMatchOffMain(sessionID: sessionID, device: device, clientApp: clientApp)
+    }
+
+    nonisolated static func resolveSessionSummaryMatchOffMain(
+        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp,
+        resolveOverview: @escaping TerminalSessionOverviewResolver = { device, clientApp in
+            try SpacesDeviceClient.resolveOverview(device: device, clientApp: clientApp)
+        }
+    ) async -> TerminalSessionSummaryMatch? {
+        await Task.detached(priority: .userInitiated) {
+            guard let summary = try? resolveOverview(device, clientApp).overview?.overview.sessions.first(where: { $0.id == sessionID }) else {
+                return nil
+            }
+            return TerminalSessionSummaryMatch(device: device, summary: summary)
+        }.value
     }
 
     /// Builds the device-backed terminal state model for a session, seeding launch
     /// configuration and runtime state from the caller's known values or, failing that,
-    /// the loaded device overview — and when the session is in neither, a fresh overview
-    /// read from its owning device (see `resolveSessionSummaryMatch`). The model fetches
-    /// the rest through the owning device's Device API, so the mac GUI never opens
-    /// `spaces.db`.
+    /// the loaded device overview or an off-main cold overview lookup prepared by the
+    /// caller. The model fetches the rest through the owning device's Device API, so the
+    /// mac GUI never opens `spaces.db`.
     private func makeTerminalSessionStateModel(
         sessionID: String, seedDevice: SpacesPairedDeviceRecord? = nil, seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil,
-        seedInitialRuntimeState: TerminalSessionRuntimeState? = nil
+        seedInitialRuntimeState: TerminalSessionRuntimeState? = nil, resolvedSummaryMatch: TerminalSessionSummaryMatch? = nil
     ) throws -> DeviceTerminalSessionStateModel {
-        let summaryMatch =
-            terminalSessionSummaryMatch(sessionID: sessionID)
-            ?? (seedLaunchConfiguration == nil ? resolveSessionSummaryMatch(sessionID: sessionID) : nil)
+        let summaryMatch = terminalSessionSummaryMatch(sessionID: sessionID) ?? resolvedSummaryMatch
         guard let device = seedDevice ?? summaryMatch?.device ?? terminalSessionOwningDevice(sessionID: sessionID) else {
             throw Self.deviceNotLoadedError()
         }
@@ -1247,7 +1264,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @discardableResult private func openTerminalSessionWindow(
         sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, seedDevice: SpacesPairedDeviceRecord? = nil,
-        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil
+        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil,
+        resolvedSummaryMatch: TerminalSessionSummaryMatch? = nil
     ) -> Int? {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
@@ -1267,7 +1285,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // never opens the daemon's spaces.db.
                 let stateModel = try makeTerminalSessionStateModel(
                     sessionID: sessionID, seedDevice: seedDevice, seedLaunchConfiguration: seedLaunchConfiguration,
-                    seedInitialRuntimeState: seedInitialRuntimeState)
+                    seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
                 let requestSender = stateModel.terminalServiceRequestSender
                 let applyControlState = stateModel.controlStateApplier
                 let agentSignalHandler: RemoteGhosttyAgentSignalHandler = { [weak self] events in
@@ -1359,6 +1377,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showError(error)
             return nil
         }
+    }
+
+    @discardableResult private func openTerminalSessionWindowResolvingMissingSummary(
+        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, seedDevice: SpacesPairedDeviceRecord? = nil,
+        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil
+    ) async -> Int? {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        let needsColdSummary =
+            seedLaunchConfiguration == nil && terminalSessionSummaryMatch(sessionID: sessionID) == nil
+            && Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) == nil
+        let resolvedSummaryMatch = needsColdSummary ? await resolveSessionSummaryMatch(sessionID: sessionID) : nil
+        return openTerminalSessionWindow(
+            sessionID: sessionID, mode: mode, requestID: requestID, seedDevice: seedDevice, seedLaunchConfiguration: seedLaunchConfiguration,
+            seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
     }
 
     private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) -> Bool {
@@ -1476,6 +1508,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func focusTerminalSessionWindow(sessionID: String, requestID: String? = nil) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        guard let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) else {
+            Task { @MainActor [weak self] in await self?.focusTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, requestID: requestID)
+            }
+            return
+        }
+        let startedAt = Date()
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        cancelDeferredExternalWindowHide()
+        logPerfMetric(
+            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: 0, success: true, detail: "stage=start\(requestDetail)")
+        focusTerminalSessionWindowController(
+            resolved.controller, route: resolved.route, sessionID: sessionID, requestID: requestID, startedAt: startedAt)
+    }
+
+    @discardableResult private func focusTerminalSessionWindowController(
+        _ controller: TerminalSessionWindowController, route: String, sessionID: String, requestID: String?, startedAt: Date
+    ) -> Bool {
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        logPerfMetric(
+            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "stage=resolved_controller route=\(route)\(requestDetail)")
+        controller.focusWindow(requestID: requestID, route: route)
+        logPerfMetric(
+            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "route=\(route)\(requestDetail)")
+        return true
+    }
+
+    @discardableResult private func focusTerminalSessionWindowResolvingMissingSummary(sessionID: String, requestID: String? = nil) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1486,7 +1548,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) {
             controllerAndRoute = resolved
         } else {
-            openTerminalSessionWindow(sessionID: sessionID, mode: .owner, requestID: requestID)
+            await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner, requestID: requestID)
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
             controllerAndRoute = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID).map
             { ($0.controller, "summoned_owner") }
@@ -1495,15 +1557,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             logPerfMetric(
                 "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                 detail: "route=missing\(requestDetail)")
-            return
+            return false
         }
-        logPerfMetric(
-            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "stage=resolved_controller route=\(route)\(requestDetail)")
-        controller.focusWindow(requestID: requestID, route: route)
-        logPerfMetric(
-            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "route=\(route)\(requestDetail)")
+        return focusTerminalSessionWindowController(controller, route: route, sessionID: sessionID, requestID: requestID, startedAt: startedAt)
     }
 
     static func liveTerminalSessionWindowController(_ controller: TerminalSessionWindowController?) -> TerminalSessionWindowController? {
@@ -2115,6 +2171,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard isReconnectCandidate, !section.isLocal, section.loadState.isOffline else { return false }
         return section.compatibility?.isCompatible != false
     }
+
+    /// A failed compatibility-aware pull can immediately attempt an overview stream because it has no
+    /// existing connection to throttle. A dropped stream has already scheduled the delayed reconnect, so
+    /// refreshing subscriptions during the offline transition would bypass that backoff.
+    nonisolated static func shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: Bool) -> Bool { !isStreamDisconnect }
 
     /// Whether the current sidebar selection points at a workspace or project owned by `section`. Used
     /// when a device transitions to offline: its rows are about to drop out of the merged sidebar data,
@@ -8511,7 +8572,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                                 _ = openDeviceTerminalSession(request, device: device)
                             }
                         } else {
-                            _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
+                            _ = await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner)
                         }
                     }
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
@@ -9202,12 +9263,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// local session opens a native window and a remote session opens a Device API mirror.
     @discardableResult private func focusClientSessionWindow(
         _ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
-    ) -> Bool {
+    ) async -> Bool {
         if isRemoteDeviceID(deviceID(forWorkspaceID: request.workspaceID)) {
             return openDeviceTerminalSession(request, device: device, requestID: requestID)
         }
-        focusTerminalSessionWindow(sessionID: request.sessionID, requestID: requestID)
-        return true
+        return await focusTerminalSessionWindowResolvingMissingSummary(sessionID: request.sessionID, requestID: requestID)
     }
 
     /// Focuses the local Chrome window for a workspace browser session. A browser session is a
@@ -9342,7 +9402,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             Self.setClientActiveWorkspaceID(request.workspaceID)
-            guard focusClientSessionWindow(request, device: device, requestID: requestID) else { return nil }
+            guard await focusClientSessionWindow(request, device: device, requestID: requestID) else { return nil }
             return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
             guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {

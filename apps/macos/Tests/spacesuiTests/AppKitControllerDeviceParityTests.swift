@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import spacesclientcore
 import spacesdeviceapi
@@ -81,6 +82,37 @@ import workspacecore
             deviceID: "local", deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, overview: overview, compatibility: .compatible)
         #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: local))
         #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: local, isReconnectCandidate: true))
+    }
+
+    @Test func remoteOverviewStreamDisconnectUsesScheduledReconnectBackoff() {
+        #expect(!AppKitController.shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: true))
+        #expect(AppKitController.shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: false))
+    }
+
+    @Test func coldTerminalOverviewLookupRunsOffMainThread() async {
+        let recorder = ThreadRecorder()
+        let device = SpacesPairedDeviceRecord(
+            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
+        let clientApp = SpacesDeviceClientApp(
+            installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
+        let summary = SpacesDeviceTerminalSessionSummary(
+            id: "session-cold", title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
+            lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: nil, workspaceTitle: nil, projectID: nil, projectName: nil,
+            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+
+        let match = await AppKitController.resolveSessionSummaryMatchOffMain(
+            sessionID: "session-cold", device: device, clientApp: clientApp,
+            resolveOverview: { device, _ in
+                recorder.record(Thread.isMainThread)
+                return SpacesDeviceOverviewResolution(
+                    overview: SpacesDeviceOverview(device: device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary])),
+                    daemonStatus: nil, compatibility: nil)
+            })
+
+        #expect(match == AppKitController.TerminalSessionSummaryMatch(device: device, summary: summary))
+        #expect(recorder.values == [false])
     }
 
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
@@ -527,9 +559,9 @@ import workspacecore
             sessionID: "session-1",
             request: TerminalControlRequest(
                 command: "attach",
-                client: TerminalClient(id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
-                attachmentMode: .owner),
-            requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
+                client: TerminalClient(
+                    id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
+                attachmentMode: .owner), requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
 
         #expect(response.ok)
         #expect(recorder.issuedStateFetch)
@@ -567,6 +599,23 @@ import workspacecore
 
     /// Records whether the helper issued the follow-up `.state` fetch and replies to it
     /// with a fixed snapshot, so a test can assert the post-control refresh behavior.
+    private final class ThreadRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recordedValues: [Bool] = []
+
+        var values: [Bool] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedValues
+        }
+
+        func record(_ value: Bool) {
+            lock.lock()
+            recordedValues.append(value)
+            lock.unlock()
+        }
+    }
+
     private final class ControlRequestRecorder: @unchecked Sendable {
         private let stateResponseSnapshot: GhosttyRemoteSessionStatePayload?
         private(set) var issuedStateFetch = false
@@ -577,12 +626,12 @@ import workspacecore
             { [self] request in
                 switch request.command {
                 case .control:
-                    return TerminalServiceResponse(ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
+                    return TerminalServiceResponse(
+                        ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
                 case .state:
                     issuedStateFetch = true
                     return TerminalServiceResponse(ok: true, message: "", sessionState: stateResponseSnapshot)
-                default:
-                    return TerminalServiceResponse(ok: false, message: "unexpected command")
+                default: return TerminalServiceResponse(ok: false, message: "unexpected command")
                 }
             }
         }

@@ -512,7 +512,9 @@ private enum RemoteOverviewDisconnectReason {
         // projects/alerts, then schedule the delayed reconnect. A graceful stream close carries no
         // error, so fall back to a descriptive reason for the offline tooltip.
         remoteOverviewReconnectCandidates.insert(deviceID)
-        applyRemoteDeviceSection(deviceID: deviceID, result: .failure(reason.loadError))
+        applyRemoteDeviceSection(
+            deviceID: deviceID, result: .failure(reason.loadError),
+            refreshSubscriptionsAfterApply: AppKitController.shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: true))
         scheduleRemoteOverviewReconnect()
     }
 
@@ -528,7 +530,7 @@ private enum RemoteOverviewDisconnectReason {
         }
     }
 
-    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>) {
+    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>, refreshSubscriptionsAfterApply: Bool = true) {
         guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
         // A background refresh re-fetches each remote; only touch the outline when
         // the device's overview or load state actually changed, so unchanged polls
@@ -631,7 +633,7 @@ private enum RemoteOverviewDisconnectReason {
         //      pre-rebuild groups and would keep showing (and routing clicks to) the now-removed device's
         //      alerts until the user navigates away.
         if selectionInvalidatedByOffline || host.showingAlerts { host.showAlertsDetail() }
-        refreshRemoteOverviewSubscriptions()
+        if refreshSubscriptionsAfterApply { refreshRemoteOverviewSubscriptions() }
     }
 
     /// Recomputes the flat, id-keyed sidebar dictionaries as the union of every
