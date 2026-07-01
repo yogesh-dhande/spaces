@@ -23,11 +23,14 @@ final class TerminalServicePathsTests: XCTestCase {
 
         let socketPath = try TerminalServicePaths.socketPath()
         let lockPath = try TerminalServicePaths.instanceLockPath()
+        let databaseChangeSignalSocketPath = try TerminalServicePaths.databaseChangeSignalSocketPath()
 
         XCTAssertTrue(socketPath.hasPrefix("/tmp/spaces-terminal-sockets/service-"))
         XCTAssertTrue(lockPath.hasPrefix("/tmp/spaces-terminal-sockets/daemon-"))
+        XCTAssertTrue(databaseChangeSignalSocketPath.hasPrefix("/tmp/spaces-terminal-sockets/database-change-"))
         XCTAssertLessThan(socketPath.utf8.count, 104)
         XCTAssertLessThan(lockPath.utf8.count, 104)
+        XCTAssertLessThan(databaseChangeSignalSocketPath.utf8.count, 104)
     }
 
     func testSocketPathsAreStableAcrossSymlinkedProfilePaths() throws {
@@ -55,6 +58,7 @@ final class TerminalServicePathsTests: XCTestCase {
 
         XCTAssertEqual(linkedPaths.serviceSocketPath, realPaths.serviceSocketPath)
         XCTAssertEqual(linkedPaths.serviceLockPath, realPaths.serviceLockPath)
+        XCTAssertEqual(linkedPaths.databaseChangeSignalSocketPath, realPaths.databaseChangeSignalSocketPath)
         XCTAssertEqual(linkedPaths.sessionControlSocketPath, realPaths.sessionControlSocketPath)
         XCTAssertEqual(linkedPaths.sessionSubscriptionSocketPath, realPaths.sessionSubscriptionSocketPath)
         XCTAssertEqual(linkedPaths.terminalRoot, realPaths.terminalRoot)
@@ -78,10 +82,14 @@ final class TerminalServicePathsTests: XCTestCase {
             runtimeDirectory: root.appendingPathComponent("runtime", isDirectory: true).path)
 
         XCTAssertEqual(paths.serviceSocketPath, serviceSocketPath(forTerminalRoot: paths.terminalRoot))
+        XCTAssertEqual(paths.databaseChangeSignalSocketPath, databaseChangeSignalSocketPath(forTerminalRoot: paths.terminalRoot))
         if paths.terminalRoot.hasPrefix("/private/var/") {
             XCTAssertNotEqual(
                 paths.serviceSocketPath,
                 serviceSocketPath(forTerminalRoot: paths.terminalRoot.replacingOccurrences(of: "/private/var/", with: "/var/")))
+            XCTAssertNotEqual(
+                paths.databaseChangeSignalSocketPath,
+                databaseChangeSignalSocketPath(forTerminalRoot: paths.terminalRoot.replacingOccurrences(of: "/private/var/", with: "/var/")))
         }
     }
 
@@ -93,6 +101,7 @@ final class TerminalServicePathsTests: XCTestCase {
         let sessionPaths = try TerminalSessionPaths.forSession(id: "session-symlink")
         return TerminalPathSnapshot(
             serviceSocketPath: try TerminalServicePaths.socketPath(), serviceLockPath: try TerminalServicePaths.instanceLockPath(),
+            databaseChangeSignalSocketPath: try TerminalServicePaths.databaseChangeSignalSocketPath(),
             sessionControlSocketPath: sessionPaths.controlSocketPath, sessionSubscriptionSocketPath: sessionPaths.subscriptionSocketPath,
             terminalRoot: try TerminalServicePaths.terminalRootDirectory().path)
     }
@@ -103,12 +112,19 @@ final class TerminalServicePathsTests: XCTestCase {
         return String(format: "/tmp/spaces-terminal-sockets/service-%016llx.sock", hash)
     }
 
+    private func databaseChangeSignalSocketPath(forTerminalRoot terminalRoot: String) -> String {
+        var hash: UInt64 = 5381
+        for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
+        return String(format: "/tmp/spaces-terminal-sockets/database-change-%016llx.sock", hash)
+    }
+
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
 }
 
 private struct TerminalPathSnapshot {
     let serviceSocketPath: String
     let serviceLockPath: String
+    let databaseChangeSignalSocketPath: String
     let sessionControlSocketPath: String
     let sessionSubscriptionSocketPath: String
     let terminalRoot: String

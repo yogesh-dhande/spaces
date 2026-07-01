@@ -91,8 +91,14 @@ import workspacecore
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
+    #if os(Linux)
+        private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
+    #endif
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
     private var databaseChangeObserver: NSObjectProtocol?
+    #if os(Linux)
+        private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
+    #endif
     #if os(macOS)
         private var databaseDistributedChangeObserver: NSObjectProtocol?
         private var processExitMonitor: ProcessExitMonitorService?
@@ -159,6 +165,15 @@ import workspacecore
         databaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
             [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() }
         }
+        #if os(Linux)
+            do {
+                let receiver = try DatabaseChangeSignalReceiver(socketPath: nil, queue: databaseChangeSignalQueue) {
+                    NotificationCenter.default.post(name: IPCNotification.databaseDidChange, object: nil)
+                }
+                try receiver.start()
+                databaseChangeSignalReceiver = receiver
+            } catch { writeStandardError("spacesd database_change_signal_error error=\(error)\n") }
+        #endif
         #if os(macOS)
             databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
@@ -205,6 +220,10 @@ import workspacecore
             NotificationCenter.default.removeObserver(databaseChangeObserver)
             self.databaseChangeObserver = nil
         }
+        #if os(Linux)
+            databaseChangeSignalReceiver?.stop()
+            databaseChangeSignalReceiver = nil
+        #endif
         #if os(macOS)
             if let databaseDistributedChangeObserver {
                 DistributedNotificationCenter.default().removeObserver(databaseDistributedChangeObserver)

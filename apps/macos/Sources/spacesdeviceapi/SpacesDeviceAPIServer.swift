@@ -902,6 +902,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// committed write pushes a fresh overview to subscribed clients. Cross-platform
     /// (POSIX socket + NotificationCenter), with the macOS distributed observer
     /// added so cross-process writes (the CLI sharing this profile) are caught too.
+    /// Linux cross-process writes are bridged by spacesd into the same in-process
+    /// notification.
     private func startOverviewStreamServer() {
         guard overviewStreamServer == nil else { return }
         let server = DeviceOverviewStreamServer(

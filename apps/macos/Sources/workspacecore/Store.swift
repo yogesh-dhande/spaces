@@ -72,15 +72,7 @@ public final class SQLiteStore {
     /// to avoid cross-process noise.
     private static func postDatabaseDidChange() {
         guard NSClassFromString("XCTest") == nil else { return }
-        // In-process signal (cross-platform): the daemon's own writes reach its
-        // Device API overview producer directly — the only available channel on
-        // Linux, where DistributedNotificationCenter does not exist.
-        NotificationCenter.default.post(name: IPCNotification.databaseDidChange, object: nil)
-        #if os(macOS)
-            // Cross-process signal (macOS): app/CLI writes reach the local app's
-            // sidebar reload and the daemon's overview producer in other processes.
-            try? IPCNotification.post(IPCNotification.databaseDidChange)
-        #endif
+        DatabaseChangeSignal.post()
     }
 
     public func setting(key: String) throws -> String? {
