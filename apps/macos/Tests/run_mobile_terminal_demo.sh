@@ -48,6 +48,8 @@ remote_certificate_fingerprint=""
 remote_forward_pid=""
 remote_forward_host="127.0.0.1"
 remote_forward_port=""
+remote_project_dir=""
+remote_workspace_id=""
 workspace_title="${SPACES_MOBILE_DEMO_WORKSPACE_TITLE:-Local Demo}"
 secondary_workspace_title="${SPACES_MOBILE_DEMO_SECONDARY_WORKSPACE_TITLE:-Secondary Demo}"
 ipad_name="${SPACES_MOBILE_DEMO_IPAD_NAME:-iPad Pro 13-inch (M5)}"
@@ -915,6 +917,82 @@ PY
   update_remote_demo_device_endpoint
 }
 
+# Creates a project (and its default workspace) on the paired remote demo daemon so the remote
+# mobile-UI e2e scenarios have a workspace to open a terminal in — the remote mirror of the local
+# demo projects. The project directory is created on the remote host and registered through the
+# remote daemon's Device API (over the SSH forward) using the just-paired iPhone client credentials.
+# Sets remote_project_dir and remote_workspace_id.
+create_remote_demo_project() {
+  [[ -n "$remote_forward_port" && -n "$iphone_remote_token" ]] || {
+    echo "Cannot create the remote demo project without a paired remote device." >&2
+    exit 1
+  }
+  local run_suffix project_root
+  run_suffix="$(basename "$temp_root")"
+  project_root="$(remote_expand_path "$remote_demo_workspace_root/mobile-ui-project-$run_suffix")"
+  remote_ssh "python3 - $(shell_quote "$project_root")" <<'PY'
+import pathlib
+import shutil
+import subprocess
+import sys
+
+project_root = pathlib.Path(sys.argv[1])
+shutil.rmtree(project_root, ignore_errors=True)
+project_root.mkdir(parents=True, exist_ok=True)
+(project_root / "README.txt").write_text("remote mobile-ui demo sentinel\n")
+
+def git(*args):
+    subprocess.run(["git", "-C", str(project_root), *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+git("init")
+git("config", "user.email", "spaces-e2e@example.invalid")
+git("config", "user.name", "Spaces E2E")
+git("add", "README.txt")
+git("commit", "-m", "Initial remote mobile-ui demo fixture")
+PY
+  remote_project_dir="$project_root"
+  remote_workspace_id="$(
+    run_demo_env \
+      HOME="$demo_home" \
+      SPACES_DB_PATH="$spaces_db_path" \
+      SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
+      python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_transport_key" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_dir" <<'PY'
+import json
+import subprocess
+import sys
+
+spacese2e, bundle_id, host, port, transport_key, auth_token, installation_id, project_dir = sys.argv[1:]
+request = {
+    "authToken": auth_token,
+    "clientApp": {
+        "installationID": installation_id,
+        "bundleID": bundle_id,
+        "platform": "ios",
+        "deviceName": "Remote Demo Setup",
+        "appVersion": "1.0",
+    },
+    "command": {"createProject": {"projectDir": project_dir, "gitURL": None}},
+}
+try:
+    completed = subprocess.run(
+        [spacese2e, "mobile-request", "--host", host, "--port", port, "--transport-key=" + transport_key, "--request-json", json.dumps(request)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+except subprocess.CalledProcessError as error:
+    raise SystemExit(f"createProject request failed (exit {error.returncode}): {(error.stderr or error.stdout or '').strip()}")
+payload = json.loads(completed.stdout)
+mutation = ((payload.get("result") or {}).get("mutation") or {})
+workspace_id = mutation.get("workspaceID")
+if not payload.get("ok") or not workspace_id:
+    raise SystemExit(f"createProject did not return a workspaceID: {json.dumps(payload)}")
+print(workspace_id)
+PY
+  )"
+}
+
 wait_for_session_owner() {
   local owner_session_id="$1"
   python3 - "$spaces_db_path" "$owner_session_id" <<'PY'
@@ -1117,11 +1195,29 @@ write_pairing_json() {
   local ipad_token="$3"
   local iphone_installation_id="$4"
   local iphone_token="$5"
-  python3 - "$output_path" "$transport_key" "$certificate_fingerprint" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token" <<'PY'
+  python3 - "$output_path" "$transport_key" "$certificate_fingerprint" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token" \
+    "$remote_forward_host" "$remote_forward_port" "$remote_transport_key" "$remote_certificate_fingerprint" "$remote_project_dir" "$remote_workspace_id" \
+    "$ipad_remote_token" "$iphone_remote_token" <<'PY'
 import json
 import sys
 
-output_path, transport_key, certificate_fingerprint, ipad_installation_id, ipad_token, iphone_installation_id, iphone_token = sys.argv[1:]
+(
+    output_path,
+    transport_key,
+    certificate_fingerprint,
+    ipad_installation_id,
+    ipad_token,
+    iphone_installation_id,
+    iphone_token,
+    remote_host,
+    remote_port,
+    remote_transport_key,
+    remote_certificate_fingerprint,
+    remote_project_dir,
+    remote_workspace_id,
+    ipad_remote_token,
+    iphone_remote_token,
+) = sys.argv[1:]
 payload = {
     "ipad": {
         "installationID": ipad_installation_id,
@@ -1136,6 +1232,20 @@ payload = {
         "certificateFingerprint": certificate_fingerprint,
     },
 }
+# The remote section is the mirror of the per-device local creds, but for the paired remote demo
+# daemon reached over the SSH forward, plus the shared remote project/workspace the mobile-UI
+# scenarios open a terminal in. Present only when the demo paired a remote device.
+if remote_workspace_id:
+    payload["remote"] = {
+        "host": remote_host,
+        "port": int(remote_port),
+        "transportKey": remote_transport_key,
+        "certificateFingerprint": remote_certificate_fingerprint,
+        "projectDir": remote_project_dir,
+        "workspaceID": remote_workspace_id,
+        "ipad": {"installationID": ipad_installation_id, "authToken": ipad_remote_token},
+        "iphone": {"installationID": iphone_installation_id, "authToken": iphone_remote_token},
+    }
 with open(output_path, "w") as handle:
     json.dump(payload, handle)
 PY
@@ -1517,7 +1627,6 @@ ipad_token="$(pair_device "$ipad_pairing_link" "$ipad_installation_id" "$ipad_na
 open_device_pairing_window
 iphone_pairing_link="$pairing_link"
 iphone_token="$(pair_device "$iphone_pairing_link" "$iphone_installation_id" "$iphone_name" "$device_api_host")"
-write_pairing_json "$pairing_json" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token"
 
 ipad_remote_token=""
 iphone_remote_token=""
@@ -1526,7 +1635,9 @@ if [[ -n "$remote_device_id" ]]; then
   ipad_remote_token="$(pair_device "$remote_pairing_link" "$ipad_installation_id" "$ipad_name")"
   open_remote_device_pairing_window
   iphone_remote_token="$(pair_device "$remote_pairing_link" "$iphone_installation_id" "$iphone_name")"
+  create_remote_demo_project
 fi
+write_pairing_json "$pairing_json" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token"
 ipad_device_seed_json="$(make_device_seed_json "$ipad_token" "$ipad_remote_token")"
 iphone_device_seed_json="$(make_device_seed_json "$iphone_token" "$iphone_remote_token")"
 

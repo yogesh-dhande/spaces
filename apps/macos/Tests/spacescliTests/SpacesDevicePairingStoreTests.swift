@@ -32,6 +32,45 @@ final class SpacesDevicePairingStoreTests: XCTestCase {
         }
     }
 
+    func testRebootstrapKeepsPresentedTokenStable() throws {
+        try withTemporaryProfile {
+            let store = try SpacesDevicePairingStore()
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "MAC-INSTALLATION-STABLE", bundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, platform: "macos",
+                deviceName: "MacBook Pro", appVersion: "1.0")
+
+            let token = try store.issueToken(for: clientApp)
+            // Re-bootstrapping while presenting the current token keeps it, so the local
+            // first-party client (which re-bootstraps on every sidebar reload) stays authorized
+            // instead of invalidating the tokens held by its live Device API connections.
+            let reissued = try store.issueToken(for: clientApp, presentedToken: token)
+            XCTAssertEqual(reissued, token)
+            XCTAssertNoThrow(try store.authorize(clientApp: clientApp, authToken: token))
+        }
+    }
+
+    func testIssueTokenMintsFreshTokenWithoutOrWithStalePresentedToken() throws {
+        try withTemporaryProfile {
+            let store = try SpacesDevicePairingStore()
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "MAC-INSTALLATION-FRESH", bundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, platform: "macos",
+                deviceName: "MacBook Pro", appVersion: "1.0")
+
+            let firstToken = try store.issueToken(for: clientApp)
+            // No presented token (first launch, or a client that lost its token) mints a fresh one
+            // and invalidates the prior token.
+            let rotated = try store.issueToken(for: clientApp)
+            XCTAssertNotEqual(rotated, firstToken)
+            XCTAssertThrowsError(try store.authorize(clientApp: clientApp, authToken: firstToken))
+            XCTAssertNoThrow(try store.authorize(clientApp: clientApp, authToken: rotated))
+
+            // A stale presented token cannot resurrect itself; it too mints a fresh token.
+            let afterStale = try store.issueToken(for: clientApp, presentedToken: firstToken)
+            XCTAssertNotEqual(afterStale, rotated)
+            XCTAssertNoThrow(try store.authorize(clientApp: clientApp, authToken: afterStale))
+        }
+    }
+
     func testAuthorizeRejectsUnsupportedBundle() throws {
         try withTemporaryProfile {
             let store = try SpacesDevicePairingStore()

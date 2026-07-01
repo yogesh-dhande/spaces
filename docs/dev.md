@@ -157,6 +157,8 @@ apps/macos/Tests/e2e.sh mobile
 
 The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
+With `SPACES_E2E_RUN_REMOTE=1`, the lane also drives the `takeover` and `two-session` scenarios against a remote daemon. Those remote UI scenarios run against the daemon the demo actually pairs the simulators with — the demo's own remote daemon reached over the SSH forward — so the demo creates a remote project/workspace on it and publishes the remote target (host, port, transport key, per-device auth token, and workspace) in the demo `pairing.json`; the harness reads that section rather than reusing the separate remote Device API parity flow's daemon, which uses an isolated data dir and is torn down before the UI scenarios run. The remote Device API parity flow remains independent coverage for the `remote-device-api` target.
+
 The E2E helpers source the worktree `.env` (gitignored, at the repo root) via `scripts/spaces-e2e-env.sh` when it exists. Local-only scenarios run without `.env`; remote-host lanes require it. A working remote test host is configured in the primary checkout's `.env`; a fresh worktree has none, so copy it in to run remote lanes from that worktree:
 
 ```bash

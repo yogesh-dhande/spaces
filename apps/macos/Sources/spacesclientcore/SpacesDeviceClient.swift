@@ -40,7 +40,7 @@ public struct SpacesDeviceOverviewResolution: Sendable {
 public enum SpacesDeviceClientError: LocalizedError, Equatable {
     case missingLocalBootstrap
     case missingOverview
-    case missingTransportKey(String)
+    case missingTransportKey(deviceName: String, isLocal: Bool)
     case requestRejected(String)
     case unavailable(String)
 
@@ -48,7 +48,16 @@ public enum SpacesDeviceClientError: LocalizedError, Equatable {
         switch self {
         case .missingLocalBootstrap: "The local daemon did not return Device API credentials."
         case .missingOverview: "The device did not return project and workspace data."
-        case .missingTransportKey(let deviceName): "Missing secure transport key for \(deviceName). Remove and reconnect this device."
+        // The recovery differs by device: a remote device's transport key is only obtainable by
+        // re-pairing, but the local device re-bootstraps itself on launch, so "remove and reconnect"
+        // is wrong for this Mac (you cannot un-pair your own device). Guide the local case to a
+        // restart, which re-establishes the key. This is only reached when the in-app self-heal
+        // (`ensureLocalDeviceCredentials`) could not re-bootstrap — typically the local daemon being
+        // unreachable — so a relaunch (which relaunches the daemon) is the actionable next step.
+        case .missingTransportKey(let deviceName, let isLocal):
+            isLocal
+                ? "Missing secure transport key for \(deviceName). Restart Spaces to reconnect this device."
+                : "Missing secure transport key for \(deviceName). Remove and reconnect this device."
         case .requestRejected(let message): message
         case .unavailable(let message): message
         }
@@ -56,7 +65,7 @@ public enum SpacesDeviceClientError: LocalizedError, Equatable {
 }
 
 public enum SpacesDeviceClient {
-    public typealias LocalBootstrapProvider = @Sendable (SpacesDeviceClientApp) throws -> SpacesDeviceAPIControlResponse
+    public typealias LocalBootstrapProvider = @Sendable (SpacesDeviceClientApp, _ presentedToken: String?) throws -> SpacesDeviceAPIControlResponse
     typealias DeviceRequestProvider =
         @Sendable (SpacesDeviceAPIRequest, SpacesPairedDeviceRecord, SpacesDeviceClientApp, SpacesProfile?) throws -> SpacesDeviceAPIResponse
     static let defaultRequestTimeoutSeconds: TimeInterval = 10
@@ -76,7 +85,11 @@ public enum SpacesDeviceClient {
         now: Date = Date(), bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
     ) throws -> SpacesPairedDeviceRecord {
         let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
-        let response = try bootstrap(clientApp)
+        // Present the token we already hold so the daemon keeps it instead of rotating it: the local
+        // device re-bootstraps on every sidebar reload, and a rotated token would invalidate the
+        // tokens held by live Device API connections (terminal streams and control requests).
+        let presentedToken = (try? SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: profile)) ?? nil
+        let response = try bootstrap(clientApp, presentedToken)
         guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
         guard let bootstrap = response.localClientBootstrap else { throw SpacesDeviceClientError.missingLocalBootstrap }
         let timestamp = ISO8601DateFormatter().string(from: now)
@@ -88,6 +101,24 @@ public enum SpacesDeviceClient {
         try SpacesDeviceCredentialStore.saveToken(bootstrap.authToken, deviceID: record.id, profile: profile)
         try SpacesDeviceCredentialStore.saveTransportKey(bootstrap.transportKey, deviceID: record.id, profile: profile)
         return record
+    }
+
+    /// Ensures the local device's Device API credentials (transport key and auth token) are present,
+    /// re-bootstrapping to regenerate them when either is missing. Only the local device can self-heal
+    /// this way: it is bootstrapped, not paired through a one-time window, so a fresh bootstrap
+    /// re-establishes its credentials. A remote device with missing credentials genuinely needs to be
+    /// removed and re-paired, so callers must not route remote devices here. Cheap when the credentials
+    /// already exist (two keychain existence checks, no daemon round-trip).
+    @discardableResult public static func ensureLocalDeviceCredentials(
+        database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
+    ) throws -> SpacesPairedDeviceRecord? {
+        let localDeviceID = SpacesPairedDeviceRecord.localDeviceID
+        let hasCredentials =
+            ((try? SpacesDeviceCredentialStore.hasTransportKey(deviceID: localDeviceID, profile: profile)) ?? false)
+            && ((try? SpacesDeviceCredentialStore.hasToken(deviceID: localDeviceID, profile: profile)) ?? false)
+        if hasCredentials { return nil }
+        return try bootstrapLocalDevice(database: providedDatabase, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
     }
 
     /// True when a local-device failure is a daemon-reachability problem rather than an error from a
@@ -171,10 +202,7 @@ public enum SpacesDeviceClient {
             device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
             onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
         ) throws -> SpacesDeviceAPIOverviewStreamClient {
-            guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
-                throw SpacesDeviceClientError.missingTransportKey(device.name)
-            }
-            let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile)
+            let (transportKey, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
             let client = try SpacesDeviceAPIOverviewStreamClient(
                 authToken: authToken, clientApp: clientApp, host: device.host, port: device.port, transportKey: transportKey,
                 onOverview: { onOverview(SpacesDeviceOverview(device: device, overview: $0)) }, onDisconnect: onDisconnect)
@@ -490,15 +518,36 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
+    /// Reads a device's Device API credentials (pinned-TLS transport key and auth token), transparently
+    /// re-bootstrapping the local device when *either* secret is missing. Both are checked together so a
+    /// lost token alone still triggers recovery — otherwise the request would be sent unauthenticated and
+    /// rejected with a 401 while the transport key looked healthy. A remote device cannot regenerate its
+    /// own credentials, so a missing remote transport key surfaces as `missingTransportKey` (the client
+    /// must re-pair); a remote token is returned as-is (possibly nil, the pre-existing behavior).
+    static func credentialsEnsuringLocalRecovery(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?
+    ) throws -> (transportKey: String, authToken: String?) {
+        if device.id == SpacesPairedDeviceRecord.localDeviceID {
+            let hasTransportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) != nil
+            let hasToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile) != nil
+            if !hasTransportKey || !hasToken { try ensureLocalDeviceCredentials(clientApp: clientApp, profile: profile) }
+            guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
+                throw SpacesDeviceClientError.missingTransportKey(deviceName: device.name, isLocal: true)
+            }
+            return (transportKey, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
+        }
+        guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
+            throw SpacesDeviceClientError.missingTransportKey(deviceName: device.name, isLocal: false)
+        }
+        return (transportKey, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
+    }
+
     public static func request(
         _ request: SpacesDeviceAPIRequest, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         #if canImport(Network)
-            guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
-                throw SpacesDeviceClientError.missingTransportKey(device.name)
-            }
-            let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile)
+            let (transportKey, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
             let client = try SpacesDeviceAPIRequestClient(
                 host: device.host, port: device.port, transportKey: transportKey, timeoutSeconds: requestTimeoutSeconds(for: request.command))
             let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
@@ -513,9 +562,9 @@ public enum SpacesDeviceClient {
         -> SpacesDeviceAPIRequest
     { SpacesDeviceAPIRequest(command: request.command, authToken: authToken, clientApp: clientApp) }
 
-    public static func defaultLocalBootstrapProvider(_ clientApp: SpacesDeviceClientApp) throws -> SpacesDeviceAPIControlResponse {
-        try SpacesDeviceAPIControlClient.bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: clientApp)
-    }
+    public static func defaultLocalBootstrapProvider(_ clientApp: SpacesDeviceClientApp, _ presentedToken: String?) throws
+        -> SpacesDeviceAPIControlResponse
+    { try SpacesDeviceAPIControlClient.bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: clientApp, presentedToken: presentedToken) }
 
     static func isRetryableLocalDeviceAPIConnectionError(_ error: any Error) -> Bool {
         #if canImport(Network)

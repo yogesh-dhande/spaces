@@ -1159,7 +1159,7 @@ PY
   "$SPACES_E2E_CLI" mobile-request \
     --host "$host" \
     --port "$port" \
-    --transport-key "$transport_key" \
+    --transport-key="$transport_key" \
     --request-json "$(cat "$pair_request_json")" >"$pair_response_json"
   auth_token="$(
     python3 - "$pair_response_json" <<'PY'
@@ -1176,7 +1176,7 @@ PY
     --spacese2e "$SPACES_E2E_CLI" \
     --host "$host" \
     --port "$port" \
-    --transport-key "$transport_key" \
+    --transport-key="$transport_key" \
     --auth-token "$auth_token" \
     --project-dir "$parity_project_dir" \
     --label "local-macos" \

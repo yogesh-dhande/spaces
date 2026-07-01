@@ -59,16 +59,14 @@ DB_PATH=""
 RUNTIME_DIR=""
 DEVICE_API_HOST=""
 DEVICE_API_PORT=""
-REMOTE_DEVICE_RESULT_JSON=""
-REMOTE_DEVICE_ID=""
-REMOTE_DEVICE_NAME=""
-REMOTE_DEVICE_API_HOST=""
-REMOTE_DEVICE_API_PORT=""
-REMOTE_DEVICE_AUTH_TOKEN=""
-REMOTE_DEVICE_TRANSPORT_KEY=""
-REMOTE_DEVICE_CERTIFICATE_FINGERPRINT=""
-REMOTE_DEVICE_PROJECT_DIR=""
-REMOTE_DEVICE_WORKSPACE_ID=""
+DEMO_REMOTE_HOST=""
+DEMO_REMOTE_PORT=""
+DEMO_REMOTE_TRANSPORT_KEY=""
+DEMO_REMOTE_CERTIFICATE_FINGERPRINT=""
+DEMO_REMOTE_PROJECT_DIR=""
+DEMO_REMOTE_WORKSPACE_ID=""
+DEMO_REMOTE_AUTH_TOKEN=""
+DEMO_REMOTE_INSTALLATION_ID=""
 TARGET_DEVICE_ID=""
 TARGET_DEVICE_NAME=""
 TARGET_DEVICE_API_HOST=""
@@ -498,33 +496,21 @@ run_remote_device_e2e() {
     SPACES_E2E_REMOTE_DEVICE_RESULT_JSON="$remote_result" \
     "$REMOTE_DEVICE_E2E_SCRIPT" >"$remote_stdout" 2>"$remote_log" \
     || fail "Remote paired-device E2E failed. See $remote_log"
-  REMOTE_DEVICE_RESULT_JSON="$remote_result"
-  local parsed
-  parsed="$(
-    python3 - "$REMOTE_DEVICE_RESULT_JSON" <<'PY'
+  # Validate the parity flow produced a complete result. The remote mobile-UI scenarios run against
+  # the demo's own remote daemon (see load_demo_remote_target), so this flow is independent remote
+  # Device API parity coverage rather than the source of the UI target.
+  python3 - "$remote_result" <<'PY' || fail "Remote paired-device E2E produced an incomplete result. See $remote_log"
 import json
-import shlex
 import sys
 payload = json.load(open(sys.argv[1]))
-fields = {
-    "REMOTE_DEVICE_ID": "deviceID",
-    "REMOTE_DEVICE_NAME": "name",
-    "REMOTE_DEVICE_API_HOST": "remoteDaemonHost",
-    "REMOTE_DEVICE_API_PORT": "remoteDaemonPort",
-    "REMOTE_DEVICE_AUTH_TOKEN": "authToken",
-    "REMOTE_DEVICE_TRANSPORT_KEY": "transportKey",
-    "REMOTE_DEVICE_CERTIFICATE_FINGERPRINT": "certificateFingerprint",
-    "REMOTE_DEVICE_PROJECT_DIR": "projectDir",
-    "REMOTE_DEVICE_WORKSPACE_ID": "workspaceID",
-}
-for env_name, json_name in fields.items():
-    value = payload.get(json_name)
-    if value is None or str(value).strip() == "":
-        raise SystemExit(f"remote device result missing {json_name}")
-    print(f"{env_name}={shlex.quote(str(value))}")
+required = [
+    "deviceID", "name", "remoteDaemonHost", "remoteDaemonPort", "authToken", "transportKey", "certificateFingerprint", "projectDir",
+    "workspaceID",
+]
+missing = [name for name in required if not str(payload.get(name, "")).strip()]
+if missing:
+    raise SystemExit("remote device result missing: " + ", ".join(missing))
 PY
-  )"
-  eval "$parsed"
 }
 
 create_device_api_parity_fixture() {
@@ -577,7 +563,7 @@ PY
     --spacese2e "$SPACES_E2E_BIN" \
     --host "$DEVICE_API_HOST" \
     --port "$DEVICE_API_PORT" \
-    --transport-key "$transport_key" \
+    --transport-key="$transport_key" \
     --auth-token "$auth_token" \
     --project-dir "$parity_project_dir" \
     --label "local-device" \
@@ -585,6 +571,43 @@ PY
     --client-device-name "$MOBILE_DEVICE_LABEL Device API E2E" \
     --result-json "$parity_result" >"$parity_stdout" 2>"$parity_log" \
     || fail "Local Device API parity flow failed. See $parity_log"
+}
+
+# Loads the remote UI target from the demo's pairing.json. This is the daemon the mobile apps and
+# harness are actually paired with (the demo's remote daemon reached over the SSH forward), together
+# with the remote project/workspace the demo created on it. The per-device auth token/installation ID
+# match the simulator that drives this run's UI test. Populates the DEMO_REMOTE_* vars.
+load_demo_remote_target() {
+  local parsed
+  parsed="$(
+    python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" <<'PY'
+import json
+import shlex
+import sys
+
+payload = json.load(open(sys.argv[1]))
+device_key = sys.argv[2]
+remote = payload.get("remote")
+if not isinstance(remote, dict) or not remote:
+    raise SystemExit("mobile demo pairing.json is missing the remote target section")
+device = remote.get(device_key) or {}
+fields = {
+    "DEMO_REMOTE_HOST": remote.get("host"),
+    "DEMO_REMOTE_PORT": remote.get("port"),
+    "DEMO_REMOTE_TRANSPORT_KEY": remote.get("transportKey"),
+    "DEMO_REMOTE_CERTIFICATE_FINGERPRINT": remote.get("certificateFingerprint"),
+    "DEMO_REMOTE_PROJECT_DIR": remote.get("projectDir"),
+    "DEMO_REMOTE_WORKSPACE_ID": remote.get("workspaceID"),
+    "DEMO_REMOTE_AUTH_TOKEN": device.get("authToken"),
+    "DEMO_REMOTE_INSTALLATION_ID": device.get("installationID"),
+}
+for name, value in fields.items():
+    if value is None or str(value).strip() == "":
+        raise SystemExit(f"mobile demo remote target is missing {name}")
+    print(f"{name}={shlex.quote(str(value))}")
+PY
+  )" || fail "Failed to load the remote mobile demo target from $DEMO_ROOT/pairing.json"
+  eval "$parsed"
 }
 
 configure_target() {
@@ -599,17 +622,17 @@ configure_target() {
       TARGET_WORKSPACE_ID=""
       ;;
     remote)
-      [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "remote target requested before remote Device API E2E result was available"
-      PROJECT_DIR="$REMOTE_DEVICE_PROJECT_DIR"
-      TARGET_DEVICE_ID="$REMOTE_DEVICE_ID"
-      TARGET_DEVICE_NAME="$REMOTE_DEVICE_NAME"
-      TARGET_DEVICE_API_HOST="$REMOTE_DEVICE_API_HOST"
-      TARGET_DEVICE_API_PORT="$REMOTE_DEVICE_API_PORT"
-      TARGET_DEVICE_AUTH_TOKEN="$REMOTE_DEVICE_AUTH_TOKEN"
-      TARGET_DEVICE_TRANSPORT_KEY="$REMOTE_DEVICE_TRANSPORT_KEY"
-      TARGET_DEVICE_CERTIFICATE_FINGERPRINT="$REMOTE_DEVICE_CERTIFICATE_FINGERPRINT"
-      TARGET_DEVICE_INSTALLATION_ID="REMOTE-DEVICE-E2E"
-      TARGET_WORKSPACE_ID="$REMOTE_DEVICE_WORKSPACE_ID"
+      load_demo_remote_target
+      PROJECT_DIR="$DEMO_REMOTE_PROJECT_DIR"
+      TARGET_DEVICE_ID="remote"
+      TARGET_DEVICE_NAME="Remote Device"
+      TARGET_DEVICE_API_HOST="$DEMO_REMOTE_HOST"
+      TARGET_DEVICE_API_PORT="$DEMO_REMOTE_PORT"
+      TARGET_DEVICE_AUTH_TOKEN="$DEMO_REMOTE_AUTH_TOKEN"
+      TARGET_DEVICE_TRANSPORT_KEY="$DEMO_REMOTE_TRANSPORT_KEY"
+      TARGET_DEVICE_CERTIFICATE_FINGERPRINT="$DEMO_REMOTE_CERTIFICATE_FINGERPRINT"
+      TARGET_DEVICE_INSTALLATION_ID="$DEMO_REMOTE_INSTALLATION_ID"
+      TARGET_WORKSPACE_ID="$DEMO_REMOTE_WORKSPACE_ID"
       ;;
     *)
       fail "unsupported mobile E2E target without a paired remote-daemon harness: $CURRENT_TARGET"
@@ -712,8 +735,9 @@ record_profile_app_owner_pid() {
 
 remote_device_api_request() {
   local request_json="$1"
-  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || return 1
-  python3 - "$SPACES_E2E_BIN" "$REMOTE_DEVICE_RESULT_JSON" "$BUNDLE_ID" "$request_json" <<'PY'
+  [[ -n "$DEMO_REMOTE_HOST" && -n "$DEMO_REMOTE_PORT" && -n "$DEMO_REMOTE_TRANSPORT_KEY" && -n "$DEMO_REMOTE_AUTH_TOKEN" ]] \
+    || fail "remote Device API request attempted before the remote mobile demo target was loaded"
+  python3 - "$SPACES_E2E_BIN" "$BUNDLE_ID" "$DEMO_REMOTE_HOST" "$DEMO_REMOTE_PORT" "$DEMO_REMOTE_TRANSPORT_KEY" "$DEMO_REMOTE_AUTH_TOKEN" "$DEMO_REMOTE_INSTALLATION_ID" "$request_json" <<'PY'
 import json
 import os
 import subprocess
@@ -721,12 +745,15 @@ import sys
 from pathlib import Path
 
 spacese2e = Path(sys.argv[1])
-remote_result_path = Path(sys.argv[2])
-bundle_id = sys.argv[3]
-request = json.loads(sys.argv[4])
-remote = json.loads(remote_result_path.read_text())
+bundle_id = sys.argv[2]
+host = sys.argv[3]
+port = sys.argv[4]
+transport_key = sys.argv[5]
+auth_token = sys.argv[6]
+installation_id = sys.argv[7]
+request = json.loads(sys.argv[8])
 client_app = {
-    "installationID": "REMOTE-DEVICE-E2E",
+    "installationID": installation_id,
     "bundleID": bundle_id,
     "platform": "ios",
     "deviceName": "Remote Device E2E",
@@ -745,24 +772,28 @@ def typed_device_request(request):
     return {"command": {command: payload}}
 
 request = typed_device_request(request)
-completed = subprocess.run(
-    [
-        str(spacese2e),
-        "mobile-request",
-        "--host",
-        str(remote["remoteDaemonHost"]),
-        "--port",
-        str(remote["remoteDaemonPort"]),
-        "--transport-key=" + remote["transportKey"],
-        "--request-json",
-        json.dumps({"authToken": remote["authToken"], "clientApp": client_app, **request}),
-    ],
-    capture_output=True,
-    text=True,
-    env=os.environ,
-    timeout=20,
-    check=True,
-)
+try:
+    completed = subprocess.run(
+        [
+            str(spacese2e),
+            "mobile-request",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--transport-key=" + transport_key,
+            "--request-json",
+            json.dumps({"authToken": auth_token, "clientApp": client_app, **request}),
+        ],
+        capture_output=True,
+        text=True,
+        env=os.environ,
+        timeout=20,
+        check=True,
+    )
+except subprocess.CalledProcessError as error:
+    sys.stderr.write(f"mobile-request failed (exit {error.returncode}): {(error.stderr or error.stdout or '').strip()}\n")
+    raise SystemExit(1)
 print(completed.stdout, end="")
 PY
 }

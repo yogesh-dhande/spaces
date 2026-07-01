@@ -10,7 +10,6 @@ import spacesterminalcore
 final class RemoteGhosttySessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
     private var databaseRoot: URL?
-    private final class RuntimeNotificationProbe: @unchecked Sendable { var count = 0 }
     private final class DirectTerminalServiceRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var payloads: [GhosttyRemoteSessionStatePayload]
@@ -575,7 +574,10 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(receivedPayloads[0].outputEndByteOffset, 42)
     }
 
-    @MainActor func testEndedRemoteHostDoesNotReloadFinalStateFromNotificationRefresh() throws {
+    @MainActor func testEndedRemoteHostRendersFinalStateFromRequestSender() throws {
+        // The final render of an ended session comes from the owning device's `.state`
+        // response, not a local `spaces.db` mirror. The host renders it in memory and
+        // writes no mirror row.
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -589,30 +591,18 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-04T00:00:01Z",
             exitedAt: "2026-06-04T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 5, rows: 1)
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
-        try TerminalSessionPersistence.writeRemoteSessionState(
-            GhosttyRemoteSessionStatePayload(
+        let recorder = DirectTerminalServiceRecorder(
+            payload: GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T00:00:01Z", sessionStateRevision: 1,
                 sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
                 title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
-                renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)), paths: paths)
+                renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)))
 
-        let probe = RuntimeNotificationProbe()
-        let observer = NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: nil) {
-            notification in
-            guard notification.userInfo?["sessionID"] as? String == sessionID else { return }
-            MainActor.assumeIsolated {
-                probe.count += 1
-                if probe.count == 1 { _ = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths).effectiveTitle }
-            }
-        }
-        defer { NotificationCenter.default.removeObserver(observer) }
-
-        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
+        waitForCondition("ended host renders final state") { host.snapshotText() == "done" }
         XCTAssertEqual(host.effectiveTitle, "final-title")
         XCTAssertEqual(host.snapshotText(), "done")
-        XCTAssertEqual(probe.count, 0)
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRemoteSessionState(paths: paths))
     }
 
     @MainActor func testEndedRemoteHostPermitsReadOnlyBindingsForFinalRenderViewer() throws {
@@ -629,16 +619,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-05T00:00:01Z",
             exitedAt: "2026-06-05T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 4, rows: 1)
-        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
-        try TerminalSessionPersistence.writeRemoteSessionState(
-            GhosttyRemoteSessionStatePayload(
+        let recorder = DirectTerminalServiceRecorder(
+            payload: GhosttyRemoteSessionStatePayload(
                 sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
                 sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
                 title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
-                renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)), paths: paths)
+                renderUpdate: try renderUpdate(text: "done", sessionRevision: 1)))
 
-        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
+        waitForCondition("ended host renders final state") { host.snapshotText() == "done" }
         host.debugSetBindingActionHandler { _ in true }
         try host.attach(
             client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
@@ -1366,7 +1355,8 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send)
 
         waitForCondition("direct daemon state render") { host.snapshotText() == "alpha" }
-        XCTAssertEqual(try TerminalSessionPersistence.readRemoteSessionState(paths: paths).sessionID, sessionID)
+        // The GUI host renders device state in memory and writes no local mirror row.
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRemoteSessionState(paths: paths))
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
         let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-10T00:00:02Z")

@@ -1170,7 +1170,7 @@ private final class BlockingAuthorizePairingStore: SpacesDevicePairingStoreProto
 
     init(clientApp: SpacesDeviceClientApp) { self.clientApp = clientApp }
 
-    func issueToken(for clientApp: SpacesDeviceClientApp) throws -> String {
+    func issueToken(for clientApp: SpacesDeviceClientApp, presentedToken _: String?) throws -> String {
         try validate(clientApp: clientApp)
         lock.lock()
         isPaired = true
