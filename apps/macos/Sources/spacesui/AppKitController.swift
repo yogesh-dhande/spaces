@@ -3767,13 +3767,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let card = CompatibilityBlockView(
-            verdict: verdict, status: status,
+            verdict: verdict, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, status: status,
             onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.confirmDaemonRestart(deviceID: deviceID) })
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 24),
-            card.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 24),
+            card.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
+            card.leadingAnchor.constraint(greaterThanOrEqualTo: detailContainer.leadingAnchor, constant: 24),
             card.trailingAnchor.constraint(lessThanOrEqualTo: detailContainer.trailingAnchor, constant: -24),
             card.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
         ])
