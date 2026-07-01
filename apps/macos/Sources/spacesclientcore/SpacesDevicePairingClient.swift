@@ -123,6 +123,8 @@ public enum SpacesDevicePairingClient {
             let sshUser = normalized(request.sshUser)
             try validateSSHPort(request.sshPort)
             let destination = sshDestination(host: sshHost, user: sshUser)
+            openSSHControlMaster(destination: destination, port: request.sshPort)
+            defer { closeSSHControlMaster(destination: destination, port: request.sshPort) }
             let deviceAPIHost = try sshPairingDeviceAPIHost(destination: destination, port: request.sshPort, sshHost: sshHost)
 
             try validateRemoteDeviceSSH(destination: destination, port: request.sshPort)
@@ -171,6 +173,8 @@ public enum SpacesDevicePairingClient {
             let sshUser = normalized(device.sshUser)
             try validateSSHPort(device.sshPort)
             let destination = sshDestination(host: sshHost, user: sshUser)
+            openSSHControlMaster(destination: destination, port: device.sshPort)
+            defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
             let deviceAPIHost = try remotePairingWindowDeviceAPIHost(destination: destination, port: device.sshPort, sshHost: sshHost)
             try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
             let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
@@ -203,6 +207,8 @@ public enum SpacesDevicePairingClient {
             let sshUser = normalized(device.sshUser)
             try validateSSHPort(device.sshPort)
             let destination = sshDestination(host: sshHost, user: sshUser)
+            openSSHControlMaster(destination: destination, port: device.sshPort)
+            defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
             try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
             let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
             guard probe.operatingSystem == "Linux" else { return false }
@@ -605,6 +611,7 @@ public enum SpacesDevicePairingClient {
         var arguments = [
             "-q", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
         ]
+        arguments += sshControlArguments(destination: destination, port: port)
         if let port { arguments += ["-P", String(port)] }
         arguments += [archiveURL.path, scpRemoteDestination(destination: destination, remotePath: remoteArchivePath)]
         let result = try runLocalProcess(executablePath: scpPath, arguments: arguments, timeoutSeconds: 300)
@@ -642,6 +649,97 @@ public enum SpacesDevicePairingClient {
         }
     }
 
+    // MARK: SSH connection multiplexing
+    //
+    // A remote pairing/setup flow runs several short SSH commands back to back (config lookup, reachability
+    // check, install probe, `spaces pair`, and, for Linux hosts, the installer copy/run). Opening a fresh
+    // connection for each one pays the full TCP + key-exchange + auth cost every time, which over a jittery
+    // WAN link is both slow and unreliable: a single cold connect can spike past a command's timeout and
+    // abort the whole flow. Each flow therefore opens one shared SSH master connection up front and every
+    // later `ssh`/`scp` reuses it over the existing channel, so only the master pays the connection cost.
+    // The master is best-effort: if it cannot be established, the individual commands fall back to their own
+    // direct connections, so multiplexing only changes a flow's speed and resilience, never its outcome.
+
+    static func sshControlPath(destination: String, port: Int?) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in "\(destination)|\(port.map(String.init) ?? "")".utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        // Keep the socket path short (well under the ~104-char AF_UNIX limit) and under the per-user
+        // temporary directory so only this user can connect to the master.
+        return NSTemporaryDirectory() + "spaces-ssh-\(String(hash, radix: 16)).sock"
+    }
+
+    static func sshControlArguments(destination: String, port: Int?) -> [String] {
+        ["-o", "ControlPath=\(sshControlPath(destination: destination, port: port))"]
+    }
+
+    /// Opens the shared SSH master connection so the commands that follow reuse it. Best-effort: failures are
+    /// swallowed and the caller's commands fall back to direct connections. A cold connect can exceed one
+    /// attempt's window on a jittery link, so timed-out attempts are retried a bounded number of times; a
+    /// non-timeout failure (auth, host key) is left for the reachability check to report with an actionable
+    /// message.
+    private static func openSSHControlMaster(destination: String, port: Int?) {
+        guard FileManager.default.isExecutableFile(atPath: sshPath) else { return }
+        let controlPath = sshControlPath(destination: destination, port: port)
+        if sshControlMasterIsRunning(controlPath: controlPath, destination: destination, port: port) { return }
+        try? FileManager.default.removeItem(atPath: controlPath)  // clear any stale socket before opening
+
+        var arguments = [
+            "-f", "-N", "-M", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o",
+            "StrictHostKeyChecking=yes", "-o", "ControlMaster=auto", "-o", "ControlPath=\(controlPath)", "-o", "ControlPersist=60",
+        ]
+        if let port { arguments += ["-p", String(port)] }
+        arguments.append(destination)
+
+        for _ in 0..<3 {
+            let result = runDetachedSSHProcess(arguments: arguments, timeoutSeconds: 25)
+            if result.timedOut { continue }  // transient jitter on the cold connect — retry
+            return  // established, or a hard failure the reachability check will surface
+        }
+    }
+
+    private static func closeSSHControlMaster(destination: String, port: Int?) {
+        guard FileManager.default.isExecutableFile(atPath: sshPath) else { return }
+        let controlPath = sshControlPath(destination: destination, port: port)
+        var arguments = ["-O", "exit", "-o", "ControlPath=\(controlPath)"]
+        if let port { arguments += ["-p", String(port)] }
+        arguments.append(destination)
+        _ = runDetachedSSHProcess(arguments: arguments, timeoutSeconds: 10)
+        try? FileManager.default.removeItem(atPath: controlPath)
+    }
+
+    private static func sshControlMasterIsRunning(controlPath: String, destination: String, port: Int?) -> Bool {
+        guard FileManager.default.fileExists(atPath: controlPath) else { return false }
+        var arguments = ["-O", "check", "-o", "ControlPath=\(controlPath)"]
+        if let port { arguments += ["-p", String(port)] }
+        arguments.append(destination)
+        let result = runDetachedSSHProcess(arguments: arguments, timeoutSeconds: 10)
+        return result.exitStatus == 0 && !result.timedOut
+    }
+
+    /// Runs an `ssh` control command whose output is discarded (master setup with `-f`, `-O check`,
+    /// `-O exit`). Uses the null device for all stdio so a backgrounded master cannot hold a pipe open and
+    /// block on read.
+    private static func runDetachedSSHProcess(arguments: [String], timeoutSeconds: TimeInterval) -> (exitStatus: Int32, timedOut: Bool) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: sshPath)
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return (exitStatus: -1, timedOut: false) }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        let timedOut = process.isRunning
+        if timedOut {
+            process.terminate()
+            while process.isRunning { Thread.sleep(forTimeInterval: 0.02) }
+        }
+        return (exitStatus: process.terminationStatus, timedOut: timedOut)
+    }
+
     private static func runSSH(destination: String, port: Int?, remoteCommand: String, timeoutSeconds: TimeInterval) throws -> SSHCommandResult {
         guard FileManager.default.isExecutableFile(atPath: sshPath) else {
             throw SpacesRemoteDevicePairingError.sshUnavailable("SSH is required to connect a remote device, but \(sshPath) is not executable.")
@@ -651,6 +749,7 @@ public enum SpacesDevicePairingClient {
         var arguments = [
             "-T", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
         ]
+        arguments += sshControlArguments(destination: destination, port: port)
         if let port { arguments += ["-p", String(port)] }
         arguments += [destination, remoteShellCommand(remoteCommand)]
         process.arguments = arguments

@@ -273,7 +273,7 @@ device_request() {
   "$SPACES_E2E_BIN" mobile-request \
     --host "$REMOTE_DAEMON_HOST" \
     --port "$REMOTE_DAEMON_PORT" \
-    --transport-key "$TRANSPORT_KEY" \
+    --transport-key="$TRANSPORT_KEY" \
     --request-json "$request_json" >"$response_file"
   python3 - "$response_file" <<'PY'
 import json
@@ -404,7 +404,7 @@ remote_device_parity() {
     --spacese2e "$SPACES_E2E_BIN" \
     --host "$REMOTE_DAEMON_HOST" \
     --port "$REMOTE_DAEMON_PORT" \
-    --transport-key "$TRANSPORT_KEY" \
+    --transport-key="$TRANSPORT_KEY" \
     --auth-token "$AUTH_TOKEN" \
     --project-dir "$project_dir" \
     --label "remote-device" \
