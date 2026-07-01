@@ -297,6 +297,9 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
     @Test func globalWindowNavigationUsesRememberedBuiltInTerminalSessionOnlyDuringActiveTerminalFocus() {
         #expect(AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: true))
         #expect(!AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: false))
+        #expect(AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.google.Chrome"))
+        #expect(!AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.apple.TextEdit"))
+        #expect(!AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: nil))
         #expect(
             AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
                 appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: false))
@@ -329,6 +332,8 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
                 focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, rememberedTerminalSessionWorkspaceID: nil,
                 activeWorkspaceID: "active")
                 == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "active", source: "active_workspace"))
+        #expect(AppKitController.activeWorkspaceIDForGlobalNavigation(appIsActive: true, activeWorkspaceID: "active") == "active")
+        #expect(AppKitController.activeWorkspaceIDForGlobalNavigation(appIsActive: false, activeWorkspaceID: "active") == nil)
     }
 
     @Test func commandPaletteSessionUsesCapturedMainWindowVisibilityForHotkeyState() {

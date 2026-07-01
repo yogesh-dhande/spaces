@@ -7,9 +7,7 @@ import spacesterminalghostty
 /// Raised when the injected state provider has no device-owned state to render
 /// yet. The window controller surfaces the existing "unavailable" UI rather than
 /// reading the daemon's `spaces.db` directly.
-enum TerminalSessionStateUnavailableError: Error {
-    case launchConfigurationUnavailable
-}
+enum TerminalSessionStateUnavailableError: Error { case launchConfigurationUnavailable }
 
 @MainActor private final class TerminalSessionWindow: NSWindow {
     var terminalKeyEventHandler: ((NSEvent) -> Bool)?
@@ -262,9 +260,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
         detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
         detachClientSynchronouslyOnClose: Bool = true, defersInitialOwnerClientAttach: Bool = false,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil,
-        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
         runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)? = nil,
         loadWindowFrameAction: @escaping (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?,
         saveWindowFrameAction: @escaping (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void,
@@ -272,11 +270,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     ) {
         self.init(
             sessionID: sessionID, paths: paths, stateProvider: stateProvider, preferredAttachmentMode: preferredAttachmentMode,
-            performInitialRefresh: performInitialRefresh,
-            sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-            detachClientAction: detachClientAction, copySelectionAction: copySelectionAction,
-            detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, defersInitialOwnerClientAttach: defersInitialOwnerClientAttach,
-            pasteClipboardAction: pasteClipboardAction,
+            performInitialRefresh: performInitialRefresh, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
+            takeoverAction: takeoverAction, attachClientAction: attachClientAction, detachClientAction: detachClientAction,
+            copySelectionAction: copySelectionAction, detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose,
+            defersInitialOwnerClientAttach: defersInitialOwnerClientAttach, pasteClipboardAction: pasteClipboardAction,
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
             onWindowClose: onWindowClose, runtimeControlsProvider: runtimeControlsProvider, loadWindowFrameAction: loadWindowFrameAction,
             saveWindowFrameAction: saveWindowFrameAction,
@@ -294,9 +291,9 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
         detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
         detachClientSynchronouslyOnClose: Bool = true, defersInitialOwnerClientAttach: Bool = false,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil,
-        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
         runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)? = nil,
         loadWindowFrameAction: @escaping (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?,
         saveWindowFrameAction: @escaping (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void,
@@ -413,9 +410,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private func initialAttachmentModeForShow() -> TerminalAttachmentMode {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return preferredAttachmentMode }
-        guard let ownerClient = activeOwnerClient(snapshot: stateProvider.currentAttachmentSnapshot) else {
-            return preferredAttachmentMode
-        }
+        guard let ownerClient = activeOwnerClient(snapshot: stateProvider.currentAttachmentSnapshot) else { return preferredAttachmentMode }
         return ownerClient.id == client.id ? .owner : .viewer
     }
 

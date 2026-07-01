@@ -292,6 +292,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The first command-palette result should stay selected by default, arrow keys should move the selection, and `Enter` should execute the same target-level focus/open action used by the numbered window shortcuts.
 - Leader-based previous/next window cycling should follow the most recently focused targets within the workspace rather than the static workspace definition order. Each repeated cycle sequence should traverse a frozen ordering snapshot so `previous` and `next` walk the full target set instead of bouncing between the last two windows.
 - Leader-based next/previous window cycling should always mean window cycling, even when the main Spaces window is focused.
+- Leader-based next/previous window cycling from outside Spaces should run only when the focused window belongs to a tracked workspace target. A focused Chrome window qualifies only when its active tab URL maps to a configured browser session; unmapped Chrome tabs and unrelated external apps leave focus unchanged.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available immediately.

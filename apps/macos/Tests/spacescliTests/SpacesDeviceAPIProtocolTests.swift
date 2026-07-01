@@ -169,10 +169,11 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             id: "terminal-1", workspaceID: "workspace-1", title: "Shell", workingDirectory: "/repo", sessionID: "session-3", runState: .running,
             canOpenTerminal: true, canStop: true, daemonEndpoint: endpoint)
         let session = SpacesDeviceTerminalSessionSummary(
-            id: "session-1", title: "API", workingDirectory: "/repo", shell: "/bin/zsh", command: "npm run dev", state: .running, backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent, servicePID: 123, childPID: 456, workspaceID: "workspace-1", workspaceTitle: "Feature", projectID: "project-1",
-            projectName: "Project", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true,
-            isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), daemonEndpoint: endpoint)
+            id: "session-1", title: "API", workingDirectory: "/repo", shell: "/bin/zsh", command: "npm run dev", state: .running,
+            backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 123, childPID: 456, workspaceID: "workspace-1",
+            workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), daemonEndpoint: endpoint)
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(

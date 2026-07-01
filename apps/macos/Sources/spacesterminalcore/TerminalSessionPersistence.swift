@@ -173,9 +173,9 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
     /// while attached. This is the single source of truth for liveness; the persistence
     /// query and any off-device consumer both judge attachments through this rule, so an
     /// expired remote viewer is never mistaken for a live attachment.
-    public func liveAttachments(
-        now: Date = Date(), remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
-    ) -> [TerminalAttachment] {
+    public func liveAttachments(now: Date = Date(), remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval)
+        -> [TerminalAttachment]
+    {
         let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
         let clientsByID = Dictionary(clients.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return attachments.filter { attachment in

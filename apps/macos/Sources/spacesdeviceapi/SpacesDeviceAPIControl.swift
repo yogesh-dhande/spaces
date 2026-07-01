@@ -431,7 +431,11 @@ public enum SpacesDeviceAPIControlClient {
 
     public static func bootstrapLocalClient(clientApp: SpacesDeviceClientApp, presentedToken: String? = nil, timeout: TimeInterval = 5) throws
         -> SpacesDeviceAPIControlResponse
-    { try send(SpacesDeviceAPIControlRequest(command: .bootstrapLocalClient(.init(clientApp: clientApp, presentedToken: presentedToken))), timeout: timeout) }
+    {
+        try send(
+            SpacesDeviceAPIControlRequest(command: .bootstrapLocalClient(.init(clientApp: clientApp, presentedToken: presentedToken))),
+            timeout: timeout)
+    }
 
     public static func bootstrapLocalClientEnsuringCurrentTerminalService(
         clientApp: SpacesDeviceClientApp, presentedToken: String? = nil, timeout: TimeInterval = 5

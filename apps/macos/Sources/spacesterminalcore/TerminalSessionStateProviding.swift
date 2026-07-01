@@ -42,6 +42,5 @@ import Foundation
     /// otherwise. Calling more than once attaches additional listeners to the
     /// model's single underlying subscription rather than opening a new one.
     func startStateStream(
-        onUpdate: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor ((any Error)?) -> Void)
+        onUpdate: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor ((any Error)?) -> Void)
 }

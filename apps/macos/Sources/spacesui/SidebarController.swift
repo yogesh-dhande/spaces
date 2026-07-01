@@ -28,13 +28,7 @@ private enum RemoteOverviewDisconnectReason {
     case error(any Error)
     case streamClosed
 
-    init(_ error: (any Error)?) {
-        if let error {
-            self = .error(error)
-        } else {
-            self = .streamClosed
-        }
-    }
+    init(_ error: (any Error)?) { if let error { self = .error(error) } else { self = .streamClosed } }
 
     var loadError: any Error {
         switch self {
@@ -407,9 +401,7 @@ private enum RemoteOverviewDisconnectReason {
             remoteOverviewSubscriptions[id] = nil
             client.stop()
         }
-        for id in remoteOverviewSubscribing where !desiredIDs.contains(id) {
-            remoteOverviewStartupDisconnects[id] = nil
-        }
+        for id in remoteOverviewSubscribing where !desiredIDs.contains(id) { remoteOverviewStartupDisconnects[id] = nil }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in remotes
         where desiredIDs.contains(record.id) && remoteOverviewSubscriptions[record.id] == nil && !remoteOverviewSubscribing.contains(record.id) {
@@ -486,8 +478,7 @@ private enum RemoteOverviewDisconnectReason {
         switch Self.remoteOverviewDisconnectAction(
             hasStoredSubscription: remoteOverviewSubscriptions[deviceID] != nil, isOpeningSubscription: remoteOverviewSubscribing.contains(deviceID))
         {
-        case .ignoreIntentionalRemoval:
-            return
+        case .ignoreIntentionalRemoval: return
         case .recordStartupDisconnect:
             remoteOverviewStartupDisconnects[deviceID] = RemoteOverviewDisconnectReason(error)
             return

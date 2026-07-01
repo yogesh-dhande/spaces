@@ -112,11 +112,8 @@
         }
 
         func startStateStream(
-            onUpdate: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-            onDisconnect: @escaping @MainActor ((any Error)?) -> Void
-        ) {
-            registerListener(onUpdate: onUpdate, onDisconnect: onDisconnect)
-        }
+            onUpdate: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor ((any Error)?) -> Void
+        ) { registerListener(onUpdate: onUpdate, onDisconnect: onDisconnect) }
 
         // MARK: Host wiring
 
@@ -153,9 +150,7 @@
             { [weak self] _, onEvent, onDisconnect in
                 guard let self else { throw SpacesDeviceClientError.unavailable("Terminal state model was released.") }
                 return MainActor.assumeIsolated {
-                    self.registerListener(
-                        onUpdate: { payload in onEvent(payload) },
-                        onDisconnect: { error in onDisconnect(error) })
+                    self.registerListener(onUpdate: { payload in onEvent(payload) }, onDisconnect: { error in onDisconnect(error) })
                 }
             }
         }
@@ -163,8 +158,7 @@
         // MARK: Fan-out subscription
 
         @discardableResult private func registerListener(
-            onUpdate: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-            onDisconnect: @escaping @MainActor ((any Error)?) -> Void
+            onUpdate: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor ((any Error)?) -> Void
         ) -> ListenerHandle {
             let id = UUID()
             listeners.append(Listener(id: id, onUpdate: onUpdate, onDisconnect: onDisconnect))
@@ -222,9 +216,9 @@
             guard !listeners.isEmpty, currentRuntimeState?.state.isInteractive != false else { return }
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(500))
-                guard let self, self.streamClient == nil, !self.listeners.isEmpty,
-                    self.currentRuntimeState?.state.isInteractive != false
-                else { return }
+                guard let self, self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
+                    return
+                }
                 self.lastSubscriptionAttemptAt = nil
                 self.ensureSubscriptionStarted()
             }
@@ -279,7 +273,8 @@
             case .state(let payload):
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID)), authToken: authToken, clientApp: clientApp))
+                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID)), authToken: authToken, clientApp: clientApp)
+                )
                 return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
             case .control(let payload):
                 let deviceRequest = try AppKitController.deviceTerminalControlRequest(
@@ -289,8 +284,7 @@
                 return TerminalServiceResponse(
                     ok: response.ok, message: response.message, sessionState: response.sessionState,
                     controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
-            default:
-                throw WorkspaceError.invalidArgument(message: "Device terminal command '\(request.commandName)' is not supported.")
+            default: throw WorkspaceError.invalidArgument(message: "Device terminal command '\(request.commandName)' is not supported.")
             }
         }
     }

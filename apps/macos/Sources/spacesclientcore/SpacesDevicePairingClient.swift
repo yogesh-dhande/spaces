@@ -687,8 +687,8 @@ public enum SpacesDevicePairingClient {
         try? FileManager.default.removeItem(atPath: controlPath)  // clear any stale socket before opening
 
         var arguments = [
-            "-f", "-N", "-M", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o",
-            "StrictHostKeyChecking=yes", "-o", "ControlMaster=auto", "-o", "ControlPath=\(controlPath)", "-o", "ControlPersist=60",
+            "-f", "-N", "-M", "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
+            "-o", "ControlMaster=auto", "-o", "ControlPath=\(controlPath)", "-o", "ControlPersist=60",
         ]
         if let port { arguments += ["-p", String(port)] }
         arguments.append(destination)

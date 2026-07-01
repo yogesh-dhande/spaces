@@ -34,8 +34,8 @@ public struct TerminalClient: Codable, Sendable, Equatable, Identifiable {
     public let leaseRefreshedAt: String?
 
     public init(
-        id: String = UUID().uuidString, kind: TerminalClientKind, identity: TerminalClientIdentity, connectedAt: String, disconnectedAt: String? = nil,
-        leaseRefreshedAt: String? = nil
+        id: String = UUID().uuidString, kind: TerminalClientKind, identity: TerminalClientIdentity, connectedAt: String,
+        disconnectedAt: String? = nil, leaseRefreshedAt: String? = nil
     ) {
         self.id = id
         self.kind = kind
