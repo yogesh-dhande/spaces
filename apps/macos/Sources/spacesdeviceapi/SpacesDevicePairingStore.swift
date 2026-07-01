@@ -59,16 +59,35 @@ public final class SpacesDevicePairingStore: @unchecked Sendable {
         pairingsPath = root.appendingPathComponent("device-pairings.json", isDirectory: false).path
     }
 
-    public func issueToken(for clientApp: SpacesDeviceClientApp) throws -> String {
+    /// Issues (or refreshes) the auth token for a client installation and persists its hash.
+    ///
+    /// When `presentedToken` still matches the stored pairing for this installation, it is kept
+    /// and returned unchanged. This keeps an already-paired client's token stable across repeated
+    /// bootstraps — the local first-party client re-bootstraps on every sidebar reload, and minting
+    /// a new token each time silently invalidated the token held by every live Device API connection
+    /// (terminal state streams and control requests), which surfaced as terminal input being dropped
+    /// and "terminal session is no longer available" errors. A missing or stale presented token mints
+    /// a fresh token, which is the first-pair and re-pair path.
+    public func issueToken(for clientApp: SpacesDeviceClientApp, presentedToken: String? = nil) throws -> String {
         try validate(clientApp: clientApp)
 
         let now = ISO8601DateFormatter().string(from: Date())
-        let token = UUID().uuidString.uppercased()
         var pairings = try loadPairings()
+        let existing = pairings.first(where: { $0.installationID == clientApp.installationID })
+
+        let token: String
+        if let existing, existing.bundleID == clientApp.bundleID,
+            let presentedToken = presentedToken?.trimmingCharacters(in: .whitespacesAndNewlines), !presentedToken.isEmpty,
+            existing.tokenHash == Self.hash(presentedToken)
+        {
+            token = presentedToken
+        } else {
+            token = UUID().uuidString.uppercased()
+        }
+
         let paired = SpacesDevicePairedInstallation(
             installationID: clientApp.installationID, bundleID: clientApp.bundleID, platform: clientApp.platform, deviceName: clientApp.deviceName,
-            appVersion: clientApp.appVersion, tokenHash: Self.hash(token),
-            createdAt: pairings.first(where: { $0.installationID == clientApp.installationID })?.createdAt ?? now, lastUsedAt: now)
+            appVersion: clientApp.appVersion, tokenHash: Self.hash(token), createdAt: existing?.createdAt ?? now, lastUsedAt: now)
         if let index = pairings.firstIndex(where: { $0.installationID == clientApp.installationID }) {
             pairings[index] = paired
         } else {

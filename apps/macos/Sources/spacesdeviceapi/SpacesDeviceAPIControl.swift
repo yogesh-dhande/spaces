@@ -44,8 +44,17 @@ struct SpacesDeviceAPIControlRevokeDeviceRequest: Codable, Equatable, Sendable {
 
 struct SpacesDeviceAPIControlBootstrapLocalClientRequest: Codable, Equatable, Sendable {
     let clientApp: SpacesDeviceClientApp
+    /// The auth token the client already holds for the local device, if any. When it still
+    /// matches the daemon's stored pairing, the daemon keeps it instead of minting a new one,
+    /// so re-bootstrapping (which happens on every sidebar reload) does not invalidate the
+    /// tokens held by live Device API connections. `nil` on first launch or after the token
+    /// was lost, which mints a fresh token.
+    let presentedToken: String?
 
-    init(clientApp: SpacesDeviceClientApp) { self.clientApp = clientApp }
+    init(clientApp: SpacesDeviceClientApp, presentedToken: String? = nil) {
+        self.clientApp = clientApp
+        self.presentedToken = presentedToken
+    }
 }
 
 enum SpacesDeviceAPIControlCommand: Equatable, Sendable {
@@ -420,13 +429,16 @@ public enum SpacesDeviceAPIControlClient {
         try send(SpacesDeviceAPIControlRequest(command: .resetAllPairings), timeout: timeout)
     }
 
-    public static func bootstrapLocalClient(clientApp: SpacesDeviceClientApp, timeout: TimeInterval = 5) throws -> SpacesDeviceAPIControlResponse {
-        try send(SpacesDeviceAPIControlRequest(command: .bootstrapLocalClient(.init(clientApp: clientApp))), timeout: timeout)
-    }
-
-    public static func bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: SpacesDeviceClientApp, timeout: TimeInterval = 5) throws
+    public static func bootstrapLocalClient(clientApp: SpacesDeviceClientApp, presentedToken: String? = nil, timeout: TimeInterval = 5) throws
         -> SpacesDeviceAPIControlResponse
-    { try responseEnsuringCurrentTerminalService(timeout: timeout, send: { try bootstrapLocalClient(clientApp: clientApp, timeout: $0) }) }
+    { try send(SpacesDeviceAPIControlRequest(command: .bootstrapLocalClient(.init(clientApp: clientApp, presentedToken: presentedToken))), timeout: timeout) }
+
+    public static func bootstrapLocalClientEnsuringCurrentTerminalService(
+        clientApp: SpacesDeviceClientApp, presentedToken: String? = nil, timeout: TimeInterval = 5
+    ) throws -> SpacesDeviceAPIControlResponse {
+        try responseEnsuringCurrentTerminalService(
+            timeout: timeout, send: { try bootstrapLocalClient(clientApp: clientApp, presentedToken: presentedToken, timeout: $0) })
+    }
 
     public static func isControlEndpointUnavailable(_ error: Error) -> Bool {
         if let posixError = error as? POSIXError { return isUnavailablePOSIXCode(posixError.code) }

@@ -67,7 +67,8 @@
             clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil
         ) throws {
             guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
-                throw SpacesDeviceClientError.missingTransportKey(device.name)
+                throw SpacesDeviceClientError.missingTransportKey(
+                    deviceName: device.name, isLocal: device.id == SpacesPairedDeviceRecord.localDeviceID)
             }
             self.device = device
             self.sessionID = sessionID

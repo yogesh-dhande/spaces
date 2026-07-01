@@ -1388,6 +1388,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             seedLaunchConfiguration == nil && terminalSessionSummaryMatch(sessionID: sessionID) == nil
             && Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) == nil
         let resolvedSummaryMatch = needsColdSummary ? await resolveSessionSummaryMatch(sessionID: sessionID) : nil
+        // The terminal state model opens its own pinned-TLS Device API connections directly, so its
+        // credentials are not re-established by the overview refresh path. When the session is local,
+        // re-bootstrap off-main if the local transport key/token went missing (e.g. an earlier
+        // bootstrap failed while the daemon was down) so the window opens instead of dead-ending on
+        // "Missing secure transport key".
+        let owningDevice = seedDevice ?? resolvedSummaryMatch?.device ?? terminalSessionOwningDevice(sessionID: sessionID)
+        if owningDevice?.id == SpacesPairedDeviceRecord.localDeviceID {
+            let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+            await Task.detached(priority: .userInitiated) { _ = try? SpacesDeviceClient.ensureLocalDeviceCredentials(clientApp: clientApp) }.value
+        }
         return openTerminalSessionWindow(
             sessionID: sessionID, mode: mode, requestID: requestID, seedDevice: seedDevice, seedLaunchConfiguration: seedLaunchConfiguration,
             seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
