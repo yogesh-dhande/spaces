@@ -151,6 +151,8 @@ flowchart TD
 - The iOS client sends preview metadata and chunk requests over a preview-specific command connection so file transfer cannot interleave with terminal input RPCs. Each preview request carries a generation token so overlapping taps cannot present stale metadata, downloads, or errors. Downloaded preview files are stored in a temporary cache keyed by a SHA-256 digest of the session and link metadata, direct HTTPS media URLs are downloaded to disk before being moved into that cache, stale direct-media downloads are cancelled on preview invalidation, and stale preview files are removed opportunistically. Preview files are presented with Quick Look. Direct non-media web URLs and cleartext HTTP URLs bypass the preview cache and open through UIKit.
 - The recovery launch environment overwrites `SPACES_DB_PATH`, `SPACES_RUNTIME_DIR`, and `SPACESD_EXECUTABLE` with the current profile database path, runtime directory, and service executable path. This binds the relaunched app to the same profile and keeps app-side terminal prewarm pointed at the still-running service binary instead of deriving a different profile or service path from the app process environment.
 - Native built-in terminal windows receive a workspace runtime-control provider from `spacesui`. The native window title owns the runtime name and the terminal UI owns the compact right-aligned action strip; `AppKitController` resolves the session back to a process, coding-agent, or ad hoc terminal row, preferring stable process template and coding-agent launcher IDs over user-editable names. Runtime controls are cached on the terminal controller and refreshed on creation, runtime metadata notifications, and lifecycle mutations so window focus can reuse the current descriptor.
+- Window focus and cycling are client concerns, reconstructed from the overview rather than an in-process orchestrator (a "window" is per-client state). One device-agnostic dispatcher resolves a focus target — a browser URL, a terminal session, or a run-process/run-agent action — from the selected workspace's overview, shared by numbered shortcuts, the command palette, and attention-item focus. Only two leaves depend on where the workspace's daemon runs: a browser session focuses its dedicated local Chrome window — opened once and tracked client-side by resolved URL, then re-focused by window id — or, for a remote daemon, opens the URL; a terminal session focuses the client's window for that session id, opening a native window for a local session or a Device API mirror for a remote one (the session-window registry is keyed by session id and shared by both). A missing window is simply reopened by the dispatcher, so there is no separate "recover this window" prompt.
+- Window cycling rebuilds the same ordered focusable targets client-side and tracks an in-memory cursor and short-lived cycle session per workspace (no database persistence). The current target is resolved from the focused built-in terminal session, then the frontmost Chrome tab URL, then the remembered cursor; the cursor and a per-burst rotation order keep rapid presses stable.
 - Global window cycling resolves a focused Spaces terminal window to its terminal session workspace before consulting the focused external window. Non-terminal focused windows still resolve through the window-system path first, then remembered terminal focus and active-workspace fallback.
 - User window close detaches process and coding-agent terminal windows while ad hoc terminal window close uses the ad hoc session stop path. Terminal-toolbar stop uses the process, coding-agent, or ad hoc lifecycle path for the selected runtime. Programmatic closes produced by stop or restart carry a termination marker through IPC so AppKit window cleanup does not recursively run close cleanup.
 - Runtime-target refresh preserves live process-owned and agent-owned Spaces terminal sessions by service runtime state after their native window detaches. Preserved agent sessions clear dead native window IDs during refresh and rebind to the replacement native window when focused. Ad hoc terminal rows require an active or pending attachment and are pruned when their final local or remote attachment is gone.
@@ -158,9 +160,12 @@ flowchart TD
 ### Device API and Remote Access
 - Each daemon creates or loads a self-signed TLS identity under `~/.spaces/runtime/daemon-tls`. macOS stores the identity as owner-readable private-key and certificate DER files that are loaded into an in-memory Security identity at daemon startup. Pairing links carry the daemon endpoint, nonce, short code, transport key material, and certificate fingerprint so clients can pin identity before receiving a long-lived token.
 - The daemon stores paired-client token hashes and device metadata under daemon-owned state. macOS and iOS store the issued token in Keychain and store non-secret paired-device metadata in the client database.
-- The macOS sidebar renders one section per paired device. `AppKitController` holds a `DeviceSection` per device with an independent load state; the local device loads from the initial snapshot and each remote device's overview is fetched concurrently through `SpacesDeviceClient.overview(device:)`. The flat id-keyed `projects`/`workspacesByProject` lookups are rebuilt as the union of all loaded sections — safe because project and workspace ids are globally unique — and daemon mutations resolve their target device from the selected row, falling back to the local device. The iOS client keeps a single active-device selection. Each client stores its own paired-device metadata independently from daemon state so switching clients does not mutate any daemon's workspace records.
-- macOS Alerts aggregate across devices: the local device's attention items are built from its orchestrator, and each remote device's attention items are derived client-side from its overview payload (exited process rows and waiting coding-agent rows), so no daemon protocol change is needed. The sidebar and dock badge sum every loaded device's items.
+- The macOS sidebar renders one section per paired device. `AppKitController` holds a `DeviceSection` per device with an independent load state; the local device loads from the initial snapshot and each remote device's overview is fetched concurrently through `SpacesDeviceClient.overview(device:)`. When the local daemon is unreachable, the snapshot degrades the local section to `.offline` (carrying the failure reason) instead of failing wholesale, so the local Mac surfaces offline the same way a remote does; the Devices settings pane offers a Restart Local Daemon action that calls `TerminalService.relaunch()` directly (a crashed daemon has no control RPC) and then re-renders against a fresh status. The flat id-keyed `projects`/`workspacesByProject` lookups are rebuilt as the union of all loaded sections — safe because project and workspace ids are globally unique — and daemon mutations resolve their target device from the selected row, falling back to the local device. The iOS client keeps a single active-device selection. Each client stores its own paired-device metadata independently from daemon state so switching clients does not mutate any daemon's workspace records.
+- Remote sidebar sections stay live through a per-paired-device overview push subscription, not polling. The initial `SpacesDeviceClient.overview(device:)` fetch gives immediate population; `SidebarController` then opens a `subscribeOverview` stream per credentialed remote and applies pushed overviews. A dropped stream and a failed initial connect both schedule the same delayed retry that reopens any paired device without a live subscription, so an offline remote recovers on its own rather than staying stale until an unrelated sidebar reload. A stream close that arrives while the initial subscription call is still returning is recorded as a startup disconnect; the returned client is stopped instead of retained, the section transitions offline, and the reconnect path runs. When an established stream drops, the section also transitions to `.offline` immediately (the same path a failed overview pull takes) so the sidebar shows the offline caption instead of stale projects/alerts while the retry runs; a graceful stream close that carries no transport error falls back to a descriptive offline reason. The offline transition clears the section's cached `overview` and rows (as the reachable-but-incompatible branch does), because id-based lookups such as `clientWorkspaceID(forTerminalSession:)` search section overviews directly — leaving a stale overview would resolve an offline remote's workspace/session ids while `deviceID(forWorkspaceID:)` falls back to the local daemon, misrouting terminal cleanup. If the offline device owned the current sidebar selection, its rows leave the merged data, so the detail pane would otherwise go stale and misroute actions to the local daemon; the offline transition detects that case and falls back to the alerts view, and it rebuilds the alerts detail whenever the alerts pane is already visible so its cards and focus map drop the removed device. Remote state has no local event channel, so this push is its only freshness source.
+- The daemon's `DeviceOverviewStreamServer` rebuilds and pushes a fresh overview when its source data changes, coalescing bursts into one broadcast. Database-backed changes raise `IPCNotification.databaseDidChange`; macOS writers also post the profile-scoped distributed notification, while Linux writers connect to a profile-scoped daemon socket that translates out-of-process committed writes into the same in-process notification. Terminal runtime, title, and exit state lives outside the database and instead raises `TerminalOverviewSignal` (in-process, plus profile-scoped across processes on macOS so a daemon-hosted server hears app-hosted session changes). The overview server observes both so terminal-state-only changes still reach subscribers.
+- macOS Alerts aggregate across devices from one builder: every device's attention items — local and remote alike — are derived client-side from its overview payload (exited process rows by `exitedAt`, waiting/done coding-agent rows by `updatedAt`), so the local device needs no orchestrator and no daemon protocol differs by device. Because desktop windows are client-local and absent from the overview, exited processes surface as process alerts (no per-window browser/editor icon styling) and clicking one focuses the process. The sidebar and dock badge sum every loaded device's items.
 - Project and workspace creation run on the selected daemon. Git project creation can clone from a daemon-side Git URL into the daemon workspace root, and existing-path project creation validates a daemon-local path.
+- Git-import preview is daemon-hosted over the Device API so it works on the device that will own the project. `prepareGitProject` clones to the final managed path on the target daemon and returns the detected `spaces.yaml` config (to pre-fill the add-project form) plus an opaque handle to the clone; if managed directories already exist it returns replacement candidates instead of cloning so the GUI can confirm first. Create passes that handle to `createProject`, which adopts the existing clone instead of re-cloning; canceling sends `discardPreparedGitProject` to delete it. The client holds and returns the handle without interpreting it (it references the daemon's on-disk clone), so the GUI never opens `spaces.db` for the import.
 - Workspace planning is local to the owning daemon. Runtime manifests carry workspace ID, project ID, daemon-local path, branch, base branch, named ports, process environment, and allowed file roots.
 - Workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts execute on the owning daemon. Synchronous workspace command logs are allocated under the daemon runtime root, and daemon listener token environment keys are scrubbed from launched child commands.
 - `spaces agent signal` writes agent lifecycle events to the daemon database for the workspace that owns the terminal session.
@@ -186,8 +191,7 @@ flowchart TD
 ### Database
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- Daemon SQLite stores projects, workspaces, runtime state, terminal metadata, paired-client metadata, daemon settings, and global settings.
-- macOS client SQLite stores paired-device metadata under `<profile-root>/Client/spaces-client.db`, with timestamped backups under `<profile-root>/Client/Backups/`.
+- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, terminal window frames, desktop (yabai) window IDs, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` records the canonical schema version. The active daemon schema is version `3`.
@@ -227,7 +231,6 @@ erDiagram
     TEXT dir
     INTEGER is_git
     TEXT default_branch
-    INTEGER is_collapsed
     TEXT setup_script
     TEXT stop_script
   }
@@ -319,9 +322,6 @@ erDiagram
     TEXT workspace_id PK
     TEXT name
     TEXT url
-    TEXT extracted_target_url
-    INTEGER extracted_window_id
-    INTEGER extracted_window_valid
     INTEGER order_index PK
   }
 
@@ -356,7 +356,6 @@ erDiagram
     TEXT name
     TEXT detail
     TEXT app
-    INTEGER window_id
     TEXT tracking_id
     INTEGER order_index
     TEXT created_at
@@ -551,6 +550,110 @@ Notable uniqueness outside primary keys:
 - `terminal_sessions.root_directory`, `terminal_runtime_states.root_directory`, and `terminal_remote_session_states.root_directory` are unique.
 - `terminal_attachments` enforces at most one active owner per root and at most one active attachment per root/client pair through partial unique indexes.
 
+### Client Database
+
+The diagram above is the daemon database (`spaces.db`). The macOS client keeps a separate `spaces-client.db` for client/desktop-owned state. It is keyed by `device_id` where rows are scoped to a paired device, so one client database describes the local device and every remote it has paired with.
+
+```mermaid
+erDiagram
+  paired_devices {
+    TEXT id PK
+    TEXT name
+    TEXT platform
+    TEXT host
+    INTEGER port
+    TEXT certificate_fingerprint
+    TEXT ssh_host
+    TEXT ssh_user
+    INTEGER ssh_port
+    TEXT last_selected_at
+  }
+
+  client_settings {
+    TEXT key PK
+    TEXT value
+  }
+
+  project_sidebar_state {
+    TEXT device_id PK
+    TEXT project_id PK
+    INTEGER is_collapsed
+  }
+
+  terminal_window_frames {
+    TEXT root_directory PK
+    TEXT mode PK
+    TEXT session_id
+    REAL x
+    REAL y
+    REAL width
+    REAL height
+  }
+
+  runtime_targets {
+    TEXT id PK
+    TEXT device_id
+    TEXT workspace_id
+    TEXT type
+    TEXT app
+    INTEGER window_id
+    TEXT tracking_id
+    INTEGER order_index
+  }
+
+  browser_targets {
+    TEXT runtime_target_id PK
+    TEXT target_url
+    TEXT resolved_url
+  }
+
+  runtime_target_events {
+    TEXT id PK
+    TEXT runtime_target_id FK
+    TEXT event_type
+    INTEGER window_id
+  }
+
+  local_window_focus_state {
+    TEXT key PK
+    TEXT workspace_id
+    INTEGER window_id
+  }
+
+  desktop_window_ids {
+    TEXT device_id PK
+    TEXT workspace_id PK
+    TEXT runtime_target_id PK
+    INTEGER window_id
+  }
+
+  browser_session_window_ids {
+    TEXT device_id PK
+    TEXT workspace_id PK
+    TEXT target_url PK
+    INTEGER window_id
+  }
+
+  migration_state {
+    INTEGER current_version
+  }
+
+  runtime_targets ||--o| browser_targets : extends
+  runtime_targets ||--o{ runtime_target_events : records
+```
+
+Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`), `desktop_window_ids` (desktop/yabai window IDs, keyed by `device_id`+`workspace_id`+`runtime_target_id`), and `browser_session_window_ids` (the dedicated Chrome window opened for a browser session, keyed by `device_id`+`workspace_id`+resolved `target_url`).
+
+`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not yet read or written. They were scaffolded for the thin-client split; the desktop window-ID portion of that split now ships as `desktop_window_ids` (see [Window-ID ownership](#window-id-ownership)).
+
+### Window-ID ownership
+
+Desktop window identity (`window_id`/yabai window IDs) is a client/desktop concern: a yabai window ID only means anything on the device's own desktop, and the session-less daemon (no yabai) never owns one. So window IDs live entirely in the client database (`desktop_window_ids`), keyed by `device_id` + `workspace_id` + the daemon-owned `runtime_target_id`, and recorded only for the local device.
+
+The daemon `runtime_targets` table carries pure runtime/terminal identity (`tracking_id`, `type`, `app`, `order_index`) with no `window_id` column, and the overview emits no window IDs — a remote viewer carries none, which is correct since it cannot focus another desktop's windows. The `runtime_target_id`-keyed `desktop_window_ids` table overlays captured window IDs onto a process-local `SQLiteStore` through a client-database-backed `DesktopWindowIDStore` (`ClientDesktopWindowIDStore` in `spacesclientcore`, conforming to the `systembridge` protocol), keeping desktop window identity out of the daemon database for any process that still resolves windows through the store.
+
+A workspace browser session is itself a client/desktop concept: the GUI opens one dedicated Chrome window per session, records that window's id in the client `browser_session_window_ids` table (keyed by `device_id` + `workspace_id` + the resolved `target_url`) through `ClientBrowserWindowIDStore`, and re-focuses that specific window by id thereafter — opening a fresh dedicated window only when the tracked one is gone. This is the client-state replacement for the daemon's former `workspace_browser_sessions.extracted_window_id`; the daemon, which never has a desktop session, no longer persists any browser window identity. Focusing by the tracked window id (rather than scanning every Chrome window for the URL) keeps focus on the session's own window and never on an unrelated window that happens to have the same URL open.
+
 ### Projects
 Projects persist:
 - a globally unique opaque project identity (a freshly minted UUID) separate from filesystem paths, so the same repository on two devices is two distinct projects and project ids never collide when one client aggregates several devices
@@ -575,7 +678,7 @@ The YAML schema contains:
 - `browser_sessions[].name`, `browser_sessions[].url`
 - `agent_launchers[].name`, `agent_launchers[].command`
 
-Import uses the same project/workspace normalization paths as GUI saves so existing port, process, and coding-agent launcher IDs are preserved by name or command where possible. GUI project creation previews a directory through the owning daemon's `previewProject` command, which loads `spaces.yaml` into a project-config payload before persistence; the form then saves the reviewed settings into the project and default workspace from the visible form snapshot without re-reading `spaces.yaml`. Because the preview runs on the daemon, folder-based creation works for both the local Mac and selected remote devices, and the New Project form opens in a standalone dialog window. The folder source is a path text field with daemon-backed directory autocomplete; the preview runs when the path is committed, and creation stays disabled until the committed path is validated. Git project creation prepares an app-managed bare clone plus default worktree before persistence, loads `spaces.yaml` from that worktree into the reviewed settings, and persists the prepared project only after the user saves; save-time validation failures keep the prepared source staged for retry, while explicit cancel, replacing the prepared source, or quitting with the form active removes the unmanaged clone and worktree. Async cleanup tasks are registered by trimmed Git URL, and preparation awaits any registered cleanup for that URL before touching the deterministic managed paths. If an unmanaged prepared clone or worktree is still present for the same Git URL, preparation treats it as abandoned state, removes the replaceable managed directories, and clones again so retrying the URL refreshes the loaded settings instead of failing on existing paths. Local and Git preparation results are accepted only while the originating add-project form and source segment remain active, and source hydration replaces open script editors and row section drafts so the visible settings match the selected source. Existing-project GUI import validates `spaces.yaml`, projects it through the normal configuration normalization path, and hydrates the visible project-settings sections without writing to SQLite; hydration uses the row-section replace path so import and discard clear stale inline editors and pending drafts before rendering the imported or saved rows. The imported state is tracked on the project form refs, and Save prompts for whether to apply the visible template to every workspace before calling the normal project update path. The workspace-sync save choice uses the same snapshot/rollback path as direct import when applying the visible template to every workspace. The direct core import API keeps `spaces.yaml` authoritative for compatibility, and invalid YAML still uses the managed-project rollback path. Export encodes the saved project template with Yams' Codable encoder and overwrites `spaces.yaml`.
+Import uses the same project/workspace normalization paths as GUI saves so existing port, process, and coding-agent launcher IDs are preserved by name or command where possible. GUI project creation previews a directory through the owning daemon's `previewProject` command, which loads `spaces.yaml` into a project-config payload before persistence; the form then saves the reviewed settings into the project and default workspace from the visible form snapshot without re-reading `spaces.yaml`. Because the preview runs on the daemon, folder-based creation works for both the local Mac and selected remote devices, and the New Project form opens in a standalone dialog window. The folder source is a path text field with daemon-backed directory autocomplete; the preview runs when the path is committed, and creation stays disabled until the committed path is validated. Git project creation prepares an app-managed bare clone plus default worktree before persistence, loads `spaces.yaml` from that worktree into the reviewed settings, and persists the prepared project only after the user saves; save-time validation failures keep the prepared source staged for retry, while explicit cancel, replacing the prepared source, changing the selected device, or quitting with the form active removes the unmanaged clone and worktree on the device that prepared it. Prepared Git handles store the preparing device id, readiness checks require that id to match the selected device, and stale async preparation results are discarded when the form points at a different device. Async cleanup tasks are registered by selected device plus trimmed Git URL, and preparation awaits any registered cleanup for that device and URL before touching the deterministic managed paths. If an unmanaged prepared clone or worktree is still present for the same Git URL on that device, preparation treats it as abandoned state, removes the replaceable managed directories, and clones again so retrying the URL refreshes the loaded settings instead of failing on existing paths. Local and Git preparation results are accepted only while the originating add-project form and source segment remain active, and source hydration replaces open script editors and row section drafts so the visible settings match the selected source. Existing-project GUI import validates `spaces.yaml`, projects it through the normal configuration normalization path, and hydrates the visible project-settings sections without writing to SQLite; hydration uses the row-section replace path so import and discard clear stale inline editors and pending drafts before rendering the imported or saved rows. The imported state is tracked on the project form refs, and Save prompts for whether to apply the visible template to every workspace before calling the normal project update path. The workspace-sync save choice uses the same snapshot/rollback path as direct import when applying the visible template to every workspace. The direct core import API keeps `spaces.yaml` authoritative for compatibility, and invalid YAML still uses the managed-project rollback path. Export encodes the saved project template with Yams' Codable encoder and overwrites `spaces.yaml`.
 
 ### Workspaces
 Workspaces persist:
@@ -605,7 +708,7 @@ This separation lets template edits coexist with current runtime state and per-w
 It also lets lifecycle state stay explicit while runtime health is derived from the current runtime records.
 
 ### Runtime Target Model
-- `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, current yabai `window_id`, durable terminal `tracking_id`, ordering, and display metadata.
+- `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, durable terminal `tracking_id`, ordering, and display metadata. The desktop (yabai) window ID is not stored here — it is client/desktop-local and lives in the client database (see [Window-ID ownership](#window-id-ownership)).
 - `browser_targets` extends browser runtime targets with the configured target URL and the last resolved URL.
 - `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` when the session is focusable and stores agent-session state: provider, display label, status, provider session key, claimed launcher identity, durable Spaces `terminal_session_id`, and timestamps.
 - `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, yabai window ID, and the full set of environment key names seen by `spaces agent signal` for that event.
@@ -662,12 +765,17 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 7. When the user opted in during archive confirmation, attempt remote-branch deletion first and local-branch deletion second, then surface any skipped or failed branch cleanup as a post-archive notice instead of rolling back the archive.
 
 ### Discovery and Reconciliation
-- Background worktree discovery imports valid unmanaged worktrees for known projects.
+- Worktree discovery is owned by `spacesd`, not the GUI. Discovery acts on the device's own filesystem and database, so it runs in the daemon on every device — including headless remotes the thin-client GUI cannot reach. `WorktreeDiscoveryService` runs a catch-up scan on daemon startup (cross-platform, pure git + store) to reconcile worktrees created, removed, or branch-switched while the daemon was down, and installs a `FileSystemWatcher` per local git project on the repo's git common directory. The watcher triggers the scan/create/archive reconciliation only when `HEAD` or anything under `worktrees/` changes, so ordinary object and index churn from commits does not wake it. The watcher backend is FSEvents on macOS (one recursive watch of the common dir, filtered) and inotify on Linux (a non-recursive watch of the common dir plus the small `worktrees/` tree, reinstalled as worktrees are added or removed). Scans are serialized so the burst of filesystem events a worktree mutation emits cannot drive overlapping scans that race on row creation. The daemon reconciles the watcher set on `databaseDidChange`, so added or removed git projects start or stop being watched. Each scan writes through `SQLiteStore`, which announces `databaseDidChange`, so the GUI sidebar and remote overview subscribers refresh without coupling to the service.
+- Sidebar metadata refresh is signal-triggered, not file-watched. Every process that commits a database write posts a profile-scoped `IPCNotification.databaseDidChange` from the `SQLiteStore` transaction commit; terminal runtime, title, and exit metadata posts profile-scoped `TerminalOverviewSignal`. The app reloads the local sidebar section on those signals, so external CLI/daemon edits and terminal-state-only changes are caught without polling, and the app's own database reads never trigger a reload (avoiding a file-watch feedback loop). The database-change post is synchronous so a short-lived CLI delivers it before exiting.
+- Owned child-process exit detection is owned by `spacesd`, since the daemon spawns workspace processes and detection is device-runtime work that must run on every device. `ProcessExitMonitorService` installs a `DispatchSourceProcess` (macOS) per running pid and runs the orchestrator's process-status reconcile on exit, applying the configured on-exit (notify/restart) behavior; the reconcile writes through `SQLiteStore`, so the GUI and remote overview refresh on `databaseDidChange`. The observed-pid set is reconciled on startup, on `databaseDidChange` (launches/stops change the running set), and on terminal runtime-state changes (child pid and exit state can appear before a database pid exists). Runtime-state-triggered reconciles ignore startup grace because the terminal host has reported an authoritative pid or exit transition, and rapid events are coalesced into one trailing reconcile. Persisted terminal exit/failure states are also honored during startup grace, while interactive `starting` and `running` states remain live. The reconcile builds a plain `WorkspaceOrchestrator`, so restart resolves through the daemon's process-wide in-process terminal launcher. A bundle-less daemon cannot post OS notifications, so the `notify` on-exit behavior is forwarded to the client through `IPCNotification.deliverUserNotification`, which the app delivers; this is the device-detects, client-notifies pattern. (Linux process-exit detection is pending the corresponding non-FSEvents mechanism.)
+- Device-runtime watchers live in `spacesd` (worktree discovery), while watchers that drive only client UI state remain in `AppKitController`/`SidebarController` (the database-change and terminal-overview sidebar reloads, plus the process-exit observers), each with explicit start/stop lifetimes tied to its owner's lifecycle. When a watcher cannot be installed, the affected live feature surfaces the failure instead of falling back to polling.
+- A reload deferred because the user is mid-edit (an open add form, unsaved project settings, or focused text input) is held and flushed at the next idle point (form close or app re-activation) rather than re-checked on a timer.
 - Background reconciliation removes stale tracked windows and refreshes persisted workspace metadata from disk where needed.
 - Saving workspace settings updates persisted configuration and synchronizes named-port reservations, but it does not reconcile live runtime by auto-starting or auto-stopping processes, browser sessions, or coding agents.
 - Reconciliation may degrade runtime health, but it should not silently promote or demote workspace lifecycle state.
 - Sidebar snapshot refresh can update the backing lists in the background without rebuilding the active detail pane when the current selection is still valid.
 - These passes should not block the main UI thread.
+- Workspace window tracking and setup prerequisite checks retain their existing interval-based passes; their inputs are multi-source and have no single event to observe.
 
 ## Environment and Process Model
 - Named port definitions are allocated per workspace and exposed as environment variables. Workspace-settings saves preserve existing allocations where possible, allocate newly added definitions immediately, and release removed definitions without waiting for the next launch.
@@ -717,7 +825,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - `spaces agent signal` resolves explicit workspace and terminal-session IDs. `init` creates or attaches the originating terminal's agent row. Non-`init` events update an existing row, or establish one when configured session metadata or current terminal runtime identifies the terminal as a coding agent. The label inference path recognizes configured Spaces agent terminals and known runtime agent foreground state.
 - Agent windows are stored separately from regular process windows because they carry provider and lifecycle metadata, but `init` also reconciles them against tracked terminal windows so ad-hoc agent terminals become focusable tracked rows.
 - Built-in terminal runtime state records nullable foreground process metadata for the sampled foreground PID, with separate nullable classification fields for known coding-agent commands including `codex`, `claude`, `claude-code`, and `opencode`. The Ghostty host classifies only the current live foreground PID; cached child PID state is used for process liveness and is not used for agent classification. The classifier matches the resolved executable basename and the POSIX invocation basename (`argv[0]`) as command identity candidates, then handles Node wrapper script paths. Later arguments are ignored for command identity so editors, search tools, and arbitrary scripts that mention an agent name are not promoted as agents.
-- The process-monitor cadence reconciles Spaces terminal sessions against foreground classifications. Terminal launch metadata identifies configured process and configured launcher sessions; `spaces agent signal` history is not used as configured ownership. Configured process sessions are skipped, configured launcher-backed agent rows are preserved, and ad-hoc agent rows are created while a known agent is foreground. `spaces agent signal` can establish an ad-hoc agent row before the polling detector observes it. Once a live terminal session has an agent row, foreground samples do not relabel, reclassify, or remove that row. Live signal-exit events record ad-hoc session-backed rows as idle, and exited ad-hoc agent sessions keep their row with a completed status so their final terminal frame remains accessible as an agent.
+- Foreground-classification reconciliation runs on terminal runtime-state events and is owned by `spacesd`, since the daemon hosts the terminal session cores and the classification is device-runtime work. Because foreground-process changes are part of a session's runtime state, the embedded Ghostty host posts a runtime-state change that the daemon's `TerminalForegroundAgentReconciler` observes to drive the reconcile (coalesced so overlapping events collapse into one pass); the reconcile writes through `SQLiteStore`, so the GUI and remote overview refresh on `databaseDidChange`. The runtime-state notification is posted only by the macOS embedded session host, so this reconciler is macOS-only until the Linux headless core samples foreground processes. Terminal launch metadata identifies configured process and configured launcher sessions; `spaces agent signal` history is not used as configured ownership. Configured process sessions are skipped, configured launcher-backed agent rows are preserved, and ad-hoc agent rows are created while a known agent is foreground. `spaces agent signal` can establish an ad-hoc agent row before the runtime-state detector observes it. Once a live terminal session has an agent row, foreground samples do not relabel, reclassify, or remove that row. Live signal-exit events record ad-hoc session-backed rows as idle, and exited ad-hoc agent sessions keep their row with a completed status so their final terminal frame remains accessible as an agent.
 - Configured agent-launcher names are treated as reserved focus labels. The launcher-owned agent instance may keep that exact label, while unrelated ad-hoc agents that report the same label are suffixed during registration so GUI rows and harness focus targets stay unambiguous.
 - Workspace launch opens configured coding agents through the same direct-terminal path as manual agent launch. That creates the tracked agent rows eagerly, while later `spaces agent signal` calls still supply the actual lifecycle status.
 - Alerts and numbered window shortcuts keep configured and ad-hoc agent rows in one `Coding Agents` section. Configured rows occupy their stable slots first, then unmatched ad-hoc agent rows append after them so shortcut ordering remains deterministic.

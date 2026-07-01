@@ -11,6 +11,39 @@ import spacesterminalui
 import systembridge
 import workspacecore
 
+/// Reason carried into the offline load state when a remote overview stream closes without an
+/// underlying transport error (a graceful server-side close), so the offline caption still has a
+/// non-empty tooltip explaining why the device went offline.
+private enum RemoteOverviewDisconnectError: LocalizedError {
+    case streamClosed
+
+    var errorDescription: String? {
+        switch self {
+        case .streamClosed: return "The connection to this device closed."
+        }
+    }
+}
+
+private enum RemoteOverviewDisconnectReason {
+    case error(any Error)
+    case streamClosed
+
+    init(_ error: (any Error)?) {
+        if let error {
+            self = .error(error)
+        } else {
+            self = .streamClosed
+        }
+    }
+
+    var loadError: any Error {
+        switch self {
+        case .error(let error): return error
+        case .streamClosed: return RemoteOverviewDisconnectError.streamClosed
+        }
+    }
+}
+
 /// Owns the left-hand project/workspace/device outline tree (an `NSOutlineView`) and
 /// its state, plus the sidebar's data load/merge pipeline and the Alerts row chrome.
 /// `AppKitController` holds a single instance and delegates sidebar interactions to it.
@@ -32,6 +65,12 @@ import workspacecore
     typealias AlertsGroup = AppKitController.AlertsGroup
     typealias SidebarArrowSelectionTarget = AppKitController.SidebarArrowSelectionTarget
 
+    enum RemoteOverviewDisconnectAction: Equatable {
+        case ignoreIntentionalRemoval
+        case recordStartupDisconnect
+        case markOffline
+    }
+
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     /// Memoized filtered+sorted visible workspaces per project. `visibleWorkspaces`
     /// is on the NSOutlineView data-source hot path (queried per row); caching keeps
@@ -41,11 +80,25 @@ import workspacecore
     /// Per-remote-device timestamp of the last overview fetch, so polls driven by
     /// local events don't re-request every remote's overview on every cycle.
     private var remoteOverviewFetchInstants: [String: ContinuousClock.Instant] = [:]
+    /// Live device-overview subscriptions per paired remote device. The remote
+    /// daemon pushes a fresh overview on every database change, so remote sidebar
+    /// state stays current without polling (remote state has no local event).
+    private var remoteOverviewSubscriptions: [String: SpacesDeviceAPIOverviewStreamClient] = [:]
+    /// Devices with a subscription open in flight, so rapid refreshes don't start
+    /// duplicate connections.
+    private var remoteOverviewSubscribing: Set<String> = []
+    /// Disconnects observed while `subscribeOverview` is still returning. These
+    /// are real stream drops, not intentional removals, so the opener consumes
+    /// them before deciding whether to retain the returned client.
+    private var remoteOverviewStartupDisconnects: [String: RemoteOverviewDisconnectReason] = [:]
+    private var remoteOverviewSubscriptionsEnabled = false
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
     private var pendingSidebarReloadFailureMessage: String?
     private var pendingSidebarReloadForceRemoteRefresh = false
-    private var periodicSidebarMetadataRefreshTask: Task<Void, Never>?
+    /// Set when an overview-affecting signal arrives while the user is mid-edit;
+    /// flushed at idle points so a deferred change is not lost.
+    private var pendingSidebarSignalReload = false
 
     // Alerts sidebar row
     private var alertsRowView: NSView?
@@ -75,33 +128,39 @@ import workspacecore
         outlineView.dataSource = self
     }
 
-    /// Cancels the periodic-refresh and in-flight reload tasks. Called from the
-    /// host's background-service teardown and termination paths.
+    /// Cancels in-flight reload state. Called from the host's background-service
+    /// teardown and termination paths.
     func stopSidebarTasks() {
-        periodicSidebarMetadataRefreshTask?.cancel()
-        periodicSidebarMetadataRefreshTask = nil
+        pendingSidebarSignalReload = false
         sidebarReloadTask?.cancel()
         sidebarReloadTask = nil
         pendingSidebarReloadRequest = false
         pendingSidebarReloadFailureMessage = nil
+        stopRemoteOverviewSubscriptions()
     }
-
-    func cancelPeriodicSidebarMetadataRefresh() { periodicSidebarMetadataRefreshTask?.cancel() }
 
     func cancelSidebarReloadTask() { sidebarReloadTask?.cancel() }
 
-    func startPeriodicSidebarMetadataRefresh() {
-        periodicSidebarMetadataRefreshTask?.cancel()
-        periodicSidebarMetadataRefreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(PollingConstants.sidebarMetadataRefreshInterval)) } catch { break }
-                if Task.isCancelled { break }
-                guard self.host.canReloadAfterBackgroundWorkspaceRefresh() else { continue }
-                // Catch external CLI edits (for example title changes) that do not trigger other poller reloads.
-                self.requestSidebarReload()
-            }
+    /// Reloads sidebar metadata after the owning daemon reports overview-affecting
+    /// state changed. Database-backed writes arrive through `databaseDidChange`;
+    /// terminal title/exit/runtime metadata arrives through `TerminalOverviewSignal`.
+    /// Driven by the writer, so there is no polling and no file-watch feedback loop
+    /// from the app's own reads.
+    func handleDatabaseDidChange() {
+        guard host.canReloadAfterBackgroundWorkspaceRefresh() else {
+            pendingSidebarSignalReload = true
+            return
         }
+        requestSidebarReload()
+    }
+
+    func handleLocalTerminalOverviewDidChange() { handleDatabaseDidChange() }
+
+    /// Flushes a signal-driven reload deferred while the user was mid-edit.
+    func flushPendingSidebarSignalReloadIfNeeded() {
+        guard pendingSidebarSignalReload, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
+        pendingSidebarSignalReload = false
+        requestSidebarReload()
     }
 
     func canPreserveDetailPaneAfterSidebarReload() -> Bool {
@@ -171,7 +230,7 @@ import workspacecore
     func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false) {
         host.logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
-        host.pendingWorktreeDiscoveryReload = false
+        pendingSidebarSignalReload = false
         host.commandPalette.invalidateCommandPaletteCache()
         host.configCache = snapshot.config
         host.loadShortcutSpecs()
@@ -183,11 +242,15 @@ import workspacecore
         // restart resolving a block, or an update-pending state clearing), the caption must still
         // reload or it keeps showing stale Resolve/update-pending UI.
         let previousLocalSection = host.deviceSections.first(where: { $0.deviceID == snapshot.localDeviceID })
+        // An unreachable local daemon renders as offline (red caption), exactly like a remote device that
+        // fails to load; otherwise the device is loaded. Fold loadState into the unchanged check so a
+        // loaded→offline transition still reloads the caption even when both overviews are empty.
+        let localLoadState = AppKitController.localDeviceLoadState(offlineMessage: snapshot.localOfflineMessage)
         let localOutlineUnchanged =
             previousLocalSection?.overview == snapshot.localDeviceOverview && previousLocalSection?.compatibility == snapshot.localCompatibility
-            && previousLocalSection?.daemonStatus == snapshot.localDaemonStatus
+            && previousLocalSection?.daemonStatus == snapshot.localDaemonStatus && previousLocalSection?.loadState == localLoadState
         let localSection = DeviceSection(
-            deviceID: snapshot.localDeviceID, deviceName: snapshot.localDeviceName, isLocal: true, loadState: .loaded,
+            deviceID: snapshot.localDeviceID, deviceName: snapshot.localDeviceName, isLocal: true, loadState: localLoadState,
             device: snapshot.localPairedDevice, projects: snapshot.projects, workspacesByProject: snapshot.workspacesByProject,
             workspaceRuntimeStatusByID: snapshot.workspaceRuntimeStatusByID, alertsGroups: snapshot.alertsGroups,
             overview: snapshot.localDeviceOverview, daemonStatus: snapshot.localDaemonStatus, compatibility: snapshot.localCompatibility)
@@ -214,6 +277,12 @@ import workspacecore
         if !shouldPreserveDetailPane {
             host.refreshSelection()
             host.logStartupProfile("apply_snapshot_selection_ready")
+        } else if !canPreserveDetailPaneAfterSidebarReload() {
+            // The preserve verdict was computed against the pre-reload data; this reload removed what the
+            // detail pane was preserving — e.g. the local daemon went offline and its selected workspace
+            // vanished. Reconcile the pane instead of leaving stale workspace detail/actions visible.
+            host.refreshSelection()
+            host.logStartupProfile("apply_snapshot_selection_reconciled_ready")
         } else if AppKitController.shouldRefreshVisibleWorkspaceDetail(
             selectedWorkspaceID: host.selectedWorkspaceID, showingAlerts: host.showingAlerts, showingSettings: host.showingSettings,
             workspaceExists: host.selectedWorkspaceID.flatMap { findWorkspace(id: $0) } != nil, mainWindowIsFocused: host.window?.isKeyWindow == true,
@@ -252,7 +321,7 @@ import workspacecore
         }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let now = ContinuousClock.now
-        let freshnessWindow = Duration.seconds(PollingConstants.sidebarMetadataRefreshInterval)
+        let freshnessWindow = Duration.seconds(PollingConstants.remoteOverviewFreshnessInterval)
         var updatedReconnectSection = false
         for record in remotes {
             guard AppKitController.pairedDeviceHasRequiredCredentials(deviceID: record.id) else {
@@ -293,6 +362,144 @@ import workspacecore
             applySidebarProjectExpansionState()
             updateAlertsSidebarBadge()
         }
+        refreshRemoteOverviewSubscriptions()
+    }
+
+    /// Enables and opens live overview subscriptions for paired remote devices.
+    /// Called when background services start; the pull above still gives immediate
+    /// population, while the subscription delivers subsequent changes by push.
+    func startRemoteOverviewSubscriptions() {
+        remoteOverviewSubscriptionsEnabled = true
+        refreshRemoteOverviewSubscriptions()
+    }
+
+    func stopRemoteOverviewSubscriptions() {
+        remoteOverviewSubscriptionsEnabled = false
+        let clients = remoteOverviewSubscriptions
+        remoteOverviewSubscriptions.removeAll()
+        remoteOverviewSubscribing.removeAll()
+        remoteOverviewStartupDisconnects.removeAll()
+        for client in clients.values { client.stop() }
+    }
+
+    /// Reconciles open subscriptions to the set of credentialed paired remotes:
+    /// drops gone devices and opens one per newly present device.
+    func refreshRemoteOverviewSubscriptions() {
+        guard remoteOverviewSubscriptionsEnabled else { return }
+        let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(deviceID: $0.id) }
+        let desiredIDs = Set(remotes.map(\.id))
+        for (id, client) in remoteOverviewSubscriptions where !desiredIDs.contains(id) {
+            // Remove before stopping so the disconnect callback treats it as intentional.
+            remoteOverviewSubscriptions[id] = nil
+            client.stop()
+        }
+        for id in remoteOverviewSubscribing where !desiredIDs.contains(id) {
+            remoteOverviewStartupDisconnects[id] = nil
+        }
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        for record in remotes where remoteOverviewSubscriptions[record.id] == nil && !remoteOverviewSubscribing.contains(record.id) {
+            remoteOverviewStartupDisconnects[record.id] = nil
+            remoteOverviewSubscribing.insert(record.id)
+            openRemoteOverviewSubscription(record: record, clientApp: clientApp)
+        }
+    }
+
+    private func openRemoteOverviewSubscription(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp) {
+        let deviceID = record.id
+        // Build the stream callbacks with a single weak capture so the detached
+        // connect task below captures only Sendable values (not `self`).
+        let onOverview: @Sendable (SpacesDeviceOverview) -> Void = { [weak self] overview in
+            // A pushed overview comes from a reachable, decodable daemon; read its inline
+            // frozen-core status (if present) so the compatibility verdict rides along, the
+            // same way the polling `resolveOverview` path derives it.
+            let daemonStatus = overview.overview.daemonStatus
+            let compatibility = daemonStatus.map { SpacesWireCompatibility.evaluate(daemonStatus: $0) }
+            Task { @MainActor in
+                self?.applyRemoteDeviceSection(
+                    deviceID: deviceID,
+                    result: .success(RemoteDeviceLoad(overview: overview, daemonStatus: daemonStatus, compatibility: compatibility)))
+            }
+        }
+        let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] error in
+            Task { @MainActor in self?.handleRemoteOverviewDisconnected(deviceID: deviceID, error: error) }
+        }
+        Task { @MainActor [weak self] in
+            // Resolving credentials and connecting block, so do it off the main actor.
+            let client = await Task.detached(priority: .userInitiated) { () -> SpacesDeviceAPIOverviewStreamClient? in
+                try? SpacesDeviceClient.subscribeOverview(device: record, clientApp: clientApp, onOverview: onOverview, onDisconnect: onDisconnect)
+            }.value
+            guard let self else {
+                client?.stop()
+                return
+            }
+            let startupDisconnect = self.remoteOverviewStartupDisconnects.removeValue(forKey: deviceID)
+            self.remoteOverviewSubscribing.remove(deviceID)
+            guard let client else {
+                // The connect attempt failed (remote offline at launch or still
+                // unreachable on a reconnect). With no periodic metadata refresh to
+                // fall back on, schedule the same delayed retry the disconnect path
+                // uses so the remote section recovers on its own rather than staying
+                // stale until an unrelated sidebar reload.
+                self.scheduleRemoteOverviewReconnect()
+                return
+            }
+            if let startupDisconnect {
+                client.stop()
+                guard self.remoteOverviewSubscriptionsEnabled, self.host.macPairedDevices().contains(where: { $0.id == deviceID }) else { return }
+                self.applyRemoteOverviewDisconnect(deviceID: deviceID, reason: startupDisconnect)
+                return
+            }
+            guard self.remoteOverviewSubscriptionsEnabled, self.host.macPairedDevices().contains(where: { $0.id == deviceID }) else {
+                client.stop()
+                return
+            }
+            self.remoteOverviewSubscriptions[deviceID] = client
+        }
+    }
+
+    private func handleRemoteOverviewDisconnected(deviceID: String, error: (any Error)?) {
+        switch Self.remoteOverviewDisconnectAction(
+            hasStoredSubscription: remoteOverviewSubscriptions[deviceID] != nil, isOpeningSubscription: remoteOverviewSubscribing.contains(deviceID))
+        {
+        case .ignoreIntentionalRemoval:
+            return
+        case .recordStartupDisconnect:
+            remoteOverviewStartupDisconnects[deviceID] = RemoteOverviewDisconnectReason(error)
+            return
+        case .markOffline:
+            remoteOverviewSubscriptions[deviceID] = nil
+            applyRemoteOverviewDisconnect(deviceID: deviceID, reason: RemoteOverviewDisconnectReason(error))
+        }
+    }
+
+    nonisolated static func remoteOverviewDisconnectAction(hasStoredSubscription: Bool, isOpeningSubscription: Bool) -> RemoteOverviewDisconnectAction
+    {
+        if hasStoredSubscription { return .markOffline }
+        if isOpeningSubscription { return .recordStartupDisconnect }
+        return .ignoreIntentionalRemoval
+    }
+
+    private func applyRemoteOverviewDisconnect(deviceID: String, reason: RemoteOverviewDisconnectReason) {
+        guard remoteOverviewSubscriptionsEnabled else { return }
+        // An established stream dropping means the remote daemon or network went away. With no
+        // periodic remote refresh to fall back on, transition the section to offline now — the same
+        // way a failed pull does — so the sidebar shows the offline caption instead of stale
+        // projects/alerts, then schedule the delayed reconnect. A graceful stream close carries no
+        // error, so fall back to a descriptive reason for the offline tooltip.
+        applyRemoteDeviceSection(deviceID: deviceID, result: .failure(reason.loadError))
+        scheduleRemoteOverviewReconnect()
+    }
+
+    /// Retries opening overview subscriptions after a short delay so a persistently
+    /// unreachable remote reconnects without spinning. Used both when an open stream
+    /// drops and when the initial connect fails; `refreshRemoteOverviewSubscriptions`
+    /// reopens any paired device that has no live subscription. This is
+    /// reconnect-on-failure, not a poll of healthy state.
+    private func scheduleRemoteOverviewReconnect() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            self?.refreshRemoteOverviewSubscriptions()
+        }
     }
 
     func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>) {
@@ -301,6 +508,10 @@ import workspacecore
         // the device's overview or load state actually changed, so unchanged polls
         // don't collapse expanded projects.
         let wasLoaded = host.deviceSections[index].loadState == .loaded
+        // Set when this call marks the device offline while a workspace/project of that device was the
+        // current selection: its rows drop out of the merged sidebar data below, so the detail pane is
+        // left stale and must fall back to the alerts view (see the end of this method).
+        var selectionInvalidatedByOffline = false
         switch result {
         case .success(let load):
             // Compatibility/status can change while the overview stays identical (e.g. after a restart
@@ -348,12 +559,30 @@ import workspacecore
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
             host.deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-            host.deviceSections[index].alertsGroups = AppKitController.buildRemoteAlertsGroups(from: overview.overview, deviceID: deviceID)
+            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(from: overview.overview, deviceID: deviceID)
             host.deviceSections[index].overview = overview.overview
             host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded
         case .failure(let error):
             if case .offline = host.deviceSections[index].loadState { return }
+            // Capture (before the rebuild drops this device's rows from the merged data) whether the
+            // current selection belongs to this device, so the offline transition can reconcile a now-
+            // stale detail pane.
+            selectionInvalidatedByOffline = AppKitController.sidebarSelectionBelongsToDeviceSection(
+                selectedWorkspaceID: host.selectedWorkspaceID, selectedProjectID: host.selectedProjectID,
+                section: host.deviceSections[index])
+            // Drop the offline device's cached rows and overview. The merged sidebar data already excludes
+            // non-loaded sections, but the section's `overview` is still searched directly by id-based
+            // lookups (e.g. `clientWorkspaceID(forTerminalSession:)`); leaving it populated lets an offline
+            // remote's workspace/session ids resolve through the stale overview while `deviceID(forWorkspaceID:)`
+            // falls back to the local daemon, misrouting terminal cleanup to the wrong device. Clearing here
+            // (as the reachable-but-incompatible branch above already does) keeps offline devices out of every
+            // overview lookup from one place.
+            host.deviceSections[index].projects = []
+            host.deviceSections[index].workspacesByProject = [:]
+            host.deviceSections[index].workspaceRuntimeStatusByID = [:]
+            host.deviceSections[index].alertsGroups = []
+            host.deviceSections[index].overview = nil
             // Drop the prior verdict so an offline device shows "offline" rather than a stale Resolve
             // button / restart block from when it was last reachable-but-incompatible.
             host.deviceSections[index].compatibility = nil
@@ -365,6 +594,14 @@ import workspacecore
         host.outlineView.reloadData()
         applySidebarProjectExpansionState()
         updateAlertsSidebarBadge()
+        // Rebuild the Alerts detail when either:
+        //  (a) the offline device owned the current selection — its rows are gone from the merged data, so
+        //      the workspace/project detail pane is stale and would misroute follow-up actions to the local
+        //      daemon; fall back to the Alerts view, which clears the invalid selection; or
+        //  (b) the Alerts pane is already visible — its cards and `alertsFocusRequestMap` were built from the
+        //      pre-rebuild groups and would keep showing (and routing clicks to) the now-removed device's
+        //      alerts until the user navigates away.
+        if selectionInvalidatedByOffline || host.showingAlerts { host.showAlertsDetail() }
     }
 
     /// Recomputes the flat, id-keyed sidebar dictionaries as the union of every
@@ -414,10 +651,14 @@ import workspacecore
         return result
     }
 
-    /// True when more than one paired device is present, so the sidebar groups
-    /// projects under per-device header rows. With a single (local) device the
-    /// root stays a flat project list.
-    var showsDeviceHeaders: Bool { host.deviceSections.count > 1 }
+    /// True when the sidebar groups projects under per-device header rows: whenever more than one device
+    /// is paired, or when any section is offline so its "offline" caption — the only surface for an
+    /// unreachable daemon's reason — still has a header row to render in (a single offline local device
+    /// otherwise has no project rows and would show nothing). A single loaded device stays a flat list.
+    var showsDeviceHeaders: Bool {
+        AppKitController.sidebarShowsDeviceHeaders(
+            deviceCount: host.deviceSections.count, hasOfflineSection: host.deviceSections.contains { $0.loadState.isOffline })
+    }
 
     func deviceProjects(deviceID: String) -> [ProjectSummary] {
         host.projects.filter { project in
@@ -625,6 +866,11 @@ import workspacecore
             stateLabel.lineBreakMode = .byTruncatingTail
             stateLabel.setContentHuggingPriority(.required, for: .horizontal)
             stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            // Surface the offline reason (e.g. the daemon startup error) on hover; the caption itself
+            // stays the terse "offline" to match remote devices and avoid widening the sidebar.
+            if case .offline(let message)? = host.deviceSections.first(where: { $0.deviceID == deviceID })?.loadState, !message.isEmpty {
+                stateLabel.toolTip = message
+            }
             contentRow.addArrangedSubview(stateLabel)
         }
 

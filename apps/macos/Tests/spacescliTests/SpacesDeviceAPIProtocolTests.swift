@@ -5,6 +5,21 @@ import spacesterminalcore
 @testable import spacesdevicecore
 
 final class SpacesDeviceAPIProtocolTests: XCTestCase {
+    func testSubscribeDeviceOverviewRoundTripsThroughCodecAndIsASubscription() throws {
+        let request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: "SECRET")
+        XCTAssertTrue(request.command.isSubscriptionCommand)
+        XCTAssertTrue(request.command.isDeviceOverviewSubscription)
+        XCTAssertFalse(SpacesDeviceAPIRequest(command: .overview).command.isDeviceOverviewSubscription)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testDeviceOverviewStreamCodecRoundTripsPayload() throws {
+        let payload = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+        let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)
+        XCTAssertEqual(line.last, 0x0A)
+        XCTAssertEqual(try SpacesDeviceOverviewStreamCodec.decodeLine(line.dropLast()), payload)
+    }
+
     func testTerminalControlRequestsAreNotReplaySafeAfterAmbiguousConnectionFailure() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(.init(action: .send, sessionID: "session-1", clientID: "client-1", text: "a")), authToken: "SECRET")
@@ -47,6 +62,31 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
                     scrollMods: 7)), authToken: "SECRET")
 
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testGitProjectPreparationCommandsAndResultRoundTripThroughCodec() throws {
+        let prepare = SpacesDeviceAPIRequest(
+            command: .prepareGitProject(.init(gitURL: "https://example.com/repo.git", replaceExistingManagedDirectories: true)), authToken: "SECRET")
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(prepare)), prepare)
+        // Preparing clones, so it must not be replayed after an ambiguous connection failure.
+        XCTAssertFalse(prepare.isSafeToReplayAfterConnectionFailure)
+
+        let discard = SpacesDeviceAPIRequest(command: .discardPreparedGitProject(.init(preparedGitProjectHandle: "HANDLE")), authToken: "SECRET")
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(discard)), discard)
+        XCTAssertFalse(discard.isSafeToReplayAfterConnectionFailure)
+
+        // createProject carries the opaque handle so the daemon adopts the existing clone.
+        let create = SpacesDeviceAPIRequest(
+            command: .createProject(.init(projectDir: nil, gitURL: "https://example.com/repo.git", config: nil, preparedGitProjectHandle: "HANDLE")),
+            authToken: "SECRET")
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(create)), create)
+
+        let preparation = SpacesDeviceGitProjectPreparation(
+            preparedGitProjectHandle: "HANDLE", name: "repo", defaultBranch: "main", config: SpacesDeviceProjectConfig(),
+            replacementCandidates: [SpacesDeviceManagedDirectoryReplacementCandidate(kind: "projectRepository", path: "/tmp/repo")])
+        let response = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .gitProjectPreparation(preparation))
+        let decoded = try JSONDecoder().decode(SpacesDeviceAPIResponse.self, from: JSONEncoder().encode(response))
+        XCTAssertEqual(decoded.gitProjectPreparation, preparation)
     }
 
     func testAmbiguousRequestPayloadIsRejected() throws {

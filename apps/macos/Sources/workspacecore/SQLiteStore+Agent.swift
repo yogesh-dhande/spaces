@@ -46,7 +46,6 @@ extension SQLiteStore {
                   COALESCE(runtime_targets.app, ''),
                   COALESCE(runtime_targets.name, ''),
                   COALESCE(runtime_targets.detail, ''),
-                  COALESCE(runtime_targets.window_id, ''),
                   COALESCE(runtime_targets.tracking_id, ''),
                   COALESCE(agent_sessions.terminal_session_id, ''),
                   COALESCE(agent_sessions.session_key, ''),
@@ -76,7 +75,6 @@ extension SQLiteStore {
                       COALESCE(runtime_targets.app, ''),
                       COALESCE(runtime_targets.name, ''),
                       COALESCE(runtime_targets.detail, ''),
-                      COALESCE(runtime_targets.window_id, ''),
                       COALESCE(runtime_targets.tracking_id, ''),
                       COALESCE(agent_sessions.terminal_session_id, ''),
                       COALESCE(agent_sessions.session_key, ''),
@@ -106,7 +104,6 @@ extension SQLiteStore {
                   COALESCE(runtime_targets.app, ''),
                   COALESCE(runtime_targets.name, ''),
                   COALESCE(runtime_targets.detail, ''),
-                  COALESCE(runtime_targets.window_id, ''),
                   COALESCE(runtime_targets.tracking_id, ''),
                   COALESCE(agent_sessions.terminal_session_id, ''),
                   COALESCE(agent_sessions.session_key, ''),
@@ -172,17 +169,21 @@ extension SQLiteStore {
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 17 else { return nil }
+        guard row.count >= 16 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
-        let terminalSessionID = row[10].isEmpty ? nil : row[10]
-        let status = AgentWindowStatus(rawValue: row[14]) ?? .idle
+        let terminalSessionID = row[9].isEmpty ? nil : row[9]
+        let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
+        let resolvedTrackingID = row[8].isEmpty ? row[9] : row[8]
+        // The captured desktop window belongs to the linked runtime target (row[4]); an agent
+        // detached from its target has none, so its window ID resolves to nil.
         let terminalTarget = decodeTerminalTarget(
             runtimeTargetID: row[4], app: row[5].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[5], name: row[6],
-            detail: row[7], windowID: row[8], trackingID: row[9].isEmpty ? row[10] : row[9])
+            detail: row[7], windowID: overlaidWindowID(workspaceID: row[1], runtimeTargetID: row[4].isEmpty ? nil : row[4]),
+            trackingID: resolvedTrackingID)
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
-            terminalTarget: terminalTarget, sessionKey: row[11].isEmpty ? nil : row[11], claimedLauncherID: row[12].isEmpty ? nil : row[12],
-            claimedLauncherName: row[13].isEmpty ? nil : row[13], status: status, createdAt: row[15], updatedAt: row[16])
+            terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10], claimedLauncherID: row[11].isEmpty ? nil : row[11],
+            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, createdAt: row[14], updatedAt: row[15])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {
@@ -192,9 +193,7 @@ extension SQLiteStore {
 
     func ensureRuntimeTargetForAgentWindow(_ record: AgentWindowRecord) throws -> String? {
         let runtimeTargetID =
-            try record.runtimeTargetID
-            ?? matchingRuntimeTargetID(
-                workspaceID: record.workspaceID, trackingID: record.terminalTrackingID, windowID: record.yabaiWindowID ?? record.windowID)
+            try record.runtimeTargetID ?? matchingRuntimeTargetID(workspaceID: record.workspaceID, trackingID: record.terminalTrackingID)
         guard let terminalTarget = record.terminalTarget else { return runtimeTargetID }
         let targetID = runtimeTargetID ?? terminalTarget.runtimeTargetID ?? record.id
         let existingWindows = try windows(workspaceID: record.workspaceID)

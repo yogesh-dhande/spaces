@@ -48,6 +48,23 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(branch, "feature")
     }
 
+    // Tests that the git common directory resolves to the shared `.git` for both the
+    // main checkout and its linked worktrees, which is what the worktree watcher observes.
+    func testCommonDirectoryResolvesSharedGitDirectoryForMainAndLinkedWorktrees() throws {
+        let root = try makeTempDirectory()
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try initializeGitRepository(at: repo, initialBranch: "main")
+        let worktree = root.appendingPathComponent("feature-worktree", isDirectory: true)
+        let client = GitClient()
+        try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature")
+
+        let expected = repo.appendingPathComponent(".git").resolvingSymlinksInPath().path
+        XCTAssertEqual(client.commonDirectory(path: repo.path), expected)
+        XCTAssertEqual(client.commonDirectory(path: worktree.path), expected)
+        XCTAssertNil(client.commonDirectory(path: root.appendingPathComponent("not-a-repo").path))
+    }
+
     // Tests create worktree when branch exists only on remote by arranging representative inputs and asserting the expected result.
     func testCreateWorktreeWhenBranchExistsOnlyOnRemote() throws {
         let fixture = try makeRemoteFixture()

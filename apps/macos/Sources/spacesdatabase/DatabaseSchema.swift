@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 5
+    public static let currentVersion = 7
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -58,6 +58,24 @@ public enum DatabaseSchema {
         },
         DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop workspace title column", requiresBackup: true) { database in
             try executeBatch(database: database, sql: "ALTER TABLE workspaces DROP COLUMN title")
+        },
+        // Desktop window IDs moved to the client database (client-owned, desktop-local). The
+        // daemon never has a desktop session, so this column was only ever written by the GUI.
+        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "Drop daemon-owned desktop window IDs", requiresBackup: true) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE runtime_targets DROP COLUMN window_id;")
+        },
+        // Browser session windows moved to the client database (client-owned, desktop-local).
+        // The daemon never has a desktop session, so these extracted-window columns were only
+        // ever written by the GUI's former in-process orchestrator.
+        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "Drop daemon-owned browser extracted window IDs", requiresBackup: true) {
+            database in
+            try executeBatch(
+                database: database,
+                sql: """
+                    ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_window_valid;
+                    ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_window_id;
+                    ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_target_url;
+                    """)
         },
     ]
 
@@ -304,9 +322,6 @@ public enum DatabaseSchema {
               workspace_id TEXT NOT NULL,
               name TEXT,
               url TEXT,
-              extracted_target_url TEXT,
-              extracted_window_id INTEGER,
-              extracted_window_valid INTEGER NOT NULL DEFAULT 0,
               order_index INTEGER NOT NULL,
               PRIMARY KEY (workspace_id, order_index),
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
@@ -358,7 +373,6 @@ public enum DatabaseSchema {
               name TEXT,
               detail TEXT,
               app TEXT NOT NULL,
-              window_id INTEGER,
               tracking_id TEXT,
               order_index INTEGER NOT NULL,
               created_at TEXT NOT NULL,

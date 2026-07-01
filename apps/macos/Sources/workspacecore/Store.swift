@@ -15,9 +15,22 @@ public final class SQLiteStore {
     private let busyTimeoutMS: Int32 = 5000
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
+    /// Depth of open explicit transactions. Autocommit writes (`execute` at depth
+    /// zero) post a change signal immediately; statements inside a transaction
+    /// defer to the single post after `COMMIT`, so a reload never observes
+    /// uncommitted state. One connection serializes its own writes, so a plain
+    /// counter is sufficient.
+    private var openTransactionCount = 0
 
-    public init(path: String) throws {
+    /// Desktop (yabai) window IDs live outside the daemon database. The GUI injects a
+    /// client-database-backed store so window-ID reads/writes are correlated to daemon-owned
+    /// runtime targets without persisting any desktop state in `spaces.db`. The daemon and CLI
+    /// leave this nil — they have no desktop session and never focus windows.
+    public let desktopWindowIDStore: DesktopWindowIDStore?
+
+    public init(path: String, desktopWindowIDStore: DesktopWindowIDStore? = nil) throws {
         databasePath = path
+        self.desktopWindowIDStore = desktopWindowIDStore
         var handle: OpaquePointer?
         let openFlags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(path, &handle, openFlags, nil) != SQLITE_OK {
@@ -38,14 +51,28 @@ public final class SQLiteStore {
 
     func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
         try executeBatch(sql: "BEGIN IMMEDIATE;")
+        openTransactionCount += 1
         do {
             let value = try body()
             try executeBatch(sql: "COMMIT;")
+            openTransactionCount -= 1
+            Self.postDatabaseDidChange()
             return value
         } catch {
             try? executeBatch(sql: "ROLLBACK;")
+            openTransactionCount -= 1
             throw error
         }
+    }
+
+    /// Announces a committed write so the app reloads sidebar metadata, and so the
+    /// daemon's Device API can push a fresh overview to paired clients, in response
+    /// to the writer rather than by watching database files. Posted synchronously so
+    /// a short-lived CLI delivers the signal before it exits. Suppressed under tests
+    /// to avoid cross-process noise.
+    private static func postDatabaseDidChange() {
+        guard NSClassFromString("XCTest") == nil else { return }
+        DatabaseChangeSignal.post()
     }
 
     public func setting(key: String) throws -> String? {
@@ -66,7 +93,7 @@ public final class SQLiteStore {
     public func appConfig() throws -> AppConfig {
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
-        let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange(start: 20000, end: 30000) : PortRange(start: start, end: end)
+        let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange.default : PortRange(start: start, end: end)
         return AppConfig(portRange: portRange)
     }
 
@@ -123,13 +150,31 @@ public final class SQLiteStore {
         return value
     }
 
-    func decodeTerminalTarget(runtimeTargetID: String, app: String, name: String, detail: String, windowID: String, trackingID: String)
+    func decodeTerminalTarget(runtimeTargetID: String, app: String, name: String, detail: String, windowID: Int?, trackingID: String)
         -> TerminalTargetRecord?
     {
-        guard !runtimeTargetID.isEmpty || !app.isEmpty || !trackingID.isEmpty || !windowID.isEmpty else { return nil }
+        guard !runtimeTargetID.isEmpty || !app.isEmpty || !trackingID.isEmpty || windowID != nil else { return nil }
         return TerminalTargetRecord(
-            runtimeTargetID: runtimeTargetID.isEmpty ? nil : runtimeTargetID, windowID: Int(windowID),
-            trackingID: trackingID.isEmpty ? nil : trackingID)
+            runtimeTargetID: runtimeTargetID.isEmpty ? nil : runtimeTargetID, windowID: windowID, trackingID: trackingID.isEmpty ? nil : trackingID)
+    }
+
+    // MARK: - Desktop window-ID correlation
+
+    /// Reads the captured desktop window ID for a runtime target, if a client store is injected.
+    /// Best-effort: a lookup failure yields nil so focus can fall back to session/IPC paths.
+    func overlaidWindowID(workspaceID: String, runtimeTargetID: String?) -> Int? {
+        guard let desktopWindowIDStore, let runtimeTargetID, !runtimeTargetID.isEmpty else { return nil }
+        return try? desktopWindowIDStore.desktopWindowID(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
+    }
+
+    /// Persists (or clears) the captured desktop window ID for a runtime target.
+    func persistDesktopWindowID(workspaceID: String, runtimeTargetID: String, windowID: Int?) throws {
+        guard let desktopWindowIDStore else { return }
+        if let windowID {
+            try desktopWindowIDStore.setDesktopWindowID(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID, windowID: windowID)
+        } else {
+            try desktopWindowIDStore.clearDesktopWindowID(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
+        }
     }
 
     func nextRuntimeTargetOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
@@ -138,26 +183,19 @@ public final class SQLiteStore {
         return maxIndex + 1
     }
 
-    func matchingRuntimeTargetID(workspaceID: String, trackingID: String?, windowID: Int?) throws -> String? {
+    func matchingRuntimeTargetID(workspaceID: String, trackingID: String?) throws -> String? {
+        guard let trackingID, !trackingID.isEmpty else { return nil }
         let rows = try queryRows(
             sql: """
                 SELECT
                   rt.id,
-                  COALESCE(rt.tracking_id, ''),
-                  COALESCE(rt.window_id, ''),
-                  rt.updated_at
+                  COALESCE(rt.tracking_id, '')
                 FROM runtime_targets rt
                 WHERE rt.workspace_id = ?
                   AND rt.type = 'terminal'
                 ORDER BY rt.updated_at DESC
                 """, bindings: [workspaceID])
-
-        func firstMatch(_ predicate: ([String]) -> Bool) -> String? { rows.first(where: predicate)?.first }
-
-        if let trackingID, !trackingID.isEmpty, let match = firstMatch({ $0[1] == trackingID }) { return match }
-        let hasExplicitTerminalIdentity = trackingID?.isEmpty == false
-        if !hasExplicitTerminalIdentity, let windowID, let match = firstMatch({ $0[2] == String(windowID) }) { return match }
-        return nil
+        return rows.first(where: { $0[1] == trackingID })?.first
     }
 
     private func executeBatch(sql: String) throws {
@@ -185,6 +223,9 @@ public final class SQLiteStore {
             let message = String(cString: sqlite3_errmsg(db))
             throw NSError(domain: "spaces.store", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
         }
+        // `execute` only runs mutating statements; reads use `queryRow(s)`. An
+        // autocommit write (no open transaction) is durable now, so signal it.
+        if openTransactionCount == 0 { Self.postDatabaseDidChange() }
     }
 
     func queryRow(sql: String, bindings: [Any] = []) throws -> [String]? {

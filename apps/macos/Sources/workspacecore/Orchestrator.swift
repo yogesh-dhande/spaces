@@ -20,6 +20,10 @@ public final class WorkspaceOrchestrator {
     public typealias BuiltInTerminalWindowCloser = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionTerminator = @Sendable (String) -> Void
     public typealias BuiltInTerminalSessionLauncher = @Sendable (TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary
+    /// `(title, body, subtitle)`. Delivers a user-facing notification. The daemon
+    /// cannot show OS notifications (no app bundle), so it installs a process-wide
+    /// override that forwards to the client instead of delivering directly.
+    public typealias NotificationDeliverer = @Sendable (String, String, String?) -> Void
 
     #if canImport(UserNotifications)
         private final class NotificationAuthorizationCache: @unchecked Sendable {
@@ -80,6 +84,24 @@ public final class WorkspaceOrchestrator {
     private static let notificationAuthorizationCache = NotificationAuthorizationCache()
     private static let builtInTerminalSessionLauncherOverrideStore = BuiltInTerminalSessionLauncherOverrideStore()
     private static let builtInTerminalSessionTerminatorOverrideStore = BuiltInTerminalSessionTerminatorOverrideStore()
+    private static let notificationDelivererOverrideStore = NotificationDelivererOverrideStore()
+
+    private final class NotificationDelivererOverrideStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deliverer: NotificationDeliverer?
+
+        func set(_ deliverer: NotificationDeliverer?) {
+            lock.lock()
+            self.deliverer = deliverer
+            lock.unlock()
+        }
+
+        func get() -> NotificationDeliverer? {
+            lock.lock()
+            defer { lock.unlock() }
+            return deliverer
+        }
+    }
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -95,7 +117,7 @@ public final class WorkspaceOrchestrator {
         public init(notice: String?) { self.notice = notice }
     }
 
-    public struct PreparedGitProjectImport: Sendable {
+    public struct PreparedGitProjectImport: Codable, Sendable {
         public let project: ProjectRecord
         public let defaultWorkspace: WorkspaceRecord
         public let importedDocument: SpacesYAMLDocument?
@@ -130,6 +152,11 @@ public final class WorkspaceOrchestrator {
         builtInTerminalSessionTerminatorOverrideStore.set(terminator)
     }
 
+    /// Installs a process-wide notification deliverer used when an orchestrator is
+    /// created without an explicit one. The daemon sets this to forward notifications
+    /// to the client, since a bundle-less daemon cannot post OS notifications.
+    public static func setProcessWideNotificationDeliverer(_ deliverer: NotificationDeliverer?) { notificationDelivererOverrideStore.set(deliverer) }
+
     public static func sendTerminalServiceRequest(to target: SpacesDaemonConnectionTarget, request: TerminalServiceRequest) throws
         -> TerminalServiceResponse
     {
@@ -155,38 +182,11 @@ public final class WorkspaceOrchestrator {
         let destination: URL
     }
 
-    struct BrowserWindowScanResult {
-        let windows: [WindowRecord]
-        let tabIndexByWindowAndURL: [String: Int]
-    }
-
-    struct CachedScannedBrowserTabTarget {
-        let tabIndex: Int
-        let browserPrefixes: [String]
-    }
-
-    struct ScannedBrowserFocusTarget {
-        let windowID: Int
-        let tabIndex: Int
-        let matchedURL: String
-    }
-
-    struct BrowserWindowScanCacheEntry {
-        let browserPrefixes: [String]
-        let refreshedAt: Date
-        let scanResult: BrowserWindowScanResult
-    }
-
     struct SpacesTerminalSessionHandle {
         let sessionID: String
         let childPID: Int?
         let windowID: Int?
         let outputPath: String
-    }
-
-    struct ManagedTerminalFocusTarget {
-        let providerIdentity: TerminalTrackingIdentity?
-        let windowID: Int?
     }
 
     struct WorkspaceSetupRunResult {
@@ -226,27 +226,6 @@ public final class WorkspaceOrchestrator {
         case unavailable
     }
 
-    struct WorkspaceProcessFocusOutcome {
-        let focused: Bool
-        let route: String
-        let focusedExistingWindow: Bool
-    }
-
-    private enum WorkspaceNavigationCursor: Hashable {
-        case agent(String)
-        case process(String)
-        case terminal(String)
-        case browserWindowURL(Int, String)
-        case browserURL(String)
-        case window(Int)
-    }
-
-    private struct WorkspaceNavigationCycleSession {
-        let orderedCursors: [WorkspaceNavigationCursor]
-        var currentIndex: Int
-        var lastUsedAt: Date
-    }
-
     enum WorkspaceNavigationTarget {
         case agent(AgentWindowRecord)
         case browser(WindowRecord)
@@ -265,8 +244,6 @@ public final class WorkspaceOrchestrator {
     public let store: SQLiteStore
     let git: GitClient
     let yabai: YabaiAdapter
-    let chrome: ChromeAdapter
-    let browserWindowScanDebounceInterval: TimeInterval
     let currentDate: () -> Date
     let notificationDeliverer: (String, String, String?) -> Void
     let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
@@ -282,21 +259,11 @@ public final class WorkspaceOrchestrator {
     private var workspaceLifecycleInFlight: Set<String> = []
     let workspaceSetupLock = NSLock()
     var workspaceSetupInFlight: Set<String> = []
-    private let windowNavigationLock = NSLock()
-    private var windowNavigationCursorByWorkspace: [String: WorkspaceNavigationCursor] = [:]
-    private var windowNavigationHistoryByWorkspace: [String: [WorkspaceNavigationCursor]] = [:]
-    private var windowNavigationCycleSessionByWorkspace: [String: WorkspaceNavigationCycleSession] = [:]
-    let browserScanCacheLock = NSLock()
-    var browserWindowScanCacheByWorkspace: [String: BrowserWindowScanCacheEntry] = [:]
     let terminalFocusPulseController: TerminalFocusPulseControlling
-    private let windowNavigationCycleSessionTimeout: TimeInterval = 2
-    private let windowNavigationHistoryLimit = 64
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
-        yabai: YabaiAdapter = .init(), chrome: ChromeAdapter = .init(),
-        browserWindowScanDebounceInterval: TimeInterval = PollingConstants.browserWindowScanDebounceInterval,
-        terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
+        yabai: YabaiAdapter = .init(), terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
@@ -307,11 +274,9 @@ public final class WorkspaceOrchestrator {
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
         self.yabai = yabai
-        self.chrome = chrome
         self.workspacesRootDirectoryURL = workspacesRootDirectory
-        self.browserWindowScanDebounceInterval = browserWindowScanDebounceInterval
         self.terminalFocusPulseController = terminalFocusPulseController
-        self.notificationDeliverer = notificationDeliverer ?? Self.deliverUserNotification
+        self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
         self.windowFocusPulseEnabledProvider = windowFocusPulseEnabledProvider ?? { SettingsKey.defaultWindowFocusPulseEnabled }
         self.windowFocusPulseColorProvider = windowFocusPulseColorProvider ?? { SettingsKey.windowFocusPulseColor(from: nil) }
         #if canImport(Darwin)
@@ -427,9 +392,7 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts).manifest)
-        return resolveBrowserSessions(sessions, env: env).map { resolved in
-            BrowserSession(name: resolved.session.name, url: resolved.prefix, extractedWindow: resolved.session.extractedWindow)
-        }
+        return resolveBrowserSessions(sessions, env: env).map { resolved in BrowserSession(name: resolved.session.name, url: resolved.prefix) }
     }
 
     public func updateWorkspaceSettings(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
@@ -1183,7 +1146,7 @@ public final class WorkspaceOrchestrator {
     }
 
     #if canImport(UserNotifications)
-        private static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
+        public static func deliverUserNotification(title: String, body: String, subtitle: String? = nil) {
             guard NSClassFromString("XCTest") == nil else { return }
             let center = UNUserNotificationCenter.current()
             guard let authorizationStatus = currentNotificationAuthorizationStatus(center: center) else {
@@ -1275,7 +1238,7 @@ public final class WorkspaceOrchestrator {
             }
         }
     #else
-        private static func deliverUserNotification(title _: String, body _: String, subtitle _: String? = nil) {}
+        public static func deliverUserNotification(title _: String, body _: String, subtitle _: String? = nil) {}
 
         public static func prepareUserNotificationAuthorization() {}
     #endif
@@ -1490,299 +1453,9 @@ public final class WorkspaceOrchestrator {
         try store.windows(workspaceID: reservation.workspaceID).contains { $0.id == reservation.windowRecordID }
     }
 
-    public func focusWorkspace(workspaceID: String) throws {
-        let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
-        for window in windows {
-            let ok = focusTrackedWindow(window, workspaceID: workspaceID, requestID: nil)
-            if ok {
-                rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
-                break
-            }
-        }
-    }
-
     public func workspaceFocusableWindowNames(workspaceID: String) throws -> [String] {
         _ = try resolveWorkspace(id: workspaceID)
         return try focusableWorkspaceTargets(workspaceID: workspaceID).map(\.name)
-    }
-
-    public func focusWorkspaceWindow(workspaceID: String, index: Int) throws {
-        guard index > 0 else { return }
-        let focusStartedAt = currentDate()
-        let loadWindowsStartedAt = currentDate()
-        let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=direct_load_windows index=\(index) count=\(windows.count) elapsed_ms=\(elapsedMS(since: loadWindowsStartedAt))"
-        )
-        guard index <= windows.count else { return }
-        let targetIndex = index - 1
-        let focusTargetStartedAt = currentDate()
-        let ok = try focusTrackedWindowOrRecoverBrowserWindow(windows[targetIndex], workspaceID: workspaceID, requestID: nil)
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=direct_focus_target index=\(index) target=\(navigationTargetDebugName(navigationTarget(for: windows[targetIndex]))) success=\(ok ? 1 : 0) elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
-        )
-        guard ok else { throw missingTrackedWindowError(for: windows[targetIndex], workspaceID: workspaceID) }
-        if ok { rememberNavigationTarget(navigationTarget(for: windows[targetIndex]), workspaceID: workspaceID) }
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=direct_focus_total index=\(index) target=\(navigationTargetDebugName(navigationTarget(for: windows[targetIndex]))) success=\(ok ? 1 : 0) elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-        )
-        logPerfMetric(
-            "direct_window_focus", workspaceID: workspaceID, target: navigationTargetDebugName(navigationTarget(for: windows[targetIndex])),
-            detail: "index=\(index)", elapsedMS: elapsedMS(since: focusStartedAt), success: ok)
-    }
-
-    public func focusWorkspaceWindow(workspaceID: String, name: String) throws {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { throw WorkspaceError.invalidArgument(message: "Window name is required.") }
-        let focusStartedAt = currentDate()
-        let targets = try focusableWorkspaceTargets(workspaceID: workspaceID)
-        guard let match = targets.first(where: { normalizedFocusName($0.name) == normalizedFocusName(trimmedName) }) else {
-            throw WorkspaceError.invalidArgument(message: missingFocusNameMessage(name: trimmedName, availableNames: targets.map(\.name)))
-        }
-
-        switch match.target {
-        case .agent(let record):
-            let focused = try focusAgentWindowOrLaunchClaimedLauncher(record, requestID: nil)
-            guard focused else { throw missingTrackedAgentError(record) }
-            rememberNavigationTarget(.agent(record), workspaceID: workspaceID)
-        case .browserSession(let targetURL): try focusWorkspaceBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-        case .configuredProcess(let processName):
-            throw WorkspaceError.invalidArgument(message: "Process window '\(processName)' is not currently running.")
-        case .process(let process):
-            let focused = try focusWorkspaceProcessRecord(process, workspaceID: workspaceID)
-            guard focused else { throw missingTrackedProcessError(process, workspaceID: workspaceID) }
-            rememberNavigationTarget(.process(process), workspaceID: workspaceID)
-        case .window(let window):
-            let focused = try focusTrackedWindowOrRecoverBrowserWindow(window, workspaceID: workspaceID, requestID: nil)
-            guard focused else { throw missingTrackedWindowError(for: window, workspaceID: workspaceID) }
-            rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
-        }
-
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=direct_focus_total name=\(trimmedName) success=1 elapsed_ms=\(elapsedMS(since: focusStartedAt))")
-        logPerfMetric("named_window_focus", workspaceID: workspaceID, target: trimmedName, elapsedMS: elapsedMS(since: focusStartedAt), success: true)
-    }
-
-    public func focusWorkspaceBrowserSession(workspaceID: String, targetURL: String) throws {
-        let focusStartedAt = currentDate()
-        let windows = try indexedWorkspaceWindows(workspaceID: workspaceID)
-        if let window = windows.first(where: { $0.role == "browser" && $0.targetURL == targetURL }) {
-            let focused = try focusTrackedWindowOrRecoverBrowserWindow(window, workspaceID: workspaceID, requestID: nil)
-            guard focused else { throw missingTrackedWindowError(for: window, workspaceID: workspaceID) }
-            rememberNavigationTarget(navigationTarget(for: window), workspaceID: workspaceID)
-            try markWorkspaceRunningIfNeeded(workspaceID: workspaceID)
-            logPerfMetric(
-                "browser_focus", workspaceID: workspaceID, target: targetURL, detail: "recovered=0", elapsedMS: elapsedMS(since: focusStartedAt),
-                success: true)
-            return
-        }
-
-        try recoverMissingBrowserSession(workspaceID: workspaceID, targetURL: targetURL)
-        if let recoveredWindow = try indexedWorkspaceWindows(workspaceID: workspaceID).first(where: {
-            $0.role == "browser" && $0.targetURL == targetURL
-        }) {
-            rememberNavigationTarget(navigationTarget(for: recoveredWindow), workspaceID: workspaceID)
-        }
-        logPerfMetric(
-            "browser_focus", workspaceID: workspaceID, target: targetURL, detail: "recovered=1", elapsedMS: elapsedMS(since: focusStartedAt),
-            success: true)
-    }
-
-    public func focusNextWindow(workspaceID: String) throws {
-        _ = try focusWindowRelative(workspaceID: workspaceID, delta: 1, requestID: nil, preferredFocusedBuiltInTerminalSessionID: nil)
-    }
-
-    public func focusPreviousWindow(workspaceID: String) throws {
-        _ = try focusWindowRelative(workspaceID: workspaceID, delta: -1, requestID: nil, preferredFocusedBuiltInTerminalSessionID: nil)
-    }
-
-    public func focusNextWindowHidesApp(workspaceID: String, requestID: String? = nil, preferredFocusedBuiltInTerminalSessionID: String? = nil) throws
-        -> Bool
-    {
-        try focusWindowRelative(
-            workspaceID: workspaceID, delta: 1, requestID: requestID,
-            preferredFocusedBuiltInTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
-    }
-
-    public func focusPreviousWindowHidesApp(workspaceID: String, requestID: String? = nil, preferredFocusedBuiltInTerminalSessionID: String? = nil)
-        throws -> Bool
-    {
-        try focusWindowRelative(
-            workspaceID: workspaceID, delta: -1, requestID: requestID,
-            preferredFocusedBuiltInTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
-    }
-
-    public func workspaceIDForFocusedWindow() throws -> String? {
-        guard let focused = try yabai.focusedWindow() else { return nil }
-        if focused.app == "Google Chrome", let workspaceID = try focusedChromeWorkspaceID(windowID: focused.id) { return workspaceID }
-        if let workspaceID = try store.workspaceID(windowID: focused.id) { return workspaceID }
-        return try store.workspaceIDForAgentWindow(yabaiWindowID: focused.id)
-    }
-
-    private func focusWindowRelative(workspaceID: String, delta: Int, requestID: String?, preferredFocusedBuiltInTerminalSessionID: String?) throws
-        -> Bool
-    {
-        let cycleStartedAt = currentDate()
-        let direction = delta > 0 ? "next" : "previous"
-        let targetsStartedAt = currentDate()
-        let targets = try workspaceNavigationTargets(workspaceID: workspaceID, forCycling: true)
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=targets direction=\(direction) count=\(targets.count) elapsed_ms=\(elapsedMS(since: targetsStartedAt))")
-        guard !targets.isEmpty else { return false }
-        let currentIndexStartedAt = currentDate()
-        let currentIndex: Int?
-        if let preferredFocusedBuiltInTerminalSessionID,
-            let preferredIndex = preferredFocusedBuiltInTerminalTargetIndex(
-                targets: targets, workspaceID: workspaceID, terminalSessionID: preferredFocusedBuiltInTerminalSessionID)
-        {
-            logCycleProfile(
-                "workspace=\(workspaceID) stage=current_target_resolved path=app_terminal_session index=\(preferredIndex) elapsed_ms=\(elapsedMS(since: currentIndexStartedAt))"
-            )
-            currentIndex = preferredIndex
-        } else {
-            currentIndex =
-                try currentFocusedNavigationTargetIndex(targets: targets, workspaceID: workspaceID)
-                ?? windowNavigationCursor(workspaceID: workspaceID).flatMap { navigationTargetIndex(cursor: $0, targets: targets) }
-        }
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=current_target direction=\(direction) resolved_index=\(currentIndex.map(String.init) ?? "nil") elapsed_ms=\(elapsedMS(since: currentIndexStartedAt))"
-        )
-        let cycleOrdering = cycleTargetOrdering(workspaceID: workspaceID, targets: targets, currentIndex: currentIndex)
-        let orderedTargets = cycleOrdering.indices.map { targets[$0] }
-        let orderedCurrentIndex = cycleOrdering.currentIndex
-        let targetIndex: Int
-        if let orderedCurrentIndex {
-            targetIndex = (orderedCurrentIndex + delta + orderedTargets.count) % orderedTargets.count
-        } else if delta > 0 {
-            targetIndex = 0
-        } else {
-            targetIndex = orderedTargets.count - 1
-        }
-        var resolvedTargetIndex = targetIndex
-        var ok = false
-        for attempt in 0..<orderedTargets.count {
-            let candidateIndex = (targetIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
-            let focusTargetStartedAt = currentDate()
-            let candidateFocused = try focusNavigationTarget(
-                orderedTargets[candidateIndex], workspaceID: workspaceID, requestID: requestID,
-                sourceBuiltInTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
-            logCycleProfile(
-                "workspace=\(workspaceID) stage=focus_target direction=\(direction) attempt=\(attempt) index=\(candidateIndex) target=\(navigationTargetDebugName(orderedTargets[candidateIndex])) success=\(candidateFocused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusTargetStartedAt))"
-            )
-            guard candidateFocused else { continue }
-            resolvedTargetIndex = candidateIndex
-            ok = true
-            break
-        }
-        if ok {
-            let activeWorkspaceStartedAt = currentDate()
-            rememberNavigationTarget(orderedTargets[resolvedTargetIndex], workspaceID: workspaceID, asCycleNavigation: true)
-            setWindowNavigationCycleSession(
-                workspaceID: workspaceID, orderedCursors: orderedTargets.compactMap(navigationCursor(for:)), currentIndex: resolvedTargetIndex)
-            logCycleProfile(
-                "workspace=\(workspaceID) stage=set_active direction=\(direction) elapsed_ms=\(elapsedMS(since: activeWorkspaceStartedAt))")
-        }
-        logCycleProfile(
-            "workspace=\(workspaceID) direction=\(direction) total_ms=\(elapsedMS(since: cycleStartedAt)) target=\(navigationTargetDebugName(orderedTargets[resolvedTargetIndex])) success=\(ok ? "1" : "0")"
-        )
-        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        logPerfMetric(
-            "window_cycle", workspaceID: workspaceID, target: navigationTargetDebugName(orderedTargets[resolvedTargetIndex]),
-            detail: "direction=\(direction)\(requestDetail)", elapsedMS: elapsedMS(since: cycleStartedAt), success: ok)
-        guard ok else { return false }
-        return shouldHideAppAfterFocusingNavigationTarget(orderedTargets[resolvedTargetIndex])
-    }
-
-    private func currentFocusedNavigationTargetIndex(targets: [WorkspaceNavigationTarget], workspaceID: String) throws -> Int? {
-        let resolutionStartedAt = currentDate()
-        let focusedWindowStartedAt = currentDate()
-        guard let focused = try yabai.focusedWindow() else {
-            if let cursor = windowNavigationCursor(workspaceID: workspaceID),
-                let cursorIndex = navigationTargetIndex(cursor: cursor, targets: targets)
-            {
-                logCycleProfile(
-                    "workspace=\(workspaceID) stage=current_target_resolved path=cursor_fallback index=\(cursorIndex) elapsed_ms=\(elapsedMS(since: resolutionStartedAt))"
-                )
-                return cursorIndex
-            }
-            if let browserMatch = try currentFocusedBrowserNavigationTargetIndex(targets: targets, workspaceID: workspaceID) {
-                logCycleProfile(
-                    "workspace=\(workspaceID) stage=current_target_resolved path=browser_url index=\(browserMatch) elapsed_ms=\(elapsedMS(since: resolutionStartedAt))"
-                )
-                return browserMatch
-            }
-            logCycleProfile("workspace=\(workspaceID) stage=current_target_resolved path=none elapsed_ms=\(elapsedMS(since: resolutionStartedAt))")
-            return nil
-        }
-        logCycleProfile(
-            "workspace=\(workspaceID) stage=focused_window app=\(focused.app) window=\(focused.id) elapsed_ms=\(elapsedMS(since: focusedWindowStartedAt))"
-        )
-        let windowMatches = targets.enumerated().filter { navigationTargetWindowID($0.element) == focused.id }
-        if let cursor = windowNavigationCursor(workspaceID: workspaceID),
-            let match = windowMatches.first(where: { navigationCursor(for: $0.element) == cursor })
-        {
-            logCycleProfile(
-                "workspace=\(workspaceID) stage=current_target_resolved path=cursor index=\(match.offset) elapsed_ms=\(elapsedMS(since: resolutionStartedAt))"
-            )
-            return match.offset
-        }
-        if let match = windowMatches.last {
-            logCycleProfile(
-                "workspace=\(workspaceID) stage=current_target_resolved path=window_id index=\(match.offset) elapsed_ms=\(elapsedMS(since: resolutionStartedAt))"
-            )
-            return match.offset
-        }
-        if let browserMatch = try currentFocusedBrowserNavigationTargetIndex(targets: targets, workspaceID: workspaceID) {
-            logCycleProfile(
-                "workspace=\(workspaceID) stage=current_target_resolved path=browser_url index=\(browserMatch) elapsed_ms=\(elapsedMS(since: resolutionStartedAt))"
-            )
-            return browserMatch
-        }
-        logCycleProfile("workspace=\(workspaceID) stage=current_target_resolved path=none elapsed_ms=\(elapsedMS(since: resolutionStartedAt))")
-        return nil
-    }
-
-    private func currentFocusedBrowserNavigationTargetIndex(targets: [WorkspaceNavigationTarget], workspaceID: String) throws -> Int? {
-        guard chrome.isAvailable(), let activeURL = try chrome.frontmostActiveTabURL(), !activeURL.isEmpty else { return nil }
-
-        let browserMatches = targets.enumerated().compactMap { entry -> (offset: Int, targetURL: String)? in
-            guard let targetURL = navigationTargetBrowserURL(entry.element), !targetURL.isEmpty, activeURL.hasPrefix(targetURL) else { return nil }
-            return (entry.offset, targetURL)
-        }
-        guard !browserMatches.isEmpty else { return nil }
-
-        if let cursor = windowNavigationCursor(workspaceID: workspaceID),
-            let cursorMatch = browserMatches.first(where: { navigationCursor(for: targets[$0.offset]) == cursor })
-        {
-            return cursorMatch.offset
-        }
-
-        return browserMatches.max(by: { $0.targetURL.count < $1.targetURL.count })?.offset
-    }
-
-    private func preferredFocusedBuiltInTerminalTargetIndex(targets: [WorkspaceNavigationTarget], workspaceID: String, terminalSessionID: String)
-        -> Int?
-    {
-        let terminalMatches = targets.enumerated().filter { navigationTargetTerminalID($0.element) == terminalSessionID }
-        guard !terminalMatches.isEmpty else { return nil }
-
-        if let cursor = windowNavigationCursor(workspaceID: workspaceID),
-            let cursorMatch = terminalMatches.first(where: { navigationCursor(for: $0.element) == cursor })
-        {
-            return cursorMatch.offset
-        }
-
-        if let session = windowNavigationCycleSession(workspaceID: workspaceID, now: currentDate()),
-            let sessionIndices = sessionTargetIndices(session: session, targetCursors: targets.map(navigationCursor(for:))),
-            session.currentIndex >= 0, session.currentIndex < sessionIndices.count
-        {
-            let sessionTarget = targets[sessionIndices[session.currentIndex]]
-            if let sessionMatch = terminalMatches.first(where: { navigationCursor(for: $0.element) == navigationCursor(for: sessionTarget) }) {
-                return sessionMatch.offset
-            }
-        }
-
-        return terminalMatches.last?.offset
     }
 
     private func workspaceNavigationTargets(workspaceID: String, forCycling: Bool = false) throws -> [WorkspaceNavigationTarget] {
@@ -1866,72 +1539,6 @@ public final class WorkspaceOrchestrator {
         return targets
     }
 
-    private func navigationTargetWindowID(_ target: WorkspaceNavigationTarget) -> Int? {
-        switch target {
-        case .agent(let record): return try? trackedAgentWindowID(record)
-        case .browser(let window), .window(let window): return window.windowID
-        case .process(let process): return process.windowID
-        }
-    }
-
-    private func navigationTargetTerminalID(_ target: WorkspaceNavigationTarget) -> String? {
-        switch target {
-        case .agent(let record): return terminalTargetID(record: record)
-        case .process(let process): return terminalTargetID(process: process)
-        case .window(let window): return terminalTargetID(window: window)
-        case .browser: return nil
-        }
-    }
-
-    private func navigationTargetBrowserURL(_ target: WorkspaceNavigationTarget) -> String? {
-        switch target {
-        case .browser(let window), .window(let window): return window.targetURL
-        case .agent, .process: return nil
-        }
-    }
-
-    private func focusNavigationTarget(
-        _ target: WorkspaceNavigationTarget, workspaceID: String, requestID: String?, sourceBuiltInTerminalSessionID: String?
-    ) throws -> Bool {
-        switch target {
-        case .agent(let record): return try focusAgentWindowOrLaunchClaimedLauncher(record, requestID: requestID)
-        case .browser(let window), .window(let window):
-            return focusTrackedWindow(
-                window, workspaceID: workspaceID, requestID: requestID, sourceBuiltInTerminalSessionID: sourceBuiltInTerminalSessionID)
-        case .process(let process): return try focusWorkspaceProcessOutcome(process, workspaceID: workspaceID, requestID: requestID).focused
-        }
-    }
-
-    private func shouldHideAppAfterFocusingNavigationTarget(_ target: WorkspaceNavigationTarget) -> Bool {
-        switch target {
-        case .agent: return false
-        case .browser: return true
-        case .process: return false
-        case .window(let window): return window.app != TerminalHost.spaces.appName
-        }
-    }
-
-    private func navigationCursor(for target: WorkspaceNavigationTarget) -> WorkspaceNavigationCursor? {
-        switch target {
-        case .agent(let record): return .agent(record.id)
-        case .process(let process): return .process(process.id)
-        case .browser(let window):
-            if let browserURL = window.targetURL, !browserURL.isEmpty, let windowID = window.windowID {
-                return .browserWindowURL(windowID, browserURL)
-            }
-            if let browserURL = window.targetURL, !browserURL.isEmpty { return .browserURL(browserURL) }
-            if let windowID = window.windowID { return .window(windowID) }
-        case .window(let window):
-            if let terminalID = terminalTargetID(window: window), !terminalID.isEmpty { return .terminal(terminalID) }
-            if let windowID = window.windowID { return .window(windowID) }
-        }
-        return nil
-    }
-
-    private func navigationTarget(for window: WindowRecord) -> WorkspaceNavigationTarget {
-        window.role == "browser" ? .browser(window) : .window(window)
-    }
-
     func focusableWorkspaceTargets(workspaceID: String) throws -> [(name: String, target: FocusableWorkspaceTarget)] {
         try validateWorkspaceFocusNames(workspaceID: workspaceID)
         let runtimeTargets = try workspaceNavigationTargets(workspaceID: workspaceID)
@@ -1990,80 +1597,6 @@ public final class WorkspaceOrchestrator {
         case .process(let process): return sanitizedFocusName(process.templateName)
         case .window(let window): return sanitizedFocusName(window.name)
         }
-    }
-
-    private func cycleTargetOrdering(workspaceID: String, targets: [WorkspaceNavigationTarget], currentIndex: Int?) -> (
-        indices: [Int], currentIndex: Int?
-    ) {
-        let targetCursors = targets.map(navigationCursor(for:))
-        if let session = windowNavigationCycleSession(workspaceID: workspaceID, now: currentDate()),
-            let sessionIndices = sessionTargetIndices(session: session, targetCursors: targetCursors)
-        {
-            let resolvedCurrentIndex =
-                if let currentIndex, let cursor = targetCursors[currentIndex] {
-                    sessionIndices.firstIndex(where: { targetCursors[$0] == cursor }) ?? session.currentIndex
-                } else { session.currentIndex }
-            return (sessionIndices, resolvedCurrentIndex)
-        }
-
-        let orderedIndices = Array(targets.indices)
-        return (orderedIndices, currentIndex.flatMap { originalIndex in orderedIndices.firstIndex(of: originalIndex) })
-    }
-
-    private func sessionTargetIndices(session: WorkspaceNavigationCycleSession, targetCursors: [WorkspaceNavigationCursor?]) -> [Int]? {
-        var remainingIndicesByCursor: [WorkspaceNavigationCursor: [Int]] = [:]
-        for (index, cursor) in targetCursors.enumerated() {
-            guard let cursor else { return nil }
-            remainingIndicesByCursor[cursor, default: []].append(index)
-        }
-        var orderedIndices: [Int] = []
-        for cursor in session.orderedCursors {
-            guard var indices = remainingIndicesByCursor[cursor], let nextIndex = indices.first else { return nil }
-            orderedIndices.append(nextIndex)
-            indices.removeFirst()
-            remainingIndicesByCursor[cursor] = indices.isEmpty ? nil : indices
-        }
-        for (_, indices) in remainingIndicesByCursor.sorted(by: { $0.value[0] < $1.value[0] }) { orderedIndices.append(contentsOf: indices) }
-        return orderedIndices
-    }
-
-    func rememberNavigationTarget(_ target: WorkspaceNavigationTarget, workspaceID: String, asCycleNavigation: Bool = false) {
-        updateWindowNavigationState(navigationCursor(for: target), workspaceID: workspaceID, asCycleNavigation: asCycleNavigation)
-    }
-
-    private func updateWindowNavigationState(_ cursor: WorkspaceNavigationCursor?, workspaceID: String, asCycleNavigation: Bool) {
-        windowNavigationLock.lock()
-        defer { windowNavigationLock.unlock() }
-        if let cursor {
-            windowNavigationCursorByWorkspace[workspaceID] = cursor
-            var history = windowNavigationHistoryByWorkspace[workspaceID] ?? []
-            history.removeAll(where: { $0 == cursor })
-            history.insert(cursor, at: 0)
-            if history.count > windowNavigationHistoryLimit { history.removeLast(history.count - windowNavigationHistoryLimit) }
-            windowNavigationHistoryByWorkspace[workspaceID] = history
-            if !asCycleNavigation { windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID) }
-        } else {
-            windowNavigationCursorByWorkspace.removeValue(forKey: workspaceID)
-            windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID)
-        }
-    }
-
-    private func setWindowNavigationCycleSession(workspaceID: String, orderedCursors: [WorkspaceNavigationCursor], currentIndex: Int) {
-        windowNavigationLock.lock()
-        windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceNavigationCycleSession(
-            orderedCursors: orderedCursors, currentIndex: currentIndex, lastUsedAt: currentDate())
-        windowNavigationLock.unlock()
-    }
-
-    private func windowNavigationCycleSession(workspaceID: String, now: Date) -> WorkspaceNavigationCycleSession? {
-        windowNavigationLock.lock()
-        defer { windowNavigationLock.unlock() }
-        guard let session = windowNavigationCycleSessionByWorkspace[workspaceID] else { return nil }
-        guard now.timeIntervalSince(session.lastUsedAt) <= windowNavigationCycleSessionTimeout else {
-            windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID)
-            return nil
-        }
-        return session
     }
 
     func sanitizedFocusName(_ value: String?) -> String? {
@@ -2141,124 +1674,6 @@ public final class WorkspaceOrchestrator {
             message: "Names must be unique across browser sessions, processes, and coding agents. Duplicates: \(duplicates.joined(separator: ", "))")
     }
 
-    private func missingFocusNameMessage(name: String, availableNames: [String]) -> String {
-        guard !availableNames.isEmpty else { return "Window '\(name)' was not found. No focusable window names are available for this workspace." }
-        return "Window '\(name)' was not found. Available names: \(availableNames.joined(separator: ", "))"
-    }
-
-    private func navigationTargetIndex(cursor: WorkspaceNavigationCursor, targets: [WorkspaceNavigationTarget]) -> Int? {
-        targets.enumerated().first(where: { navigationCursor(for: $0.element) == cursor })?.offset
-    }
-
-    private func windowNavigationCursor(workspaceID: String) -> WorkspaceNavigationCursor? {
-        windowNavigationLock.lock()
-        defer { windowNavigationLock.unlock() }
-        return windowNavigationCursorByWorkspace[workspaceID]
-    }
-
-    private func setWindowNavigationCursor(_ cursor: WorkspaceNavigationCursor?, workspaceID: String) {
-        windowNavigationLock.lock()
-        if let cursor {
-            windowNavigationCursorByWorkspace[workspaceID] = cursor
-        } else {
-            windowNavigationCursorByWorkspace.removeValue(forKey: workspaceID)
-        }
-        windowNavigationLock.unlock()
-    }
-
-    func focusTrackedWindow(_ window: WindowRecord, workspaceID: String, requestID: String?, sourceBuiltInTerminalSessionID: String? = nil) -> Bool {
-        let focusStartedAt = currentDate()
-        let focused: Bool
-        let focusedExistingWindow: Bool
-        if window.role == "browser", let windowID = window.windowID {
-            var browserFocusPath = "yabai"
-            let focusedWindow: Bool
-            if sourceBuiltInTerminalSessionID != nil, let requestID, let targetURL = window.targetURL, chrome.isAvailable() {
-                let chromeFocusByWindowStartedAt = currentDate()
-                let scannedFocus = (try? focusScannedBrowserTab(workspaceID: workspaceID, targetURL: targetURL)) ?? false
-                logBrowserFocus(
-                    "workspace=\(workspaceID) path=chrome_scanned_tab_from_built_in window=\(windowID) success=\(scannedFocus ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusByWindowStartedAt)) request_id=\(requestID)"
-                )
-                if scannedFocus {
-                    focusedWindow = true
-                    browserFocusPath = "chrome_scanned_tab_from_built_in"
-                } else {
-                    let chromeFocusByURLStartedAt = currentDate()
-                    let focusedByURL = (try? chrome.focusFirstMatchingTab(urlPrefix: targetURL)) ?? false
-                    logBrowserFocus(
-                        "workspace=\(workspaceID) path=chrome_url_from_built_in target=\(targetURL) success=\(focusedByURL ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusByURLStartedAt)) request_id=\(requestID)"
-                    )
-                    if focusedByURL {
-                        focusedWindow = true
-                        browserFocusPath = "chrome_url_from_built_in"
-                    } else {
-                        focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false
-                    }
-                }
-            } else {
-                focusedWindow = (try? yabai.focusWindow(id: windowID)) ?? false
-            }
-            if focusedWindow, chrome.isAvailable(), browserFocusPath == "yabai" {
-                let chromeFocusStartedAt = currentDate()
-                _ = try? chrome.focusFirstTabOfFrontWindow()
-                browserFocusPath = "chrome_front_tab_1"
-                logBrowserFocus(
-                    "workspace=\(workspaceID) path=\(browserFocusPath) window=\(windowID) success=\(focusedWindow ? "1" : "0") elapsed_ms=\(elapsedMS(since: chromeFocusStartedAt)) request_id=\(requestID ?? "")"
-                )
-            }
-            focused = focusedWindow
-            focusedExistingWindow = focusedWindow
-            logBrowserFocus(
-                "workspace=\(workspaceID) path=\(browserFocusPath) window=\(windowID) success=\(focused ? "1" : "0") elapsed_ms=\(elapsedMS(since: focusStartedAt))"
-            )
-        } else {
-            let trackingIdentity = resolvedFocusIdentity(for: window, workspaceID: workspaceID)
-            let focusResult = focusManagedTerminal(
-                terminalApp: window.app, providerIdentity: trackingIdentity, windowID: window.windowID, requestID: requestID)
-            switch focusResult {
-            case .existingWindow:
-                focused = true
-                focusedExistingWindow = true
-            case .trackedTerminal:
-                focused = true
-                focusedExistingWindow = window.windowID != nil
-            case .sessionRequest:
-                focused = true
-                focusedExistingWindow = false
-            case .reboundSession(let capturedWindowID):
-                focused = true
-                focusedExistingWindow = false
-                if terminalHost(for: window.app) == .spaces {
-                    if let capturedWindowID {
-                        try? persistBuiltInTerminalWindowBinding(window, windowID: capturedWindowID)
-                    } else {
-                        try? clearStaleBuiltInTerminalWindowBinding(window)
-                    }
-                }
-            case .reopenedSession(let capturedWindowID):
-                focused = true
-                focusedExistingWindow = false
-                if terminalHost(for: window.app) == .spaces {
-                    if let capturedWindowID {
-                        try? persistBuiltInTerminalWindowBinding(window, windowID: capturedWindowID)
-                    } else {
-                        try? clearStaleBuiltInTerminalWindowBinding(window)
-                    }
-                }
-            case .unavailable:
-                let fallbackFocused = (window.windowID.flatMap { try? yabai.focusWindow(id: $0) }) ?? false
-                focused = fallbackFocused
-                focusedExistingWindow = fallbackFocused
-            }
-        }
-        guard let id = window.windowID else { return focused }
-        if !focused, window.role == "browser", let targetURL = window.targetURL {
-            try? markBrowserWindowMissing(workspaceID: workspaceID, targetURL: targetURL, windowID: id)
-        }
-        if focused, focusedExistingWindow, window.role == "terminal" { pulseTerminalWindowIfNeeded(windowID: id) }
-        return focused
-    }
-
     func commandPrefixedWithShellEnvironment(_ command: String, env: [String: String]) -> String {
         guard !env.isEmpty else { return command }
         let exports = env.sorted(by: { $0.key < $1.key }).map { "export \($0.key)=\(shellQuoted($0.value))" }.joined(separator: "; ")
@@ -2304,15 +1719,6 @@ public final class WorkspaceOrchestrator {
     func debugLoggingEnabled() -> Bool { ProcessInfo.processInfo.environment["DEBUG"] == "1" }
 
     static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
-
-    private func navigationTargetDebugName(_ target: WorkspaceNavigationTarget) -> String {
-        switch target {
-        case .agent(let record): return "agent:\(record.label ?? record.provider.rawValue)"
-        case .browser(let window): return "browser:\(window.targetURL ?? window.name ?? "")"
-        case .process(let process): return "process:\(process.templateName)"
-        case .window(let window): return "\(window.role):\(window.name ?? window.app)"
-        }
-    }
 
     public func listSpaceOptions() throws -> [SpaceOption] {
         let spaces = try yabai.listSpaces()
@@ -2585,13 +1991,6 @@ public final class WorkspaceOrchestrator {
     private func captureCreatedAppWindow(snapshot: [YabaiWindow], appName: String) throws -> YabaiWindow? {
         let previousIDs = Set(snapshot.map(\.id))
         return try yabai.listWindows().first(where: { $0.app == appName && !previousIDs.contains($0.id) })
-    }
-
-    private func captureNewAppWindow(snapshot: [YabaiWindow], appName: String) throws -> YabaiWindow? {
-        let current = try yabai.listWindows()
-        if let created = try captureCreatedAppWindow(snapshot: snapshot, appName: appName) { return created }
-        if let focused = try yabai.focusedWindow(), focused.app == appName { return focused }
-        return current.filter { $0.app == appName }.sorted { $0.id > $1.id }.first
     }
 
     private func captureCreatedAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
@@ -3064,54 +2463,6 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    public func recoverMissingBrowserSession(workspaceID: String, targetURL: String) throws {
-        try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
-        let (project, workspace) = try resolveWorkspace(id: workspaceID)
-        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        guard !sessions.isEmpty else { throw WorkspaceError.invalidArgument(message: "No browser sessions are configured for this workspace.") }
-        guard chrome.isAvailable() else { throw WorkspaceError.dependencyMissing(message: "Google Chrome is required for browser sessions.") }
-
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
-        let resolvedSessions = resolveBrowserSessions(sessions, env: env)
-        guard
-            let matchedSession = resolvedSessions.compactMap({ resolved -> (session: ResolvedBrowserSession, score: Int)? in
-                guard let score = browserURLMatchScore(targetURL, targetURL: resolved.prefix) else { return nil }
-                return (resolved, score)
-            }).max(by: { lhs, rhs in
-                if lhs.score == rhs.score { return lhs.session.prefix.count < rhs.session.prefix.count }
-                return lhs.score < rhs.score
-            })?.session
-        else { throw WorkspaceError.invalidArgument(message: "Browser session not found for recovery.") }
-
-        let snapshot = bestEffortYabaiWindowSnapshot()
-        _ = try chrome.openWindow(url: matchedSession.prefix, background: false)
-        guard let newWindow = try captureNewAppWindow(snapshot: snapshot, appName: "Google Chrome") else {
-            throw WorkspaceError.invalidArgument(message: "Failed to recover browser session window.")
-        }
-
-        var updatedSessions = sessions
-        updatedSessions[matchedSession.index].extractedWindow = ExtractedBrowserWindowMapping(
-            targetURL: matchedSession.prefix, windowID: newWindow.id, isValid: true)
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: updatedSessions)
-
-        let trackedWindows = try store.windows(workspaceID: workspace.id)
-        let existingWindow = trackedWindows.first(where: { window in
-            guard window.role == "browser", let trackedTargetURL = window.targetURL else { return false }
-            return browserURLMatchesTarget(matchedSession.prefix, targetURL: trackedTargetURL)
-        })
-        let storedWindow = WindowRecord(
-            id: existingWindow?.id ?? UUID().uuidString, workspaceID: workspace.id, app: newWindow.app,
-            name: try browserFocusName(workspaceID: workspace.id, targetURL: matchedSession.prefix) ?? matchedSession.prefix,
-            detail: matchedSession.prefix, targetURL: matchedSession.prefix, windowID: newWindow.id, role: "browser",
-            orderIndex: existingWindow?.orderIndex ?? matchedSession.index, lastSeenAt: nowISO8601())
-        try store.upsert(window: storedWindow)
-        try markWorkspaceRunningIfNeeded(workspace)
-    }
-
     func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord) throws {
         guard !workspace.isRunning else { return }
         let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
@@ -3126,17 +2477,6 @@ public final class WorkspaceOrchestrator {
     func clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: String) throws {
         guard try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) else { return }
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-    }
-
-    private func missingTrackedWindowError(for window: WindowRecord, workspaceID: String) -> WorkspaceError {
-        if window.role == "browser" {
-            return .missingTrackedWindow(
-                MissingTrackedWindowContext(
-                    kind: .browserSession, workspaceID: workspaceID, windowID: window.windowID, targetURL: window.targetURL,
-                    title: window.name ?? window.targetURL ?? "Browser Session"))
-        }
-        return .missingTrackedWindow(
-            MissingTrackedWindowContext(kind: .window, workspaceID: workspaceID, windowID: window.windowID, title: window.name ?? window.app))
     }
 
     func safeFilename(_ raw: String) -> String {

@@ -90,6 +90,35 @@ public enum SpacesDeviceClient {
         return record
     }
 
+    /// True when a local-device failure is a daemon-reachability problem rather than an error from a
+    /// reachable daemon. Reachability covers: the control socket being unavailable; the Device API network
+    /// transport failing to connect (timeout/refused/reset); spacesd failing to start at all (startup
+    /// timeout, or a missing executable); and the daemon answering that its Device API is not running.
+    /// Callers degrade these to an offline sidebar. Anything else — a persistence/credential failure after
+    /// a reachable daemon returned a valid bootstrap, or a reachable daemon rejecting the overview with a
+    /// real error (database/migration/authorization/malformed payload) — means spacesd is reachable, so it
+    /// must surface as a real error instead of being hidden behind an offline state.
+    public static func isLocalDaemonUnreachableError(_ error: any Error) -> Bool {
+        if SpacesDeviceAPIControlClient.isControlEndpointUnavailable(error) { return true }
+        // The Device API network transport (used by the overview round-trip) couldn't reach the daemon.
+        if isRetryableLocalDeviceAPIConnectionError(error) { return true }
+        #if os(macOS)
+            // The terminal service couldn't bring spacesd up at all — it timed out starting, or the
+            // executable is missing — so the local daemon is down, the same offline state as an unreachable
+            // socket. These cases exist only in the macOS TerminalService, which is where local bootstrap runs.
+            if let terminalError = error as? TerminalServiceError {
+                switch terminalError {
+                case .serviceStartupTimedOut, .executableNotFound: return true
+                case .requestFailed: return false
+                }
+            }
+        #endif
+        if case SpacesDeviceClientError.requestRejected(let message) = error {
+            return message == SpacesDeviceAPIControlClient.deviceAPINotRunningMessage
+        }
+        return false
+    }
+
     public static func localOverview(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
@@ -133,6 +162,26 @@ public enum SpacesDeviceClient {
         guard let overview = response.overview else { throw SpacesDeviceClientError.missingOverview }
         return SpacesDeviceOverview(device: device, overview: overview)
     }
+
+    #if canImport(Network)
+        /// Opens a live device-overview subscription: the paired daemon pushes a
+        /// fresh overview whenever its database changes, so the client stays current
+        /// without polling. The returned client must be retained and `stop()`ped.
+        public static func subscribeOverview(
+            device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+            onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        ) throws -> SpacesDeviceAPIOverviewStreamClient {
+            guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
+                throw SpacesDeviceClientError.missingTransportKey(device.name)
+            }
+            let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile)
+            let client = try SpacesDeviceAPIOverviewStreamClient(
+                authToken: authToken, clientApp: clientApp, host: device.host, port: device.port, transportKey: transportKey,
+                onOverview: { onOverview(SpacesDeviceOverview(device: device, overview: $0)) }, onDisconnect: onDisconnect)
+            try client.start()
+            return client
+        }
+    #endif
 
     /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status so the
     /// caller can classify compatibility against this build.
@@ -232,12 +281,37 @@ public enum SpacesDeviceClient {
     }
 
     public static func createProject(
-        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, preparedGitProjectHandle: String? = nil,
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(command: .createProject(.init(projectDir: projectDir, gitURL: gitURL, config: config))), device: device, clientApp: clientApp,
-            profile: profile)
+            .init(
+                command: .createProject(
+                    .init(projectDir: projectDir, gitURL: gitURL, config: config, preparedGitProjectHandle: preparedGitProjectHandle))),
+            device: device, clientApp: clientApp, profile: profile)
+    }
+
+    /// Clones a git repository on the target daemon and returns its detected config plus an opaque
+    /// handle to the clone (or replacement candidates to confirm first). The handle is later passed
+    /// to `createProject` to adopt the clone, or to `discardPreparedGitProject` to delete it.
+    public static func prepareGitProject(
+        gitURL: String, replaceExistingManagedDirectories: Bool, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceGitProjectPreparation {
+        let response = try request(
+            .init(command: .prepareGitProject(.init(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories))),
+            device: device, clientApp: clientApp, profile: profile)
+        guard let preparation = response.gitProjectPreparation else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return preparation
+    }
+
+    @discardableResult public static func discardPreparedGitProject(
+        preparedGitProjectHandle: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .discardPreparedGitProject(.init(preparedGitProjectHandle: preparedGitProjectHandle))), device: device,
+            clientApp: clientApp, profile: profile)
     }
 
     public static func deleteProject(
@@ -474,13 +548,14 @@ public enum SpacesDeviceClient {
 
     static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
-        case .createProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace, .restartWorkspace,
-            .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess,
-            .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
+        case .createProject, .prepareGitProject, .discardPreparedGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace,
+            .launchWorkspace, .stopWorkspace, .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal,
+            .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent,
+            .restartCodingAgent:
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink,
-            .readTerminalLinkChunk, .subscribe:
+            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:
             defaultRequestTimeoutSeconds
         }
     }

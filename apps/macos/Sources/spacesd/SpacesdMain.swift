@@ -91,6 +91,19 @@ import workspacecore
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
+    #if os(Linux)
+        private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
+    #endif
+    private var worktreeDiscoveryService: WorktreeDiscoveryService?
+    private var databaseChangeObserver: NSObjectProtocol?
+    #if os(Linux)
+        private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
+    #endif
+    #if os(macOS)
+        private var databaseDistributedChangeObserver: NSObjectProtocol?
+        private var processExitMonitor: ProcessExitMonitorService?
+        private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
+    #endif
     private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
         builtInTerminalSessionTerminator: { [weak self] sessionID in
             Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
@@ -102,10 +115,7 @@ import workspacecore
                     return try self.launchBuiltInTerminalSession(launchConfiguration)
                 }
             }.get()
-        },
-        onRestartRequested: { [weak self] in
-            Task { @MainActor in self?.requestDaemonRestart() }
-        })
+        }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
     private let git = RemoteWorkspaceGitClient()
 
     init() throws {
@@ -121,11 +131,113 @@ import workspacecore
         try configuredRemoteServer?.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
+        startDeviceRuntimeServices()
+    }
+
+    /// Device-runtime work (worktree discovery, process-exit monitoring) is owned by
+    /// the daemon, since it runs on every device — including headless remotes the
+    /// thin-client GUI cannot reach. Each service reconciles the device's own
+    /// filesystem/process state into the database; `databaseDidChange` reconciles
+    /// their watcher/observer sets when projects or running processes change.
+    private func startDeviceRuntimeServices() {
+        installProcessWideOrchestratorHooks()
+        guard let databasePath = try? DatabaseLocator.defaultPath() else {
+            writeStandardError("spacesd device_runtime_error error=could not resolve database path\n")
+            return
+        }
+        let worktreeService = WorktreeDiscoveryService(databasePath: databasePath) { error in
+            writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
+        }
+        worktreeService.start()
+        worktreeDiscoveryService = worktreeService
+        #if os(macOS)
+            let monitor = ProcessExitMonitorService(databasePath: databasePath) { error in
+                writeStandardError("spacesd process_exit_monitor_error error=\(error)\n")
+            }
+            monitor.start()
+            processExitMonitor = monitor
+            let foregroundAgentReconciler = TerminalForegroundAgentReconciler(databasePath: databasePath) { error in
+                writeStandardError("spacesd terminal_foreground_agent_reconcile_error error=\(error)\n")
+            }
+            foregroundAgentReconciler.start()
+            terminalForegroundAgentReconciler = foregroundAgentReconciler
+        #endif
+        databaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
+            [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() }
+        }
+        #if os(Linux)
+            do {
+                let receiver = try DatabaseChangeSignalReceiver(socketPath: nil, queue: databaseChangeSignalQueue) {
+                    NotificationCenter.default.post(name: IPCNotification.databaseDidChange, object: nil)
+                }
+                try receiver.start()
+                databaseChangeSignalReceiver = receiver
+            } catch { writeStandardError("spacesd database_change_signal_error error=\(error)\n") }
+        #endif
+        #if os(macOS)
+            databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
+                forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
+            ) { [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() } }
+        #endif
+    }
+
+    private func handleDatabaseDidChangeForDeviceRuntime() {
+        worktreeDiscoveryService?.refreshWatchers()
+        #if os(macOS)
+            processExitMonitor?.refreshObservers()
+        #endif
+    }
+
+    /// Routes plain orchestrators built off the request path (the device-runtime
+    /// services) through the daemon's in-process terminal launcher and a client-side
+    /// notification deliverer. A bundle-less daemon cannot post OS notifications, so
+    /// `notify` on-exit events are forwarded to the client to deliver.
+    private func installProcessWideOrchestratorHooks() {
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher { [weak self] launchConfiguration in
+            try Self.runOnMainActorSynchronously {
+                Result {
+                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                    return try self.launchBuiltInTerminalSession(launchConfiguration)
+                }
+            }.get()
+        }
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator { [weak self] sessionID in
+            Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
+        }
+        #if os(macOS)
+            WorkspaceOrchestrator.setProcessWideNotificationDeliverer { title, body, subtitle in
+                var userInfo = [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: body]
+                if let subtitle { userInfo[IPCNotification.notificationSubtitleUserInfoKey] = subtitle }
+                try? IPCNotification.post(IPCNotification.deliverUserNotification, userInfo: userInfo)
+            }
+        #endif
     }
 
     func shutdown() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
+        if let databaseChangeObserver {
+            NotificationCenter.default.removeObserver(databaseChangeObserver)
+            self.databaseChangeObserver = nil
+        }
+        #if os(Linux)
+            databaseChangeSignalReceiver?.stop()
+            databaseChangeSignalReceiver = nil
+        #endif
+        #if os(macOS)
+            if let databaseDistributedChangeObserver {
+                DistributedNotificationCenter.default().removeObserver(databaseDistributedChangeObserver)
+                self.databaseDistributedChangeObserver = nil
+            }
+        #endif
+        worktreeDiscoveryService?.stop()
+        worktreeDiscoveryService = nil
+        #if os(macOS)
+            processExitMonitor?.stop()
+            processExitMonitor = nil
+            terminalForegroundAgentReconciler?.stop()
+            terminalForegroundAgentReconciler = nil
+        #endif
         deviceAPISupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
         remoteServer?.stop()
@@ -1186,8 +1298,7 @@ private enum SpacesDaemonMobileCredentialStore {
 
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(

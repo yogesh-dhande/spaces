@@ -93,6 +93,237 @@ extension OrchestratorTests {
         XCTAssertNil(unchanged?.exitedAt)
     }
 
+    // Tests that a process which dies inside the startup grace window is still
+    // reconciled when grace is ignored — the path the DispatchSourceProcess exit
+    // observer uses, since the kernel has authoritatively reported the exit.
+    func testCheckAndUpdateProcessStatusesMarksRecentDeadProcessWhenIgnoringGrace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let recentDeadProcess = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
+        try store.upsert(runningProcess: recentDeadProcess)
+
+        XCTAssertTrue(try orchestrator.checkAndUpdateProcessStatuses(ignoreStartupGracePeriod: true))
+        let updated = try store.runningProcesses(workspaceID: workspace.id).first
+        XCTAssertEqual(updated?.status, .exited)
+        XCTAssertNotNil(updated?.exitedAt)
+    }
+
+    // A Spaces terminal-backed process can be recorded running before its child PID is persisted
+    // (the launch returns once the session is ready; the child PID lands in terminal runtime state
+    // slightly later). The exit monitor must still see such a process, so runningOwnedProcessPIDs
+    // resolves the PID through runtime state when the DB pid is missing.
+    func testRunningOwnedProcessPIDsResolvesPIDFromRuntimeStateWhenDatabasePIDMissing() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        try withEnv(name: SpacesProfile.runtimeDirectoryEnvironmentVariable, value: runtimeDir.path) {
+            let sessionID = "session-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            // childPID is a live pid (this test process); the DB record carries no pid yet.
+            try TerminalSessionPersistence.writeRuntimeState(
+                .init(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: Int32(getpid()), state: .running,
+                    updatedAt: "2026-05-09T17:00:00Z"), paths: paths)
+            let process = RunningProcessRecord(
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: TerminalHost.spaces.appName, windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+            try store.upsert(runningProcess: process)
+
+            XCTAssertTrue(try orchestrator.runningOwnedProcessPIDs().contains(Int(getpid())))
+        }
+    }
+
+    // Without a resolvable runtime PID, a pid-less running record contributes nothing — the monitor
+    // has nothing to observe — rather than inserting a bogus zero/negative pid.
+    func testRunningOwnedProcessPIDsSkipsRecordWithNoResolvablePID() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let process = RunningProcessRecord(
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
+            terminalApp: TerminalHost.spaces.appName, windowID: 123, terminalTrackingID: "session-without-runtime-state", pid: nil,
+            status: .running, logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        try withEnv(name: SpacesProfile.runtimeDirectoryEnvironmentVariable, value: runtimeDir.path) {
+            XCTAssertTrue(try orchestrator.runningOwnedProcessPIDs().isEmpty)
+        }
+    }
+
+    func testCheckAndUpdateProcessStatusesHonorsExitedRuntimeStateInsideStartupGrace() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "session-\(UUID().uuidString)"
+        let processID = UUID().uuidString
+        let process = RunningProcessRecord(
+            id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+            windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        let exitedAt = ISO8601DateFormatter().string(from: Date())
+        try writeTerminalSessionFixture(
+            sessionID: sessionID, workspace: workspace, kind: .process,
+            runtimeState: .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil, state: .exited,
+                updatedAt: exitedAt, exitedAt: exitedAt))
+
+        XCTAssertTrue(try orchestrator.checkAndUpdateProcessStatuses())
+        let updated = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first { $0.id == processID })
+        XCTAssertEqual(updated.status, .exited)
+        XCTAssertNotNil(updated.exitedAt)
+    }
+
+    func testCheckAndUpdateProcessStatusesKeepsStartingRuntimeStateRunningAfterStartupGrace() throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "session-\(UUID().uuidString)"
+        let processID = UUID().uuidString
+        let process = RunningProcessRecord(
+            id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+            windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20.0)), exitedAt: nil)
+        try store.upsert(runningProcess: process)
+
+        try writeTerminalSessionFixture(
+            sessionID: sessionID, workspace: workspace, kind: .process,
+            runtimeState: .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil,
+                state: .starting, updatedAt: ISO8601DateFormatter().string(from: Date())))
+
+        XCTAssertFalse(try orchestrator.checkAndUpdateProcessStatuses())
+        let updated = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first { $0.id == processID })
+        XCTAssertEqual(updated.status, .running)
+        XCTAssertNil(updated.exitedAt)
+    }
+
+    #if os(macOS)
+        @MainActor func testProcessExitMonitorRuntimeStateExitReconcilesPIDLessProcessInsideStartupGrace() throws {
+            let root = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let databasePath = root.appendingPathComponent("spaces-test.db").path
+            let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+            try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+
+            try withEnvironmentValues([
+                SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDir.path,
+            ]) {
+                let store = try SQLiteStore(path: databasePath)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let projectDir = root.appendingPathComponent("project", isDirectory: true)
+                try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+                let project = try orchestrator.addProject(dir: projectDir.path)
+                let workspace = try orchestrator.createWorkspace(projectID: project.id)
+                let sessionID = "session-\(UUID().uuidString)"
+                let processID = UUID().uuidString
+                let process = RunningProcessRecord(
+                    id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+                    windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+                try store.upsert(runningProcess: process)
+
+                let monitor = ProcessExitMonitorService(databasePath: databasePath)
+                monitor.start()
+                defer { monitor.stop() }
+
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                let exitedAt = ISO8601DateFormatter().string(from: Date())
+                try TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(getpid()), childPID: nil, state: .exited,
+                        updatedAt: exitedAt, exitedAt: exitedAt), paths: paths)
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+
+                let updated = try waitForRunningProcess(store: store, workspaceID: workspace.id, processID: processID) { $0.status == .exited }
+                XCTAssertEqual(updated.status, .exited)
+                XCTAssertNotNil(updated.exitedAt)
+            }
+        }
+
+        @MainActor func testProcessExitMonitorRuntimeStatePIDReconcilesPIDLessProcessInsideStartupGrace() throws {
+            let root = try makeTempDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let databasePath = root.appendingPathComponent("spaces-test.db").path
+            let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
+            try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
+
+            try withEnvironmentValues([
+                SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDir.path,
+            ]) {
+                let store = try SQLiteStore(path: databasePath)
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let projectDir = root.appendingPathComponent("project", isDirectory: true)
+                try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+                let project = try orchestrator.addProject(dir: projectDir.path)
+                let workspace = try orchestrator.createWorkspace(projectID: project.id)
+                let sessionID = "session-\(UUID().uuidString)"
+                let processID = UUID().uuidString
+                let process = RunningProcessRecord(
+                    id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+                    windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+                try store.upsert(runningProcess: process)
+
+                let monitor = ProcessExitMonitorService(databasePath: databasePath)
+                monitor.start()
+                defer { monitor.stop() }
+
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                try TerminalSessionPersistence.writeRuntimeState(
+                    .init(
+                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(getpid()), childPID: Int32(getpid()), state: .running,
+                        updatedAt: ISO8601DateFormatter().string(from: Date())), paths: paths)
+                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+
+                let updated = try waitForRunningProcess(store: store, workspaceID: workspace.id, processID: processID) {
+                    $0.pid == Int(getpid()) && $0.status == .running
+                }
+                XCTAssertEqual(updated.pid, Int(getpid()))
+                XCTAssertEqual(updated.status, .running)
+            }
+        }
+    #endif
+
     func testCheckAndUpdateProcessStatusesTreatsZombiePIDAsExited() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -301,173 +532,10 @@ extension OrchestratorTests {
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-456"), workspace.id)
     }
 
-    func testFocusNextWindowDoesNotRequestAppHideForBuiltInProcessTarget() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let root = try makeTempDirectory()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("built-in cycle focus should not reopen the session") },
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-browser", workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
-                windowID: 101, role: "browser", orderIndex: 0, lastSeenAt: "now"))
-        let process = RunningProcessRecord(
-            id: "process-spaces-cycle", workspaceID: workspace.id, templateName: "api", command: "npm run api",
-            terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-cycle",
-            terminalNativeID: "spaces-session-cycle", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                windowID: 202, terminalTrackingID: "spaces-session-cycle", terminalNativeID: "spaces-session-cycle", role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
-
-        var hidesApp = true
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
-                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
-                    hidesApp = try orchestrator.focusNextWindowHidesApp(workspaceID: workspace.id)
-                }
-            }
-        }
-
-        XCTAssertFalse(hidesApp)
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-cycle"])
-        XCTAssertEqual(focusCapture.requestIDs, [nil])
-    }
-
-    // Tests process focus throws a recoverable missing-window error when a legacy tracked terminal window no longer exists.
-    func testFocusWorkspaceProcessThrowsRecoverableErrorForMissingProcessWindow() throws {
-        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-
-        let process = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "LegacyTerminal",
-            windowID: 999, terminalTrackingID: "session-999", pid: 1234, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
-            exitedAt: nil)
-        try store.upsert(runningProcess: process)
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            XCTAssertThrowsError(try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)) { error in
-                guard case .missingTrackedWindow(let context) = error as? WorkspaceError else {
-                    return XCTFail("Expected missingTrackedWindow, got \(error)")
-                }
-                XCTAssertEqual(context.kind, .process)
-                XCTAssertEqual(context.processID, process.id)
-                XCTAssertEqual(context.title, "api")
-            }
-        }
-    }
-
-    func testFocusWorkspaceProcessUsesBuiltInSpacesSessionWithoutTrackedYabaiWindowID() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store,
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let process = RunningProcessRecord(
-            id: "process-spaces", workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
-            windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", pid: nil, status: .running, logPath: nil,
-            lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev", targetURL: nil,
-                windowID: nil, terminalTrackingID: "spaces-session-1", terminalNativeID: "spaces-session-1", role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
-
-        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-1"])
-        XCTAssertEqual(focusCapture.requestIDs, [nil])
-    }
-
-    func testFocusWorkspaceProcessReusesLiveBuiltInSpacesSessionWithoutOpeningWhenWindowBindingIsMissing() throws {
-        let store = try makeTemporaryStore()
-        let openCapture = TerminalOpenCapture()
-        let focusCapture = TerminalFocusCapture()
-        let root = try makeTempDirectory()
-        let queryLog = root.appendingPathComponent("yabai-query.log")
-        let orchestrator = WorkspaceOrchestrator(
-            store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                openCapture.sessionIDs.append(sessionID)
-                openCapture.modes.append(mode)
-            },
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let process = RunningProcessRecord(
-            id: "process-spaces-session-only", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "spaces-session-live-only",
-            terminalNativeID: "spaces-session-live-only", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil
-        )
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces-session-only", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: nil, terminalTrackingID: "spaces-session-live-only", terminalNativeID: "spaces-session-live-only",
-                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUSED_ID", value: "889") {
-                try withEnv(name: "YABAI_FOCUSED_APP", value: TerminalHost.spaces.appName) {
-                    try withEnv(name: "YABAI_FOCUSED_TITLE", value: "web") {
-                        try withEnv(name: "YABAI_QUERY_LOG_FILE", value: queryLog.path) {
-                            try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
-                        }
-                    }
-                }
-            }
-        }
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-live-only"])
-        XCTAssertEqual(focusCapture.requestIDs, [nil])
-        XCTAssertTrue(openCapture.sessionIDs.isEmpty)
-
-        let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
-        XCTAssertEqual(updatedProcess.windowID, 889)
-
-        let updatedWindow = try XCTUnwrap(
-            try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.terminalTrackingID == "spaces-session-live-only" }
-            ))
-        XCTAssertEqual(updatedWindow.windowID, 889)
-
-        let queryLines = try String(contentsOf: queryLog, encoding: .utf8).split(separator: "\n").map(String.init)
-        XCTAssertEqual(queryLines.filter { $0 == "query --windows --window" }.count, 1)
-        XCTAssertFalse(queryLines.contains("query --windows"))
-    }
-
     func testRefreshWorkspaceWindowsKeepsBuiltInProcessTerminalWindowAfterOwnerCloses() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, )
+        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -503,298 +571,6 @@ extension OrchestratorTests {
 
         let windows = try orchestrator.windows(workspaceID: workspace.id)
         XCTAssertEqual(windows.map(\.id), ["process-api"])
-    }
-
-    func testFocusWorkspaceProcessUsesBuiltInFocusIPCForLiveBuiltInSpacesWindow() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let root = try makeTempDirectory()
-        let focusLog = root.appendingPathComponent("spaces-live-window-focus.log")
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("live built-in window focus should not reopen the session") },
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let process = RunningProcessRecord(
-            id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: 501, terminalTrackingID: "spaces-session-live",
-            terminalNativeID: "spaces-session-live", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 501, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live", role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(
-                    name: "YABAI_WINDOWS_JSON",
-                    value:
-                        #"[{"id":501,"pid":11,"app":"Spaces","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-                ) { try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id) }
-            }
-        }
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-live"])
-        XCTAssertEqual(focusCapture.requestIDs, [nil])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
-    }
-
-    func testFocusWorkspaceProcessPassesRequestIDToBuiltInSpacesFocusIPC() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("focus should not reopen built-in session") },
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let root = try makeTempDirectory()
-        let focusLog = root.appendingPathComponent("spaces-built-in-focus.log")
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let process = RunningProcessRecord(
-            id: "process-spaces-request-id", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "spaces-session-request-id",
-            terminalNativeID: "spaces-session-request-id", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
-            exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces-request-id", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: nil, terminalTrackingID: "spaces-session-request-id", terminalNativeID: "spaces-session-request-id",
-                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: "focus-request-1")
-            }
-        }
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-request-id"])
-        XCTAssertEqual(focusCapture.requestIDs, ["focus-request-1"])
-    }
-
-    func testCycleFocusWorkspaceProcessSkipsStaleYabaiFocusProbeForBuiltInSpacesSession() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let openCapture = TerminalOpenCapture()
-        let root = try makeTempDirectory()
-        let focusLog = root.appendingPathComponent("yabai-focus.log")
-        let orchestrator = WorkspaceOrchestrator(
-            store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                openCapture.sessionIDs.append(sessionID)
-                openCapture.modes.append(mode)
-            },
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let process = RunningProcessRecord(
-            id: "process-spaces-cycle-fast-path", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
-            terminalNativeID: "spaces-session-cycle-fast-path", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
-            exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces-cycle-fast-path", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-cycle-fast-path",
-                terminalNativeID: "spaces-session-cycle-fast-path", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                    try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
-                        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: "cycle-request-1")
-                    }
-                }
-            }
-        }
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-cycle-fast-path"])
-        XCTAssertEqual(focusCapture.requestIDs, ["cycle-request-1"])
-        XCTAssertTrue(openCapture.sessionIDs.isEmpty)
-        XCTAssertTrue(openCapture.modes.isEmpty)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
-    }
-
-    func testFocusWorkspaceProcessReopensBuiltInSpacesSessionAndClearsStaleWindowBinding() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let pulseController = MockTerminalFocusPulseController()
-        let root = try makeTempDirectory()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, terminalFocusPulseController: pulseController,
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let process = RunningProcessRecord(
-            id: "process-spaces-stale-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-stale",
-            terminalNativeID: "spaces-session-stale", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces-stale-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-stale", terminalNativeID: "spaces-session-stale", role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") {
-                    try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
-                        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
-                    }
-                }
-            }
-        }
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-stale"])
-        XCTAssertEqual(focusCapture.requestIDs, [nil])
-        XCTAssertTrue(pulseController.pulsedWindowIDs.isEmpty)
-
-        let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
-        XCTAssertNil(updatedProcess.windowID)
-
-        let updatedWindow = try XCTUnwrap(
-            try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.terminalTrackingID == "spaces-session-stale" }))
-        XCTAssertNil(updatedWindow.windowID)
-    }
-
-    func testFocusWorkspaceProcessRebindsBuiltInSpacesSessionToFreshWindowWithoutReopenWhenFocusIPCFindsLiveWindow() throws {
-        let store = try makeTemporaryStore()
-        let capture = TerminalOpenCapture()
-        let focusCapture = TerminalFocusCapture()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                capture.sessionIDs.append(sessionID)
-                capture.modes.append(mode)
-            },
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let root = try makeTempDirectory()
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-        let queryLog = root.appendingPathComponent("yabai-query.log")
-
-        let process = RunningProcessRecord(
-            id: "process-spaces-rebound-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-rebound",
-            terminalNativeID: "spaces-session-rebound", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces-rebound-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-rebound", terminalNativeID: "spaces-session-rebound",
-                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                try withEnv(name: "YABAI_FOCUS_FAIL_IDS", value: "777") {
-                    try withEnv(name: "YABAI_FOCUSED_ID", value: "888") {
-                        try withEnv(name: "YABAI_FOCUSED_APP", value: TerminalHost.spaces.appName) {
-                            try withEnv(name: "YABAI_FOCUSED_TITLE", value: "web") {
-                                try withEnv(name: "YABAI_QUERY_LOG_FILE", value: queryLog.path) {
-                                    try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        XCTAssertTrue(capture.sessionIDs.isEmpty)
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-rebound"])
-
-        let updatedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == process.id }))
-        XCTAssertEqual(updatedProcess.windowID, 888)
-
-        let updatedWindow = try XCTUnwrap(
-            try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" && $0.terminalTrackingID == "spaces-session-rebound" }))
-        XCTAssertEqual(updatedWindow.windowID, 888)
-
-        let queryLines = try String(contentsOf: queryLog, encoding: .utf8).split(separator: "\n").map(String.init)
-        XCTAssertEqual(queryLines.filter { $0 == "query --windows --window" }.count, 1)
-        XCTAssertFalse(queryLines.contains("query --windows"))
-    }
-
-    func testFocusWorkspaceProcessUsesTrackedBuiltInSessionWhenLiveWindowIDExists() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let pulseController = MockTerminalFocusPulseController()
-        let root = try makeTempDirectory()
-        let focusLog = root.appendingPathComponent("spaces-tracked-live-window-focus.log")
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, terminalFocusPulseController: pulseController,
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let process = RunningProcessRecord(
-            id: "process-spaces-live-window", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
-            terminalApp: TerminalHost.spaces.appName, windowID: 777, terminalTrackingID: "spaces-session-live",
-            terminalNativeID: "spaces-session-live", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-spaces-live-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "web", detail: "npm run dev",
-                targetURL: nil, windowID: 777, terminalTrackingID: "spaces-session-live", terminalNativeID: "spaces-session-live", role: "terminal",
-                orderIndex: 200, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(
-                    name: "YABAI_WINDOWS_JSON",
-                    value:
-                        #"[{"id":777,"pid":11,"app":"Spaces","title":"web","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-                ) { try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id) }
-            }
-        }
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-live"])
-        XCTAssertEqual(focusCapture.requestIDs, [nil])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: focusLog.path))
-        XCTAssertTrue(pulseController.pulsedWindowIDs.isEmpty)
     }
 
     // Tests restarting a process recreates a tracked terminal window row even if the stale window row was already pruned.
@@ -912,84 +688,6 @@ extension OrchestratorTests {
         XCTAssertNotEqual(openCapture.sessionIDs.first, "old-spaces-session")
         let restartedProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == "process-api" }))
         XCTAssertEqual(restartedProcess.terminalTrackingID, openCapture.sessionIDs.first)
-    }
-
-    // Tests running-process recovery reattaches without restarting when the built-in terminal session is still available.
-    // Tests running-process recovery returns false instead of restarting when the tracked process is no longer alive.
-    func testRecoverRunningWorkspaceProcessIfPossibleReturnsFalseWhenProcessIsNotRunning() throws {
-        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-
-        let process = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 999,
-            terminalTrackingID: "session-old", pid: 999_999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-
-        let recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: workspace.id, processID: process.id)
-
-        XCTAssertFalse(recovered)
-    }
-
-    func testRecoverRunningWorkspaceProcessIfPossibleReopensBuiltInSpacesSession() throws {
-        let root = try makeTempDirectory()
-        let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try makeTemporaryStore()
-        let capture = TerminalOpenCapture()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store,
-            builtInTerminalWindowOpener: { sessionID, mode in
-                capture.sessionIDs.append(sessionID)
-                capture.modes.append(mode)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        let sessionID = "spaces-session-recover-1"
-
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            try paths.ensureDirectories()
-            FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
-            try TerminalSessionPersistence.writeRuntimeState(
-                .init(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: getpid(), state: .running,
-                    updatedAt: "2026-05-09T19:00:00Z"), paths: paths)
-
-            let process = RunningProcessRecord(
-                id: "process-spaces-recover", workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID,
-                pid: Int(getpid()), status: .running, logPath: paths.outputPath, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-            try store.upsert(runningProcess: process)
-            try store.upsert(
-                window: WindowRecord(
-                    id: process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                    windowID: 401, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
-
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                    let recovered = try orchestrator.recoverRunningWorkspaceProcessIfPossible(workspaceID: workspace.id, processID: process.id)
-                    XCTAssertTrue(recovered)
-                }
-            }
-        }
-
-        XCTAssertEqual(capture.sessionIDs, [sessionID])
-        XCTAssertEqual(capture.modes, [.owner])
-
-        let recoveredProcess = try XCTUnwrap(
-            try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.id == "process-spaces-recover" }))
-        XCTAssertEqual(recoveredProcess.terminalTrackingID, sessionID)
-        XCTAssertEqual(recoveredProcess.terminalNativeID, sessionID)
-        XCTAssertEqual(recoveredProcess.terminalApp, TerminalHost.spaces.appName)
-        XCTAssertNil(recoveredProcess.windowID)
-
-        let recoveredWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.id == "process-spaces-recover" }))
-        XCTAssertEqual(recoveredWindow.terminalTrackingID, sessionID)
-        XCTAssertEqual(recoveredWindow.terminalNativeID, sessionID)
-        XCTAssertEqual(recoveredWindow.app, TerminalHost.spaces.appName)
-        XCTAssertNil(recoveredWindow.windowID)
     }
 
     // Tests configured-but-missing processes can be recovered directly without restarting unrelated running processes.
@@ -1923,9 +1621,9 @@ extension OrchestratorTests {
         // Mark workspace as running so stop can proceed.
         var runningWorkspace = workspace
         runningWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)", dirname: workspace.dirname,
-            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
-            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
+            id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)",
+            dirname: workspace.dirname, branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault,
+            isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop should succeed (skip script because dir is missing) rather than throw.
@@ -1953,9 +1651,9 @@ extension OrchestratorTests {
 
         // Mark workspace as running.
         let runningWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname, branch: workspace.branch,
-            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isHidden: workspace.isHidden,
-            isRunning: true, lastLaunchedAt: nil, notes: nil)
+            id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname,
+            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
+            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop workspace: should attempt to close the editor window via yabai (yabai.closeWindow may fail silently).
@@ -2077,5 +1775,18 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id)) { error in
             XCTAssertTrue(error.localizedDescription.contains("archived"))
         }
+    }
+
+    private func waitForRunningProcess(
+        store: SQLiteStore, workspaceID: String, processID: String, timeout: TimeInterval = 2.0, matching predicate: (RunningProcessRecord) -> Bool
+    ) throws -> RunningProcessRecord {
+        let deadline = Date().addingTimeInterval(timeout)
+        var latest: RunningProcessRecord?
+        repeat {
+            latest = try store.runningProcesses(workspaceID: workspaceID).first { $0.id == processID }
+            if let latest, predicate(latest) { return latest }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        } while Date() < deadline
+        return try XCTUnwrap(latest)
     }
 }

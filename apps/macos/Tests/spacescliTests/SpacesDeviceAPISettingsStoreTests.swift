@@ -44,6 +44,20 @@ final class SpacesDeviceAPISettingsStoreTests: XCTestCase {
         }
     }
 
+    func testIsDisabledByEnvironmentRecognizesOnlyTheDisableOverride() {
+        // The override turns the Device API off; a relaunch can't bring it back, so the UI keys off this.
+        XCTAssertTrue(SpacesDeviceAPIDefaults.isDisabledByEnvironment([SpacesDeviceAPIDefaults.disabledEnvironmentVariable: "1"]))
+        XCTAssertTrue(SpacesDeviceAPIDefaults.isDisabledByEnvironment([SpacesDeviceAPIDefaults.disabledEnvironmentVariable: "true"]))
+        XCTAssertTrue(SpacesDeviceAPIDefaults.isDisabledByEnvironment([SpacesDeviceAPIDefaults.disabledEnvironmentVariable: " TRUE "]))
+
+        // Absent, empty, or any other value leaves the Device API enabled (a transient socket failure is
+        // not the disabled-override case).
+        XCTAssertFalse(SpacesDeviceAPIDefaults.isDisabledByEnvironment([:]))
+        XCTAssertFalse(SpacesDeviceAPIDefaults.isDisabledByEnvironment([SpacesDeviceAPIDefaults.disabledEnvironmentVariable: ""]))
+        XCTAssertFalse(SpacesDeviceAPIDefaults.isDisabledByEnvironment([SpacesDeviceAPIDefaults.disabledEnvironmentVariable: "0"]))
+        XCTAssertFalse(SpacesDeviceAPIDefaults.isDisabledByEnvironment([SpacesDeviceAPIDefaults.disabledEnvironmentVariable: "no"]))
+    }
+
     func testEnvironmentPortOverrideAllowsEphemeralPortWithoutChangingStoredDefaults() throws {
         try withTemporaryProfile { _ in
             let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "0"]

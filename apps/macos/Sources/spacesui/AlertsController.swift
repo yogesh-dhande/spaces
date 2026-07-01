@@ -14,8 +14,7 @@ import workspacecore
 /// Owns the Alerts pane's state and behavior. `AppKitController` holds a single
 /// instance and delegates alerts interactions to it. The controller reaches back
 /// into the host for shared window/model/orchestration services via `host`.
-@MainActor
-final class AlertsController: NSObject {
+@MainActor final class AlertsController: NSObject {
     unowned let host: AppKitController
 
     init(host: AppKitController) {
@@ -46,27 +45,23 @@ final class AlertsController: NSObject {
         }
     }
 
-    func alertsAttentionCount() -> Int {
-        buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count }
-    }
+    func alertsAttentionCount() -> Int { buildAlertsGroups().reduce(0) { total, group in total + group.items.filter(\.countsTowardBadge).count } }
 
-    func loadAlertsDismissedAttentionItemIDs() {
-        dismissedAlertsAttentionItemIDs = (try? host.orchestrator.alertsDismissedAttentionItemIDs()) ?? []
-    }
+    func loadAlertsDismissedAttentionItemIDs() { dismissedAlertsAttentionItemIDs = host.loadDismissedAlertsAttentionItemIDs() }
 
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() {
         let activeIDs = Set(host.alertsGroups.flatMap { $0.items.map(\.attentionID) })
         let prunedIDs = dismissedAlertsAttentionItemIDs.intersection(activeIDs)
         guard prunedIDs != dismissedAlertsAttentionItemIDs else { return }
         dismissedAlertsAttentionItemIDs = prunedIDs
-        do { try host.orchestrator.setAlertsDismissedAttentionItemIDs(prunedIDs) } catch { host.showError(error) }
+        do { try host.storeDismissedAlertsAttentionItemIDs(prunedIDs) } catch { host.showError(error) }
     }
 
     func dismissAlertsAttentionItem(_ attentionID: String) {
         guard !dismissedAlertsAttentionItemIDs.contains(attentionID) else { return }
         dismissedAlertsAttentionItemIDs.insert(attentionID)
         do {
-            try host.orchestrator.setAlertsDismissedAttentionItemIDs(dismissedAlertsAttentionItemIDs)
+            try host.storeDismissedAlertsAttentionItemIDs(dismissedAlertsAttentionItemIDs)
             host.updateAlertsSidebarBadge()
             if host.showingAlerts { showAlertsDetail() }
         } catch {
@@ -231,8 +226,8 @@ final class AlertsController: NSObject {
         dismissButton.toolTip = "Dismiss from alerts"
 
         let mainRow = host.windowRow(
-            icon: entry.icon, iconColor: AppKitController.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail, shortcut: shortcut,
-            processStatus: entry.processStatus, agentStatus: entry.agentStatus,
+            icon: entry.icon, iconColor: AppKitController.alertsIconColor(entry.iconTint), label: entry.label, detail: entry.detail,
+            shortcut: shortcut, processStatus: entry.processStatus, agentStatus: entry.agentStatus,
             automationID: entry.agentStatus == nil ? nil : "alerts-agent-\(AppKitController.automationIdentifierSlug(entry.label))",
             trailingAccessory: dismissButton, action: action)
 

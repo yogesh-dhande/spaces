@@ -52,15 +52,13 @@ final class CompatibilityBlockView: NSView {
 
         addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 18),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 18), stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
         ])
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { nil }
+    @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
     // AppKit only calls `updateLayer()` when `wantsUpdateLayer` is true; without this the card's
     // orange border/background would never be applied.
@@ -90,13 +88,11 @@ final class CompatibilityBlockView: NSView {
 
     private static func detail(for verdict: SpacesWireCompatibility) -> String {
         switch verdict {
-        case .clientTooOld:
-            "This device runs a newer Spaces than this app. Update Spaces to reconnect to this device."
+        case .clientTooOld: "This device runs a newer Spaces than this app. Update Spaces to reconnect to this device."
         case .daemonTooOld:
             "The daemon on this device is older than this app needs. Restart it to apply the update and reconnect. "
                 + "Other paired devices remain available."
-        case .compatible:
-            "A newer Spaces is installed; the daemon keeps running the older build until it restarts."
+        case .compatible: "A newer Spaces is installed; the daemon keeps running the older build until it restarts."
         }
     }
 

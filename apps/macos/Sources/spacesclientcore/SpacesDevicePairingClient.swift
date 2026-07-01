@@ -194,8 +194,7 @@ public enum SpacesDevicePairingClient {
     /// host (a remote Mac or missing SSH metadata), so the caller can fall back to the restart RPC.
     /// Destructive: the restart stops the daemon's terminals, processes, and coding agents — callers
     /// must confirm the restart impact with the user first. macOS-only (requires SSH).
-    @discardableResult
-    public static func updateRemoteLinuxDaemon(
+    @discardableResult public static func updateRemoteLinuxDaemon(
         for device: SpacesPairedDeviceRecord, appVersion: String? = nil, remoteArtifactPublicKey: String? = nil
     ) throws -> Bool {
         #if canImport(Network)
@@ -208,8 +207,8 @@ public enum SpacesDevicePairingClient {
             let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
             guard probe.operatingSystem == "Linux" else { return false }
             try installRemoteLinuxSpaces(
-                destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion,
-                remoteArtifactPublicKey: remoteArtifactPublicKey)
+                destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey
+            )
             return true
         #else
             return false

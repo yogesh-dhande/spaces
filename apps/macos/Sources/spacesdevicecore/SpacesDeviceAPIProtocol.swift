@@ -301,6 +301,9 @@ public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
     public let processID: String?
     public let sessionID: String?
     public let runState: SpacesDeviceRunState
+    /// ISO-8601 timestamp the process exited, when known. Drives attention-alert recency without
+    /// the client opening the daemon database.
+    public let exitedAt: String?
     public let canRun: Bool
     public let canStop: Bool
     public let canRestart: Bool
@@ -308,7 +311,8 @@ public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
 
     public init(
         id: String, workspaceID: String, name: String, command: String, templateID: String? = nil, processID: String?, sessionID: String?,
-        runState: SpacesDeviceRunState, canRun: Bool, canStop: Bool, canRestart: Bool, daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
+        runState: SpacesDeviceRunState, exitedAt: String? = nil, canRun: Bool, canStop: Bool, canRestart: Bool,
+        daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -318,6 +322,7 @@ public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Ide
         self.processID = processID
         self.sessionID = sessionID
         self.runState = runState
+        self.exitedAt = exitedAt
         self.canRun = canRun
         self.canStop = canStop
         self.canRestart = canRestart
@@ -336,6 +341,9 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
     public let isConfigured: Bool
     public let runState: SpacesDeviceRunState
     public let activityState: SpacesDeviceCodingAgentActivityState
+    /// ISO-8601 timestamp of the agent session's last state change, when known. Drives
+    /// attention-alert recency and dismissal identity without the client opening the daemon database.
+    public let updatedAt: String?
     public let canRun: Bool
     public let canStop: Bool
     public let canRestart: Bool
@@ -343,8 +351,8 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
 
     public init(
         id: String, workspaceID: String, name: String, command: String, launcherID: String? = nil, agentID: String?, sessionID: String?,
-        isConfigured: Bool, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState, canRun: Bool, canStop: Bool,
-        canRestart: Bool, daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
+        isConfigured: Bool, runState: SpacesDeviceRunState, activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String? = nil,
+        canRun: Bool, canStop: Bool, canRestart: Bool, daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -356,6 +364,7 @@ public struct SpacesDeviceWorkspaceCodingAgentRow: Codable, Sendable, Equatable,
         self.isConfigured = isConfigured
         self.runState = runState
         self.activityState = activityState
+        self.updatedAt = updatedAt
         self.canRun = canRun
         self.canStop = canStop
         self.canRestart = canRestart
@@ -845,17 +854,22 @@ public struct SpacesDeviceProjectCreateRequest: Codable, Sendable, Equatable {
     public let projectDir: String?
     public let gitURL: String?
     public let config: SpacesDeviceProjectConfig?
+    /// Opaque handle returned by `prepareGitProject`. When present the daemon adopts the already
+    /// cloned repository for that handle instead of re-cloning `gitURL`, so a git import clones once.
+    public let preparedGitProjectHandle: String?
 
-    public init(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil) {
+    public init(projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, preparedGitProjectHandle: String? = nil) {
         self.projectDir = projectDir
         self.gitURL = gitURL
         self.config = config
+        self.preparedGitProjectHandle = preparedGitProjectHandle
     }
 
     private enum CodingKeys: String, CodingKey {
         case projectDir
         case gitURL
         case config
+        case preparedGitProjectHandle
     }
 
     public init(from decoder: any Decoder) throws {
@@ -863,6 +877,57 @@ public struct SpacesDeviceProjectCreateRequest: Codable, Sendable, Equatable {
         projectDir = try container.decodeIfPresent(String.self, forKey: .projectDir)
         gitURL = try container.decodeIfPresent(String.self, forKey: .gitURL)
         config = try container.decodeIfPresent(SpacesDeviceProjectConfig.self, forKey: .config)
+        preparedGitProjectHandle = try container.decodeIfPresent(String.self, forKey: .preparedGitProjectHandle)
+    }
+}
+
+public struct SpacesDevicePrepareGitProjectRequest: Codable, Sendable, Equatable {
+    public let gitURL: String
+    public let replaceExistingManagedDirectories: Bool
+
+    public init(gitURL: String, replaceExistingManagedDirectories: Bool) {
+        self.gitURL = gitURL
+        self.replaceExistingManagedDirectories = replaceExistingManagedDirectories
+    }
+}
+
+public struct SpacesDeviceDiscardPreparedGitProjectRequest: Codable, Sendable, Equatable {
+    public let preparedGitProjectHandle: String
+
+    public init(preparedGitProjectHandle: String) { self.preparedGitProjectHandle = preparedGitProjectHandle }
+}
+
+/// A managed project/workspace directory that already exists for a git URL and would be replaced by
+/// preparing it again. Surfaced so the client can confirm replacement before the daemon clones.
+public struct SpacesDeviceManagedDirectoryReplacementCandidate: Codable, Sendable, Equatable {
+    public let kind: String
+    public let path: String
+
+    public init(kind: String, path: String) {
+        self.kind = kind
+        self.path = path
+    }
+}
+
+/// Result of `prepareGitProject`. When `replacementCandidates` is non-empty the daemon did not clone
+/// (the client must confirm replacement and retry); otherwise it carries the opaque handle for the
+/// cloned repository plus its detected `spaces.yaml`-derived config for populating the add form.
+public struct SpacesDeviceGitProjectPreparation: Codable, Sendable, Equatable {
+    public let preparedGitProjectHandle: String?
+    public let name: String?
+    public let defaultBranch: String?
+    public let config: SpacesDeviceProjectConfig?
+    public let replacementCandidates: [SpacesDeviceManagedDirectoryReplacementCandidate]
+
+    public init(
+        preparedGitProjectHandle: String?, name: String?, defaultBranch: String?, config: SpacesDeviceProjectConfig?,
+        replacementCandidates: [SpacesDeviceManagedDirectoryReplacementCandidate]
+    ) {
+        self.preparedGitProjectHandle = preparedGitProjectHandle
+        self.name = name
+        self.defaultBranch = defaultBranch
+        self.config = config
+        self.replacementCandidates = replacementCandidates
     }
 }
 
@@ -1197,6 +1262,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case requestDaemonRestart
     case overview
     case createProject(SpacesDeviceProjectCreateRequest)
+    case prepareGitProject(SpacesDevicePrepareGitProjectRequest)
+    case discardPreparedGitProject(SpacesDeviceDiscardPreparedGitProjectRequest)
     case deleteProject(SpacesDeviceProjectReference)
     case importProject(SpacesDeviceProjectImportRequest)
     case exportProject(SpacesDeviceProjectReference)
@@ -1225,6 +1292,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case subscribe(SpacesDeviceTerminalSubscriptionRequest)
     case resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest)
     case readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest)
+    /// Long-lived subscription that streams the device overview whenever the
+    /// remote daemon's database changes, so paired clients stay live without
+    /// polling. No payload: one overview stream per connection.
+    case subscribeDeviceOverview
 
     public var name: String {
         switch self {
@@ -1234,6 +1305,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .requestDaemonRestart: "requestDaemonRestart"
         case .overview: "overview"
         case .createProject: "createProject"
+        case .prepareGitProject: "prepareGitProject"
+        case .discardPreparedGitProject: "discardPreparedGitProject"
         case .deleteProject: "deleteProject"
         case .importProject: "importProject"
         case .exportProject: "exportProject"
@@ -1262,6 +1335,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .subscribe: "subscribe"
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
+        case .subscribeDeviceOverview: "subscribeDeviceOverview"
         }
     }
 
@@ -1291,7 +1365,16 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     }
 
     public var isSubscriptionCommand: Bool {
-        if case .subscribe = self { return true }
+        switch self {
+        case .subscribe, .subscribeDeviceOverview: true
+        default: false
+        }
+    }
+
+    /// True for the device-overview subscription, which streams overview payloads
+    /// rather than terminal state and is not tied to a terminal session.
+    public var isDeviceOverviewSubscription: Bool {
+        if case .subscribeDeviceOverview = self { return true }
         return false
     }
 
@@ -1313,6 +1396,8 @@ extension SpacesDeviceAPICommand: Codable {
         case requestDaemonRestart
         case overview
         case createProject
+        case prepareGitProject
+        case discardPreparedGitProject
         case deleteProject
         case importProject
         case exportProject
@@ -1341,6 +1426,7 @@ extension SpacesDeviceAPICommand: Codable {
         case subscribe
         case resolveTerminalLink
         case readTerminalLinkChunk
+        case subscribeDeviceOverview
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1364,6 +1450,9 @@ extension SpacesDeviceAPICommand: Codable {
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .overview
         case .createProject: self = .createProject(try container.decode(SpacesDeviceProjectCreateRequest.self, forKey: key))
+        case .prepareGitProject: self = .prepareGitProject(try container.decode(SpacesDevicePrepareGitProjectRequest.self, forKey: key))
+        case .discardPreparedGitProject:
+            self = .discardPreparedGitProject(try container.decode(SpacesDeviceDiscardPreparedGitProjectRequest.self, forKey: key))
         case .deleteProject: self = .deleteProject(try container.decode(SpacesDeviceProjectReference.self, forKey: key))
         case .importProject: self = .importProject(try container.decode(SpacesDeviceProjectImportRequest.self, forKey: key))
         case .exportProject: self = .exportProject(try container.decode(SpacesDeviceProjectReference.self, forKey: key))
@@ -1395,6 +1484,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribe: self = .subscribe(try container.decode(SpacesDeviceTerminalSubscriptionRequest.self, forKey: key))
         case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(SpacesDeviceTerminalLinkResolveRequest.self, forKey: key))
         case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunkRequest.self, forKey: key))
+        case .subscribeDeviceOverview:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .subscribeDeviceOverview
         }
     }
 
@@ -1407,6 +1499,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .requestDaemonRestart: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .requestDaemonRestart)
         case .overview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .overview)
         case .createProject(let payload): try container.encode(payload, forKey: .createProject)
+        case .prepareGitProject(let payload): try container.encode(payload, forKey: .prepareGitProject)
+        case .discardPreparedGitProject(let payload): try container.encode(payload, forKey: .discardPreparedGitProject)
         case .deleteProject(let payload): try container.encode(payload, forKey: .deleteProject)
         case .importProject(let payload): try container.encode(payload, forKey: .importProject)
         case .exportProject(let payload): try container.encode(payload, forKey: .exportProject)
@@ -1435,6 +1529,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribe(let payload): try container.encode(payload, forKey: .subscribe)
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
+        case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
         }
     }
 }
@@ -1483,6 +1578,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalState(GhosttyRemoteSessionStatePayload)
     case workspaceCreateOptions(SpacesDeviceWorkspaceCreateOptions)
     case projectPreview(SpacesDeviceProjectPreview)
+    case gitProjectPreparation(SpacesDeviceGitProjectPreparation)
     case directorySuggestions(SpacesDeviceDirectorySuggestions)
     case mutation(SpacesDeviceMutationResult)
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
@@ -1497,6 +1593,7 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalState
         case workspaceCreateOptions
         case projectPreview
+        case gitProjectPreparation
         case directorySuggestions
         case mutation
         case terminalLinkMetadata
@@ -1516,6 +1613,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalState: self = .terminalState(try container.decode(GhosttyRemoteSessionStatePayload.self, forKey: key))
         case .workspaceCreateOptions: self = .workspaceCreateOptions(try container.decode(SpacesDeviceWorkspaceCreateOptions.self, forKey: key))
         case .projectPreview: self = .projectPreview(try container.decode(SpacesDeviceProjectPreview.self, forKey: key))
+        case .gitProjectPreparation: self = .gitProjectPreparation(try container.decode(SpacesDeviceGitProjectPreparation.self, forKey: key))
         case .directorySuggestions: self = .directorySuggestions(try container.decode(SpacesDeviceDirectorySuggestions.self, forKey: key))
         case .mutation: self = .mutation(try container.decode(SpacesDeviceMutationResult.self, forKey: key))
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
@@ -1532,6 +1630,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalState(let payload): try container.encode(payload, forKey: .terminalState)
         case .workspaceCreateOptions(let payload): try container.encode(payload, forKey: .workspaceCreateOptions)
         case .projectPreview(let payload): try container.encode(payload, forKey: .projectPreview)
+        case .gitProjectPreparation(let payload): try container.encode(payload, forKey: .gitProjectPreparation)
         case .directorySuggestions(let payload): try container.encode(payload, forKey: .directorySuggestions)
         case .mutation(let payload): try container.encode(payload, forKey: .mutation)
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
@@ -1570,6 +1669,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var projectPreview: SpacesDeviceProjectPreview? { if case .projectPreview(let payload) = result { payload } else { nil } }
+
+    public var gitProjectPreparation: SpacesDeviceGitProjectPreparation? {
+        if case .gitProjectPreparation(let payload) = result { payload } else { nil }
+    }
 
     public var directorySuggestions: SpacesDeviceDirectorySuggestions? {
         if case .directorySuggestions(let payload) = result { payload } else { nil }

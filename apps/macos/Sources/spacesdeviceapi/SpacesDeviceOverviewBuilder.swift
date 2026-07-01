@@ -271,8 +271,9 @@ struct SpacesDeviceOverviewBuilder {
             rows.append(
                 SpacesDeviceWorkspaceProcessRow(
                     id: template.id, workspaceID: descriptor.workspace.id, name: template.name ?? "", command: template.command,
-                    templateID: template.id, processID: runningProcess?.id, sessionID: availableSessionID, runState: state, canRun: !isRunning,
-                    canStop: isRunning, canRestart: isRunning, daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    templateID: template.id, processID: runningProcess?.id, sessionID: availableSessionID, runState: state,
+                    exitedAt: runningProcess?.exitedAt, canRun: !isRunning, canStop: isRunning, canRestart: isRunning,
+                    daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
 
         for runningProcess in descriptor.runningProcesses where !usedProcessIDs.contains(runningProcess.id) {
@@ -286,8 +287,8 @@ struct SpacesDeviceOverviewBuilder {
                 SpacesDeviceWorkspaceProcessRow(
                     id: "process-runtime:\(runningProcess.id)", workspaceID: descriptor.workspace.id, name: name.isEmpty ? "Process" : name,
                     command: runningProcess.command, templateID: runningProcess.templateID, processID: runningProcess.id,
-                    sessionID: availableSessionID, runState: state, canRun: false, canStop: isRunning, canRestart: false,
-                    daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    sessionID: availableSessionID, runState: state, exitedAt: runningProcess.exitedAt, canRun: false, canStop: isRunning,
+                    canRestart: false, daemonEndpoint: descriptor.terminalDaemonEndpoint))
         }
         return ProcessRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
@@ -350,8 +351,8 @@ struct SpacesDeviceOverviewBuilder {
         let canRestart = agent != nil && (isConfigured || hasClaimedLauncherID || hasClaimedLauncherName)
         return SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: session?.sessionID,
-            isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), canRun: canRun, canStop: canStop,
-            canRestart: canRestart, daemonEndpoint: daemonEndpoint)
+            isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), updatedAt: agent?.updatedAt, canRun: canRun,
+            canStop: canStop, canRestart: canRestart, daemonEndpoint: daemonEndpoint)
     }
 
     private static func workspaceTerminalRows(

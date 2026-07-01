@@ -232,8 +232,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     }
 
     func testOverviewIncludesSetupLogTailWhileRunningSoRemoteClientsCanStreamProgress() throws {
-        let logDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("setup-log-tail-\(UUID().uuidString)", isDirectory: true)
+        let logDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
+            "setup-log-tail-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: logDir) }
         let logURL = logDir.appendingPathComponent("setup.log", isDirectory: false)
@@ -257,7 +257,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         // Succeeded shows the normal workspace detail rather than the setup screen, so its tail is
         // omitted to keep the overview snapshot small even when the log file still exists.
         let succeeded = SpacesDeviceOverviewBuilder.build(
-            projects: [project], workspaces: [.init(project: project, workspace: workspace, setupState: setupState(status: .succeeded))], sessions: [])
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, setupState: setupState(status: .succeeded))], sessions: []
+        )
         XCTAssertNil(succeeded.workspaces.first?.setupState?.logTail)
     }
 

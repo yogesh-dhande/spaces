@@ -11,7 +11,8 @@ import Testing
         #expect(
             AppKitController.preparedGitProjectResultMatchesActiveRequest(
                 isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentPreparationID: preparationID, completionPreparationID: preparationID))
+                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
+                currentPreparationID: preparationID, completionPreparationID: preparationID))
     }
 
     @Test func preparedGitProjectResultRejectsStaleOrInactiveRequests() {
@@ -20,19 +21,28 @@ import Testing
         #expect(
             !AppKitController.preparedGitProjectResultMatchesActiveRequest(
                 isActiveForm: false, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentPreparationID: preparationID, completionPreparationID: preparationID))
+                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
+                currentPreparationID: preparationID, completionPreparationID: preparationID))
         #expect(
             !AppKitController.preparedGitProjectResultMatchesActiveRequest(
                 isActiveForm: true, selectedSegment: 0, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentPreparationID: preparationID, completionPreparationID: preparationID))
+                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
+                currentPreparationID: preparationID, completionPreparationID: preparationID))
         #expect(
             !AppKitController.preparedGitProjectResultMatchesActiveRequest(
                 isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/other.git",
-                requestedRepoURL: "https://example.com/repo.git", currentPreparationID: preparationID, completionPreparationID: preparationID))
+                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
+                currentPreparationID: preparationID, completionPreparationID: preparationID))
         #expect(
             !AppKitController.preparedGitProjectResultMatchesActiveRequest(
                 isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentPreparationID: UUID(), completionPreparationID: preparationID))
+                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "remote", requestedDeviceID: "local",
+                currentPreparationID: preparationID, completionPreparationID: preparationID))
+        #expect(
+            !AppKitController.preparedGitProjectResultMatchesActiveRequest(
+                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
+                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
+                currentPreparationID: UUID(), completionPreparationID: preparationID))
     }
 
     @Test func localProjectPreviewResultRequiresActiveLocalSource() {
@@ -53,10 +63,57 @@ import Testing
                 isActiveForm: true, selectedSegment: 0, currentDirectoryPath: "/tmp/other", requestedDirectoryPath: "/tmp/project"))
     }
 
-    @Test func preparedGitProjectDiscardKeyUsesTrimmedRepoURL() {
-        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "  https://example.com/repo.git\n") == "https://example.com/repo.git")
-        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "   ") == nil)
-        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: nil) == nil)
+    @Test func preparedGitProjectReadinessRequiresSelectedDevice() {
+        #expect(
+            AppKitController.preparedGitProjectMatchesCurrentSelection(
+                preparedGitProjectHandle: "handle", preparedGitURL: "https://example.com/repo.git", preparedGitDeviceID: "local",
+                currentRepoURL: "https://example.com/repo.git", selectedDeviceID: "local", currentPreparationID: nil))
+        #expect(
+            !AppKitController.preparedGitProjectMatchesCurrentSelection(
+                preparedGitProjectHandle: "handle", preparedGitURL: "https://example.com/repo.git", preparedGitDeviceID: "remote",
+                currentRepoURL: "https://example.com/repo.git", selectedDeviceID: "local", currentPreparationID: nil))
+        #expect(
+            !AppKitController.preparedGitProjectMatchesCurrentSelection(
+                preparedGitProjectHandle: "handle", preparedGitURL: "https://example.com/repo.git", preparedGitDeviceID: "local",
+                currentRepoURL: "https://example.com/repo.git", selectedDeviceID: "local", currentPreparationID: UUID()))
+    }
+
+    @Test func preparedGitProjectDiscardKeyUsesTrimmedRepoURLAndDevice() {
+        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "  https://example.com/repo.git\n", deviceID: "local") == "local\nhttps://example.com/repo.git")
+        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "local") != AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "remote"))
+        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "   ", deviceID: "local") == nil)
+        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: nil, deviceID: "local") == nil)
+    }
+
+    @Test func preparedGitProjectCreateFailureRestoresHandleToStillActiveForm() {
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: true, formHasPreparedHandle: false, formTargetsPreparationDevice: true) == .restoreToForm)
+    }
+
+    @Test func preparedGitProjectCreateFailureDiscardsOrphanedClone() {
+        // Form dismissed mid-create, so there is nothing to restore into.
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: false, formHasPreparedHandle: false, formTargetsPreparationDevice: true) == .discardOrphan)
+        // A newer preparation already replaced the handle on the still-active form; the captured
+        // clone is orphaned and discarding it must not clobber the newer one.
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: true, formHasPreparedHandle: true, formTargetsPreparationDevice: true) == .discardOrphan)
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: false, formHasPreparedHandle: true, formTargetsPreparationDevice: true) == .discardOrphan)
+    }
+
+    @Test func preparedGitProjectCreateFailureDiscardsWhenFormSwitchedDevices() {
+        // The user changed the (still-editable) device picker mid-create, so the form now targets a
+        // different daemon than the one the clone was prepared on. Restoring the handle would make
+        // Cancel/retry act on the wrong daemon and orphan the original clone, so discard it on its own
+        // device instead.
+        #expect(
+            AppKitController.preparedGitProjectCreateFailureAction(
+                isActiveForm: true, formHasPreparedHandle: false, formTargetsPreparationDevice: false) == .discardOrphan)
     }
 
     @MainActor @Test func setupScriptReplaceCancelsOpenEditorAndAppliesHydratedValue() {

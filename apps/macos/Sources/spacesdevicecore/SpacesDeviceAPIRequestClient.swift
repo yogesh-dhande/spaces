@@ -517,6 +517,125 @@ import spacesterminalcore
         }
     }
 
+    /// Reads the device-overview subscription stream: opens a pinned-TLS Device API
+    /// connection, sends a `subscribeDeviceOverview` request, and delivers each
+    /// newline-framed overview payload. Mirrors `SpacesDeviceAPIStateStreamClient`
+    /// but decodes overview payloads instead of terminal state.
+    public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
+        private let request: SpacesDeviceAPIRequest
+        private let host: String
+        private let port: UInt16
+        private let transportKey: String
+        private let onOverview: @Sendable (SpacesDeviceOverviewPayload) -> Void
+        private let onDisconnect: @Sendable ((any Error)?) -> Void
+        private let queue = DispatchQueue(label: "spaces.device.api.overview.stream")
+        private var connection: NWConnection?
+        private var buffer = Data()
+
+        public init(
+            authToken: String?, clientApp: SpacesDeviceClientApp?, host: String, port: Int, transportKey: String,
+            onOverview: @escaping @Sendable (SpacesDeviceOverviewPayload) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+        ) throws {
+            guard let port = UInt16(exactly: port), port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
+            self.request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: authToken, clientApp: clientApp)
+            self.host = host
+            self.port = port
+            self.transportKey = transportKey
+            self.onOverview = onOverview
+            self.onDisconnect = onDisconnect
+        }
+
+        public func start(timeoutSeconds: TimeInterval = 10) throws {
+            guard let endpointPort = NWEndpoint.Port(rawValue: port) else { throw SpacesDeviceAPIRequestClientError.invalidPort }
+            let ready = DispatchSemaphore(value: 0)
+            let sent = DispatchSemaphore(value: 0)
+            let box = SpacesDeviceAPIRequestResultBox()
+            let createdConnection = NWConnection(
+                host: NWEndpoint.Host(host), port: endpointPort,
+                using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+            createdConnection.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready: ready.signal()
+                case .failed(let error):
+                    let wrappedError = SpacesDeviceAPIRequestClientError.connectionFailed(String(describing: error))
+                    box.setError(wrappedError)
+                    ready.signal()
+                    sent.signal()
+                    self?.onDisconnect(wrappedError)
+                case .cancelled: self?.onDisconnect(nil)
+                default: break
+                }
+            }
+            connection = createdConnection
+            createdConnection.start(queue: queue)
+            guard ready.wait(timeout: .now() + timeoutSeconds) == .success else {
+                stop()
+                throw SpacesDeviceAPIRequestClientError.timeout("Timed out connecting to the Device API.")
+            }
+            if let error = box.error() {
+                stop()
+                throw error
+            }
+
+            var payload = try SpacesDeviceAPICodec.encodeRequest(request)
+            payload.append(0x0A)
+            createdConnection.send(
+                content: payload, contentContext: .defaultMessage, isComplete: false,
+                completion: .contentProcessed { error in
+                    if let error { box.setError(SpacesDeviceAPIRequestClientError.connectionFailed(String(describing: error))) }
+                    sent.signal()
+                })
+            guard sent.wait(timeout: .now() + timeoutSeconds) == .success else {
+                stop()
+                throw SpacesDeviceAPIRequestClientError.timeout("Timed out sending the Device API overview subscription request.")
+            }
+            if let error = box.error() {
+                stop()
+                throw error
+            }
+            receiveNextLine()
+        }
+
+        public func stop() {
+            connection?.cancel()
+            connection = nil
+        }
+
+        private func receiveNextLine() {
+            connection?.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] content, _, isComplete, error in
+                guard let self else { return }
+                if let error {
+                    self.onDisconnect(SpacesDeviceAPIRequestClientError.connectionFailed(String(describing: error)))
+                    self.stop()
+                    return
+                }
+                if let content { self.buffer.append(content) }
+                while let newlineIndex = self.buffer.firstIndex(of: 0x0A) {
+                    let line = Data(self.buffer.prefix(upTo: newlineIndex))
+                    self.buffer.removeSubrange(self.buffer.startIndex...newlineIndex)
+                    if !line.isEmpty {
+                        do { self.onOverview(try SpacesDeviceOverviewStreamCodec.decodeLine(line)) } catch {
+                            // A non-payload line is usually a server error response; surface its message.
+                            if let response = try? SpacesDeviceAPICodec.decodeResponse(line) {
+                                self.onDisconnect(SpacesDeviceAPIRequestClientError.connectionFailed(response.message))
+                            } else {
+                                self.onDisconnect(error)
+                            }
+                            self.stop()
+                            return
+                        }
+                    }
+                }
+                if isComplete {
+                    self.onDisconnect(nil)
+                    self.stop()
+                    return
+                }
+                self.receiveNextLine()
+            }
+        }
+    }
+
     private final class SpacesDeviceAPIRequestResultBox: @unchecked Sendable {
         private let lock = NSLock()
         private var storedError: Error?

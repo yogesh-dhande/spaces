@@ -134,6 +134,7 @@ case "${1:-}" in
             zig-out/lib
         : > zig-out/include/ghostty/vt.h
         : > zig-out/lib/libghostty-vt.a
+        cp "$SPACES_TEST_FAKE_VT_LIB" "zig-out/lib/$SPACES_TEST_FAKE_VT_LIB_NAME"
         ;;
     *)
         echo "unexpected zig invocation: $*" >&2
@@ -157,6 +158,24 @@ case "$ARCH" in
         ;;
 esac
 
+case "$(uname -s)" in
+    Darwin)
+        FAKE_VT_LIB_NAME="libghostty-vt.dylib"
+        FAKE_VT_LIB="$TMP_ROOT/$FAKE_VT_LIB_NAME"
+        printf 'void spaces_fake_ghostty_vt(void) {}\n' > "$TMP_ROOT/fake-vt.c"
+        cc -dynamiclib "$TMP_ROOT/fake-vt.c" -o "$FAKE_VT_LIB"
+        ;;
+    Linux)
+        FAKE_VT_LIB_NAME="libghostty-vt.so"
+        FAKE_VT_LIB="$TMP_ROOT/$FAKE_VT_LIB_NAME"
+        printf 'void spaces_fake_ghostty_vt(void) {}\n' > "$TMP_ROOT/fake-vt.c"
+        cc -shared -fPIC "$TMP_ROOT/fake-vt.c" -o "$FAKE_VT_LIB"
+        ;;
+    *)
+        fail "unsupported test OS: $(uname -s)"
+        ;;
+esac
+
 place_fake_zig() {
     local zig_bin="$TEMP_APP_ROOT/.local/ghosttyvt/toolchain/$ZIG_ARCHIVE_NAME/zig"
     mkdir -p "$(dirname "$zig_bin")"
@@ -175,6 +194,7 @@ mkdir -p \
     "$RELEASE_BUILD_ROOT/vt/lib"
 : > "$RELEASE_BUILD_ROOT/vt/include/ghostty/vt.h"
 : > "$RELEASE_BUILD_ROOT/vt/lib/libghostty-vt.a"
+cp "$FAKE_VT_LIB" "$RELEASE_BUILD_ROOT/vt/lib/$FAKE_VT_LIB_NAME"
 
 tar -C "$RELEASE_BUILD_ROOT/kit" -czf "$RELEASE_DIR/GhosttyKit.xcframework.tar.gz" "GhosttyKit.xcframework"
 tar -C "$RELEASE_BUILD_ROOT/resources" -czf "$RELEASE_DIR/GhosttyKit-resources.tar.gz" "ghostty" "terminfo"
@@ -232,6 +252,8 @@ SETUP_ENV=(
     "SPACES_TEST_RELEASE_DIR=$RELEASE_DIR"
     "SPACES_TEST_ZIG_CACHE_DIR=$ZIG_CACHE_DIR"
     "SPACES_TEST_GH_LOG=$GH_LOG"
+    "SPACES_TEST_FAKE_VT_LIB=$FAKE_VT_LIB"
+    "SPACES_TEST_FAKE_VT_LIB_NAME=$FAKE_VT_LIB_NAME"
 )
 
 CACHE_ENTRY="$CACHE_DIR/$GHOSTTY_SHA/17C52-$ARCH-ReleaseFast"
@@ -265,6 +287,17 @@ if grep -q "Downloading Ghostty artifacts" "$TMP_ROOT/restore.out"; then
 fi
 [[ -d "$TEMP_APP_ROOT/.local/ghosttykit/GhosttyKit.xcframework" ]] || fail "restore did not install GhosttyKit into .local"
 [[ -f "$TEMP_APP_ROOT/.local/ghosttyvt/include/ghostty/vt.h" ]] || fail "restore did not install libghostty-vt header into .local"
+
+# --- 2b. Local artifacts with a matching manifest but no runtime dylib are not reused. ---
+rm -f "$TEMP_APP_ROOT/.local/ghosttyvt/lib/$FAKE_VT_LIB_NAME"
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "SPACES_TEST_GH_FAIL=1" "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/missing-runtime.out" 2>&1; then
+    fail "missing-runtime setup failed (should have restored from cache)"
+fi
+grep -q "Local Ghostty artifacts are incomplete or not loadable" "$TMP_ROOT/missing-runtime.out" \
+    || fail "missing-runtime run did not reject local artifacts"
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/missing-runtime.out" \
+    || fail "missing-runtime run did not restore from cache"
 
 # --- 3. A stale cache entry for the same key is replaced, not kept. ---
 # Corrupt the cached manifest so it no longer matches the validation inputs

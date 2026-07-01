@@ -36,6 +36,74 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertNil(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .viewer))
     }
 
+    func testDesktopWindowIDRoundTripIsScopedByDeviceWorkspaceAndRuntimeTarget() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 101)
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b", windowID: 202)
+        // Same runtime-target id but a different workspace must not collide.
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-a", windowID: 303)
+
+        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 101)
+        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b"), 202)
+        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-a"), 303)
+        XCTAssertNil(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "missing"))
+
+        XCTAssertEqual(try database.desktopWindowIDs(deviceID: "local", workspaceID: "ws-1"), ["rt-a": 101, "rt-b": 202])
+    }
+
+    func testDesktopWindowIDReverseLookupResolvesOwningRuntimeTargets() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 9999)
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-b", windowID: 9999)
+
+        let matches = try database.desktopWindowIDMatches(deviceID: "local", windowID: 9999)
+        XCTAssertEqual(Set(matches.map(\.workspaceID)), ["ws-1", "ws-2"])
+        XCTAssertEqual(Set(matches.map(\.runtimeTargetID)), ["rt-a", "rt-b"])
+        XCTAssertTrue(try database.desktopWindowIDMatches(deviceID: "local", windowID: 0).isEmpty)
+    }
+
+    func testSetDesktopWindowIDUpdatesExistingRow() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 1)
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 2)
+
+        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 2)
+        XCTAssertEqual(try database.desktopWindowIDs(deviceID: "local", workspaceID: "ws-1").count, 1)
+    }
+
+    func testClearDesktopWindowIDRemovesOnlyTheMatchingRow() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 1)
+        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b", windowID: 2)
+
+        try database.clearDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a")
+
+        XCTAssertNil(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"))
+        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b"), 2)
+    }
+
+    func testDesktopWindowIDsSurviveMigrationFromVersionTwo() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("spaces-client.db").path
+
+        // Open at the previous schema version (without the desktop_window_ids table), then reopen
+        // at the current version to exercise the v2 -> v3 migration path.
+        let legacy = try SpacesClientDatabase(
+            path: path, currentVersion: 2, migrationSteps: SpacesClientDatabase.defaultMigrationSteps.filter { $0.toVersion <= 2 })
+        try legacy.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
+
+        let migrated = try SpacesClientDatabase(path: path)
+        XCTAssertTrue(try migrated.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
+        try migrated.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 7)
+        XCTAssertEqual(try migrated.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 7)
+    }
+
     func testDefaultPathUsesEnvironmentOverride() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -221,6 +289,15 @@ final class SpacesClientDatabaseTests: XCTestCase {
         }
     }
 
+    func testFreshDatabaseReportsNoBackups() throws {
+        try withTemporaryProfile { root in
+            let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)
+            let database = try SpacesClientDatabase(path: databaseURL.path)
+
+            XCTAssertEqual(try database.backupURLs(), [])
+        }
+    }
+
     func testFailedMigrationRestoresBackup() throws {
         try withTemporaryProfile { root in
             let databaseURL = root.appendingPathComponent("Client/spaces-client.db", isDirectory: false)
@@ -230,10 +307,15 @@ final class SpacesClientDatabaseTests: XCTestCase {
             try SpacesDeviceCredentialStore.saveToken("SECRET-TOKEN", deviceID: record.id)
             defer { try? SpacesDeviceCredentialStore.deleteToken(deviceID: record.id) }
 
-            let failingStep = SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Intentional failure") { _ in
+            let failingStep = SpacesClientMigrationStep(
+                fromVersion: SpacesClientDatabase.currentVersion, toVersion: SpacesClientDatabase.currentVersion + 1,
+                description: "Intentional failure"
+            ) { _ in
                 throw NSError(domain: "SpacesClientDatabaseTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "boom"])
             }
-            XCTAssertThrowsError(try SpacesClientDatabase(path: databaseURL.path, currentVersion: 3, migrationSteps: [failingStep]))
+            XCTAssertThrowsError(
+                try SpacesClientDatabase(
+                    path: databaseURL.path, currentVersion: SpacesClientDatabase.currentVersion + 1, migrationSteps: [failingStep]))
 
             let restored = try SpacesClientDatabase(path: databaseURL.path)
             XCTAssertEqual(try restored.pairedDevice(id: record.id), record)

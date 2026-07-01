@@ -25,9 +25,8 @@ struct SpacesE2ECommand: ParsableCommand {
             LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
             HideWorkspaceCommand.self, StopWorkspaceCommand.self, StopFixturesCommand.self, SetWorkspaceBrowserSessionURLsCommand.self,
             SetWorkspaceAgentLaunchersCommand.self, ClearWorkspaceAgentWindowsCommand.self, SetWorkspaceStopScriptCommand.self,
-            AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self,
-            FocusWorkspaceWindowIndexCommand.self, CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self,
-            RecoverWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
+            AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, CycleWorkspaceWindowCommand.self,
+            FocusWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
             CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             StartTerminalSessionCommand.self, TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self,
             TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self,
@@ -1374,34 +1373,16 @@ private struct FocusWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var processName: String
     @Option(name: .long) var requestID: String?
 
+    /// Drives the running app's client-side process focus over IPC; the app resolves the
+    /// running process by name and threads `requestID` to its terminal-focus follow-through.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
-            throw ValidationError("Running process not found: \(processName)")
-        }
-        try orchestrator.focusWorkspaceProcess(workspaceID: workspace.id, processID: process.id, requestID: requestID)
-        try emitJSON(["workspaceID": workspace.id, "processID": process.id, "processName": process.templateName, "requestID": requestID ?? ""])
-    }
-}
-
-private struct FocusWorkspaceWindowIndexCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "focus-workspace-window-index")
-
-    @Option(name: .long) var workspaceDir: String
-    @Option(name: .long) var index: Int
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: index)
-        try emitJSON(["workspaceID": workspace.id, "index": String(index)])
+        let workspaceID = try workspaceID(forDir: workspaceDir)
+        var userInfo: [String: String] = [
+            IPCNotification.workspaceIDUserInfoKey: workspaceID, IPCNotification.workspaceTargetNameUserInfoKey: processName,
+        ]
+        if let requestID, !requestID.isEmpty { userInfo[IPCNotification.focusRequestIDUserInfoKey] = requestID }
+        try IPCNotification.post(IPCNotification.focusWorkspaceProcess, userInfo: userInfo)
+        try emitJSON(["workspaceID": workspaceID, "processName": processName, "requestID": requestID ?? ""])
     }
 }
 
@@ -1411,14 +1392,13 @@ private struct FocusWorkspaceWindowCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
     @Option(name: .long) var name: String
 
+    /// Drives the running app's client-side focus-by-name over IPC.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: name)
-        try emitJSON(["workspaceID": workspace.id, "name": name])
+        let workspaceID = try workspaceID(forDir: workspaceDir)
+        try IPCNotification.post(
+            IPCNotification.focusWorkspaceWindowByName,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspaceID, IPCNotification.workspaceTargetNameUserInfoKey: name])
+        try emitJSON(["workspaceID": workspaceID, "name": name])
     }
 }
 
@@ -1446,23 +1426,6 @@ private struct CycleWorkspaceWindowCommand: ParsableCommand {
         default: throw ValidationError("Unsupported direction: \(direction)")
         }
         try emitJSON(["workspaceID": workspace.id, "direction": direction])
-    }
-}
-
-private struct RecoverWorkspaceProcessCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "recover-workspace-process")
-
-    @Option(name: .long) var workspaceDir: String
-    @Option(name: .long) var processName: String
-
-    func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: processName)
-        try emitJSON(["workspaceID": workspace.id, "processName": processName])
     }
 }
 
@@ -1628,16 +1591,26 @@ private struct FocusableWindowNamesCommand: ParsableCommand {
 
     @Option(name: .long) var workspaceDir: String
 
-    /// Returns the current indexed focus order used by direct window shortcuts
-    /// and CLI numeric focus paths so the shell harness can align its keyboard
-    /// assertions with production ordering.
+    /// Returns the running app's ordered focusable window names (the numbered-shortcut
+    /// order) so the shell harness can align its keyboard assertions with production
+    /// ordering. The app owns the ordering and writes it to a file over IPC; this command
+    /// posts the request, waits for the file, and relays its `{"names": [...]}` to stdout.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+        let workspaceID = try workspaceID(forDir: workspaceDir)
+        let outputURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("spaces-focusable-window-names-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        try IPCNotification.post(
+            IPCNotification.dumpFocusableWindowNames,
+            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspaceID, IPCNotification.outputPathUserInfoKey: outputURL.path])
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while Date() < deadline {
+            if let data = try? Data(contentsOf: outputURL), !data.isEmpty {
+                FileHandle.standardOutput.write(data)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.05)
         }
-        try emitJSON(["names": try orchestrator.workspaceFocusableWindowNames(workspaceID: workspace.id)])
+        throw ValidationError("Timed out waiting for focusable window names from the app for workspace: \(workspaceID)")
     }
 }
 
@@ -2177,7 +2150,22 @@ private func emitJSON<T: Encodable>(_ value: T) throws {
 
 /// Builds the same real orchestrator used by the app and CLI so the manual E2E
 /// helper exercises production storage and lifecycle code.
-private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath())) }
+// Desktop window IDs are client-owned (in spaces-client.db), so the e2e harness — which drives real
+// desktop focus through an in-process orchestrator just like the app — must inject the same client
+// store. Without it the harness would neither persist captured window IDs nor read them back.
+private func makeOrchestrator() throws -> WorkspaceOrchestrator {
+    try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath(), desktopWindowIDStore: ClientDesktopWindowIDStore()))
+}
+
+/// Resolves a workspace directory to its stable id from the store. The harness uses this
+/// only to address IPC focus commands at the running app; the focus itself runs in the app.
+private func workspaceID(forDir dir: String) throws -> String {
+    let normalizedWorkspaceDir = normalizePath(dir)
+    guard let workspace = try makeOrchestrator().store.workspace(dir: normalizedWorkspaceDir) else {
+        throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
+    }
+    return workspace.id
+}
 
 private func sendTerminalServiceRequestForSession(sessionID rawSessionID: String, request: TerminalServiceRequest) throws -> TerminalServiceResponse {
     let sessionID = try required(rawSessionID, label: "session-id")

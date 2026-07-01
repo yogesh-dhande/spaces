@@ -77,6 +77,8 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 - `apps/macos/.local/ghosttyvt/include`
 - `apps/macos/.local/ghosttyvt/lib`
 
+Artifact validation requires the platform dynamic `libghostty-vt` runtime library (`libghostty-vt.dylib` on macOS, `libghostty-vt.so` on Linux). A static `libghostty-vt.a` alone is not a complete install because terminal transcript rendering loads the dynamic library at runtime.
+
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
 By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version, and records a clean source build. When the worktree-local artifacts do not match, default setup next checks a shared, content-addressed cache and restores from it with a local copy before falling back to a download. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When the downloaded release artifact validates except for a different Xcode build, default setup leaves the download uninstalled and builds locally from the pinned submodule. The `--download-only` mode used by CI and publishing workflows is download-only and fails on an Xcode build mismatch.
 
@@ -155,7 +157,13 @@ apps/macos/Tests/e2e.sh mobile
 
 The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
-The E2E helpers source the worktree `.env` when it exists. Local-only scenarios run without `.env`; remote-host lanes require that file to provide `SPACES_E2E_REMOTE_SSH_HOST`.
+The E2E helpers source the worktree `.env` (gitignored, at the repo root) via `scripts/spaces-e2e-env.sh` when it exists. Local-only scenarios run without `.env`; remote-host lanes require it. A working remote test host is configured in the primary checkout's `.env`; a fresh worktree has none, so copy it in to run remote lanes from that worktree:
+
+```bash
+cp ~/projects/spaces/.env .env
+```
+
+The remote keys it provides are `SPACES_E2E_REMOTE_SSH_HOST`, `SPACES_E2E_REMOTE_SSH_USER`, `SPACES_E2E_REMOTE_DAEMON_HOST`, `SPACES_E2E_REMOTE_DAEMON_PORT`, `SPACES_E2E_REMOTE_WORKSPACE_ROOT`, `SPACES_E2E_REMOTE_GIT_ROOT`, `SPACES_E2E_REMOTE_HOST_ID`, `SPACES_E2E_REMOTE_NAME`, and `SPACES_E2E_REMOTE_AUTH_TOKEN`. They drive the remote Device API lanes (`apps/macos/Tests/e2e.sh device-api remote` / `latency-compare`) and the Linux daemon deploy/cleanup scripts. Never commit `.env`.
 
 Each `apps/macos/Tests/e2e.sh` invocation writes an ignored Markdown report under `apps/macos/.artifacts/e2e-runs/<timestamp>-<lane>/summary.md`. The run directory stores collected metric artifacts as flat step-prefixed files alongside the report. The report includes the command timeline, per-case timing table, per-step logs, flattened tables for collected JSON metrics and result files, TSV tables for app metric/result logs, and links to raw JSONL performance logs.
 

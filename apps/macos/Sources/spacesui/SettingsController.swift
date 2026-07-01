@@ -74,6 +74,9 @@ import workspacecore
             created.isMovableByWindowBackground = true
             created.isReleasedWhenClosed = false
             created.minSize = NSSize(width: 680, height: 460)
+            // Hard cap the width so no pane content (e.g. a long error path) can auto-expand the window
+            // to an unusable size; pane labels wrap within this bound.
+            created.maxSize = NSSize(width: 1100, height: 2000)
             created.standardWindowButton(.miniaturizeButton)?.isHidden = true
             created.standardWindowButton(.zoomButton)?.isHidden = true
             created.standardWindowButton(.closeButton)?.isHidden = true
@@ -390,7 +393,7 @@ import workspacecore
         if host.configCache?.editor == preference { return }
         do {
             try host.clientDatabase().setSetting(key: SettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
-            host.configCache = try AppKitController.clientAppConfig(base: host.orchestrator.appConfig())
+            host.configCache = try AppKitController.clientAppConfig()
         } catch { host.showError(error) }
     }
 

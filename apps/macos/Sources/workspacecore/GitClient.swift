@@ -126,6 +126,18 @@ public final class GitClient {
 
     public func pruneWorktrees(path repoPath: String) throws { try runGitOrThrow(["-C", repoPath, "worktree", "prune"]) }
 
+    /// Absolute path of the repository's git common directory (the shared `.git`
+    /// that holds `worktrees/` and the canonical `HEAD`). Resolved via
+    /// `rev-parse --git-common-dir` so it is correct whether `path` is the main
+    /// checkout or a linked worktree. Returns `nil` when `path` is not a repo.
+    public func commonDirectory(path repoPath: String) -> String? {
+        guard let output = try? runGitAndCapture(["-C", repoPath, "rev-parse", "--git-common-dir"]) else { return nil }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: trimmed, relativeTo: URL(fileURLWithPath: repoPath)).standardizedFileURL
+        return url.resolvingSymlinksInPath().path
+    }
+
     public func listWorktrees(path repoPath: String) throws -> [WorktreeInfo] {
         let output = try runGitAndCapture(["-C", repoPath, "worktree", "list", "--porcelain"])
         return parseWorktreeList(output)

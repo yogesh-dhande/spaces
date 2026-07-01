@@ -220,7 +220,40 @@ installed_artifacts_present() {
     [[ -d "$RESOURCES_ROOT/terminfo" ]] || return 1
     [[ -f "$GHOSTTYVT_INCLUDE_ROOT/ghostty/vt.h" ]] || return 1
     [[ -d "$GHOSTTYVT_LIB_ROOT" ]] || return 1
-    find "$GHOSTTYVT_LIB_ROOT" -maxdepth 1 \( -name 'libghostty-vt*.dylib' -o -name 'libghostty-vt.a' \) -print -quit | grep -q .
+    ghostty_vt_runtime_library_present
+}
+
+ghostty_vt_runtime_library_path() {
+    case "$(uname -s)" in
+        Darwin)
+            printf "%s/libghostty-vt.dylib\n" "$GHOSTTYVT_LIB_ROOT"
+            ;;
+        Linux)
+            printf "%s/libghostty-vt.so\n" "$GHOSTTYVT_LIB_ROOT"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ghostty_vt_runtime_library_present() {
+    local library_path description
+    library_path="$(ghostty_vt_runtime_library_path)" || return 1
+    [[ -f "$library_path" ]] || return 1
+    description="$(file -L "$library_path" 2>/dev/null || true)"
+
+    case "$(uname -s)" in
+        Darwin)
+            grep -Eq 'Mach-O .*dynamically linked shared library' <<<"$description"
+            ;;
+        Linux)
+            grep -Eq 'ELF .* shared object' <<<"$description"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 normalize_ghosttykit_static_library() {
@@ -261,11 +294,15 @@ verify_ghosttykit_contract() {
 }
 
 reuse_local_artifacts_if_valid() {
-    if manifest_matches_current_sha "$LOCAL_MANIFEST" && installed_artifacts_present; then
-        echo "==> Reusing local Ghostty artifacts for $GHOSTTY_SHA"
-        normalize_ghosttykit_static_library
-        verify_ghosttykit_contract
-        return 0
+    if manifest_matches_current_sha "$LOCAL_MANIFEST"; then
+        if installed_artifacts_present; then
+            echo "==> Reusing local Ghostty artifacts for $GHOSTTY_SHA"
+            normalize_ghosttykit_static_library
+            verify_ghosttykit_contract
+            return 0
+        fi
+        echo "==> Local Ghostty artifacts are incomplete or not loadable on this platform"
+        return 1
     fi
 
     if [[ -f "$LOCAL_MANIFEST" ]]; then
@@ -606,6 +643,7 @@ build_from_source() {
     )
 
     install_source_build_outputs
+    installed_artifacts_present || die "Ghostty source build did not install a loadable libghostty-vt runtime library"
     normalize_ghosttykit_static_library
     write_manifest "$LOCAL_MANIFEST" "$dirty" "build"
     verify_ghosttykit_contract
@@ -807,6 +845,7 @@ download_release_artifacts() {
     rm -rf "$tmp_dir"
     trap - EXIT
 
+    installed_artifacts_present || die "Downloaded Ghostty artifacts did not install a loadable libghostty-vt runtime library"
     normalize_ghosttykit_static_library
     verify_ghosttykit_contract
 }

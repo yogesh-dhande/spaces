@@ -137,12 +137,6 @@ extension TerminalSessionWindowController {
         return window?.firstResponder === fieldEditor
     }
     var debugFirstResponderTargetsOutputView: Bool { window?.firstResponder === outputView }
-    var debugRefreshIntervalMS: Int {
-        switch currentRefreshInterval() {
-        case Self.ownerGhosttyRefreshInterval: 2000
-        default: 500
-        }
-    }
     @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
         ghosttyRendererHost?.sendScroll(horizontal: horizontal, vertical: vertical) ?? false
     }

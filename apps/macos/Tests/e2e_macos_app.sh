@@ -2241,10 +2241,6 @@ assert_cycle_focus_surface_state() {
     fi
     return 0
   fi
-  if [[ "${LAST_CYCLE_TARGET_FOCUS_VIA_CHROME_OBSERVATION:-0}" == "1" ]]; then
-    log_debug "accepted cycle surface state from Chrome/yabai target observation after surface snapshot timeout"
-    return 0
-  fi
   if wait_for_spaces_cycle_surface_hidden; then
     return 0
   fi
@@ -2303,34 +2299,9 @@ wait_for_chrome_window_focus() {
     then
       return 0
     fi
-    if [[ -z "$window_id" && "$(chrome_front_url)" == "$expected_url" ]]; then
-      return 0
-    fi
     sleep 0.2
   done
   fail "timed out waiting for $label: window=$window_id url=$expected_url"
-}
-
-wait_for_chrome_window_focus_observed_optional() {
-  local window_id="$1"
-  local expected_url="$2"
-  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    local focused_window_id front_app front_url
-    assert_no_spaces_modal_dialog
-    front_app="$(frontmost_app 2>/dev/null | tr -d '\n' || true)"
-    focused_window_id="$(yabai_focused_window_id)"
-    front_url="$(chrome_front_url 2>/dev/null | tr -d '\n' || true)"
-    if [[ "$front_app" == "Google Chrome" ]] \
-      && [[ -n "$window_id" ]] \
-      && [[ "$focused_window_id" == "$window_id" ]] \
-      && [[ "$front_url" == "$expected_url" ]]
-    then
-      return 0
-    fi
-    sleep 0.2
-  done
-  return 1
 }
 
 spaces_modal_dialog_text() {
@@ -3050,6 +3021,46 @@ end tell
 APPLESCRIPT
 }
 
+# Returns the id of the Chrome window that contains a tab whose URL starts with the given
+# prefix, or empty if none. Identifies the harness's own window by content (the resolved
+# docs URL carries an ephemeral port, so it never matches the user's unrelated windows) —
+# never by frontmost/focus, so the harness never acts on a window it did not open.
+chrome_window_id_for_url() {
+  local url_prefix="$1"
+  osascript - "$url_prefix" <<'APPLESCRIPT'
+on run argv
+  set targetPrefix to item 1 of argv
+  tell application "Google Chrome"
+    repeat with w in windows
+      repeat with t in tabs of w
+        set u to URL of t
+        if u is not missing value and u starts with targetPrefix then
+          return id of w as string
+        end if
+      end repeat
+    end repeat
+  end tell
+  return ""
+end run
+APPLESCRIPT
+}
+
+wait_for_chrome_window_id_for_url() {
+  local url_prefix="$1"
+  local label="$2"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    local window_id
+    window_id="$(chrome_window_id_for_url "$url_prefix")"
+    if [[ -n "$window_id" ]]; then
+      printf '%s\n' "$window_id"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for Chrome window containing tab url: ${label:-$url_prefix}"
+}
+
 chrome_window_active_url() {
   local window_id="$1"
   osascript - "$window_id" <<'APPLESCRIPT'
@@ -3094,43 +3105,47 @@ end run
 APPLESCRIPT
 }
 
+# Closes only the harness's own fixture tabs (file:// fixtures or the 20000-20011 fixture
+# ports). Chrome closes any window whose last tab is removed, so dedicated fixture windows
+# disappear while the user's own windows and tabs are never touched — even if a fixture tab
+# was ever opened inside one. Iterating tab indices high-to-low keeps indices stable as
+# tabs close.
 close_fixture_chrome_windows() {
   osascript - "$TMP_PREFIX" <<'APPLESCRIPT' >/dev/null 2>&1 || true
 on run argv
   set targetPrefix to item 1 of argv
   set targetPrivatePrefix to "/private" & targetPrefix
   tell application "Google Chrome"
-    set doomedWindowIDs to {}
     repeat with w in windows
-      set shouldClose to false
-      repeat with t in tabs of w
+      try
+        set tabCount to count of tabs of w
+      on error
+        set tabCount to 0
+      end try
+      repeat with i from tabCount to 1 by -1
         try
-          set tabURL to URL of t
+          set tabURL to URL of tab i of w
         on error
           set tabURL to ""
         end try
+        set isFixture to false
         if tabURL starts with ("file://" & targetPrefix) or tabURL starts with ("file://" & targetPrivatePrefix) then
-          set shouldClose to true
-          exit repeat
+          set isFixture to true
+        else
+          repeat with fixturePort from 20000 to 20011
+            set portText to fixturePort as text
+            if tabURL starts with ("http://localhost:" & portText & "/") or tabURL starts with ("http://127.0.0.1:" & portText & "/") then
+              set isFixture to true
+              exit repeat
+            end if
+          end repeat
         end if
-        repeat with fixturePort from 20000 to 20011
-          set portText to fixturePort as text
-          if tabURL starts with ("http://localhost:" & portText & "/") or tabURL starts with ("http://127.0.0.1:" & portText & "/") then
-            set shouldClose to true
-            exit repeat
-          end if
-        end repeat
-        if (tabURL contains "://localhost:" or tabURL contains "://127.0.0.1:") and (tabURL contains "/docs/" or tabURL contains "/admin/") then
-          set shouldClose to true
+        if isFixture then
+          try
+            close tab i of w
+          end try
         end if
-        if shouldClose then exit repeat
       end repeat
-      if shouldClose then set end of doomedWindowIDs to (id of w)
-    end repeat
-    repeat with doomedID in doomedWindowIDs
-      try
-        close (first window whose id is doomedID)
-      end try
     end repeat
   end tell
 end run
@@ -4299,27 +4314,36 @@ ensure_workspace_http_ready() {
   fail "timed out waiting for verified workspace HTTP content"
 }
 
-window_url_for_name() {
+browser_session_url_for_name() {
   local dump_file="$1"
-  local window_name="$2"
-  python3 - "$dump_file" "$window_name" <<'PY'
+  local session_name="$2"
+  python3 - "$dump_file" "$session_name" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
     data = json.load(fh)
 target = sys.argv[2]
-for window in data["windows"]:
-    if window["name"] == target:
-        print(window.get("targetURL") or "")
+for session in (data.get("settings") or {}).get("browserSessions") or []:
+    if session.get("name") == target:
+        print(session.get("url") or "")
         break
 PY
 }
 
+# Resolves a configured browser session's URL by name to the same port-expanded URL the
+# app focuses. Browser windows are client state in the thin client (not daemon-tracked),
+# so the expected URL comes from the workspace's configured session, not a tracked window.
 workspace_window_url_by_name() {
   local workspace_dir="$1"
   local window_name="$2"
   local out_file="$TMP_ROOT/workspace-window-url-by-name.json"
   dump_workspace "$workspace_dir" "$out_file" >/dev/null 2>>"$DEBUG_LOG" || return 0
-  window_url_for_name "$out_file" "$window_name"
+  local raw_url
+  raw_url="$(browser_session_url_for_name "$out_file" "$window_name")"
+  [[ -n "$raw_url" ]] || return 0
+  local port
+  port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")" || return 0
+  local placeholder="\$$APP_PORT_NAME"
+  printf '%s\n' "${raw_url//$placeholder/$port}"
 }
 
 wait_for_workspace_window_url_by_name() {
@@ -4482,23 +4506,6 @@ for window in data.get("windows", []):
 PY
 }
 
-workspace_window_id_by_target_url() {
-  local workspace_dir="$1"
-  local target_url="$2"
-  local out_file="$TMP_ROOT/workspace-window-id-by-target-url.json"
-  dump_workspace "$workspace_dir" "$out_file" >/dev/null 2>>"$DEBUG_LOG" || return 0
-  python3 - "$out_file" "$target_url" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-target = sys.argv[2]
-for window in data.get("windows", []):
-    if (window.get("targetURL") or "") == target:
-        print(window.get("windowID") or "")
-        break
-PY
-}
-
 wait_for_workspace_window_id_by_name() {
   local workspace_dir="$1"
   local target_name="$2"
@@ -4515,20 +4522,27 @@ wait_for_workspace_window_id_by_name() {
   fail "timed out waiting for tracked window id: $target_name"
 }
 
-wait_for_workspace_window_id_by_target_url() {
-  local workspace_dir="$1"
-  local target_url="$2"
+# Strictly verifies the cycle focused a browser session's dedicated Chrome window: Chrome is
+# the frontmost app, its front window is that specific window (by Chrome window id), and its
+# active tab is the session URL. A Chrome window's AppleScript id is NOT yabai's window id, so
+# the desktop-side check is "Chrome is frontmost" rather than a yabai window-id match; the
+# exact window is pinned by the Chrome window id the caller captured for that URL.
+wait_for_browser_cycle_target_focus() {
+  local docs_window_id="$1"
+  local docs_url="$2"
+  local label="$3"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    local window_id
-    window_id="$(workspace_window_id_by_target_url "$workspace_dir" "$target_url")"
-    if [[ -n "$window_id" ]]; then
-      printf '%s\n' "$window_id"
+    assert_no_spaces_modal_dialog
+    if [[ "$(frontmost_app 2>/dev/null | tr -d '\n')" == "Google Chrome" ]] \
+      && [[ "$(chrome_front_window_id)" == "$docs_window_id" ]] \
+      && [[ "$(chrome_front_url)" == "$docs_url" ]]
+    then
       return 0
     fi
     sleep 0.2
   done
-  fail "timed out waiting for tracked browser window id: $target_url"
+  fail "timed out waiting for browser cycle target focus: window=$docs_window_id url=$docs_url ($label)"
 }
 
 wait_for_cycle_target_focus() {
@@ -4537,26 +4551,12 @@ wait_for_cycle_target_focus() {
   local docs_window_id="$3"
   local request_id="${4:-}"
   LAST_CYCLE_TARGET_FOCUS_VIA_APP_OBSERVATION=0
-  LAST_CYCLE_TARGET_FOCUS_VIA_CHROME_OBSERVATION=0
   case "$cycle_target" in
     browser:*)
-      local target_browser_url target_browser_window_id
-      target_browser_url="${cycle_target#browser:}"
-      target_browser_window_id="$(wait_for_workspace_window_id_by_target_url "$workspace_dir" "$target_browser_url")"
-      if ! wait_for_surface_snapshot_python_mode_optional "include-yabai" \
-        "browser cycle target focus $target_browser_window_id" \
-        'expected_window_id = sys.argv[2]
-frontmost_bundle = data.get("frontmostApplicationBundleID") or ""
-spaces = data.get("spaces") or {}
-ok = frontmost_bundle == "com.google.Chrome" and str(data.get("yabaiFocusedWindowID") or "") == expected_window_id and not spaces.get("modalVisible")
-raise SystemExit(0 if ok else 1)' \
-        "$target_browser_window_id"; then
-        if ! wait_for_chrome_window_focus_observed_optional "$target_browser_window_id" "$target_browser_url"; then
-          fail "timed out waiting for browser cycle target focus: window=$target_browser_window_id url=$target_browser_url"
-        fi
-        LAST_CYCLE_TARGET_FOCUS_VIA_CHROME_OBSERVATION=1
-        log_debug "accepted browser cycle target focus from Chrome/yabai observation after surface snapshot timeout: window=$target_browser_window_id url=$target_browser_url"
-      fi
+      # Browser windows are client state in the thin client: the cycle's browser target is the
+      # dedicated docs Chrome window the caller identified by URL. Verify focus strictly by the
+      # Chrome window id + URL with Chrome frontmost (no daemon id, no fallback).
+      wait_for_browser_cycle_target_focus "$docs_window_id" "${cycle_target#browser:}" "$cycle_target"
       ;;
     terminal:*|process:*|agent:*)
       local target_name target_session_id target_window_id
@@ -4703,8 +4703,7 @@ run_launch_and_focus_assertions() {
   browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
   wait_for_condition "chrome_front_url" "$browser_docs_url"
   local docs_window_id
-  docs_window_id="$(chrome_front_window_id)"
-  [[ -n "$docs_window_id" ]] || fail "docs focus did not leave a front Chrome window"
+  docs_window_id="$(wait_for_chrome_window_id_for_url "$browser_docs_url" "docs")"
   log_debug "$host docs_window_id=$docs_window_id configured_docs=$PRIMARY_DOCS_URL browser_docs=$browser_docs_url"
   wait_for_condition "chrome_front_window_id" "$docs_window_id"
   wait_for_condition "chrome_window_active_url $docs_window_id" "$browser_docs_url"
@@ -4749,8 +4748,7 @@ run_launch_and_focus_assertions() {
   browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
   wait_for_condition "chrome_front_url" "$browser_docs_url"
   local refocused_docs_window_id
-  refocused_docs_window_id="$(chrome_front_window_id)"
-  [[ -n "$refocused_docs_window_id" ]] || fail "docs refocus did not leave a front Chrome window"
+  refocused_docs_window_id="$(wait_for_chrome_window_id_for_url "$browser_docs_url" "docs refocus")"
   wait_for_condition "chrome_window_active_url $refocused_docs_window_id" "$browser_docs_url"
   if [[ "$refocused_docs_window_id" != "$docs_window_id" ]]; then
     log_debug "$host docs refocus recovered window old=$docs_window_id new=$refocused_docs_window_id"
@@ -5531,8 +5529,6 @@ run_multi_workspace_focus_and_cycle_assertions() {
   local secondary_workspace_dir="$3"
   local primary_docs_url="$PRIMARY_DOCS_URL"
   local secondary_docs_url="$SECONDARY_DOCS_URL"
-  local primary_dump="$TMP_ROOT/$host-primary-multi.json"
-  local secondary_dump="$TMP_ROOT/$host-secondary-multi.json"
 
   ensure_configured_terminal_host "$host"
   begin_case "$host: multi-workspace focus and cycle isolation"
@@ -5541,12 +5537,16 @@ run_multi_workspace_focus_and_cycle_assertions() {
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
 
+  # Browser windows are client state in the thin client, so each docs URL comes from the
+  # workspace's configured session and the docs Chrome window is identified by that URL
+  # (distinct ephemeral ports per workspace), never by frontmost — so the harness only ever
+  # acts on the windows it opened.
+  local primary_docs_window_id secondary_docs_window_id
   run_spaces_logged /tmp/spaces-e2e-multi-primary-launch.log start "$primary_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-multi-primary-launch-focus.log open docs "$primary_workspace_dir"
   transition_pause "$host launch primary workspace"
   log_debug "$host multi primary launch complete"
-  dump_workspace "$primary_workspace_dir" "$primary_dump"
-  primary_docs_url="$(window_url_for_name "$primary_dump" "docs")"
+  primary_docs_url="$(workspace_window_url_by_name "$primary_workspace_dir" "docs")"
   [[ -n "$primary_docs_url" ]] || primary_docs_url="$PRIMARY_DOCS_URL"
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch.log start "$secondary_workspace_dir"
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-launch-focus.log open docs "$secondary_workspace_dir"
@@ -5554,32 +5554,11 @@ run_multi_workspace_focus_and_cycle_assertions() {
   log_debug "$host multi secondary launch complete"
   wait_for_workspace_running_state "$primary_workspace_dir" "true"
   wait_for_workspace_running_state "$secondary_workspace_dir" "true"
-  dump_workspace "$secondary_workspace_dir" "$secondary_dump"
-  secondary_docs_url="$(window_url_for_name "$secondary_dump" "docs")"
+  secondary_docs_url="$(workspace_window_url_by_name "$secondary_workspace_dir" "docs")"
   [[ -n "$secondary_docs_url" ]] || secondary_docs_url="$SECONDARY_DOCS_URL"
+  primary_docs_window_id="$(wait_for_chrome_window_id_for_url "$primary_docs_url" "primary docs")"
+  secondary_docs_window_id="$(wait_for_chrome_window_id_for_url "$secondary_docs_url" "secondary docs")"
   dump_chrome_state "$host multi after-both-launches"
-
-  local primary_docs_window_id secondary_docs_window_id
-  primary_docs_window_id="$(python3 - "$primary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "docs":
-        print(window.get("windowID") or "")
-        break
-PY
-)"
-  secondary_docs_window_id="$(python3 - "$secondary_dump" <<'PY'
-import json, sys
-with open(sys.argv[1]) as fh:
-    data = json.load(fh)
-for window in data["windows"]:
-    if window["name"] == "docs":
-        print(window.get("windowID") or "")
-        break
-PY
-)"
 
   run_spaces_logged /tmp/spaces-e2e-multi-primary-focus.log open docs "$primary_workspace_dir"
   transition_pause "$host focus primary docs"

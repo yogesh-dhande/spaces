@@ -30,7 +30,7 @@ final class StoreTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("fresh.db")
 
-        _ = try SQLiteStore(path: dbURL.path)
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         let version = try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state")
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
@@ -82,6 +82,9 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
         XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("id"))
+        XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_window_id"))
+        XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_window_valid"))
+        XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_target_url"))
         XCTAssertFalse(projectBrowserSessionColumns.contains("id"))
         XCTAssertTrue(workspaceAgentLauncherColumns.contains("id"))
         XCTAssertTrue(projectAgentLauncherColumns.contains("id"))
@@ -136,7 +139,7 @@ final class StoreTests: XCTestCase {
                 INSERT INTO migration_state(current_version) VALUES (0);
                 """)
 
-        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())) { error in
             XCTAssertEqual(error.localizedDescription, "No migration path exists from schema version 0 to \(DatabaseSchema.currentVersion).")
         }
     }
@@ -146,53 +149,17 @@ final class StoreTests: XCTestCase {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("current.db")
 
-        _ = try SQLiteStore(path: dbURL.path)
-        _ = try SQLiteStore(path: dbURL.path)
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
-    // Tests the v4 -> v5 migration drops the workspaces.title column while preserving existing workspace rows.
-    func testTitleColumnMigrationPreservesWorkspaceRows() throws {
-        let root = try makeTempDirectory()
-        let dbURL = root.appendingPathComponent("v4.db")
-        // Stand up a v4 database that still carries the title column, with one project and workspace.
-        try runSQLiteExec(
-            dbURL: dbURL,
-            sql: """
-                CREATE TABLE projects (
-                  id TEXT PRIMARY KEY, name TEXT NOT NULL, dir TEXT NOT NULL UNIQUE, is_git INTEGER NOT NULL,
-                  default_branch TEXT, setup_script TEXT, stop_script TEXT
-                );
-                CREATE TABLE workspaces (
-                  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, dir TEXT NOT NULL, runtime_path TEXT NOT NULL,
-                  dirname TEXT, branch TEXT, base_branch TEXT, is_default INTEGER NOT NULL, is_archived INTEGER NOT NULL,
-                  is_hidden INTEGER NOT NULL DEFAULT 0, is_running INTEGER NOT NULL, last_launched_at TEXT, notes TEXT
-                );
-                INSERT INTO projects(id, name, dir, is_git) VALUES ('p', 'App', '/repos/app', 1);
-                INSERT INTO workspaces(id, project_id, title, dir, runtime_path, dirname, branch, is_default, is_archived, is_running)
-                VALUES ('ws', 'p', 'Legacy Title', '/repos/app/almond', '/repos/app/almond', 'almond', 'feature/login', 0, 0, 0);
-                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
-                INSERT INTO migration_state(current_version) VALUES (4);
-                """)
-
-        // Opening the store runs migrations up to the current version.
-        let store = try SQLiteStore(path: dbURL.path)
-        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
-
-        // The title column is gone, but the workspace row survives and resolves its display name from the branch.
-        XCTAssertFalse(try readTableColumns(dbURL: dbURL, table: "workspaces").contains("title"))
-        let workspace = try XCTUnwrap(store.workspace(id: "ws"))
-        XCTAssertEqual(workspace.branch, "feature/login")
-        XCTAssertEqual(workspace.displayName, "feature/login")
-        XCTAssertEqual(workspace.dirname, "almond")
-    }
-
     func testCurrentSchemaRejectsBlankPortNamesAtDatabaseLevel() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("port-name-constraints.db")
-        _ = try SQLiteStore(path: dbURL.path)
+        _ = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         try runSQLiteExec(
             dbURL: dbURL,
@@ -235,7 +202,7 @@ final class StoreTests: XCTestCase {
                 INSERT INTO migration_state(current_version) VALUES (99);
                 """)
 
-        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+        XCTAssertThrowsError(try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())) { error in
             XCTAssertEqual(error.localizedDescription, "Unsupported database schema version 99 at \(dbURL.path).")
         }
     }
@@ -405,24 +372,17 @@ final class StoreTests: XCTestCase {
 
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
-            sessions: [
-                BrowserSession(
-                    name: "checkout", url: "https://example.com",
-                    extractedWindow: ExtractedBrowserWindowMapping(targetURL: "https://example.com", windowID: 303, isValid: true)), BrowserSession(),
-            ])
+            sessions: [BrowserSession(name: "checkout", url: "https://example.com"), BrowserSession()])
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(sessions.count, 2)
         XCTAssertEqual(sessions[0].name, "checkout")
         XCTAssertEqual(sessions[0].url, "https://example.com")
-        XCTAssertEqual(sessions[0].extractedWindow?.targetURL, "https://example.com")
 
         let codexLauncher = AgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
         let claudeLauncher = AgentLauncher(id: "launcher-claude", name: "Claude", command: "claude")
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [codexLauncher, claudeLauncher])
         let launchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
         XCTAssertEqual(launchers, [codexLauncher, claudeLauncher])
-        XCTAssertEqual(sessions[0].extractedWindow?.windowID, 303)
-        XCTAssertEqual(sessions[0].extractedWindow?.isValid, true)
         XCTAssertNil(sessions[1].name)
         XCTAssertNil(sessions[1].url)
 
@@ -504,7 +464,7 @@ final class StoreTests: XCTestCase {
     func testProjectRoundTripDoesNotRequireSidebarState() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("project-round-trip.db")
-        let store = try SQLiteStore(path: dbURL.path)
+        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let project = makeProjectRecord(id: "p1", dir: "/tmp/project")
         try store.upsert(project: project)
 
@@ -516,7 +476,7 @@ final class StoreTests: XCTestCase {
     func testStoreWriteWaitsForTransientDatabaseLock() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("busy-timeout.db")
-        let store = try SQLiteStore(path: dbURL.path)
+        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
 
         var lockDB: OpaquePointer?
         guard sqlite3_open(dbURL.path, &lockDB) == SQLITE_OK, let lockDB else {
@@ -649,7 +609,7 @@ final class StoreTests: XCTestCase {
     func testWorkspaceIDForTerminalSessionResolvesWorkspaceOwnedTerminalRow() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("spaces-test.db")
-        let store = try SQLiteStore(path: dbURL.path)
+        let store = try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let project = makeProjectRecord(dir: try makeTempDirectory().path)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
@@ -777,14 +737,15 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.projects().map(\.name), ["A Project", "Z Project"])
 
         let defaultWorkspace = WorkspaceRecord(
-            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false,
-            lastLaunchedAt: nil)
-        let archivedWorkspace = WorkspaceRecord(
-            id: "archived", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false, isArchived: true,
+            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
             isRunning: false, lastLaunchedAt: nil)
+        let archivedWorkspace = WorkspaceRecord(
+            id: "archived", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false,
+            isArchived: true, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: archivedWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
+        XCTAssertEqual(try store.workspace(id: "archived")?.id, "archived")
         XCTAssertEqual(try store.workspace(id: "archived")?.baseBranch, "develop")
         XCTAssertEqual(try store.workspaces(projectID: aProject.id, includeArchived: false).map(\.id), ["default"])
         XCTAssertEqual(Set(try store.workspaces(projectID: aProject.id, includeArchived: true).map(\.id)), Set(["default", "archived"]))
@@ -920,33 +881,6 @@ final class StoreTests: XCTestCase {
 
         let notFound = try store.windows(windowID: 0)
         XCTAssertTrue(notFound.isEmpty)
-    }
-
-    // Tests workspace browser sessions with extracted window round trips correctly by arranging representative inputs and asserting the expected result.
-    func testWorkspaceBrowserSessionsWithExtractedWindowRoundTrip() throws {
-        let store = try makeTemporaryStore()
-        let project = makeProjectRecord(dir: try makeTempDirectory().path)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
-        try store.upsert(project: project)
-        try store.upsert(workspace: workspace)
-
-        let extractedWindow = ExtractedBrowserWindowMapping(targetURL: "http://localhost:3000", windowID: 501, isValid: true)
-        let sessions: [BrowserSession] = [
-            BrowserSession(name: "frontend", url: "http://localhost:3000", extractedWindow: extractedWindow),
-            BrowserSession(name: "backend", url: "http://localhost:4000", extractedWindow: nil),
-        ]
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: sessions)
-
-        let loaded = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        XCTAssertEqual(loaded.count, 2)
-        XCTAssertEqual(loaded[0].name, "frontend")
-        XCTAssertEqual(loaded[0].url, "http://localhost:3000")
-        XCTAssertNotNil(loaded[0].extractedWindow)
-        XCTAssertEqual(loaded[0].extractedWindow?.windowID, 501)
-        XCTAssertEqual(loaded[0].extractedWindow?.targetURL, "http://localhost:3000")
-        XCTAssertEqual(loaded[0].extractedWindow?.isValid, true)
-        XCTAssertEqual(loaded[1].name, "backend")
-        XCTAssertNil(loaded[1].extractedWindow)
     }
 
     // Tests agent window lookup by terminal session ID returns the matching record by arranging representative inputs and asserting the expected result.
@@ -1127,11 +1061,11 @@ final class StoreTests: XCTestCase {
         let workspace2Dir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace1 = WorkspaceRecord(
-            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let workspace2 = WorkspaceRecord(
-            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace1)
         try store.upsert(workspace: workspace2)
@@ -1152,11 +1086,11 @@ final class StoreTests: XCTestCase {
         let workspaceDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let archived = WorkspaceRecord(
-            id: "archived", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: true, isRunning: false,
-            lastLaunchedAt: nil)
+            id: "archived", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
+            isArchived: true, isRunning: false, lastLaunchedAt: nil)
         let active = WorkspaceRecord(
-            id: "active", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
-            lastLaunchedAt: nil)
+            id: "active", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: archived)
         try store.upsert(workspace: active)
@@ -1171,11 +1105,11 @@ final class StoreTests: XCTestCase {
         try store.upsert(project: project)
         let branch = "feature-branch"
         let first = WorkspaceRecord(
-            id: "ws-1", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "ws-1", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch,
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let second = WorkspaceRecord(
-            id: "ws-2", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "ws-2", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch,
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: first)
 
         XCTAssertThrowsError(try store.upsert(workspace: second))

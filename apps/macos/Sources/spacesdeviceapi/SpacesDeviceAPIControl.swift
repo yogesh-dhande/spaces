@@ -484,8 +484,13 @@ public enum SpacesDeviceAPIControlClient {
         return try send(timeout)
     }
 
+    /// Sentinel message a reachable daemon returns when its Device API supervisor is not running. The
+    /// control endpoint answered, so this is a recoverable not-running state (a relaunch can resolve it),
+    /// distinct from the socket being unreachable.
+    public static let deviceAPINotRunningMessage = "Device API is not running."
+
     static func isDeviceAPINotRunningResponse(_ response: SpacesDeviceAPIControlResponse) -> Bool {
-        !response.ok && response.message == "Device API is not running."
+        !response.ok && response.message == deviceAPINotRunningMessage
     }
 
     static func socketPath(fileManager: FileManager = .default) throws -> String {

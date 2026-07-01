@@ -394,8 +394,13 @@
                 exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
                 workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows,
                 foregroundPID: ptyDriver.foregroundPID())
+            let previousState = lastRuntimeState?.state
             try? TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             lastRuntimeState = runtimeState
+            // Drive an overview rebroadcast only on a real lifecycle transition
+            // (e.g. running -> exited); the repeated `.running` writes don't change
+            // anything the sidebar shows.
+            if previousState != state { TerminalOverviewSignal.post() }
         }
 
         private func broadcastCurrentState(reason: String) {

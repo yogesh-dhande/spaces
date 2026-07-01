@@ -4,30 +4,6 @@ import Testing
 @testable import workspacecore
 
 @Suite struct AppKitControllerExternalWindowActionTests {
-    @MainActor private final class EventRecorder { var events: [String] = [] }
-
-    @Test @MainActor func builtInTerminalWindowActionsRunInlineOnMainThread() {
-        let recorder = EventRecorder()
-
-        AppKitController.dispatchBuiltInTerminalWindowActionOnMainThread(
-            isMainThread: true, scheduler: { _ in recorder.events.append("scheduled") }, action: { recorder.events.append("ran") })
-
-        #expect(recorder.events == ["ran"])
-    }
-
-    @Test @MainActor func builtInTerminalWindowActionsScheduleOffMainThread() {
-        let recorder = EventRecorder()
-
-        AppKitController.dispatchBuiltInTerminalWindowActionOnMainThread(
-            isMainThread: false,
-            scheduler: { action in
-                recorder.events.append("scheduled")
-                MainActor.assumeIsolated { action() }
-            }, action: { recorder.events.append("ran") })
-
-        #expect(recorder.events == ["scheduled", "ran"])
-    }
-
     @Test func successfulExternalFocusActionsHideSpaces() {
         #expect(AppKitController.shouldHideAfterSuccessfulExternalWindowAction(true, action: .focus(hidesApp: true)))
     }

@@ -85,7 +85,6 @@ extension OrchestratorTests {
 
         assertSetupBlocked { try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web") }
         assertSetupBlocked { _ = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex") }
-        assertSetupBlocked { try orchestrator.recoverMissingBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3000") }
 
         let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspace.id)
         XCTAssertFalse(reservation.sessionID.isEmpty)
@@ -275,117 +274,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
-    // Tests focus workspace skips failed window by arranging representative inputs and asserting the expected result.
-    func testFocusWorkspaceSkipsFailedWindow() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let focusLog = root.appendingPathComponent("focus.log")
-
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "bad", windowID: 999, role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "good", windowID: 101, role: "terminal", orderIndex: 1,
-                lastSeenAt: "now"))
-
-        // Mocked dependency: `yabai` focus command outcomes.
-        // Why: control success/failure ordering and verify fallback focus behavior.
-        // Remaining risk: actual focus behavior can vary with spaces/displays and concurrent window changes.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) { try orchestrator.focusWorkspace(workspaceID: workspace.id) }
-        }
-
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["101"])
-    }
-
-    // Tests focus window navigation uses the current focused window and wraps by arranging representative inputs and asserting the expected result.
-    func testFocusWindowNavigationUsesRelativeOrderAndWraps() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let focusLog = root.appendingPathComponent("relative-focus.log")
-
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
-                lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "202") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "101") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
-                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
-            }
-        }
-
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["303", "303", "202"])
-    }
-
-    func testFocusWindowNavigationFreezesRecencyOrderAcrossCycleSession() throws {
-        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace(currentDate: clock.now)
-        let focusLog = root.appendingPathComponent("frozen-cycle-focus.log")
-
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "one", windowID: 101, role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "two", windowID: 202, role: "terminal", orderIndex: 1,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "three", windowID: 303, role: "terminal", orderIndex: 2,
-                lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
-                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 2)
-                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 3)
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "303") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "202") { try orchestrator.focusPreviousWindow(workspaceID: workspace.id) }
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "101") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
-            }
-        }
-
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs.suffix(3), ["202", "101", "202"])
-    }
-
-    // Tests focus workspace window uses browser target url when present by arranging representative inputs and asserting the expected result.
-    func testFocusWorkspaceWindowUsesBrowserTargetURLWhenPresent() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let focusLog = root.appendingPathComponent("browser-focus.log")
-
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Google Calendar", targetURL: "http://localhost:3001",
-                windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
-
-        // Mocked dependency: direct yabai focus for the tracked dedicated Chrome window.
-        // Why: ensure browser rows with target URLs still focus their tracked window.
-        // Remaining risk: real Chrome window lifecycle races are not represented.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1)
-            }
-        }
-
-        let focusedIDs = try String(contentsOf: focusLog).trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(focusedIDs, "202")
-    }
-
     func testWorkspaceFocusableWindowNamesIncludeConfiguredNames() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "API", command: "npm run api")])
@@ -396,399 +284,10 @@ extension OrchestratorTests {
         XCTAssertEqual(names, ["Frontend", "API"])
     }
 
-    func testFocusWorkspaceWindowByNameRecoversConfiguredBrowserSession() throws {
-        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        let chromeOpenLog = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-chrome-open.log")
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(
-                name: "YABAI_WINDOWS_JSON",
-                value:
-                    #"[{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-            ) {
-                try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
-                    try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, name: "Frontend")
-                }
-            }
-        }
-
-        let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "browser" }))
-        XCTAssertEqual(trackedWindow.targetURL, "http://localhost:3001")
-        XCTAssertEqual(trackedWindow.windowID, 888)
-    }
-
-    // Tests direct browser focus silently recovers by opening a new tracked Chrome window when the old yabai window is stale.
-    func testFocusWorkspaceWindowRecoversMissingBrowserWindow() throws {
-        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        let chromeOpenLog = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-chrome-open.log")
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
-
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
-                windowID: 999, role: "browser", orderIndex: 0, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(
-                name: "YABAI_WINDOWS_JSON",
-                value:
-                    #"[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-            ) {
-                try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
-                    XCTAssertNoThrow(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 1))
-                }
-            }
-        }
-
-        let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "browser" }))
-        XCTAssertEqual(trackedWindow.windowID, 888)
-        let openLog = try String(contentsOf: chromeOpenLog)
-        XCTAssertTrue(openLog.contains("set URL of active tab of newWindow"))
-    }
-
-    // Tests direct browser-session focus opens a new tracked Chrome window when the configured session has no tracked window row.
-    func testFocusWorkspaceBrowserSessionRecoversWhenTrackedWindowIsMissing() throws {
-        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        let chromeOpenLog = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-chrome-open.log")
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(
-                name: "YABAI_WINDOWS_JSON",
-                value:
-                    #"[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false},{"id":888,"pid":22,"app":"Google Chrome","title":"Frontend","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-            ) {
-                try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) {
-                    XCTAssertNoThrow(try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3001"))
-                }
-            }
-        }
-
-        let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "browser" }))
-        XCTAssertEqual(trackedWindow.targetURL, "http://localhost:3001")
-        XCTAssertEqual(trackedWindow.windowID, 888)
-        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
-        let openLog = try String(contentsOf: chromeOpenLog)
-        XCTAssertTrue(openLog.contains("set URL of active tab of newWindow"))
-    }
-
-    // Tests direct browser-session focus reselects the tracked Chrome window's first tab instead of relying on yabai-only window focus.
-    func testFocusWorkspaceBrowserSessionSelectsFirstTabInTrackedChromeWindow() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let tabIndexLog = root.appendingPathComponent("browser-first-tab.log")
-        let yabaiFocusLog = root.appendingPathComponent("browser-first-tab-yabai.log")
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
-                windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: tabIndexLog.path) {
-                try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
-                    try orchestrator.focusWorkspaceBrowserSession(workspaceID: workspace.id, targetURL: "http://localhost:3001")
-                }
-            }
-        }
-
-        let focusedTabs = try String(contentsOf: tabIndexLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedTabs, ["front\t1"])
-        let focusedWindows = try String(contentsOf: yabaiFocusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedWindows, ["202"])
-    }
-
-    // Tests workspace window cycling reselects the tracked browser window's first tab when landing on a browser target.
-    func testFocusNextWindowSelectsFirstTabForBrowserTarget() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let tabIndexLog = root.appendingPathComponent("browser-cycle-first-tab.log")
-        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-yabai.log")
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 101, role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
-                windowID: 202, role: "browser", orderIndex: 1, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: tabIndexLog.path) {
-                try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
-                    try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
-                        try withEnv(name: "YABAI_FOCUSED_APP", value: "Spaces") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
-                    }
-                }
-            }
-        }
-
-        let focusedTabs = try String(contentsOf: tabIndexLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedTabs, ["front\t1"])
-        let focusedWindows = try String(contentsOf: yabaiFocusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedWindows, ["202"])
-    }
-
-    func testFocusNextWindowHidesAppUsesScannedChromeWindowTabFocusFromBuiltInTerminal() throws {
-        let store = try makeTemporaryStore()
-        let root = try makeTempDirectory()
-        let chromeFocusLog = root.appendingPathComponent("browser-cycle-url-focus.log")
-        let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-tab-index.log")
-        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-url-yabai.log")
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-browser", workspaceID: workspace.id, app: "Google Chrome", title: "Docs", targetURL: "http://localhost:3001/docs/",
-                windowID: 302, role: "browser", orderIndex: 1, lastSeenAt: "now"))
-        let process = RunningProcessRecord(
-            id: "process-spaces-browser-cycle", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
-            terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle",
-            terminalNativeID: "spaces-session-browser-cycle", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
-            exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-terminal", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
-                targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle", terminalNativeID: "spaces-session-browser-cycle",
-                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
-                try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: "202\t1\tDocs\thttp://localhost:3001/docs/\n") {
-                    try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: chromeTabIndexLog.path) {
-                        try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
-                            let hidesApp = try orchestrator.focusNextWindowHidesApp(
-                                workspaceID: workspace.id, requestID: "cycle-request-browser-focus",
-                                preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle")
-                            XCTAssertTrue(hidesApp)
-                        }
-                    }
-                }
-            }
-        }
-
-        let focusedTabs = try String(contentsOf: chromeTabIndexLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedTabs, ["202\t1"])
-        let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedURLs, ["http://localhost:3001/docs/"])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
-    }
-
-    func testFocusNextWindowHidesAppUsesChromeURLFocusWhenScannedTabQueryFailsFromBuiltInTerminal() throws {
-        let store = try makeTemporaryStore()
-        let root = try makeTempDirectory()
-        let chromeFocusLog = root.appendingPathComponent("browser-cycle-scan-fail-url-focus.log")
-        let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-scan-fail-tab-index.log")
-        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-scan-fail-yabai.log")
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-browser-scan-fail", workspaceID: workspace.id, app: "Google Chrome", title: "Docs",
-                targetURL: "http://localhost:3001/docs/", windowID: 302, role: "browser", orderIndex: 1, lastSeenAt: "now"))
-        let process = RunningProcessRecord(
-            id: "process-spaces-browser-cycle-scan-fail", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
-            terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-scan-fail",
-            terminalNativeID: "spaces-session-browser-cycle-scan-fail", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
-            exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-terminal-scan-fail", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend",
-                detail: "npm run frontend", targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-scan-fail",
-                terminalNativeID: "spaces-session-browser-cycle-scan-fail", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "MOCK_CHROME_SCAN_FAIL", value: "1") {
-                try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
-                    try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: chromeTabIndexLog.path) {
-                        try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
-                            let hidesApp = try orchestrator.focusNextWindowHidesApp(
-                                workspaceID: workspace.id, requestID: "cycle-request-browser-focus-scan-fail",
-                                preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle-scan-fail")
-                            XCTAssertTrue(hidesApp)
-                        }
-                    }
-                }
-            }
-        }
-
-        let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedURLs, ["http://localhost:3001/docs/"])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: chromeTabIndexLog.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
-    }
-
-    func testFocusNextWindowHidesAppNormalizesBrowserTargetURLFromBuiltInTerminal() throws {
-        let store = try makeTemporaryStore()
-        let root = try makeTempDirectory()
-        let chromeFocusLog = root.appendingPathComponent("browser-cycle-google-focus.log")
-        let chromeTabIndexLog = root.appendingPathComponent("browser-cycle-google-tab-index.log")
-        let yabaiFocusLog = root.appendingPathComponent("browser-cycle-google-yabai.log")
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Google", url: "https://google.com")])
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-browser-google", workspaceID: workspace.id, app: "Google Chrome", title: "Google", targetURL: "https://google.com",
-                windowID: 42176, role: "browser", orderIndex: 1, lastSeenAt: "now"))
-        let process = RunningProcessRecord(
-            id: "process-spaces-browser-cycle-google", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
-            terminalApp: TerminalHost.spaces.appName, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
-            terminalNativeID: "spaces-session-browser-cycle-google", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
-            exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-terminal-google", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend",
-                detail: "npm run frontend", targetURL: nil, windowID: 101, terminalTrackingID: "spaces-session-browser-cycle-google",
-                terminalNativeID: "spaces-session-browser-cycle-google", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "MOCK_CHROME_FOCUS_LOG_FILE", value: chromeFocusLog.path) {
-                try withEnv(name: "MOCK_CHROME_WINDOW_MATCHES", value: "1039450131\t1\tGoogle\thttps://www.google.com/\n") {
-                    try withEnv(name: "MOCK_CHROME_TAB_INDEX_LOG_FILE", value: chromeTabIndexLog.path) {
-                        try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: yabaiFocusLog.path) {
-                            let hidesApp = try orchestrator.focusNextWindowHidesApp(
-                                workspaceID: workspace.id, requestID: "cycle-request-browser-focus-google",
-                                preferredFocusedBuiltInTerminalSessionID: "spaces-session-browser-cycle-google")
-                            XCTAssertTrue(hidesApp)
-                        }
-                    }
-                }
-            }
-        }
-
-        let focusedTabs = try String(contentsOf: chromeTabIndexLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedTabs, ["1039450131\t1"])
-        let focusedURLs = try String(contentsOf: chromeFocusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedURLs, ["https://www.google.com/"])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: yabaiFocusLog.path))
-    }
-
-    func testFocusNextWindowUsesFrontBrowserURLWhenYabaiHasNoFocusedWindow() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let focusLog = root.appendingPathComponent("browser-cycle-fallback-focus.log")
-
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Docs", url: "http://localhost:3001/docs/")])
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Docs", targetURL: "http://localhost:3001/docs/",
-                windowID: 202, role: "browser", orderIndex: 0, lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Finder", title: "Notes", windowID: 303, role: "editor", orderIndex: 1,
-                lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(name: "YABAI_FOCUSED_NONE", value: "1") {
-                    try withEnv(name: "MOCK_CHROME_ACTIVE_URL", value: "http://localhost:3001/docs/") {
-                        try orchestrator.focusNextWindow(workspaceID: workspace.id)
-                    }
-                }
-            }
-        }
-
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["303"])
-    }
-
-    func testFocusPreviousWindowUsesPreferredBuiltInTerminalSessionBeforeFallback() throws {
-        let store = try makeTemporaryStore()
-        let focusCapture = TerminalFocusCapture()
-        let root = try makeTempDirectory()
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in XCTFail("cycle focus should not reopen built-in sessions") },
-            builtInTerminalWindowFocuser: { sessionID, requestID in
-                focusCapture.sessionIDs.append(sessionID)
-                focusCapture.requestIDs.append(requestID)
-            })
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        _ = project
-
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-browser", workspaceID: workspace.id, app: "Google Chrome", title: "Docs", targetURL: "http://localhost:3001/docs/",
-                windowID: 101, role: "browser", orderIndex: 0, lastSeenAt: "now"))
-        let process = RunningProcessRecord(
-            id: "process-spaces-cycle-priority", workspaceID: workspace.id, templateName: "frontend", command: "npm run frontend",
-            terminalApp: TerminalHost.spaces.appName, windowID: 202, terminalTrackingID: "spaces-session-priority",
-            terminalNativeID: "spaces-session-priority", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
-        try store.upsert(runningProcess: process)
-        try store.upsert(
-            window: WindowRecord(
-                id: "window-process", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run frontend",
-                targetURL: nil, windowID: 202, terminalTrackingID: "spaces-session-priority", terminalNativeID: "spaces-session-priority",
-                role: "terminal", orderIndex: 1, lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try withEnv(name: "YABAI_FOCUSED_ID", value: "101") {
-                try withEnv(name: "YABAI_FOCUSED_APP", value: "Google Chrome") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
-            }
-            _ = try orchestrator.focusPreviousWindowHidesApp(
-                workspaceID: workspace.id, requestID: "cycle-request-1", preferredFocusedBuiltInTerminalSessionID: "spaces-session-priority")
-        }
-
-        XCTAssertEqual(focusCapture.sessionIDs, ["spaces-session-priority"])
-        XCTAssertEqual(focusCapture.requestIDs, [nil])
-    }
-
-    // Tests window cycling ignores missing browser windows and keeps moving to the next live tracked window.
-    func testFocusNextWindowIgnoresMissingBrowserWindow() throws {
-        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
-        let focusLog = root.appendingPathComponent("ignore-missing-browser-focus.log")
-
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
-                windowID: 999, role: "browser", orderIndex: 0, lastSeenAt: "now"))
-        try store.upsert(
-            window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 101, role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
-
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_FOCUS_LOG_FILE", value: focusLog.path) {
-                try withEnv(name: "YABAI_FOCUSED_ID", value: "555") {
-                    try withEnv(name: "YABAI_FOCUSED_APP", value: "Finder") { try orchestrator.focusNextWindow(workspaceID: workspace.id) }
-                }
-            }
-        }
-
-        let focusedIDs = try String(contentsOf: focusLog).split(separator: "\n").map(String.init)
-        XCTAssertEqual(focusedIDs, ["101"])
-    }
-
     func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWithoutYabaiWindowIDWhileSessionIsLive() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path)
+        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -833,7 +332,7 @@ extension OrchestratorTests {
     func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowUntilHostDetachesStaleRemoteAttachment() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path)
+        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -878,7 +377,7 @@ extension OrchestratorTests {
     func testRefreshWorkspaceWindowsPrunesAdHocBuiltInTerminalWindowAfterOwnerCloses() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, )
+        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -935,8 +434,7 @@ extension OrchestratorTests {
         }
 
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }.isEmpty)
-        let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
-        XCTAssertNil(sessions.first?.extractedWindow)
+        XCTAssertFalse(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: chromeOpenLog.path))
     }
 
@@ -1037,7 +535,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: repo.path)
         let defaultWorkspace = try XCTUnwrap(
             try orchestrator.listWorkspaces(projectID: project.id, includeArchived: false).first(where: { $0.isDefault }))
-        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "active")
+        let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
         let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "archived")
         _ = try orchestrator.archiveWorkspace(workspaceID: archivedWorkspace.id)
 
@@ -1228,7 +726,7 @@ extension OrchestratorTests {
     func testStopAdHocBuiltInTerminalSessionUsesLiveSessionDirectoryWithoutTrackedWindow() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath)
+        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
@@ -1258,7 +756,7 @@ extension OrchestratorTests {
     func testStopAdHocBuiltInTerminalSessionRequiresLaunchMetadataWorkspaceMatch() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath)
+        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
@@ -1466,8 +964,8 @@ extension OrchestratorTests {
         let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
         let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
         let archived = WorkspaceRecord(
-            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true,
-            isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
+            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch,
+            isDefault: true, isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
         try store.upsert(workspace: archived)
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: defaultWS.id)).isArchived)
 
@@ -1493,8 +991,8 @@ extension OrchestratorTests {
         // Insert a default workspace directly without going through seedWorkspaceSettings.
         let workspaceID = UUID().uuidString
         let workspaceRecord = WorkspaceRecord(
-            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 
@@ -1520,21 +1018,6 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)) { error in
             XCTAssertTrue(error.localizedDescription.contains("archived"))
         }
-    }
-
-    // Tests focusWorkspaceWindow with index 0 is a no-op (guard index > 0 early return).
-    func testFocusWorkspaceWindowWithZeroIndexIsNoOp() throws {
-        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
-
-        // Index 0 is invalid (windows are 1-based); should return without throwing.
-        XCTAssertNoThrow(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 0))
-    }
-
-    // Tests focusWorkspaceWindow with an out-of-bounds index is a no-op (guard index <= windows.count early return).
-    func testFocusWorkspaceWindowWithOutOfBoundsIndexIsNoOp() throws {
-        let (orchestrator, _, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        // No windows are tracked; index 99 is out of bounds.
-        XCTAssertNoThrow(try orchestrator.focusWorkspaceWindow(workspaceID: workspace.id, index: 99))
     }
 
     // Tests updateProjectConfig throws missingProject when the project ID does not exist in the store.
