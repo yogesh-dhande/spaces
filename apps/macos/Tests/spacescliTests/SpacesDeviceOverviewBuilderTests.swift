@@ -164,7 +164,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildIncludesProjectAndWorkspaceConfigForClientParity() {
         let project = ProjectRecord(
             id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", setupScript: "make setup",
-            stopScript: "make stop-project", ports: [PortDefinition(id: "project-web-port", name: "WEB")],
+            stopScript: "make stop-project", ports: [ServiceDefinition(id: "project-web-port", name: "WEB")],
             processes: [ProcessTemplate(id: "project-web-process", name: "web", command: "npm run dev", kind: "server", onExit: .restart)],
             browserSessions: [BrowserSession(name: "web", url: "http://localhost:$WEB")],
             agentLaunchers: [AgentLauncher(id: "project-codex-agent", name: "Codex", command: "codex")])
@@ -172,7 +172,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: "feature", branch: "feature", baseBranch: "main",
             isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil, notes: "Use this payload for local and remote detail views.")
         let settings = WorkspaceSettings(
-            stopScript: "make stop-workspace", ports: [PortDefinition(id: "workspace-api-port", name: "API")],
+            stopScript: "make stop-workspace", ports: [ServiceDefinition(id: "workspace-api-port", name: "API")],
             processes: [ProcessTemplate(id: "workspace-api-process", name: "api", command: "npm run api", onExit: .none)],
             browserSessions: [BrowserSession(name: "api", url: "http://localhost:$API")],
             agentLaunchers: [AgentLauncher(id: "workspace-review-agent", name: "Review", command: "codex --review")])
@@ -271,8 +271,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-api", title: "old-api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
             id: "process-api", workspaceID: workspace.id, templateID: "template-api", templateName: "old-api", command: "npm run dev",
-            terminalApp: "Spaces", terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalApp: "Spaces", terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         let processWindow = WindowRecord(
             id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", windowID: nil, terminalTrackingID: "session-api",
             terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")

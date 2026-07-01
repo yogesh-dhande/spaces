@@ -10,7 +10,7 @@ export default function GettingStartedDocsPage() {
   return (
     <DocsShell
       title="Getting Started"
-      description="Start from a project directory or a Git URL, then launch a workspace with processes, browser sessions, and reserved ports."
+      description="Start from a project directory or a Git URL, then launch a workspace with processes, browser sessions, and named services routed through Caddy."
       pagePath="/docs/getting-started"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

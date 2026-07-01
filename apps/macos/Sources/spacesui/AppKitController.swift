@@ -2051,15 +2051,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// when a device transitions to offline: its rows are about to drop out of the merged sidebar data,
     /// so a selection under it leaves a stale detail pane that must be reconciled. A selected workspace's
     /// project is always under the same device, so the workspace check alone suffices when one is selected.
-    nonisolated static func sidebarSelectionBelongsToDeviceSection(
-        selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection
-    ) -> Bool {
-        if let selectedWorkspaceID {
-            return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } }
-        }
-        if let selectedProjectID {
-            return section.projects.contains { $0.id == selectedProjectID }
-        }
+    nonisolated static func sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection)
+        -> Bool
+    {
+        if let selectedWorkspaceID { return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } } }
+        if let selectedProjectID { return section.projects.contains { $0.id == selectedProjectID } }
         return false
     }
 
@@ -2393,8 +2389,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             AgentWindowRecord(
                                 id: agent.agentID ?? agent.id, workspaceID: workspace.id, provider: .spaces, label: agent.name,
                                 terminalTarget: agent.sessionID.map { TerminalTargetRecord(trackingID: $0) }, claimedLauncherID: agent.launcherID,
-                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState),
-                                createdAt: agent.updatedAt ?? "", updatedAt: agent.updatedAt ?? ""))))
+                                claimedLauncherName: agent.name, status: agentStatus(from: agent.activityState), createdAt: agent.updatedAt ?? "",
+                                updatedAt: agent.updatedAt ?? ""))))
             }
             guard !items.isEmpty else { continue }
             items.sort {
@@ -2550,12 +2546,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return SidebarProjectActions(showsSettings: actions.showsSettings, showsAddWorkspace: actions.showsAddWorkspace)
     }
 
-    nonisolated private static func localPortDefinition(from port: SpacesDevicePortDefinition) -> PortDefinition {
-        PortDefinition(id: port.id, name: port.name)
+    nonisolated private static func localServiceDefinition(from port: SpacesDeviceServiceDefinition) -> ServiceDefinition {
+        ServiceDefinition(id: port.id, name: port.name)
     }
 
-    nonisolated private static func devicePortDefinition(from port: PortDefinition) -> SpacesDevicePortDefinition {
-        SpacesDevicePortDefinition(id: port.id, name: port.name)
+    nonisolated private static func deviceServiceDefinition(from port: ServiceDefinition) -> SpacesDeviceServiceDefinition {
+        SpacesDeviceServiceDefinition(id: port.id, name: port.name)
     }
 
     nonisolated private static func localProcessTemplate(from process: SpacesDeviceProcessTemplate) -> ProcessTemplate {
@@ -2586,7 +2582,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated private static func localWorkspaceSettings(from config: SpacesDeviceWorkspaceConfig) -> WorkspaceSettings {
         WorkspaceSettings(
-            stopScript: config.stopScript, ports: config.ports.map(localPortDefinition(from:)),
+            stopScript: config.stopScript, ports: config.ports.map(localServiceDefinition(from:)),
             processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
             agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:)))
     }
@@ -2595,18 +2591,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         from settings: WorkspaceSettings, resolvedBrowserSessions: [SpacesDeviceBrowserSession] = []
     ) -> SpacesDeviceWorkspaceConfig {
         SpacesDeviceWorkspaceConfig(
-            stopScript: settings.stopScript, ports: settings.ports.map(devicePortDefinition(from:)),
+            stopScript: settings.stopScript, ports: settings.ports.map(deviceServiceDefinition(from:)),
             processes: settings.processes.map(deviceProcessTemplate(from:)),
             browserSessions: settings.browserSessions.map(deviceBrowserSession(from:)), resolvedBrowserSessions: resolvedBrowserSessions,
             agentLaunchers: settings.agentLaunchers.map(deviceAgentLauncher(from:)))
     }
 
     nonisolated private static func localProjectSettings(from config: SpacesDeviceProjectConfig) -> (
-        setupScript: String?, stopScript: String?, ports: [PortDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
+        setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
         agentLaunchers: [AgentLauncher]
     ) {
         (
-            setupScript: config.setupScript, stopScript: config.stopScript, ports: config.ports.map(localPortDefinition(from:)),
+            setupScript: config.setupScript, stopScript: config.stopScript, ports: config.ports.map(localServiceDefinition(from:)),
             processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
             agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:))
         )
@@ -2616,7 +2612,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceProjectConfig(
             setupScript: refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue,
             stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
-            ports: refs.portsSection.currentPorts.map(devicePortDefinition(from:)),
+            ports: refs.portsSection.currentPorts.map(deviceServiceDefinition(from:)),
             processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
             browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
             agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
@@ -2626,7 +2622,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceProjectConfig(
             setupScript: refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue,
             stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
-            ports: refs.portsSection.currentPorts.map(devicePortDefinition(from:)),
+            ports: refs.portsSection.currentPorts.map(deviceServiceDefinition(from:)),
             processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
             browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
             agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
@@ -3018,13 +3014,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return map
         }()
         let agentTerminalIDs = Set(agentWindows.flatMap { agentTerminalTrackingKeys(for: $0) })
-        let eligibleProcesses = processes.filter { process in
-            !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false)
-        }
+        let eligibleProcesses = processes.filter { process in !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) }
         let agentClaimedProcessKeys = Set(
-            processes.filter { process in
-                process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
-            }.map { processRuntimeKey(name: $0.templateName) })
+            processes.filter { process in process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false }.map {
+                processRuntimeKey(name: $0.templateName)
+            })
         var processQueuesByKey: [String: [RunningProcessRecord]] = [:]
         for process in eligibleProcesses { processQueuesByKey[processRuntimeKey(name: process.templateName), default: []].append(process) }
         for (key, list) in processQueuesByKey {
@@ -3066,9 +3060,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 windowProcesses = []
             }
             let isAgentClaimedWindow = window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
-            let nonAgentWindowProcesses = windowProcesses.filter { process in
-                !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false)
-            }
+            let nonAgentWindowProcesses = windowProcesses.filter { process in !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) }
             if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
             if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
                 for process in nonAgentWindowProcesses where !matchedProcessIDs.contains(process.id) {
@@ -4261,8 +4253,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let projectSettings:
             (
-                setupScript: String?, stopScript: String?, ports: [PortDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
-                agentLaunchers: [AgentLauncher]
+                setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate],
+                browserSessions: [BrowserSession], agentLaunchers: [AgentLauncher]
             )
         if let activeProject = deviceProjectSummary(projectID: project.id).map({ SpacesDeviceProjectSettingsViewModel(project: $0) }) {
             projectSettings = Self.localProjectSettings(from: activeProject.config)
@@ -4296,7 +4288,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
             value: projectSettings.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
-        let portsSection = PortsSection(ports: projectSettings.ports, subtitle: "Per-workspace named ports, exposed as env vars.")
+        let portsSection = PortsSection(ports: projectSettings.ports, subtitle: "Per-workspace services, routed through Caddy.")
         let processesSection = ProcessesSection(
             processes: projectSettings.processes, subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(
@@ -5859,7 +5851,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     ) -> NSView? {
         guard let config = providedConfig else { return nil }
         let reservedPorts = providedAssignedPorts?.map(\.port) ?? []
-        let section = PortsSection(ports: config.ports, collapsedDisplayPorts: reservedPorts.map(Optional.some))
+        let serviceURLs = providedAssignedPorts?.map { $0.url.isEmpty ? nil : $0.url } ?? []
+        let section = PortsSection(ports: config.ports, collapsedDisplayPorts: reservedPorts.map(Optional.some), collapsedDisplayURLs: serviceURLs)
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
@@ -9835,7 +9828,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func presentProjectPortRemoveConfirmation(port: PortDefinition, confirm: @escaping (Bool) -> Void) {
+    private func presentProjectPortRemoveConfirmation(port: ServiceDefinition, confirm: @escaping (Bool) -> Void) {
         let alert = NSAlert()
         alert.messageText = "Remove port \"\(port.name)\"?"
         alert.informativeText = "This removes the port definition from the project."

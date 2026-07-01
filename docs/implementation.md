@@ -111,7 +111,7 @@ flowchart TD
 ## Module Responsibilities
 - `SpacesApp`: minimal app entry point that boots AppKit.
 - `spacesd`: per-device background executable for the Device API, daemon-owned project/workspace state, built-in terminal sessions, process and agent runtimes, pairing, and paired-client control; terminal behavior lives in [terminal.md](terminal.md).
-- `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon/text tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline notes editor, and five configuration sections (Processes, Browser sessions, Coding agents, Named ports, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Named-port rows render the configured env-var name plus the currently reserved port number from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
+- `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon/text tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline notes editor, and five configuration sections (Processes, Browser sessions, Coding agents, Services, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Service rows render the DNS-label service name plus the currently assigned port number and derived routed URL from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
 - `spaces`: executable shim that boots the declarative CLI parser.
 - `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, translation from CLI inputs into orchestration calls, terminal and mobile subcommands, and profile or desktop-control inspection helpers used by dev and real-system workflows.
 - `spacesterminalcore`: shared terminal runtime primitives and protocols; the built-in terminal control, persistence, rendering, and CLI-tail details live in [terminal.md](terminal.md).
@@ -163,7 +163,7 @@ flowchart TD
 - macOS Alerts aggregate across devices from one builder: every device's attention items — local and remote alike — are derived client-side from its overview payload (exited process rows by `exitedAt`, waiting/done coding-agent rows by `updatedAt`), so the local device needs no orchestrator and no daemon protocol differs by device. Because desktop windows are client-local and absent from the overview, exited processes surface as process alerts (no per-window browser/editor icon styling) and clicking one focuses the process. The sidebar and dock badge sum every loaded device's items.
 - Project and workspace creation run on the selected daemon. Git project creation can clone from a daemon-side Git URL into the daemon workspace root, and existing-path project creation validates a daemon-local path.
 - Git-import preview is daemon-hosted over the Device API so it works on the device that will own the project. `prepareGitProject` clones to the final managed path on the target daemon and returns the detected `spaces.yaml` config (to pre-fill the add-project form) plus an opaque handle to the clone; if managed directories already exist it returns replacement candidates instead of cloning so the GUI can confirm first. Create passes that handle to `createProject`, which adopts the existing clone instead of re-cloning; canceling sends `discardPreparedGitProject` to delete it. The client holds and returns the handle without interpreting it (it references the daemon's on-disk clone), so the GUI never opens `spaces.db` for the import.
-- Workspace planning is local to the owning daemon. Runtime manifests carry workspace ID, project ID, daemon-local path, branch, base branch, named ports, process environment, and allowed file roots.
+- Workspace planning is local to the owning daemon. Runtime manifests carry workspace ID, project ID, daemon-local path, branch, base branch, service port assignments, process environment, and allowed file roots.
 - Workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts execute on the owning daemon. Synchronous workspace command logs are allocated under the daemon runtime root, and daemon listener token environment keys are scrubbed from launched child commands.
 - `spaces agent signal` writes agent lifecycle events to the daemon database for the workspace that owns the terminal session.
 - Worktree refresh is modeled as a fast-forward-only preflight. `RemoteWorkspaceGitClient.refreshWorktreeFastForwardOnly` fetches the workspace branch, checks for tracked dirty state and untracked overwrite risks, requires `HEAD` to be an ancestor of `origin/<branch>`, and advances with `merge --ff-only`. `RemoteWorkspaceRefreshBlock` reports dirty worktrees, overwrite risks, divergent histories, missing branches, fetch failures, and checkout failures with path, branch, and guidance. Destructive repair paths such as reset, stash, forced checkout, or cleanup are outside the launch path.
@@ -239,7 +239,7 @@ erDiagram
     TEXT stop_script
   }
 
-  project_port_definitions {
+  project_services {
     TEXT id
     TEXT project_id PK
     TEXT name
@@ -287,15 +287,15 @@ erDiagram
     TEXT notes
   }
 
-  workspace_ports {
+  workspace_service_ports {
     TEXT workspace_id PK
-    INTEGER port_index PK
-    INTEGER port_number
-    TEXT port_name
-    TEXT definition_id
+    INTEGER service_index PK
+    INTEGER port
+    TEXT service_name
+    TEXT service_id
   }
 
-  workspace_port_definitions {
+  workspace_services {
     TEXT id
     TEXT workspace_id PK
     TEXT name
@@ -518,14 +518,14 @@ erDiagram
     INTEGER current_version
   }
 
-  projects ||--o{ project_port_definitions : owns
+  projects ||--o{ project_services : owns
   projects ||--o{ project_processes : owns
   projects ||--o{ project_browser_sessions : owns
   projects ||--o{ project_agent_launchers : owns
   projects ||--o{ workspaces : owns
   projects ||--o{ ignored_worktrees : owns
-  workspaces ||--o{ workspace_ports : allocates
-  workspaces ||--o{ workspace_port_definitions : configures
+  workspaces ||--o{ workspace_service_ports : allocates
+  workspaces ||--o{ workspace_services : configures
   workspaces ||--o| workspace_settings : has
   workspaces ||--o{ workspace_processes : configures
   workspaces ||--o{ workspace_browser_sessions : configures
@@ -655,25 +655,27 @@ Projects persist:
 - source directory and git status
 - sidebar collapsed state
 - setup and stop scripts
-- port definitions
+- service definitions
 - process templates
 - browser-session templates
 - coding-agent launcher templates
 
 Managed clone directories under `~/spaces/repos` and managed worktree roots under `~/spaces/workspaces` must be keyed by a deterministic hash of the project source (directory path or Git URL) rather than by project name or the opaque project id so cleanup, retries, and same-name projects cannot collide on disk ownership. The project id is a random UUID and is intentionally not used for managed-directory naming; a managed Git clone's worktree root mirrors the leaf of its repos clone directory so both stay deterministic from the import URL and existing installs keep resolving to the same paths. Prepared Git imports persist normalized clone paths by resolving managed-root parents while replacement checks operate on the managed entry path. Replacement of existing managed folders is limited to entries inside those managed roots, and only when SQLite has no project or workspace owner at or beneath the entry or its resolved target. The ownership check runs during preflight and immediately before deletion so a folder that becomes database-owned is preserved. Discarding an unsaved prepared Git import also rechecks ownership before cleanup and skips paths that were registered by another process. Symlinked managed entries are unlinked at the managed path instead of following the link target, but replacement candidates below symlinked ancestors inside a managed root are rejected. Replacing an orphaned managed worktree clears any matching Git worktree registration before the folder is removed, pruning stale metadata when Git reports a corrupted or missing working tree.
 
-Project configuration can also be represented as `spaces.yaml` through GUI-only import/export in `workspacecore`. The file is resolved from the default workspace directory: local projects use the project directory, while app-managed Git projects use the checked-out default worktree. The YAML document uses schema version `1`, treats a missing `version` as `1`, rejects versions greater than the supported schema version, and omits internal database IDs. Missing optional keys decode to app-state defaults without rewriting the source file.
+Project configuration can also be represented as `spaces.yaml` through GUI-only import/export in `workspacecore`. The file is resolved from the default workspace directory: local projects use the project directory, while app-managed Git projects use the checked-out default worktree. The YAML document uses schema version `1`, treats a missing `version` as `1`, rejects any other version, and omits internal database IDs. The version `1` schema declares `services` (a list of DNS-1123 labels); there is no compatibility with any earlier schema. Missing optional keys decode to app-state defaults without rewriting the source file.
 
 The YAML schema contains:
 - `version`
 - `setup_script`
 - `stop_script`
-- `ports[].name`
+- `services[]` — each entry is a unique DNS-1123 service name (lowercase letters, digits, and hyphens, starting and ending with a letter or digit, up to 63 characters)
 - `processes[].name`, `processes[].command`, `processes[].on_exit` (one of `none`, `restart`, `notify`)
 - `browser_sessions[].name`, `browser_sessions[].url`
 - `agent_launchers[].name`, `agent_launchers[].command`
 
-Import uses the same project/workspace normalization paths as GUI saves so existing port, process, and coding-agent launcher IDs are preserved by name or command where possible. GUI project creation previews a directory through the owning daemon's `previewProject` command, which loads `spaces.yaml` into a project-config payload before persistence; the form then saves the reviewed settings into the project and default workspace from the visible form snapshot without re-reading `spaces.yaml`. Because the preview runs on the daemon, folder-based creation works for both the local Mac and selected remote devices, and the New Project form opens in a standalone dialog window. The folder source is a path text field with daemon-backed directory autocomplete; the preview runs when the path is committed, and creation stays disabled until the committed path is validated. Git project creation prepares an app-managed bare clone plus default worktree before persistence, loads `spaces.yaml` from that worktree into the reviewed settings, and persists the prepared project only after the user saves; save-time validation failures keep the prepared source staged for retry, while explicit cancel, replacing the prepared source, or quitting with the form active removes the unmanaged clone and worktree. Async cleanup tasks are registered by trimmed Git URL, and preparation awaits any registered cleanup for that URL before touching the deterministic managed paths. If an unmanaged prepared clone or worktree is still present for the same Git URL, preparation treats it as abandoned state, removes the replaceable managed directories, and clones again so retrying the URL refreshes the loaded settings instead of failing on existing paths. Local and Git preparation results are accepted only while the originating add-project form and source segment remain active, and source hydration replaces open script editors and row section drafts so the visible settings match the selected source. Existing-project GUI import validates `spaces.yaml`, projects it through the normal configuration normalization path, and hydrates the visible project-settings sections without writing to SQLite; hydration uses the row-section replace path so import and discard clear stale inline editors and pending drafts before rendering the imported or saved rows. The imported state is tracked on the project form refs, and Save prompts for whether to apply the visible template to every workspace before calling the normal project update path. The workspace-sync save choice uses the same snapshot/rollback path as direct import when applying the visible template to every workspace. The direct core import API keeps `spaces.yaml` authoritative for compatibility, and invalid YAML still uses the managed-project rollback path. Export encodes the saved project template with Yams' Codable encoder and overwrites `spaces.yaml`.
+Service names are validated as unique DNS-1123 labels at the import and store boundary, so an invalid name (for example `Web`, `web_1`, `web.api`, `-web`, or `web-`) or duplicate name is rejected before it reaches persistence rather than surfacing later as an invalid route.
+
+Import uses the same project/workspace normalization paths as GUI saves so existing service, process, and coding-agent launcher IDs are preserved by name or command where possible. GUI project creation previews a directory through the owning daemon's `previewProject` command, which loads `spaces.yaml` into a project-config payload before persistence; the form then saves the reviewed settings into the project and default workspace from the visible form snapshot without re-reading `spaces.yaml`. Because the preview runs on the daemon, folder-based creation works for both the local Mac and selected remote devices, and the New Project form opens in a standalone dialog window. The folder source is a path text field with daemon-backed directory autocomplete; the preview runs when the path is committed, and creation stays disabled until the committed path is validated. Git project creation prepares an app-managed bare clone plus default worktree before persistence, loads `spaces.yaml` from that worktree into the reviewed settings, and persists the prepared project only after the user saves; save-time validation failures keep the prepared source staged for retry, while explicit cancel, replacing the prepared source, or quitting with the form active removes the unmanaged clone and worktree. Async cleanup tasks are registered by trimmed Git URL, and preparation awaits any registered cleanup for that URL before touching the deterministic managed paths. If an unmanaged prepared clone or worktree is still present for the same Git URL, preparation treats it as abandoned state, removes the replaceable managed directories, and clones again so retrying the URL refreshes the loaded settings instead of failing on existing paths. Local and Git preparation results are accepted only while the originating add-project form and source segment remain active, and source hydration replaces open script editors and row section drafts so the visible settings match the selected source. Existing-project GUI import validates `spaces.yaml`, projects it through the normal configuration normalization path, and hydrates the visible project-settings sections without writing to SQLite; hydration uses the row-section replace path so import and discard clear stale inline editors and pending drafts before rendering the imported or saved rows. The imported state is tracked on the project form refs, and Save prompts for whether to apply the visible template to every workspace before calling the normal project update path. The workspace-sync save choice uses the same snapshot/rollback path as direct import when applying the visible template to every workspace. The direct core import API keeps `spaces.yaml` authoritative for compatibility, and invalid YAML still uses the managed-project rollback path. Export encodes the saved project template with Yams' Codable encoder and overwrites `spaces.yaml`.
 
 ### Workspaces
 Workspaces persist:
@@ -685,11 +687,11 @@ Workspaces persist:
 - hidden sidebar visibility state
 - explicit lifecycle state (`running` vs `stopped`)
 - daemon-local runtime path
-- seeded per-workspace copies of launch-time settings, including port definitions, process rows, browser sessions, agent launchers, stop script, and setup result metadata
+- seeded per-workspace copies of launch-time settings, including service definitions, process rows, browser sessions, agent launchers, stop script, and setup result metadata
 
 ### Runtime Records
 Runtime state persists separately from project and workspace templates:
-- allocated ports
+- allocated service ports
 - running processes
 - runtime targets
 - terminal target details
@@ -735,7 +737,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 2. For git projects, treat `Create branch` as a strictly new-branch flow and reject any branch name that already exists locally, remotely, or in an archived workspace record; only the explicit existing-branch path may reuse that branch and revive its archived workspace.
 3. Create or import the workspace directory.
 4. Persist the workspace and seed per-workspace settings from project templates.
-5. Allocate named ports.
+5. Allocate service ports.
 6. Run setup logic. Setup executes through `/bin/bash -lc`, writes merged stdout and stderr to `<profile-runtime>/workspace-setup/<workspace-id>/setup.log`, and records setup status, timestamps, exit code, and log path in `workspace_settings`.
    - Direct orchestrator creation (CLI) runs setup synchronously by default.
    - The Device API create handler defers setup: it persists the workspace with `pending` setup state, returns the mutation response immediately, and runs the setup script on a background queue (fresh store and orchestrator, mirroring the workspace-terminal reservation path). This keeps a long-running setup script from blocking the create request past the client request timeout; the GUI navigates to the new workspace and shows the setup screen while setup runs.
@@ -744,7 +746,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 ### Workspace Launch
 1. Validate that the workspace is launchable.
 2. Require workspace setup status to be `succeeded`; pending, running, or failed setup blocks managed runtime launch and recovery paths.
-3. Build the workspace environment, including named port variables and workspace paths.
+3. Build the workspace environment, including service port and URL variables and workspace paths.
 4. Close and terminate any prior Spaces-backed configured process sessions that occupy the same workspace slots.
 5. Start tracked processes inside dedicated built-in terminal sessions, wait for the session boundary to become available, and then record the terminal row plus runtime state.
 6. Leave configured browser sessions unopened until the user focuses them.
@@ -755,7 +757,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 2. Run the workspace stop script when appropriate.
 3. Close tracked dedicated windows safely.
 4. Clear runtime state. A plain stop waits briefly for built-in terminal sessions to confirm exit so the workspace keeps consistent runtime state; archive skips that wait because it force-removes the worktree regardless of session state, which keeps archiving fast.
-5. Release ports.
+5. Release service ports.
 6. Archive git worktrees when the action requires it.
 7. When the user opted in during archive confirmation, attempt remote-branch deletion first and local-branch deletion second, then surface any skipped or failed branch cleanup as a post-archive notice instead of rolling back the archive.
 
@@ -766,14 +768,19 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Device-runtime watchers live in `spacesd` (worktree discovery), while watchers that drive only client UI state remain in `AppKitController`/`SidebarController` (the database-change sidebar reload and the process-exit observers), each with explicit start/stop lifetimes tied to its owner's lifecycle. When a watcher cannot be installed, the affected live feature surfaces the failure instead of falling back to polling.
 - A reload deferred because the user is mid-edit (an open add form, unsaved project settings, or focused text input) is held and flushed at the next idle point (form close or app re-activation) rather than re-checked on a timer.
 - Background reconciliation removes stale tracked windows and refreshes persisted workspace metadata from disk where needed.
-- Saving workspace settings updates persisted configuration and synchronizes named-port reservations, but it does not reconcile live runtime by auto-starting or auto-stopping processes, browser sessions, or coding agents.
+- Saving workspace settings updates persisted configuration and synchronizes service port reservations, but it does not reconcile live runtime by auto-starting or auto-stopping processes, browser sessions, or coding agents.
 - Reconciliation may degrade runtime health, but it should not silently promote or demote workspace lifecycle state.
 - Sidebar snapshot refresh can update the backing lists in the background without rebuilding the active detail pane when the current selection is still valid.
 - These passes should not block the main UI thread.
 - Workspace window tracking retains its existing interval-based pass; its inputs are multi-source and have no single event to observe.
 
 ## Environment and Process Model
-- Named port definitions are allocated per workspace and exposed as environment variables. Workspace-settings saves preserve existing allocations where possible, allocate newly added definitions immediately, and release removed definitions without waiting for the next launch.
+- Service definitions are allocated a local port per workspace and exposed as environment variables. Workspace-settings saves preserve existing allocations where possible, allocate newly added definitions immediately, and release removed definitions without waiting for the next launch.
+- Each service contributes environment variables keyed by the uppercased service name with hyphens turned into underscores: `SPACES_<SERVICE>_PORT` (the assigned local port) and `SPACES_<SERVICE>_URL` (the browser-facing `http://<service>.<slug>.localhost:<router port>` URL). Remote/Linux service processes receive the URL as host/origin metadata for framework host allowlists and CORS settings even though the remote daemon does not run Caddy. Per-workspace identity is exposed as `SPACES_WORKSPACE_SLUG` (a DNS-safe slug) and `SPACES_WORKSPACE_HOST` (`<slug>.localhost`).
+- The workspace slug is derived from `slugifyBranchName(branch)` joined with a 12-character stable hash of the workspace id, so the slug is DNS-safe, stable for the workspace, and unique even when many workspaces share a branch-derived prefix.
+- Service port assignment is computed in one place and injected at two sites: the daemon's process-launch environment build, and the Caddy router config the daemon generates. Both read the same per-workspace assignments so a service's `127.0.0.1` port and its routed host always agree.
+- `SpacesDeviceAssignedPort` carries the assigned port plus a `url` field holding the derived routed URL, so clients render the Services section and overview without recomputing the host scheme.
+- Service definitions and their port assignments persist in the `project_services`, `workspace_services`, and `workspace_service_ports` tables. A non-destructive schema migration renames the earlier `*_port_*` tables and columns (e.g. `workspace_ports` → `workspace_service_ports`, `port_number` → `port`, `port_name` → `service_name`, `definition_id` → `service_id`) in place, preserving existing rows.
 - Workspace processes also receive stable environment variables such as project and workspace directories.
 - Setup scripts, stop scripts, and process commands all execute against the workspace-specific environment.
 - Built-in `Spaces` terminal sessions own their process lifetime directly through the session backend for launch, stop, recovery, and reopen.
@@ -783,9 +790,16 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
 - Each `ProcessTemplate` stores name, command, kind, and on-exit behavior. Persisted `execution_mode` values are ignored.
 - Process commands are validated as non-empty shell command strings.
-- Process launch exports the workspace environment, including named ports and `SPACES_*` directory variables, then executes the command through the user's resolved login shell.
+- Process launch exports the workspace environment, including service port and URL variables and `SPACES_*` directory variables, then executes the command through the user's resolved login shell.
 - Project and workspace editors, workspace launch, running-process restart validation, JSON import/export, and CLI text output all preserve shell-string process semantics.
 - Configured coding-agent launchers also run as shell strings through an inner interactive login shell so user shell PATH setup and tool bootstrap from files such as `.zshrc` are available.
+
+### Service Routing
+- The macOS daemon (`spacesd`) runs a bundled Caddy reverse proxy that maps `http://<service>.<slug>.localhost:<router port>` to each service's assigned `127.0.0.1` port. The default router port is `8088` and is configurable. Transport is plain HTTP on that shared high port and binds only to IPv4 and IPv6 loopback, so there is no LAN listener, TLS material, certificate trust, or administrator setup; Chrome and Safari treat `*.localhost` as a secure loopback context. Chrome is the supported browser, and Firefox does not resolve arbitrary `*.localhost` names by default.
+- The Caddy binary is Apache-2.0 licensed and is bundled with Spaces directly rather than through Docker or Homebrew. `apps/macos/scripts/setup_caddy.sh` fetches a pinned universal Caddy binary into `apps/macos/.local/caddy/caddy` (mirroring `setup_ghostty.sh`), and `scripts/create-app-bundle.sh` runs that setup for standard packaging before copying Caddy into the app bundle at `Contents/Resources/caddy`. The DMG installer copies the same binary to the Spaces-owned `/usr/local/bin/spaces-caddy` helper beside the installed `spacesd` daemon. The daemon probes for that helper beside its executable, at the bundle resource location, and at the repo-local `.local` path so installed and development builds both resolve it without replacing a user-managed `caddy` executable.
+- The daemon generates a Caddy JSON config under the profile runtime directory, launches Caddy with a unix-socket admin endpoint, and reloads it gracefully over that socket whenever workspace service assignments change. Reconciliation is driven by `databaseDidChange` and also verifies that Caddy is still running, so adding, removing, or reassigning a service updates routing without restarting Caddy or interrupting unaffected routes while a killed router is relaunched on the next reconcile.
+- Routing is macOS- and local-only. Remote and Linux daemons do not run Caddy, and routing covers only the local device's workspaces. Remote workspace processes still receive the browser-facing `SPACES_<SERVICE>_URL` value for host/origin configuration. Remote-workspace routing is unimplemented: it would require forwarding the remote service port to the Mac and feeding that Mac-side port into the route table instead of the daemon-side assignment.
+- The route table reads the per-workspace `workspace_service_ports` assignments. The workspace-detail GUI section that edits services retains its internal `PortsSection`/`PortRowView` type names while presenting a "Services" label. There is no `spaces` CLI subcommand for services; service ports and URLs are surfaced through the injected environment variables and the GUI.
 
 ## Window and Focus Architecture
 - The Spaces app owns window identity and cross-app focusing itself: it tracks and focuses its own AppKit terminal windows and activates Chrome for browser sessions.
@@ -793,7 +807,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Browser sessions are stored as workspace configuration and only become tracked windows after an explicit focus action opens them.
 - Browser-session focus targets Chrome directly: `WindowRecord.windowID` stores the Chrome window ID for the session's dedicated window, and Chrome tab targeting uses that window ID plus a tab index gathered from a live tab scan.
 - Browser-session matching is URL-based and tolerant of equivalent host forms. Focus, recovery, and browser-row naming all normalize scheme, host, port, and path so `google.com` and `www.google.com` resolve to the same configured session while still preferring the most specific matching session prefix.
-- For remote runtime plans, configured browser URLs that resolve to a named localhost service port are rewritten to a Mac-owned SSH local forward before Chrome focus or recovery. `BrowserSSHForwardManager` owns the `ssh -L` process keyed by host and remote port; unrelated URLs and unnamed ports keep their configured address.
+- For remote runtime plans, configured browser URLs that resolve to a service's localhost port are rewritten to a Mac-owned SSH local forward before Chrome focus or recovery. `BrowserSSHForwardManager` owns the `ssh -L` process keyed by host and remote port; unrelated URLs and unmatched ports keep their configured address.
 - Browser-session focus from a built-in terminal first tries a scanned Chrome window and tab identity for the target URL, verifies that the activated tab still belongs to the requested session, then falls back to the broader URL-scan path when browser-specific targeting cannot resolve the session.
 - Browser-session recovery and extracted-window reuse use the same normalized URL matcher as direct focus so reopened browser windows remain attached to the intended configured session even when Chrome canonicalizes the visible URL.
 - GUI and harness workspace focus resolve explicit names instead of numeric window indexes. Those names come from the same workspace-level focus model used for browser sessions, running processes, and agent terminals, and the names must stay unique within a workspace.

@@ -664,7 +664,7 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web")])
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [24000], names: ["API_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [24000], names: ["api"])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -673,7 +673,7 @@ extension OrchestratorTests {
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes = [ProcessTemplate(name: "worker", command: "npm run worker")]
-            settings.ports = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
+            settings.ports = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
         }
 
         let processes = try store.runningProcesses(workspaceID: workspace.id)
@@ -682,7 +682,7 @@ extension OrchestratorTests {
 
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(namedPorts.map(\.port), [24000, 20000])
-        XCTAssertEqual(namedPorts.map(\.name), ["API_PORT", "WEB_PORT"])
+        XCTAssertEqual(namedPorts.map(\.name), ["api", "web"])
         XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
@@ -1402,7 +1402,7 @@ extension OrchestratorTests {
 
         // Add port definitions so that portDefinitions.count > 0 with no ports allocated yet.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.ports = [PortDefinition(name: "web"), PortDefinition(name: "api")]
+            settings.ports = [ServiceDefinition(name: "web"), ServiceDefinition(name: "api")]
         }
 
         try orchestrator.upWorkspace(workspaceID: workspace.id)

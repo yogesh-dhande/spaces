@@ -16,7 +16,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: root.path)
 
         try orchestrator.updateProjectConfig(projectID: project.id) { project in
-            project.ports = [PortDefinition(name: "FRONTEND_PORT")]
+            project.ports = [ServiceDefinition(name: "frontend")]
             project.processes = [ProcessTemplate(name: "web", command: "PORT=${TYPO_PORT:-3000} npm run dev | tee log.txt")]
         }
 
@@ -32,7 +32,7 @@ extension OrchestratorTests {
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.ports = [PortDefinition(name: "FRONTEND_PORT")]
+            settings.ports = [ServiceDefinition(name: "frontend")]
             settings.processes = [ProcessTemplate(name: "web", command: "PORT=$TYPO_PORT npm run dev")]
         }
 
@@ -209,9 +209,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
 
         let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
@@ -258,9 +256,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id)
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
 
         let sessionID = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" })?.terminalTrackingID)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
@@ -280,7 +276,8 @@ extension OrchestratorTests {
         XCTAssertEqual(names, ["Frontend", "API"])
     }
 
-    func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWithoutDesktopWindowIDWhileSessionIsLive() throws {        let root = try makeTempDirectory()
+    func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWithoutDesktopWindowIDWhileSessionIsLive() throws {
+        let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
@@ -487,8 +484,8 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, terminalTarget: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
@@ -686,14 +683,14 @@ extension OrchestratorTests {
 
         let updatedProject = try orchestrator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { config in
             config.stopScript = "echo reviewed-stop"
-            config.ports = [PortDefinition(name: "API_PORT")]
+            config.ports = [ServiceDefinition(name: "api")]
             config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
         }
 
         XCTAssertEqual(updatedProject.stopScript, "echo reviewed-stop")
         let settings = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: workspace.id))
         XCTAssertEqual(settings.stopScript, "echo reviewed-stop")
-        XCTAssertEqual(settings.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(settings.ports.map(\.name), ["api"])
         XCTAssertEqual(settings.processes.first?.name, "api")
     }
 
@@ -767,20 +764,20 @@ extension OrchestratorTests {
     // Tests workspace settings and accessors reflect store state by arranging representative inputs and asserting the expected result.
     func testWorkspaceSettingsAndAccessorsReflectStoreState() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        let api = PortDefinition(id: "port-api", name: "API_PORT")
-        let web = PortDefinition(id: "port-web", name: "WEB_PORT")
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [api, web])
+        let api = ServiceDefinition(id: "port-api", name: "api")
+        let web = ServiceDefinition(id: "port-web", name: "web")
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [api, web])
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4100, 4101], names: [api.name, web.name], definitionIDs: [api.id, web.id])
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, terminalTarget: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         // Why: keep this test focused on persisted settings/accessor behavior.
         // Remaining risk: browser-session behavior with real Chrome is intentionally excluded in this unit.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.stopScript = "echo workspace-stop"
-            settings.ports = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
+            settings.ports = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
             settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
             settings.browserSessions = []
         }
@@ -805,7 +802,7 @@ extension OrchestratorTests {
         try orchestrator.updateProjectConfig(projectID: project.id) { p in
             p.setupScript = "echo setup"
             p.stopScript = "echo stop"
-            p.ports = [PortDefinition(name: "API_PORT")]
+            p.ports = [ServiceDefinition(name: "api")]
             p.processes = [ProcessTemplate(name: "api", command: "npm start")]
         }
 
@@ -931,8 +928,8 @@ extension OrchestratorTests {
         let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
         let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
         let archived = WorkspaceRecord(
-            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch,
-            isDefault: true, isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
+            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true,
+            isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
         try store.upsert(workspace: archived)
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: defaultWS.id)).isArchived)
 
@@ -958,8 +955,8 @@ extension OrchestratorTests {
         // Insert a default workspace directly without going through seedWorkspaceSettings.
         let workspaceID = UUID().uuidString
         let workspaceRecord = WorkspaceRecord(
-            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 
@@ -1029,8 +1026,9 @@ extension OrchestratorTests {
             baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "App", url: "http://localhost:$PORT")])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id, sessions: [BrowserSession(name: "App", url: "http://localhost:$SPACES_PORT_PORT")])
 
         let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(resolved.map(\.url), ["http://localhost:3000"])
@@ -1044,11 +1042,12 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
             sessions: [
-                BrowserSession(name: "First", url: "http://localhost:$PORT"), BrowserSession(name: "Duplicate", url: "http://localhost:$PORT"),
+                BrowserSession(name: "First", url: "http://localhost:$SPACES_PORT_PORT"),
+                BrowserSession(name: "Duplicate", url: "http://localhost:$SPACES_PORT_PORT"),
             ])
 
         let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
@@ -1081,11 +1080,12 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
             sessions: [
-                BrowserSession(name: "App", url: "http://localhost:$PORT"), BrowserSession(name: "Admin", url: "http://localhost:$PORT/admin"),
+                BrowserSession(name: "App", url: "http://localhost:$SPACES_PORT_PORT"),
+                BrowserSession(name: "Admin", url: "http://localhost:$SPACES_PORT_PORT/admin"),
             ])
 
         let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)

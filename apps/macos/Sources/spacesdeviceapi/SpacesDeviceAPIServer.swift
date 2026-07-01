@@ -1187,15 +1187,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let overviewLoaderForTesting { return try overviewLoaderForTesting(clientApp) }
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
+        let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
         let projects = try store.projects()
         let workspaces = try projects.flatMap { project in
             try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
-                SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
+                let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+                return SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
                     agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id),
                     assignedPorts: (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id).map {
-                        SpacesDeviceAssignedPort(name: $0.name, port: $0.port)
+                        SpacesDeviceAssignedPort(name: $0.name, port: $0.port, url: "http://\($0.name).\(slug).localhost:\(routerPort)")
                     }) ?? [], resolvedBrowserSessions: (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? [],
                     setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id), terminalDaemonEndpoint: nil)
             }
@@ -1807,7 +1809,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func normalizedRowKey(_ value: String?) -> String { normalizedString(value)?.lowercased() ?? "" }
 
-    private func workspacePort(_ port: SpacesDevicePortDefinition) -> PortDefinition { PortDefinition(id: port.id, name: port.name) }
+    private func workspacePort(_ port: SpacesDeviceServiceDefinition) -> ServiceDefinition { ServiceDefinition(id: port.id, name: port.name) }
 
     private func workspaceProcess(_ process: SpacesDeviceProcessTemplate) -> ProcessTemplate {
         ProcessTemplate(

@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 public enum SpacesDeviceKind: String, Codable, Sendable, Equatable {
     case local
@@ -189,8 +190,12 @@ public enum SpacesDevicePlanner {
         project: ProjectRecord, workspace: WorkspaceRecord, selection: SpacesDeviceSelection, namedPorts: [WorkspaceRuntimePortMapping]
     ) -> WorkspaceRuntimeManifest {
         let workingPath = workspace.runtimePath
-        var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id]
-        for mapping in namedPorts { environment[mapping.name] = String(mapping.port) }
+        let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+        var environment = [
+            "SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug,
+            "SPACES_WORKSPACE_HOST": "\(slug).localhost",
+        ]
+        for mapping in namedPorts { environment[ServiceName.portEnvVar(for: mapping.name)] = String(mapping.port) }
 
         return WorkspaceRuntimeManifest(
             workspaceID: workspace.id, projectID: project.id, deviceID: SpacesDeviceRecord.localDeviceID, location: .local,

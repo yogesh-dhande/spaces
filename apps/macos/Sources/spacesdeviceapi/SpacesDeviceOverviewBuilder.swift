@@ -172,7 +172,9 @@ struct SpacesDeviceOverviewBuilder {
             agentLaunchers: settings?.agentLaunchers.map(deviceAgentLauncher) ?? [])
     }
 
-    private static func devicePort(_ port: PortDefinition) -> SpacesDevicePortDefinition { SpacesDevicePortDefinition(id: port.id, name: port.name) }
+    private static func devicePort(_ port: ServiceDefinition) -> SpacesDeviceServiceDefinition {
+        SpacesDeviceServiceDefinition(id: port.id, name: port.name)
+    }
 
     private static func deviceProcess(_ process: ProcessTemplate) -> SpacesDeviceProcessTemplate {
         SpacesDeviceProcessTemplate(id: process.id, name: process.name, command: process.command, kind: process.kind, onExit: process.onExit.rawValue)
@@ -434,17 +436,11 @@ struct SpacesDeviceOverviewBuilder {
         return sessionID
     }
 
-    private static func terminalTrackingKey(_ process: RunningProcessRecord) -> String? {
-        terminalSessionID(for: process).map { "terminal:\($0)" }
-    }
+    private static func terminalTrackingKey(_ process: RunningProcessRecord) -> String? { terminalSessionID(for: process).map { "terminal:\($0)" } }
 
-    private static func terminalTrackingKey(_ agent: AgentWindowRecord) -> String? {
-        terminalSessionID(for: agent).map { "terminal:\($0)" }
-    }
+    private static func terminalTrackingKey(_ agent: AgentWindowRecord) -> String? { terminalSessionID(for: agent).map { "terminal:\($0)" } }
 
-    private static func terminalTrackingKey(_ window: WindowRecord) -> String? {
-        terminalSessionID(for: window).map { "terminal:\($0)" }
-    }
+    private static func terminalTrackingKey(_ window: WindowRecord) -> String? { terminalSessionID(for: window).map { "terminal:\($0)" } }
 
     private static func terminalDetail(for agent: AgentWindowRecord, windows: [WindowRecord]) -> String? {
         guard let key = terminalTrackingKey(agent) else { return nil }

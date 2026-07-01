@@ -97,6 +97,7 @@ import workspacecore
         private var databaseDistributedChangeObserver: NSObjectProtocol?
         private var processExitMonitor: ProcessExitMonitorService?
         private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
+        private var caddyRouterService: CaddyRouterService?
     #endif
     private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
         builtInTerminalSessionTerminator: { [weak self] sessionID in
@@ -155,6 +156,11 @@ import workspacecore
             }
             foregroundAgentReconciler.start()
             terminalForegroundAgentReconciler = foregroundAgentReconciler
+            let caddyRouter = CaddyRouterService(databasePath: databasePath) { error in
+                writeStandardError("spacesd caddy_router_error error=\(error)\n")
+            }
+            caddyRouter.start()
+            caddyRouterService = caddyRouter
         #endif
         databaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
             [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() }
@@ -170,6 +176,7 @@ import workspacecore
         worktreeDiscoveryService?.refreshWatchers()
         #if os(macOS)
             processExitMonitor?.refreshObservers()
+            caddyRouterService?.reconcile()
         #endif
     }
 
@@ -218,6 +225,8 @@ import workspacecore
             processExitMonitor = nil
             terminalForegroundAgentReconciler?.stop()
             terminalForegroundAgentReconciler = nil
+            caddyRouterService?.stop()
+            caddyRouterService = nil
         #endif
         deviceAPISupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }

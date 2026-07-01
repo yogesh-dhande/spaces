@@ -84,8 +84,8 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM running_processes WHERE workspace_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_service_ports WHERE workspace_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_services WHERE workspace_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM workspaces WHERE id = ?", bindings: [id])
             if let deletedWorkspace { try markIgnoredWorktree(path: deletedWorkspace.dir, projectID: deletedWorkspace.projectID) }
         }
@@ -186,8 +186,8 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM workspace_processes WHERE workspace_id = ?", bindings: [workspaceID])
             try execute(sql: "DELETE FROM workspace_browser_sessions WHERE workspace_id = ?", bindings: [workspaceID])
             try execute(sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id = ?", bindings: [workspaceID])
-            try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id = ?", bindings: [workspaceID])
-            try execute(sql: "DELETE FROM workspace_port_definitions WHERE workspace_id = ?", bindings: [workspaceID])
+            try execute(sql: "DELETE FROM workspace_service_ports WHERE workspace_id = ?", bindings: [workspaceID])
+            try execute(sql: "DELETE FROM workspace_services WHERE workspace_id = ?", bindings: [workspaceID])
         }
     }
 

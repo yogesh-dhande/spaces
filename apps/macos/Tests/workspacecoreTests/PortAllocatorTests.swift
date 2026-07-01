@@ -14,10 +14,10 @@ final class PortAllocatorTests: XCTestCase {
         let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
-        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001], names: ["RESERVED_API", "RESERVED_WEB"])
+        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001], names: ["reserved-api", "reserved-web"])
 
         let allocator = PortAllocator(store: store)
-        let definitions = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
+        let definitions = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
         let ports = try allocator.allocatePorts(workspaceID: workspaceB.id, definitions: definitions, range: PortRange(start: 20000, end: 20003))
 
         XCTAssertEqual(ports, [20002, 20003])
@@ -25,9 +25,9 @@ final class PortAllocatorTests: XCTestCase {
         XCTAssertEqual(stored, [20002, 20003])
         let named = try store.workspacePortsNamed(workspaceID: workspaceB.id)
         XCTAssertEqual(named.count, 2)
-        XCTAssertEqual(named[0].name, "API_PORT")
+        XCTAssertEqual(named[0].name, "api")
         XCTAssertEqual(named[0].port, 20002)
-        XCTAssertEqual(named[1].name, "WEB_PORT")
+        XCTAssertEqual(named[1].name, "web")
         XCTAssertEqual(named[1].port, 20003)
     }
 
@@ -42,10 +42,10 @@ final class PortAllocatorTests: XCTestCase {
         let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(workspace: workspaceA)
         try store.upsert(workspace: workspaceB)
-        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001, 20002], names: ["RESERVED_1", "RESERVED_2", "RESERVED_3"])
+        try store.setWorkspacePorts(workspaceID: workspaceA.id, ports: [20000, 20001, 20002], names: ["reserved-1", "reserved-2", "reserved-3"])
 
         let allocator = PortAllocator(store: store)
-        let definitions = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
+        let definitions = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
 
         XCTAssertThrowsError(
             try allocator.allocatePorts(workspaceID: workspaceB.id, definitions: definitions, range: PortRange(start: 20000, end: 20002))
@@ -83,7 +83,7 @@ final class PortAllocatorTests: XCTestCase {
         try store.upsert(workspace: workspace)
 
         // Store ports directly so reserveExistingPorts finds a non-empty list.
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [29001, 29002], names: ["API_PORT", "WEB_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [29001, 29002], names: ["api", "web"])
 
         let allocator = PortAllocator(store: store)
         // Should not throw and should call PortReserver.shared.reservePorts (non-empty ports path).
@@ -104,17 +104,17 @@ final class PortAllocatorTests: XCTestCase {
 
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20010], names: ["API_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20010], names: ["api"])
 
         let allocator = PortAllocator(store: store)
         let ports = try allocator.syncPorts(
-            workspaceID: workspace.id, definitions: [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")],
+            workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")],
             range: PortRange(start: 20010, end: 20020))
 
         XCTAssertEqual(ports, [20010, 20011])
         let named = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(named.map(\.port), [20010, 20011])
-        XCTAssertEqual(named.map(\.name), ["API_PORT", "WEB_PORT"])
+        XCTAssertEqual(named.map(\.name), ["api", "web"])
         XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
 
         PortReserver.shared.releasePorts(workspaceID: workspace.id)
@@ -129,9 +129,9 @@ final class PortAllocatorTests: XCTestCase {
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(workspace: workspace)
 
-        let api = PortDefinition(id: "port-api", name: "API_PORT")
-        let web = PortDefinition(id: "port-web", name: "WEB_PORT")
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [api])
+        let api = ServiceDefinition(id: "port-api", name: "api")
+        let web = ServiceDefinition(id: "port-web", name: "web")
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [api])
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20010], names: [api.name], definitionIDs: [api.id])
 
         let allocator = PortAllocator(store: store)
@@ -155,19 +155,19 @@ final class PortAllocatorTests: XCTestCase {
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
         try store.upsert(workspace: workspace)
 
-        let api = PortDefinition(id: "port-api", name: "API_PORT")
-        let web = PortDefinition(id: "port-web", name: "WEB_PORT")
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [api, web])
+        let api = ServiceDefinition(id: "port-api", name: "api")
+        let web = ServiceDefinition(id: "port-web", name: "web")
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [api, web])
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20000, 20001], names: [api.name, web.name], definitionIDs: [api.id, web.id])
 
         let allocator = PortAllocator(store: store)
         let ports = try allocator.syncPorts(
-            workspaceID: workspace.id, definitions: [PortDefinition(id: web.id, name: "FRONTEND_PORT")], range: PortRange(start: 20000, end: 20020))
+            workspaceID: workspace.id, definitions: [ServiceDefinition(id: web.id, name: "frontend")], range: PortRange(start: 20000, end: 20020))
 
         XCTAssertEqual(ports, [20001])
         let named = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(named.map(\.port), [20001])
-        XCTAssertEqual(named.map(\.name), ["FRONTEND_PORT"])
+        XCTAssertEqual(named.map(\.name), ["frontend"])
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: workspace.id).map(\.definitionID), [web.id])
 
         PortReserver.shared.releasePorts(workspaceID: workspace.id)

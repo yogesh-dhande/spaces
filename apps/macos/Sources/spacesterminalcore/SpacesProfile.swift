@@ -141,6 +141,16 @@ public struct SpacesProfile: Sendable, Equatable {
         return slug.isEmpty ? "detached-head" : slug
     }
 
+    /// DNS-safe per-workspace host slug used as the middle label in `<service>.<slug>.localhost`.
+    /// Combines the branch slug with a short stable hash of the workspace id so two workspaces on the
+    /// same branch get distinct hosts. Derived deterministically from branch + id (never persisted).
+    public static func workspaceHostSlug(branch: String?, workspaceID: String) -> String {
+        let suffix = shortStableHash(workspaceID)
+        let maxBaseLength = max(1, DNSLabel.maxLength - suffix.count - 1)
+        let base = DNSLabel.sanitize(slugifyBranchName(branch ?? ""), maxLength: maxBaseLength)
+        return "\(base)-\(suffix)"
+    }
+
     public static func shortStableHash(_ value: String) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in value.utf8 {

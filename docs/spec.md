@@ -7,7 +7,7 @@ Spaces is a local macOS control plane for switching between coding contexts quic
 
 It should reduce the overhead of:
 - creating and cleaning up workspaces and worktrees
-- starting the right processes with the right ports and environment
+- starting the right processes with the right service ports and environment
 - reopening the right browser and terminal windows
 - switching focus to the right window set
 - noticing attention items such as failed processes or coding agents waiting on a human
@@ -49,7 +49,7 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
 ### Project
 A project is a codebase plus reusable templates:
 - setup and stop scripts
-- named port definitions
+- service definitions
 - process templates
 - browser sessions
 
@@ -121,7 +121,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Expanding a project that has no workspaces shows a single muted `No workspaces yet` hint row so the disclosure toggle always reveals content; the hint is not selectable.
 - Sidebar workspace rows show the git branch name. A non-git project owns a single workspace whose directory is the project directory, so it renders as one flat selectable row labeled with the project folder name, without a disclosure chevron or a nested workspace row.
 - Sidebar workspaces under a project are ordered with the default workspace first, then the rest sorted alphabetically by display name (branch, or folder name for non-git) using natural, case-insensitive comparison, so the list is easy to scan.
-- The workspace detail pane is a single scrollable page: the workspace name (its git branch, or the project folder name for non-git) and actions at the top, directory path with copy and reveal-in-Finder buttons, the git branch name when one is recorded, inline notes editor, then configuration sections for Processes, Browser sessions, Coding agents, Named ports, and Stop script. The workspace name is read-only and is not renamed directly; renaming a git workspace's branch changes the name. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a draft item. Running process and coding-agent rows should expose stop and restart actions before edit and delete, while non-running configured rows should show run before edit and delete. Named-port rows should show the reserved port number as secondary text next to the configured name. A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
+- The workspace detail pane is a single scrollable page: the workspace name (its git branch, or the project folder name for non-git) and actions at the top, directory path with copy and reveal-in-Finder buttons, the git branch name when one is recorded, inline notes editor, then configuration sections for Processes, Browser sessions, Coding agents, Services, and Stop script. The workspace name is read-only and is not renamed directly; renaming a git workspace's branch changes the name. Each section shows its configured items as rows and expands inline into an edit form when the pencil icon is clicked; the `+ add` header button appends a draft item. Running process and coding-agent rows should expose stop and restart actions before edit and delete, while non-running configured rows should show run before edit and delete. Service rows should show the assigned port number and the derived routed URL as secondary text next to the service name, and the service-name input is validated as a unique DNS label (lowercase letters, digits, and hyphens, starting and ending with a letter or digit). A `⋯` overflow button in the action row exposes Copy path and Reveal in Finder, with Reveal in Finder available as a keyboard-invokable menu item via `⌘⇧F`.
 - The workspace detail footer should show inline shortcut hints for Toggle app, Alerts, Settings, Open editor, New terminal, Next window, and Prev window, in that order.
 
 ## Devices and Pairing
@@ -233,10 +233,19 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The setup recovery screen shows setup status, timestamps, exit code, error text, and the setup log tail. It allows setup retry, Finder reveal, ad-hoc terminal access, and setup log copy/open actions. Failed setup also exposes inline setup script editing before retry.
 - Configured processes, coding-agent launchers, and browser sessions must not launch or recover until workspace setup has succeeded. Ad-hoc workspace terminals remain available for setup repair.
 - If a configured process exits during startup, launch should surface the recent process output itself and should not open a secondary recovery window that only reports a follow-on attach failure.
-- Named ports must be available to setup scripts, stop scripts, and process commands.
-- Adding a named port from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
-- Named port assignments belong to the workspace until that workspace is archived. Stopping a workspace must not give its assigned port numbers back to other workspaces.
-- When a stopped workspace owns named ports, Spaces may hold placeholder reservations for those ports, but launching the workspace must hand those ports to the real process command so user-facing servers can bind them normally.
+- A project declares named services. Each service is a unique DNS-safe name (lowercase letters, digits, and hyphens, starting and ending with a letter or digit, up to 63 characters) and receives one dynamically assigned local port per workspace.
+- Each workspace process, setup script, and stop script runs with service and workspace environment variables available:
+  - `SPACES_<SERVICE>_PORT` — the assigned local port for that service, uppercased with hyphens turned into underscores (service `admin-ui` is exposed as `SPACES_ADMIN_UI_PORT`).
+  - `SPACES_WORKSPACE_SLUG` — a DNS-safe per-workspace slug, such as `login-fix-a3f9c2d1847b`.
+  - `SPACES_WORKSPACE_HOST` — `<slug>.localhost`.
+  - `SPACES_<SERVICE>_URL` — the routed URL `http://<service>.<slug>.localhost:8088` for that service.
+- A process binds the port Spaces assigns it, for example `PORT=$SPACES_WEB_PORT npm run dev`.
+- A bundled Caddy reverse proxy runs on the Mac and routes `http://<service>.<slug>.localhost:<router port>` to that service's assigned `127.0.0.1` port, so every workspace reaches its services at stable per-workspace URLs. The default router port is `8088` and is configurable. Routing is plain HTTP on that shared high port, listens only on loopback addresses, and requires no TLS, certificate, or administrator setup because Chrome and Safari treat `*.localhost` as a secure loopback context. Chrome is the supported browser; Firefox does not resolve arbitrary `*.localhost` names by default. Caddy routes every service host whether or not the service has a browser session.
+- Routing is scoped to local workspaces. Remote and Linux daemons do not run the Caddy router.
+- Remote and Linux workspace processes may still receive `SPACES_<SERVICE>_URL` so app servers can allowlist the browser-facing host or origin for CORS and framework host checks.
+- Adding a service from the workspace detail view should reserve its port number immediately instead of waiting for the next workspace launch.
+- Service assignments belong to the workspace until that workspace is archived. Stopping a workspace must not give its assigned port numbers back to other workspaces.
+- When a stopped workspace owns services, Spaces may hold placeholder reservations for those ports, but launching the workspace must hand those ports to the real process command so user-facing servers can bind them normally.
 - Stopping or restarting a workspace must never close unrelated user windows.
 - Runtime health is separate from lifecycle state:
   - `Running` workspaces can be healthy or degraded

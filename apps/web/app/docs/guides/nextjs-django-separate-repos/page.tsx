@@ -31,17 +31,17 @@ export default function NextjsDjangoSeparateReposGuidePage() {
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Project Settings</h2>
         <p className={prose}>
-          The frontend workspace must own both frontend and backend ports and run both processes if it is the central context for both services.
+          The frontend workspace must own both frontend and backend services and run both processes if it is the central context for both services.
         </p>
         <h3 className="mt-4 text-sm font-semibold text-foreground">Frontend Project Template</h3>
 <pre className={code}>
-          <code>{`Ports: FRONTEND_PORT, BACKEND_PORT
-Frontend Server: API_URL=http://localhost:$BACKEND_PORT PORT=$FRONTEND_PORT npm run dev
-Backend Server: cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$BACKEND_PORT
-Browser Session: http://localhost:$FRONTEND_PORT`}</code>
+          <code>{`Services: frontend, backend
+Frontend Server: API_URL=$SPACES_BACKEND_URL PORT=$SPACES_FRONTEND_PORT npm run dev
+Backend Server: cd /path/to/backend-project && python manage.py runserver 0.0.0.0:$SPACES_BACKEND_PORT
+Browser Session: $SPACES_FRONTEND_URL`}</code>
         </pre>
         <p className={prose}>
-          The backend server is started from the frontend workspace so both processes can receive the same reserved env vars. The backend row can change directories directly because process commands run as shell input.
+          The backend server is started from the frontend workspace so both processes can receive the same <code>SPACES_&lt;SERVICE&gt;_PORT</code> and <code>SPACES_&lt;SERVICE&gt;_URL</code> env vars Spaces injects for each service. The backend row can change directories directly because process commands run as shell input.
         </p>
       </article>
 

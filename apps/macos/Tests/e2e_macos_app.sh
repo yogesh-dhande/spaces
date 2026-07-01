@@ -12,8 +12,10 @@ source "$ROOT_DIR/scripts/spaces-profile-helpers.sh"
 MACOS_DIR="$ROOT_DIR/apps/macos"
 source "$MACOS_DIR/Tests/e2e_fixture_repos.sh"
 # scripts/swiftpm.sh already changes into apps/macos internally, so the default
-# build command must not add a second package-path override.
-BUILD_CMD="${BUILD_CMD:-$ROOT_DIR/scripts/swiftpm.sh build}"
+# build command must not add a second package-path override. The script path is
+# wrapped in single quotes so that `eval "$BUILD_CMD"` keeps it as one token even
+# when the repo lives under a path containing spaces (e.g. "Application Support").
+BUILD_CMD="${BUILD_CMD:-'$ROOT_DIR/scripts/swiftpm.sh' build}"
 SPACES_APP="${SPACES_APP:-$MACOS_DIR/.build/debug/SpacesApp}"
 SPACES_CLI="${SPACES_CLI:-$MACOS_DIR/.build/debug/spaces}"
 SPACES_E2E_CLI="${SPACES_E2E_CLI:-$MACOS_DIR/.build/debug/spacese2e}"
@@ -89,8 +91,11 @@ SETUP_FIXTURES_ONLY=0
 PRESERVE_FIXTURES_ON_EXIT=0
 ONLY_WINDOW_CYCLE_PROFILE=0
 PROFILE_RECORD_METRICS=1
-APP_PORT_NAME="APP_PORT"
-API_PORT_NAME="API_PORT"
+# Service names are DNS-safe labels; the port each service binds is injected as SPACES_<SERVICE>_PORT.
+APP_SERVICE_NAME="app"
+API_SERVICE_NAME="api"
+APP_PORT_VAR="SPACES_APP_PORT"
+API_PORT_VAR="SPACES_API_PORT"
 PRIMARY_DOCS_URL=""
 PRIMARY_ADMIN_URL=""
 PRIMARY_BACKEND_STATUS_URL=""
@@ -877,24 +882,24 @@ seed_fixture() {
   # workspacecore layer so the manual test is reproducible.
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO" \
-    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
-    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SEED_FILE"
+    --docs-url "http://localhost:\$${APP_PORT_VAR}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_VAR}/admin/" >"$SEED_FILE"
 }
 
 seed_second_fixture() {
   log_step "seeding second project fixture (scout-errors)"
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_2" \
-    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
-    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$SECOND_SEED_FILE"
+    --docs-url "http://localhost:\$${APP_PORT_VAR}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_VAR}/admin/" >"$SECOND_SEED_FILE"
 }
 
 seed_third_fixture() {
   log_step "seeding third project fixture (prism-analytics)"
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_3" \
-    --docs-url "http://localhost:\$${APP_PORT_NAME}/docs/" \
-    --admin-url "http://localhost:\$${APP_PORT_NAME}/admin/" >"$THIRD_SEED_FILE"
+    --docs-url "http://localhost:\$${APP_PORT_VAR}/docs/" \
+    --admin-url "http://localhost:\$${APP_PORT_VAR}/admin/" >"$THIRD_SEED_FILE"
 }
 
 shell_quote() {
@@ -1194,11 +1199,11 @@ conn = sqlite3.connect(db_path)
 try:
     row = conn.execute(
         """
-        SELECT wp.port_number
-        FROM workspace_ports AS wp
+        SELECT wp.port
+        FROM workspace_service_ports AS wp
         JOIN workspaces AS w ON w.id = wp.workspace_id
-        WHERE w.dir = ? AND wp.port_name = ?
-        ORDER BY wp.port_index
+        WHERE w.dir = ? AND wp.service_name = ?
+        ORDER BY wp.service_index
         LIMIT 1
         """,
         (workspace_dir, port_name),
@@ -1217,7 +1222,7 @@ frontend_url_for_workspace() {
   local workspace_dir="$1"
   local path="$2"
   local port
-  port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")" || fail "missing named port $APP_PORT_NAME for $workspace_dir"
+  port="$(workspace_named_port "$workspace_dir" "$APP_SERVICE_NAME")" || fail "missing service $APP_SERVICE_NAME for $workspace_dir"
   printf 'http://localhost:%s%s\n' "$port" "$path"
 }
 
@@ -1225,7 +1230,7 @@ backend_url_for_workspace() {
   local workspace_dir="$1"
   local path="$2"
   local port
-  port="$(workspace_named_port "$workspace_dir" "$API_PORT_NAME")" || fail "missing named port $API_PORT_NAME for $workspace_dir"
+  port="$(workspace_named_port "$workspace_dir" "$API_SERVICE_NAME")" || fail "missing service $API_SERVICE_NAME for $workspace_dir"
   printf 'http://localhost:%s%s\n' "$port" "$path"
 }
 
@@ -2018,7 +2023,7 @@ set_workspace_stop_script_via_gui() {
   log_step "overriding workspace stop script through real workspace-settings path"
   "$SPACES_E2E_CLI" set-workspace-stop-script \
     --workspace-dir "$workspace_dir" \
-    --stop-script "bash -lc 'for port in \"\$APP_PORT\" \"\$API_PORT\"; do if [ -n \"\$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"\$pid\" ] && pids+=(\"\$pid\"); done < <(lsof -tiTCP:\"\$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"\${pids[@]}\"; do kill \"\$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"\${pids[@]}\"; do kill -0 \"\$pid\" >/dev/null 2>&1 && kill -9 \"\$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"$marker\\n\" >> \"$EVENT_LOG\"'" >/tmp/spaces-e2e-stop-script.json
+    --stop-script "bash -lc 'for port in \"\$SPACES_APP_PORT\" \"\$SPACES_API_PORT\"; do if [ -n \"\$port\" ]; then pids=(); while IFS= read -r pid; do [ -n \"\$pid\" ] && pids+=(\"\$pid\"); done < <(lsof -tiTCP:\"\$port\" -sTCP:LISTEN 2>/dev/null || true); for pid in \"\${pids[@]}\"; do kill \"\$pid\" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in \"\${pids[@]}\"; do kill -0 \"\$pid\" >/dev/null 2>&1 && kill -9 \"\$pid\" >/dev/null 2>&1 || true; done; fi; done; printf \"$marker\\n\" >> \"$EVENT_LOG\"'" >/tmp/spaces-e2e-stop-script.json
 }
 
 archive_workspace_via_gui() {
@@ -4257,8 +4262,8 @@ workspace_window_url_by_name() {
   raw_url="$(browser_session_url_for_name "$out_file" "$window_name")"
   [[ -n "$raw_url" ]] || return 0
   local port
-  port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")" || return 0
-  local placeholder="\$$APP_PORT_NAME"
+  port="$(workspace_named_port "$workspace_dir" "$APP_SERVICE_NAME")" || return 0
+  local placeholder="\$$APP_PORT_VAR"
   printf '%s\n' "${raw_url//$placeholder/$port}"
 }
 
@@ -5176,7 +5181,7 @@ for process in data["runningProcesses"]:
 PY
 )"
     local frontend_port
-    frontend_port="$(workspace_named_port "$workspace_dir" "$APP_PORT_NAME")"
+    frontend_port="$(workspace_named_port "$workspace_dir" "$APP_SERVICE_NAME")"
     log_process_recovery_snapshot "before-kill" "$workspace_dir" "frontend" "$frontend_port" "$frontend_pid"
     kill_process_group "$frontend_pid"
     kill_listener_processes "$frontend_port"

@@ -95,12 +95,15 @@ public final class SQLiteStore {
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000
         let portRange = (start <= 0 || end <= 0 || end <= start) ? PortRange.default : PortRange(start: start, end: end)
-        return AppConfig(portRange: portRange)
+        let storedRouterPort = try setting(key: SettingsKey.appRouterPort).flatMap(Int.init)
+        let routerPort = (storedRouterPort.map { $0 > 0 } ?? false) ? storedRouterPort! : AppConfig.defaultRouterPort
+        return AppConfig(portRange: portRange, routerPort: routerPort)
     }
 
     public func setAppConfig(_ config: AppConfig) throws {
         try setSetting(key: SettingsKey.appPortRangeStart, value: String(config.portRange.start))
         try setSetting(key: SettingsKey.appPortRangeEnd, value: String(config.portRange.end))
+        try setSetting(key: SettingsKey.appRouterPort, value: String(config.routerPort))
     }
 
     private func createSchema() throws { try executeBatch(sql: DatabaseSchema.latestSchemaSQL) }
@@ -151,9 +154,7 @@ public final class SQLiteStore {
         return value
     }
 
-    func decodeTerminalTarget(runtimeTargetID: String, app: String, name: String, detail: String, trackingID: String)
-        -> TerminalTargetRecord?
-    {
+    func decodeTerminalTarget(runtimeTargetID: String, app: String, name: String, detail: String, trackingID: String) -> TerminalTargetRecord? {
         guard !runtimeTargetID.isEmpty || !app.isEmpty || !trackingID.isEmpty else { return nil }
         return TerminalTargetRecord(
             runtimeTargetID: runtimeTargetID.isEmpty ? nil : runtimeTargetID, trackingID: trackingID.isEmpty ? nil : trackingID)

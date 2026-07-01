@@ -152,9 +152,7 @@ extension OrchestratorTests {
             XCTAssertTrue(log.contains("setup stdout"))
             XCTAssertTrue(log.contains("setup stderr"))
 
-            XCTAssertThrowsError(
-                try orchestrator.launchWorkspace(workspaceID: workspace.id)
-            ) { error in
+            XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id)) { error in
                 XCTAssertTrue(error.localizedDescription.contains("Workspace setup failed"))
                 XCTAssertTrue(error.localizedDescription.contains("exit code 7"))
             }
@@ -413,9 +411,7 @@ extension OrchestratorTests {
             settings.processes = [ProcessTemplate(name: "api", command: "npm run api")]
         }
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try orchestrator.launchWorkspace(workspaceID: workspace.id)
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
@@ -506,8 +502,8 @@ extension OrchestratorTests {
         let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
         defer { try? orchestrator.discardPreparedGitProject(prepared) }
 
-        XCTAssertThrowsError(try orchestrator.addPreparedGitProject(prepared) { config in config.ports = [PortDefinition(name: "   ")] }) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Port name is required"))
+        XCTAssertThrowsError(try orchestrator.addPreparedGitProject(prepared) { config in config.ports = [ServiceDefinition(name: "   ")] }) {
+            error in XCTAssertTrue(error.localizedDescription.contains("service name"))
         }
 
         XCTAssertTrue(try store.projects().isEmpty)

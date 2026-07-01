@@ -4,6 +4,7 @@ public enum SettingsKey {
     public static let appEditor = "app_editor"
     public static let appPortRangeStart = "app_port_range_start"
     public static let appPortRangeEnd = "app_port_range_end"
+    public static let appRouterPort = "app_router_port"
     public static let guiHotkey = "gui_hotkey"
     public static let defaultGUIHotkey = "cmd+alt+="
     public static let guiCommandPaletteHotkey = "gui_command_palette_hotkey"

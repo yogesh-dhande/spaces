@@ -135,7 +135,7 @@ extension WorkspaceOrchestrator {
             try store.upsert(workspace: defaultWorkspace)
             try seedWorkspaceSettings(project: record, workspace: defaultWorkspace)
             let appConfig = try store.appConfig()
-            let portDefinitions = try store.workspacePortDefinitions(workspaceID: defaultWorkspace.id)
+            let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: defaultWorkspace.id)
             _ = try PortAllocator(store: store).allocatePorts(
                 workspaceID: defaultWorkspace.id, definitions: portDefinitions, range: appConfig.portRange)
             return record
@@ -203,10 +203,10 @@ extension WorkspaceOrchestrator {
             id: baseRecord.id, name: baseRecord.name, dir: baseRecord.dir, isGitRepo: baseRecord.isGitRepo, defaultBranch: baseRecord.defaultBranch,
             setupScript: record.setupScript, stopScript: record.stopScript, ports: record.ports, processes: record.processes,
             browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
-        record.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: record.ports)
+        record.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: record.ports)
         record.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: record.processes)
         record.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: record.agentLaunchers)
-        record.ports = try normalizedPortDefinitions(record.ports)
+        record.ports = try normalizedServiceDefinitions(record.ports)
         try validateProcessTemplates(record.processes)
         try validateUniqueConfiguredFocusNames(
             processes: record.processes, browserSessions: record.browserSessions, agentLaunchers: record.agentLaunchers)
@@ -240,8 +240,8 @@ extension WorkspaceOrchestrator {
         settings.processes = seededWorkspaceProcesses(from: project.processes)
         settings.browserSessions = project.browserSessions
         settings.agentLaunchers = project.agentLaunchers
-        settings.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: settings.ports)
-        settings.ports = try normalizedPortDefinitions(settings.ports)
+        settings.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: settings.ports)
+        settings.ports = try normalizedServiceDefinitions(settings.ports)
         settings.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: settings.processes)
         settings.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: settings.agentLaunchers)
         try validateProcessTemplates(settings.processes)
@@ -249,7 +249,7 @@ extension WorkspaceOrchestrator {
             workspaceID: workspace.id, processes: settings.processes, browserSessions: settings.browserSessions,
             agentLaunchers: settings.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: settings.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: settings.ports)
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: settings.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: settings.agentLaunchers)

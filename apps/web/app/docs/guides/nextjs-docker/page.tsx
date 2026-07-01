@@ -32,12 +32,12 @@ export default function NextjsDockerGuidePage() {
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Port Definitions</h3>
+        <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
         <pre className={code}>
-          <code>{`FRONTEND_PORT`}</code>
+          <code>{`frontend`}</code>
         </pre>
         <p className={prose}>
-          Spaces assigns one host port per workspace. Compose maps host <code>$FRONTEND_PORT</code> to container port <code>3000</code>.
+          Spaces assigns each service its own host port per workspace. Compose maps host <code>$SPACES_FRONTEND_PORT</code> to container port <code>3000</code>.
         </p>
         <h4 className="mt-4 text-sm font-semibold text-foreground">docker-compose.yml example</h4>
         <pre className={code}>
@@ -45,7 +45,7 @@ export default function NextjsDockerGuidePage() {
   web:
     build: .
     ports:
-      - "\${FRONTEND_PORT}:3000"
+      - "\${SPACES_FRONTEND_PORT}:3000"
     environment:
       - PORT=3000`}</code>
         </pre>
@@ -62,7 +62,7 @@ export default function NextjsDockerGuidePage() {
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
         <pre className={code}>
-          <code>{`FRONTEND_PORT=$FRONTEND_PORT docker compose up --build`}</code>
+          <code>{`SPACES_FRONTEND_PORT=$SPACES_FRONTEND_PORT docker compose up --build`}</code>
         </pre>
         <p className={prose}>
           The process keeps Compose attached in one terminal, which is useful for live logs and interactive shutdown.
@@ -70,10 +70,10 @@ export default function NextjsDockerGuidePage() {
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
         <pre className={code}>
-          <code>{`http://localhost:$FRONTEND_PORT`}</code>
+          <code>{`$SPACES_FRONTEND_URL`}</code>
         </pre>
         <p className={prose}>
-          This targets the workspace-specific host mapping. Without named ports, one workspace can accidentally open another workspace&apos;s frontend.
+          This targets the workspace-specific service mapping. Without named services, one workspace can accidentally open another workspace&apos;s frontend.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Stop Script: stop vs down</h3>

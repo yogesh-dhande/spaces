@@ -62,13 +62,13 @@ final class SpacesDeviceTests: XCTestCase {
         let daemonTarget = SpacesDevicePlanner.daemonTarget(selection: selection, localSocketPath: "/tmp/spacesd.sock")
         let manifest = SpacesDevicePlanner.runtimeManifest(
             project: project, workspace: workspace, selection: selection,
-            namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "WEB_PORT", port: 3000)])
+            namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)])
 
         XCTAssertEqual(selection, .local(SpacesDeviceRecord.local()))
         XCTAssertEqual(daemonTarget.deviceID, SpacesDeviceRecord.localDeviceID)
         XCTAssertEqual(daemonTarget.socketPath, "/tmp/spacesd.sock")
         XCTAssertEqual(manifest.deviceID, SpacesDeviceRecord.localDeviceID)
         XCTAssertEqual(manifest.localPath, workspace.runtimePath)
-        XCTAssertEqual(manifest.processEnvironment["WEB_PORT"], "3000")
+        XCTAssertEqual(manifest.processEnvironment["SPACES_WEB_PORT"], "3000")
     }
 }

@@ -389,8 +389,8 @@ public final class WorkspaceOrchestrator {
         let previousProcesses = existing.processes
         let previousAgentLaunchers = existing.agentLaunchers
         update(&existing)
-        existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
-        existing.ports = try normalizedPortDefinitions(existing.ports)
+        existing.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: existing.ports)
+        existing.ports = try normalizedServiceDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
         existing.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: existing.agentLaunchers)
         try validateProcessTemplates(existing.processes)
@@ -398,7 +398,7 @@ public final class WorkspaceOrchestrator {
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: existing.ports)
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
@@ -845,7 +845,7 @@ public final class WorkspaceOrchestrator {
             throw WorkspaceError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
         let config = try loadWorkspaceSettings(project: project, workspace: workspace)
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         let ports = try store.workspacePorts(workspaceID: workspace.id)
         if ports.count != portDefinitions.count {
             let portRange = try store.appConfig().portRange
@@ -1691,7 +1691,7 @@ public final class WorkspaceOrchestrator {
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
     }
 
@@ -1726,7 +1726,7 @@ public final class WorkspaceOrchestrator {
             if try store.workspaceSettingsExists(workspaceID: workspace.id) {
                 settings = WorkspaceSettings(
                     stopScript: try store.workspaceStopScript(workspaceID: workspace.id),
-                    ports: try store.workspacePortDefinitions(workspaceID: workspace.id),
+                    ports: try store.workspaceServiceDefinitions(workspaceID: workspace.id),
                     processes: try store.workspaceProcesses(workspaceID: workspace.id),
                     browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id),
                     agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
@@ -1751,7 +1751,7 @@ public final class WorkspaceOrchestrator {
         }
 
         try store.setWorkspaceStopScript(workspaceID: snapshot.workspace.id, stopScript: settings.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
+        try store.setWorkspaceServiceDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
@@ -1769,7 +1769,7 @@ public final class WorkspaceOrchestrator {
             workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions, agentLaunchers: project.agentLaunchers,
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: seededWorkspaceProcesses(from: project.processes))
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
@@ -1780,7 +1780,7 @@ public final class WorkspaceOrchestrator {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
         if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
-        let ports = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let ports = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
@@ -1792,7 +1792,7 @@ public final class WorkspaceOrchestrator {
 
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
         let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
         if runSetupScript {
             try runWorkspaceSetup(project: project, workspace: workspace)
@@ -1805,11 +1805,9 @@ public final class WorkspaceOrchestrator {
         project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)], runtimeManifest: WorkspaceRuntimeManifest? = nil
     ) -> [String: String] {
         var env: [String: String] = [:]
-        for namedPort in namedPorts {
-            let key = namedPort.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !key.isEmpty else { continue }
-            env[key] = String(namedPort.port)
-        }
+        // The runtime manifest is the authoritative source of the per-service port variables
+        // (SPACES_<SVC>_PORT) and the workspace identity variables (SPACES_WORKSPACE_SLUG / _HOST),
+        // so they stay consistent across the local and remote daemon paths. Merge it first.
         let manifest =
             runtimeManifest
             ?? SpacesDevicePlanner.runtimeManifest(
@@ -1821,6 +1819,18 @@ public final class WorkspaceOrchestrator {
         let workspacePath = runtimeWorkspacePath.flatMap { $0.isEmpty ? nil : $0 } ?? workspace.runtimePath
         env["SPACES_WORKSPACE_DIR"] = workspacePath
         env["SPACES_PROJECT_DIR"] = manifest.location == .remote ? workspacePath : project.dir
+        // Browser-facing per-service URL variables. Remote/Linux services still receive these values
+        // so app servers can allowlist the host/origin for CORS or framework host checks; the URL is
+        // the client-facing identity, not evidence that the remote daemon itself runs Caddy.
+        // These need the shared router port, which is app configuration available here but not inside
+        // the pure planner, so they live only here.
+        let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+        let routerPort = (try? store.appConfig().routerPort) ?? AppConfig.defaultRouterPort
+        for namedPort in namedPorts {
+            let name = namedPort.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            env[ServiceName.urlEnvVar(for: name)] = "http://\(name).\(slug).localhost:\(routerPort)"
+        }
         return env
     }
 

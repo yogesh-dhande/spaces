@@ -5,7 +5,7 @@ public final class PortAllocator {
 
     public init(store: SQLiteStore) { self.store = store }
 
-    public func syncPorts(workspaceID: String, definitions: [PortDefinition], range: PortRange) throws -> [Int] {
+    public func syncPorts(workspaceID: String, definitions: [ServiceDefinition], range: PortRange) throws -> [Int] {
         let count = definitions.count
         guard count > 0 else {
             try releasePorts(workspaceID: workspaceID)
@@ -56,7 +56,7 @@ public final class PortAllocator {
         return resolved
     }
 
-    public func allocatePorts(workspaceID: String, definitions: [PortDefinition], range: PortRange) throws -> [Int] {
+    public func allocatePorts(workspaceID: String, definitions: [ServiceDefinition], range: PortRange) throws -> [Int] {
         let count = definitions.count
         guard count > 0 else {
             try store.setWorkspacePorts(workspaceID: workspaceID, ports: [], names: [])

@@ -87,7 +87,7 @@ import workspacecore
                 SpacesDeviceProjectSummary(
                     id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main",
                     config: SpacesDeviceProjectConfig(
-                        setupScript: "make setup", stopScript: "make stop", ports: [SpacesDevicePortDefinition(id: "port-web", name: "WEB")],
+                        setupScript: "make setup", stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
                         agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]))
@@ -100,7 +100,7 @@ import workspacecore
                     assignedPorts: [SpacesDeviceAssignedPort(name: "WEB", port: 3000)],
                     setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(
-                        stopScript: "make stop", ports: [SpacesDevicePortDefinition(id: "port-web", name: "WEB")],
+                        stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
                         resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")],
@@ -208,8 +208,8 @@ import workspacecore
         let runningProcesses = [
             RunningProcessRecord(
                 id: "running-web", workspaceID: "workspace-1", templateID: "process-web", templateName: "web", command: "npm run dev",
-                terminalApp: "Spaces", terminalTrackingID: "session-web", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
-                startedAt: nil, exitedAt: nil)
+                terminalApp: "Spaces", terminalTrackingID: "session-web", pid: 123, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil,
+                exitedAt: nil)
         ]
 
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(
@@ -297,29 +297,22 @@ import workspacecore
             projects: [ProjectSummary(id: "proj-r", name: "R", dir: "/r", isGitRepo: true, defaultBranch: "main", deviceID: "remote")],
             workspacesByProject: [
                 "proj-r": [
-                    WorkspaceSummary(id: "ws-r", branch: "feature", dir: "/r/feature", isRunning: true, isArchived: false, isDefault: false, deviceID: "remote")
+                    WorkspaceSummary(
+                        id: "ws-r", branch: "feature", dir: "/r/feature", isRunning: true, isArchived: false, isDefault: false, deviceID: "remote")
                 ]
             ])
 
         // A workspace selection under the device is detected.
-        #expect(
-            AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: "ws-r", selectedProjectID: "proj-r", section: section))
+        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: "ws-r", selectedProjectID: "proj-r", section: section))
         // A selection on another device is left alone.
         #expect(
             !AppKitController.sidebarSelectionBelongsToDeviceSection(
                 selectedWorkspaceID: "ws-local", selectedProjectID: "proj-local", section: section))
         // A project (header) selection with no workspace selected is detected by project id.
-        #expect(
-            AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: nil, selectedProjectID: "proj-r", section: section))
-        #expect(
-            !AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: nil, selectedProjectID: "proj-local", section: section))
+        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-r", section: section))
+        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-local", section: section))
         // No selection never triggers reconciliation.
-        #expect(
-            !AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
+        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
     }
 
     @Test func waitingAgentAlertResolvesToFocusingItsSessionNotANewLaunch() {
@@ -332,7 +325,9 @@ import workspacecore
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-1", projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
                     dir: "/device/project-feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 1,
-                    config: SpacesDeviceWorkspaceConfig(agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")]),
+                    config: SpacesDeviceWorkspaceConfig(agentLaunchers: [
+                        SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")
+                    ]),
                     codingAgentRows: [
                         SpacesDeviceWorkspaceCodingAgentRow(
                             id: "row-codex", workspaceID: "workspace-1", name: "Codex", command: "codex", launcherID: "launcher-codex",

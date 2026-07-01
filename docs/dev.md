@@ -77,6 +77,14 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 
 Artifact validation requires the platform dynamic `libghostty-vt` runtime library (`libghostty-vt.dylib` on macOS, `libghostty-vt.so` on Linux). A static `libghostty-vt.a` alone is not a complete install because terminal transcript rendering loads the dynamic library at runtime.
 
+The service router also needs a bundled Caddy binary. For branch-local setup, run:
+
+```bash
+apps/macos/scripts/setup_caddy.sh
+```
+
+That fetches a pinned universal Caddy binary into `apps/macos/.local/caddy/caddy`, mirroring `setup_ghostty.sh`. Standard app packaging invokes the same setup script before bundling Caddy into the app at `Contents/Resources/caddy`; DMG installs also place Caddy beside the installed daemon at `/usr/local/bin/spaces-caddy` so launchd-started `spacesd` can run the local reverse proxy for workspace services without replacing a user-managed `caddy` executable.
+
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
 By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version, and records a clean source build. When the worktree-local artifacts do not match, default setup next checks a shared, content-addressed cache and restores from it with a local copy before falling back to a download. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When the downloaded release artifact validates except for a different Xcode build, default setup leaves the download uninstalled and builds locally from the pinned submodule. The `--download-only` mode used by CI and publishing workflows is download-only and fails on an Xcode build mismatch.
 

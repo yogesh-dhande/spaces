@@ -3,20 +3,20 @@ import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
   title: "Workspaces",
-  description: "Workspace concepts, ports, env vars, and switching.",
+  description: "Workspace concepts, services, env vars, and switching.",
 };
 
 export default function WorkspacesDocsPage() {
   return (
     <DocsShell
       title="Workspaces"
-      description="A workspace is the core runtime unit in Spaces. It owns process templates, browser sessions, window tracking, and reserved ports."
+      description="A workspace is the core runtime unit in Spaces. It owns process templates, browser sessions, window tracking, and named services routed through Caddy."
       pagePath="/docs/workspaces"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Is a Workspace?</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A workspace is one stream of work — a feature, a bug fix, an experiment. It belongs to a project, has its own directory (a git worktree for Git projects), and keeps its own copy of the project&apos;s processes, browser sessions, and ports.
+          A workspace is one stream of work — a feature, a bug fix, an experiment. It belongs to a project, has its own directory (a git worktree for Git projects), and keeps its own copy of the project&apos;s processes, browser sessions, and services.
         </p>
       </article>
 
@@ -40,12 +40,12 @@ export default function WorkspacesDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Per-Workspace Settings</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          A new workspace inherits the project&apos;s processes, browser sessions, and ports. From there, each workspace edits its own copy — the project&apos;s templates stay unchanged.
+          A new workspace inherits the project&apos;s processes, browser sessions, and services. From there, each workspace edits its own copy — the project&apos;s templates stay unchanged.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Double-click the title, branch, or notes to rename them inline. <code>Escape</code> or click away to cancel.</li>
           <li>• Renaming the branch inline renames the underlying git branch.</li>
-          <li>• Add, remove, or rename named ports per workspace.</li>
+          <li>• Add, remove, or rename services per workspace.</li>
           <li>• Edit a process command while the workspace is running and Spaces asks to confirm, then restarts just that process.</li>
           <li>• Add a browser session and it opens in Chrome when you focus it.</li>
           <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on workspace creation, launch, and agent events.</li>
@@ -53,19 +53,20 @@ export default function WorkspacesDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Named Ports</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Services</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Name the ports your project uses (for example <code>FRONTEND_PORT</code>, <code>API_PORT</code>) and Spaces gives each workspace its own port number behind those names. Two workspaces can run the same project at the same time without fighting over a port.
+          Name the services your project uses with unique lowercase DNS labels (for example <code>web</code>, <code>api</code>) and Spaces gives each workspace its own port per service plus a stable URL <code>http://&lt;service&gt;.&lt;workspace&gt;.localhost:8088</code> routed through a bundled Caddy proxy. Two workspaces can run the same project at the same time without fighting over a port.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Each named port is exposed as an environment variable to every workspace process, plus the setup and stop scripts.</li>
+          <li>• Each service is exposed as <code>SPACES_&lt;SERVICE&gt;_PORT</code> and <code>SPACES_&lt;SERVICE&gt;_URL</code> to every workspace process, plus the setup and stop scripts.</li>
           <li>• Spaces reserves the port number while the workspace exists, so nothing else on your Mac can grab it.</li>
           <li>• Ports are released when the workspace is archived.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: bugfix/login-timeout
-FRONTEND_PORT=20001
-API_PORT=20002`}</code>
+SPACES_WORKSPACE_HOST=login-fix-a3f9c2d1847b.localhost
+SPACES_WEB_PORT=20001
+SPACES_API_PORT=20002`}</code>
         </pre>
       </article>
 
@@ -75,7 +76,8 @@ API_PORT=20002`}</code>
           Every workspace process, setup script, and stop script runs with:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• The workspace&apos;s named ports (for example <code>FRONTEND_PORT=20001</code>, <code>API_PORT=20002</code>).</li>
+          <li>• Per-service variables (for example <code>SPACES_WEB_PORT=20001</code>, <code>SPACES_API_PORT=20002</code>, and the matching <code>SPACES_WEB_URL</code>, <code>SPACES_API_URL</code>).</li>
+          <li>• <code>SPACES_WORKSPACE_HOST</code> &mdash; the <code>&lt;slug&gt;.localhost</code> host that Caddy routes for this workspace.</li>
           <li>• <code>SPACES_PROJECT_DIR</code> &mdash; the project directory.</li>
           <li>• <code>SPACES_WORKSPACE_DIR</code> &mdash; this workspace&apos;s directory.</li>
         </ul>

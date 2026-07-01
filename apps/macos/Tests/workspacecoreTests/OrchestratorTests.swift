@@ -117,9 +117,9 @@ final class OrchestratorTests: XCTestCase {
         func advance(seconds: TimeInterval) { current = current.addingTimeInterval(seconds) }
     }
 
-    func makeOrchestratorWithWorkspace(
-        currentDate: @escaping () -> Date = Date.init
-    ) throws -> (WorkspaceOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL) {
+    func makeOrchestratorWithWorkspace(currentDate: @escaping () -> Date = Date.init) throws -> (
+        WorkspaceOrchestrator, SQLiteStore, ProjectRecord, WorkspaceRecord, URL
+    ) {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -170,8 +170,8 @@ final class OrchestratorTests: XCTestCase {
         version: 1
         setup_script: npm install
         stop_script: \(stopScript)
-        ports:
-          - name: API_PORT
+        services:
+          - api
         processes:
           - name: api
             command: npm run api

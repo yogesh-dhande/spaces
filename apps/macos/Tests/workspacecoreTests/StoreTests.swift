@@ -36,9 +36,9 @@ final class StoreTests: XCTestCase {
         let workspaceColumns = try readTableColumns(dbURL: dbURL, table: "workspaces")
         let projectColumns = try readTableColumns(dbURL: dbURL, table: "projects")
         let workspaceSettingsColumns = try readTableColumns(dbURL: dbURL, table: "workspace_settings")
-        let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_ports")
-        let workspacePortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_port_definitions")
-        let projectPortDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_port_definitions")
+        let workspacePortColumns = try readTableColumns(dbURL: dbURL, table: "workspace_service_ports")
+        let workspaceServiceDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "workspace_services")
+        let projectServiceDefinitionColumns = try readTableColumns(dbURL: dbURL, table: "project_services")
         let workspaceProcessColumns = try readTableColumns(dbURL: dbURL, table: "workspace_processes")
         let projectProcessColumns = try readTableColumns(dbURL: dbURL, table: "project_processes")
         let runningProcessColumns = try readTableColumns(dbURL: dbURL, table: "running_processes")
@@ -78,9 +78,9 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(workspaceSettingsColumns.contains("updated_at"))
         XCTAssertTrue(workspaceSettingsColumns.contains("setup_exit_code"))
         XCTAssertTrue(workspaceSettingsColumns.contains("setup_log_path"))
-        XCTAssertTrue(workspacePortColumns.contains("definition_id"))
-        XCTAssertTrue(workspacePortDefinitionColumns.contains("id"))
-        XCTAssertTrue(projectPortDefinitionColumns.contains("id"))
+        XCTAssertTrue(workspacePortColumns.contains("service_id"))
+        XCTAssertTrue(workspaceServiceDefinitionColumns.contains("id"))
+        XCTAssertTrue(projectServiceDefinitionColumns.contains("id"))
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("id"))
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_window_id"))
         XCTAssertFalse(workspaceBrowserSessionColumns.contains("extracted_window_valid"))
@@ -170,16 +170,16 @@ final class StoreTests: XCTestCase {
 
         XCTAssertThrowsError(
             try runSQLiteExec(
-                dbURL: dbURL, sql: "INSERT INTO project_port_definitions(id, project_id, name, order_index) VALUES ('ppd-1', 'project-1', ' ', 0);"))
+                dbURL: dbURL, sql: "INSERT INTO project_services(id, project_id, name, order_index) VALUES ('ppd-1', 'project-1', ' ', 0);"))
         XCTAssertThrowsError(
             try runSQLiteExec(
-                dbURL: dbURL,
-                sql: "INSERT INTO workspace_port_definitions(id, workspace_id, name, order_index) VALUES ('wpd-1', 'workspace-1', char(10), 0);"))
+                dbURL: dbURL, sql: "INSERT INTO workspace_services(id, workspace_id, name, order_index) VALUES ('wpd-1', 'workspace-1', char(10), 0);"
+            ))
         XCTAssertThrowsError(
             try runSQLiteExec(
                 dbURL: dbURL,
                 sql:
-                    "INSERT INTO workspace_ports(workspace_id, port_index, port_number, port_name, definition_id) VALUES ('workspace-1', 0, 3000, char(9), 'wpd-1');"
+                    "INSERT INTO workspace_service_ports(workspace_id, service_index, port, service_name, service_id) VALUES ('workspace-1', 0, 3000, char(9), 'wpd-1');"
             ))
     }
 
@@ -351,16 +351,16 @@ final class StoreTests: XCTestCase {
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
 
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 3001], names: ["API_PORT", "WEB_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 3001], names: ["api", "web"])
         XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [3000, 3001])
         let named = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(named.count, 2)
-        XCTAssertEqual(named[0].name, "API_PORT")
-        XCTAssertEqual(named[1].name, "WEB_PORT")
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4000], names: ["ADMIN_PORT"])
+        XCTAssertEqual(named[0].name, "api")
+        XCTAssertEqual(named[1].name, "web")
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4000], names: ["admin"])
         XCTAssertEqual(try store.workspacePorts(workspaceID: workspace.id), [4000])
         let namedAfter = try store.workspacePortsNamed(workspaceID: workspace.id)
-        XCTAssertEqual(namedAfter[0].name, "ADMIN_PORT")
+        XCTAssertEqual(namedAfter[0].name, "admin")
 
         let processes = [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")]
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: processes)
@@ -370,8 +370,7 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(storedProcesses[1].name, nil)
 
         try store.setWorkspaceBrowserSessions(
-            workspaceID: workspace.id,
-            sessions: [BrowserSession(name: "checkout", url: "https://example.com"), BrowserSession()])
+            workspaceID: workspace.id, sessions: [BrowserSession(name: "checkout", url: "https://example.com"), BrowserSession()])
         let sessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(sessions.count, 2)
         XCTAssertEqual(sessions[0].name, "checkout")
@@ -405,16 +404,16 @@ final class StoreTests: XCTestCase {
         try store.releaseWorkspacePorts(workspaceID: workspace.id)
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
 
-        let definitions = [PortDefinition(name: "FRONTEND_PORT"), PortDefinition(name: "API_PORT")]
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: definitions)
-        let storedDefs = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let definitions = [ServiceDefinition(name: "frontend"), ServiceDefinition(name: "api")]
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: definitions)
+        let storedDefs = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         XCTAssertEqual(storedDefs.count, 2)
-        XCTAssertEqual(storedDefs[0].name, "FRONTEND_PORT")
-        XCTAssertEqual(storedDefs[1].name, "API_PORT")
+        XCTAssertEqual(storedDefs[0].name, "frontend")
+        XCTAssertEqual(storedDefs[1].name, "api")
 
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "DB_PORT")])
-        XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id).count, 1)
-        XCTAssertEqual(try store.workspacePortDefinitions(workspaceID: workspace.id)[0].name, "DB_PORT")
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [ServiceDefinition(name: "db")])
+        XCTAssertEqual(try store.workspaceServiceDefinitions(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(try store.workspaceServiceDefinitions(workspaceID: workspace.id)[0].name, "db")
     }
 
     func testStoreRejectsBlankPortNames() throws {
@@ -428,9 +427,28 @@ final class StoreTests: XCTestCase {
             try store.upsert(
                 project: ProjectRecord(
                     id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
-                    ports: [PortDefinition(name: " ")], processes: [], browserSessions: [], agentLaunchers: [])))
-        XCTAssertThrowsError(try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "\n")]))
+                    ports: [ServiceDefinition(name: " ")], processes: [], browserSessions: [], agentLaunchers: [])))
+        XCTAssertThrowsError(try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [ServiceDefinition(name: "\n")]))
         XCTAssertThrowsError(try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["\t"]))
+    }
+
+    func testStoreRejectsDuplicateServiceNames() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        XCTAssertThrowsError(
+            try store.upsert(
+                project: ProjectRecord(
+                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil,
+                    stopScript: nil, ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")], processes: [],
+                    browserSessions: [], agentLaunchers: [])))
+        XCTAssertThrowsError(
+            try store.setWorkspaceServiceDefinitions(
+                workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")]))
+        XCTAssertThrowsError(try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 3001], names: ["api", "api"]))
     }
 
     // Tests a delete-and-reinsert logical write is atomic by arranging a duplicate-ID failure and asserting the original child rows survive unchanged.
@@ -514,8 +532,8 @@ final class StoreTests: XCTestCase {
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: nil, terminalTarget: nil, pid: nil,
-                status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:00Z", exitedAt: "2026-01-01T00:01:00Z"))
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: nil, terminalTarget: nil,
+                pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:00Z", exitedAt: "2026-01-01T00:01:00Z"))
         processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes[0].status, .exited)
 
@@ -550,8 +568,8 @@ final class StoreTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "docs-watch", command: "sleep 300",
-                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
-                status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T14:23:10Z", exitedAt: "2026-06-04T14:23:23Z"))
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .exited,
+                logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T14:23:10Z", exitedAt: "2026-06-04T14:23:23Z"))
 
         let loaded = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
@@ -620,8 +638,8 @@ final class StoreTests: XCTestCase {
 
         let processID = UUID().uuidString
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["API_PORT"])
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [PortDefinition(name: "API_PORT")])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["api"])
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api")])
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(command: "echo one")])
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(url: "https://example.com")])
         try store.upsert(
@@ -637,7 +655,7 @@ final class StoreTests: XCTestCase {
 
         XCTAssertNil(try store.workspace(id: workspace.id))
         XCTAssertTrue(try store.workspacePorts(workspaceID: workspace.id).isEmpty)
-        XCTAssertTrue(try store.workspacePortDefinitions(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.workspaceServiceDefinitions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.workspaceBrowserSessions(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
@@ -665,7 +683,7 @@ final class StoreTests: XCTestCase {
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["API_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["api"])
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, windowID: 91, role: "browser", orderIndex: 0,
@@ -716,11 +734,11 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.projects().map(\.name), ["A Project", "Z Project"])
 
         let defaultWorkspace = WorkspaceRecord(
-            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
-            isRunning: false, lastLaunchedAt: nil)
+            id: "default", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, isDefault: true, isArchived: false, isRunning: false,
+            lastLaunchedAt: nil)
         let archivedWorkspace = WorkspaceRecord(
-            id: "archived", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false,
-            isArchived: true, isRunning: false, lastLaunchedAt: nil)
+            id: "archived", projectID: aProject.id, dir: aDir, dirname: nil, branch: nil, baseBranch: "develop", isDefault: false, isArchived: true,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: archivedWorkspace)
         try store.upsert(workspace: defaultWorkspace)
 
@@ -746,8 +764,8 @@ final class StoreTests: XCTestCase {
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: secondID, workspaceID: workspace.id, templateName: "second", command: "echo second", terminalApp: nil, terminalTarget: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: secondID, workspaceID: workspace.id, templateName: "second", command: "echo second", terminalApp: nil, terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.deleteRunningProcess(id: firstID)
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.id), [secondID])
 
@@ -761,7 +779,7 @@ final class StoreTests: XCTestCase {
         let dir = try makeTempDirectory().path
         let project = ProjectRecord(
             id: dir, name: "myproject", dir: dir, isGitRepo: false, defaultBranch: nil, setupScript: "echo setup", stopScript: "echo stop",
-            ports: [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")],
+            ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")],
             processes: [ProcessTemplate(name: "api", command: "npm run api"), ProcessTemplate(command: "npm run worker")],
             browserSessions: [BrowserSession(name: "frontend", url: "https://localhost:3000")])
 
@@ -772,8 +790,8 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(loaded?.setupScript, "echo setup")
         XCTAssertEqual(loaded?.stopScript, "echo stop")
         XCTAssertEqual(loaded?.ports.count, 2)
-        XCTAssertEqual(loaded?.ports[0].name, "API_PORT")
-        XCTAssertEqual(loaded?.ports[1].name, "WEB_PORT")
+        XCTAssertEqual(loaded?.ports[0].name, "api")
+        XCTAssertEqual(loaded?.ports[1].name, "web")
         XCTAssertEqual(loaded?.processes.count, 2)
         XCTAssertEqual(loaded?.processes[0].name, "api")
         XCTAssertEqual(loaded?.processes[1].name, nil)
@@ -787,16 +805,16 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
         var project = ProjectRecord(
-            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [PortDefinition(name: "OLD_PORT")])
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [ServiceDefinition(name: "oldport")])
         try store.upsert(project: project)
 
-        project.ports = [PortDefinition(name: "NEW_PORT"), PortDefinition(name: "EXTRA_PORT")]
+        project.ports = [ServiceDefinition(name: "newport"), ServiceDefinition(name: "extra")]
         project.setupScript = "echo updated"
         try store.upsert(project: project)
 
         let loaded = try store.project(id: dir)
         XCTAssertEqual(loaded?.ports.count, 2)
-        XCTAssertEqual(loaded?.ports[0].name, "NEW_PORT")
+        XCTAssertEqual(loaded?.ports[0].name, "newport")
         XCTAssertEqual(loaded?.setupScript, "echo updated")
     }
 
@@ -805,7 +823,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir = try makeTempDirectory().path
         let project = ProjectRecord(
-            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [PortDefinition(name: "PORT")],
+            id: dir, name: "project", dir: dir, isGitRepo: false, defaultBranch: nil, ports: [ServiceDefinition(name: "port")],
             processes: [ProcessTemplate(command: "echo run")])
         try store.upsert(project: project)
 
@@ -819,7 +837,7 @@ final class StoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let dir1 = try makeTempDirectory().path
         let dir2 = try makeTempDirectory().path
-        let p1 = ProjectRecord(id: dir1, name: "alpha", dir: dir1, isGitRepo: false, defaultBranch: nil, ports: [PortDefinition(name: "PORT1")])
+        let p1 = ProjectRecord(id: dir1, name: "alpha", dir: dir1, isGitRepo: false, defaultBranch: nil, ports: [ServiceDefinition(name: "port1")])
         let p2 = ProjectRecord(id: dir2, name: "beta", dir: dir2, isGitRepo: false, defaultBranch: nil, processes: [ProcessTemplate(command: "run")])
         try store.upsert(project: p1)
         try store.upsert(project: p2)
@@ -844,7 +862,8 @@ final class StoreTests: XCTestCase {
         let id = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: id, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: sessionID, codexThreadID: nil, status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+                id: id, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: sessionID, codexThreadID: nil,
+                status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
 
         let found = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID)
         XCTAssertEqual(found?.id, id)
@@ -863,8 +882,7 @@ final class StoreTests: XCTestCase {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "review-agent", terminalTrackingID: sessionID,
-                terminalNativeID: sessionID, codexThreadID: nil, status: .done, createdAt: "2026-06-04T14:23:10Z",
-                updatedAt: "2026-06-04T14:25:06Z"))
+                terminalNativeID: sessionID, codexThreadID: nil, status: .done, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:25:06Z"))
 
         let loaded = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
         let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
@@ -890,13 +908,11 @@ final class StoreTests: XCTestCase {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTrackingID: "session-a",
-                codexThreadID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z",
-                updatedAt: "2026-01-01T00:00:01Z"))
+                codexThreadID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: UUID().uuidString, workspaceID: workspaceB.id, provider: .spaces, label: "codex", terminalTrackingID: "session-b",
-                codexThreadID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z",
-                updatedAt: "2026-01-01T00:00:02Z"))
+                codexThreadID: nil, status: .spinning, createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
 
         let agentWindows = try store.agentWindowsByProvider(workspaceID: workspace.id, provider: .spaces)
         XCTAssertEqual(agentWindows.count, 1)
@@ -916,10 +932,12 @@ final class StoreTests: XCTestCase {
         let idB = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: idA, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: "session-a", codexThreadID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+                id: idA, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: "session-a", codexThreadID: nil, status: .idle,
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: idB, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: "session-b", codexThreadID: nil, status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
+                id: idB, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: "session-b", codexThreadID: nil, status: .idle,
+                createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
 
         try store.deleteAgentWindow(id: idA)
         let remaining = try store.agentWindows(workspaceID: workspace.id)
@@ -960,7 +978,8 @@ final class StoreTests: XCTestCase {
         let id = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: id, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: "s1", codexThreadID: nil, status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+                id: id, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: "s1", codexThreadID: nil, status: .idle,
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
 
         try store.updateAgentWindowStatus(id: id, status: .done, updatedAt: "2026-01-01T00:01:00Z")
         let updated = try store.agentWindows(workspaceID: workspace.id).first
@@ -1006,11 +1025,11 @@ final class StoreTests: XCTestCase {
         let workspace2Dir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let workspace1 = WorkspaceRecord(
-            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "ws1", projectID: project.id, dir: workspace1Dir, dirname: "feature-1", branch: "feature-1", isDefault: false, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         let workspace2 = WorkspaceRecord(
-            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "ws2", projectID: project.id, dir: workspace2Dir, dirname: "feature-2", branch: "feature-2", isDefault: false, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace1)
         try store.upsert(workspace: workspace2)
@@ -1031,11 +1050,11 @@ final class StoreTests: XCTestCase {
         let workspaceDir = try makeTempDirectory().path
         let project = makeProjectRecord(dir: projectDir)
         let archived = WorkspaceRecord(
-            id: "archived", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
-            isArchived: true, isRunning: false, lastLaunchedAt: nil)
+            id: "archived", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: true, isRunning: false,
+            lastLaunchedAt: nil)
         let active = WorkspaceRecord(
-            id: "active", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "active", projectID: project.id, dir: workspaceDir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false,
+            lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: archived)
         try store.upsert(workspace: active)
@@ -1050,11 +1069,11 @@ final class StoreTests: XCTestCase {
         try store.upsert(project: project)
         let branch = "feature-branch"
         let first = WorkspaceRecord(
-            id: "ws-1", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch,
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "ws-1", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-1", branch: branch, isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         let second = WorkspaceRecord(
-            id: "ws-2", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch,
-            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "ws-2", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-2", branch: branch, isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: first)
 
         XCTAssertThrowsError(try store.upsert(workspace: second))

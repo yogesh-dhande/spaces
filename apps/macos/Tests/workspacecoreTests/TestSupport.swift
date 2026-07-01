@@ -38,9 +38,10 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
         browserSessions: [])
 }
 
-func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String) -> WorkspaceRecord {
+func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String, branch: String? = nil) -> WorkspaceRecord {
     WorkspaceRecord(
-        id: id, projectID: projectID, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        id: id, projectID: projectID, dir: dir, dirname: nil, branch: branch, isDefault: false, isArchived: false, isRunning: false,
+        lastLaunchedAt: nil)
 }
 
 /// Seeds the tracked terminal-session window that a live Spaces terminal session creates before any
