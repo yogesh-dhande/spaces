@@ -108,6 +108,12 @@ public enum TerminalForegroundProcessInspector {
             let executableName = executablePath.flatMap { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty }
             guard executableName != nil || !argv.isEmpty else { return nil }
             return TerminalForegroundProcessSnapshot(pid: pid, executablePath: executablePath, executableName: executableName, argv: argv)
+        #elseif os(Linux)
+            let executablePath = processExecutablePath(pid: pid)
+            let argv = processArguments(pid: pid)
+            let executableName = executablePath.flatMap { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty }
+            guard executableName != nil || !argv.isEmpty else { return nil }
+            return TerminalForegroundProcessSnapshot(pid: pid, executablePath: executablePath, executableName: executableName, argv: argv)
         #else
             return nil
         #endif
@@ -145,6 +151,22 @@ public enum TerminalForegroundProcessInspector {
         }
         if argv.count > maxArgumentCount { bounded.append("...") }
         return Array(bounded)
+    }
+
+    static func procCmdlineArguments(from data: Data) -> [String] {
+        guard !data.isEmpty else { return [] }
+        var arguments: [String] = []
+        var start = data.startIndex
+        var index = start
+        while index < data.endIndex {
+            if data[index] == 0 {
+                appendProcArgument(data[start..<index], to: &arguments)
+                start = data.index(after: index)
+            }
+            index = data.index(after: index)
+        }
+        if start < data.endIndex { appendProcArgument(data[start..<data.endIndex], to: &arguments) }
+        return boundedArguments(arguments)
     }
 
     private static func commandNameCandidates(executableName: String, argv: [String]) -> [CommandNameCandidate] {
@@ -243,6 +265,11 @@ public enum TerminalForegroundProcessInspector {
         return URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
     }
 
+    private static func appendProcArgument(_ bytes: Data.SubSequence, to arguments: inout [String]) {
+        guard !bytes.isEmpty, let argument = String(bytes: bytes, encoding: .utf8), !argument.isEmpty else { return }
+        arguments.append(argument)
+    }
+
     private static let nodeLongOptionsTakingValue: Set<String> = [
         "--require", "--import", "--conditions", "--icu-data-dir", "--loader", "--max-http-header-size", "--openssl-config",
         "--openssl-shared-config", "--pending-deprecation", "--preserve-symlinks-main", "--redirect-warnings", "--test-name-pattern",
@@ -294,6 +321,15 @@ public enum TerminalForegroundProcessInspector {
 
         private static func skipNULs(in buffer: [CChar], cursor: inout Int, limit: Int) {
             while cursor < limit && buffer[cursor] == 0 { cursor += 1 }
+        }
+    #elseif os(Linux)
+        private static func processExecutablePath(pid: Int32) -> String? {
+            try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/\(pid)/exe").nilIfEmpty
+        }
+
+        private static func processArguments(pid: Int32) -> [String] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/proc/\(pid)/cmdline")) else { return [] }
+            return procCmdlineArguments(from: data)
         }
     #endif
 }

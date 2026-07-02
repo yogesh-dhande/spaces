@@ -388,19 +388,29 @@
         private func writeRuntimeState(state: TerminalSessionState) {
             let liveChildPID = ptyDriver.childPID()
             if let liveChildPID { lastKnownChildPID = liveChildPID }
+            let foregroundPID = ptyDriver.foregroundPID()
+            let foregroundProcess = foregroundPID.flatMap { TerminalForegroundProcessInspector.inspect(pid: $0) }
+            let foregroundAgent = foregroundProcess.flatMap { TerminalForegroundProcessInspector.classify($0) }
             let runtimeState = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
                 exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
                 workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows,
-                foregroundPID: ptyDriver.foregroundPID())
-            let previousState = lastRuntimeState?.state
+                foregroundPID: foregroundPID, foregroundExecutablePath: foregroundProcess?.executablePath,
+                foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
+                foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
+                foregroundDisplayCommand: foregroundAgent?.displayCommand)
+            let previousSignature = lastRuntimeState.map(runtimeStateSignature(for:))
+            let nextSignature = runtimeStateSignature(for: runtimeState)
             try? TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             lastRuntimeState = runtimeState
-            // Drive an overview rebroadcast only on a real lifecycle transition
-            // (e.g. running -> exited); the repeated `.running` writes don't change
-            // anything the sidebar shows.
-            if previousState != state { TerminalOverviewSignal.post() }
+            if previousSignature != nextSignature { postRuntimeStateDidChange() }
+        }
+
+        private func postRuntimeStateDidChange() {
+            NotificationCenter.default.post(
+                name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalOverviewSignal.post()
         }
 
         private func broadcastCurrentState(reason: String) {
@@ -544,6 +554,10 @@
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: lastKnownChildPID,
                 state: state, updatedAt: nowISO8601(), exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
                 workingDirectory: launchConfiguration.workingDirectory, columns: terminalSize.columns, rows: terminalSize.rows)
+        }
+
+        private func runtimeStateSignature(for state: TerminalSessionRuntimeState) -> String {
+            "\(state.sessionID)|\(state.backend.rawValue)|\(state.servicePID)|\(state.childPID.map(String.init) ?? "nil")|\(state.foregroundPID.map(String.init) ?? "nil")|\(state.foregroundExecutablePath ?? "nil")|\(state.foregroundExecutableName ?? "nil")|\(state.foregroundArgv?.joined(separator: "\u{1F}") ?? "nil")|\(state.foregroundDetectedAgentKind?.rawValue ?? "nil")|\(state.foregroundDisplayLabel ?? "nil")|\(state.foregroundDisplayCommand ?? "nil")|\(state.title ?? "nil")|\(state.workingDirectory ?? "nil")|\(state.columns.map(String.init) ?? "nil")|\(state.rows.map(String.init) ?? "nil")|\(state.state.rawValue)|\(state.exitedAt ?? "nil")"
         }
 
         private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }
