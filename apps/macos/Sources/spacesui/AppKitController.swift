@@ -1042,7 +1042,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
-            self.openTerminalSessionWindow(sessionID: sessionID, mode: mode, requestID: requestID)
+            await self.openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: mode, requestID: requestID)
         }
     }
 
@@ -1080,7 +1080,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_focus_ipc_received", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: requestID.map { "request_id=\($0)" } ?? "")
-            self.focusTerminalSessionWindow(sessionID: sessionID, requestID: requestID)
+            await self.focusTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, requestID: requestID)
         }
     }
 
@@ -1134,13 +1134,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         } catch {}
     }
 
-    private struct RemoteTerminalSessionRoute: Sendable {
-        let requestSender: RemoteGhosttyTerminalServiceRequestSender
-        let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
-        let launchConfiguration: TerminalSessionLaunchConfiguration
-        let initialRuntimeState: TerminalSessionRuntimeState?
-    }
-
     private final class RemoteTerminalWindowClientStore: @unchecked Sendable {
         private let lock = NSLock()
         private var clientID: String?
@@ -1158,8 +1151,124 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    struct TerminalSessionSummaryMatch: Sendable, Equatable {
+        let device: SpacesPairedDeviceRecord
+        let summary: SpacesDeviceTerminalSessionSummary
+    }
+
+    typealias TerminalSessionOverviewResolver = @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> SpacesDeviceOverviewResolution
+
+    /// The overview session summary for a session and the device that owns it,
+    /// when the session is currently surfaced in a loaded device overview.
+    private func terminalSessionSummaryMatch(sessionID: String) -> TerminalSessionSummaryMatch? {
+        for section in deviceSections {
+            guard let summary = section.overview?.sessions.first(where: { $0.id == sessionID }) else { continue }
+            guard let device = deviceForMutation(deviceID: section.deviceID) else { continue }
+            return TerminalSessionSummaryMatch(device: device, summary: summary)
+        }
+        return nil
+    }
+
+    /// The device that owns a terminal session: its overview's device, the device
+    /// of the workspace that carries it, or the local device as a last resort.
+    private func terminalSessionOwningDevice(sessionID: String) -> SpacesPairedDeviceRecord? {
+        if let match = terminalSessionSummaryMatch(sessionID: sessionID) { return match.device }
+        if let workspaceID = clientWorkspaceID(forTerminalSession: sessionID) { return deviceForWorkspaceMutation(workspaceID: workspaceID) }
+        return localPairedDevice
+    }
+
+    nonisolated private static func terminalSessionLaunchConfiguration(sessionID: String, summary: SpacesDeviceTerminalSessionSummary)
+        -> TerminalSessionLaunchConfiguration
+    {
+        TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: summary.backend, lifetimePolicy: summary.lifetimePolicy, title: summary.title,
+            workingDirectory: summary.workingDirectory, shell: summary.shell, command: summary.command, createdAt: summary.createdAt,
+            workspaceID: summary.workspaceID, kind: terminalSessionKind(rowKind: summary.rowKind))
+    }
+
+    nonisolated private static func terminalSessionRuntimeState(sessionID: String, summary: SpacesDeviceTerminalSessionSummary)
+        -> TerminalSessionRuntimeState
+    {
+        TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: summary.backend, servicePID: summary.servicePID, childPID: summary.childPID, state: summary.state,
+            updatedAt: summary.updatedAt, title: summary.title, workingDirectory: summary.workingDirectory)
+    }
+
+    /// Reads a session's real launch configuration straight from its owning device when the
+    /// session is not yet in any loaded overview.
+    ///
+    /// An `openTerminalSessionWindow`/focus IPC can arrive before the sidebar surfaces a
+    /// just-created session: on a cold launch the IPC observers are registered before the
+    /// initial sidebar load populates `localPairedDevice`, and a TerminalService/spacese2e
+    /// session can be created while the overview subscription is still stale. In both cases
+    /// the loaded overview lacks the session. Rather than fabricate a placeholder
+    /// shell/command — which the later Device API state payload never corrects, since it
+    /// carries only title/cwd/runtime — this bootstraps the local device when it is unloaded,
+    /// then fetches a fresh overview off the main actor to read the session's persisted
+    /// shell/command/title, matching the launch configuration the old DB-backed path read directly.
+    private func resolveSessionSummaryMatch(sessionID: String) async -> TerminalSessionSummaryMatch? {
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        if localPairedDevice == nil {
+            guard
+                let device = await Task.detached(
+                    priority: .userInitiated, operation: { try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) }
+                ).value
+            else { return nil }
+            localPairedDevice = device
+            localDeviceID = device.id
+        }
+        guard let device = terminalSessionOwningDevice(sessionID: sessionID) else { return nil }
+        return await Self.resolveSessionSummaryMatchOffMain(sessionID: sessionID, device: device, clientApp: clientApp)
+    }
+
+    nonisolated static func resolveSessionSummaryMatchOffMain(
+        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp,
+        resolveOverview: @escaping TerminalSessionOverviewResolver = { device, clientApp in
+            try SpacesDeviceClient.resolveOverview(device: device, clientApp: clientApp)
+        }
+    ) async -> TerminalSessionSummaryMatch? {
+        await Task.detached(priority: .userInitiated) {
+            guard let summary = try? resolveOverview(device, clientApp).overview?.overview.sessions.first(where: { $0.id == sessionID }) else {
+                return nil
+            }
+            return TerminalSessionSummaryMatch(device: device, summary: summary)
+        }.value
+    }
+
+    /// Builds the device-backed terminal state model for a session, seeding launch
+    /// configuration and runtime state from the caller's known values or, failing that,
+    /// the loaded device overview or an off-main cold overview lookup prepared by the
+    /// caller. The model fetches the rest through the owning device's Device API, so the
+    /// mac GUI never opens `spaces.db`.
+    private func makeTerminalSessionStateModel(
+        sessionID: String, seedDevice: SpacesPairedDeviceRecord? = nil, seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil,
+        seedInitialRuntimeState: TerminalSessionRuntimeState? = nil, resolvedSummaryMatch: TerminalSessionSummaryMatch? = nil
+    ) throws -> DeviceTerminalSessionStateModel {
+        let summaryMatch = terminalSessionSummaryMatch(sessionID: sessionID) ?? resolvedSummaryMatch
+        guard let device = seedDevice ?? summaryMatch?.device ?? terminalSessionOwningDevice(sessionID: sessionID) else {
+            throw Self.deviceNotLoadedError()
+        }
+        // The launch configuration carries the daemon's real shell/command, which the live
+        // Device API state payload never resends (it carries only title/cwd/runtime). It must
+        // come from the caller's seed or the device overview — fabricating a placeholder here
+        // would leave the window summary showing the wrong launch command for the session's
+        // lifetime.
+        guard
+            let launchConfiguration = seedLaunchConfiguration
+                ?? summaryMatch.map({ Self.terminalSessionLaunchConfiguration(sessionID: sessionID, summary: $0.summary) })
+        else { throw Self.terminalSessionNotFoundError() }
+        let initialRuntimeState =
+            seedInitialRuntimeState ?? summaryMatch.map { Self.terminalSessionRuntimeState(sessionID: sessionID, summary: $0.summary) }
+        return try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID, launchConfiguration: launchConfiguration, initialRuntimeState: initialRuntimeState,
+            initialAttachmentSnapshot: summaryMatch?.summary.attachmentSnapshot,
+            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+    }
+
     @discardableResult private func openTerminalSessionWindow(
-        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, remoteRouteOverride: RemoteTerminalSessionRoute? = nil
+        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, seedDevice: SpacesPairedDeviceRecord? = nil,
+        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil,
+        resolvedSummaryMatch: TerminalSessionSummaryMatch? = nil
     ) -> Int? {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
@@ -1173,85 +1282,60 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 reusedExistingWindow = true
             } else {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                let remoteRoute: RemoteTerminalSessionRoute? = remoteRouteOverride
-                if let remoteRoute { try ensureRemoteTerminalSessionMirror(remoteRoute, paths: paths) }
-                let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
-                if remoteRoute == nil {
-                    agentSignalHandler = nil
-                } else {
-                    agentSignalHandler = { [weak self] events in
-                        guard let self else { return [String]() }
-                        return self.applyRemoteAgentSignals(events)
-                    }
+                // Every terminal window — local or remote — is backed by the owning
+                // device's Device API through one shared state model. State reads,
+                // the live subscription, and control all flow through it; the mac GUI
+                // never opens the daemon's spaces.db.
+                let stateModel = try makeTerminalSessionStateModel(
+                    sessionID: sessionID, seedDevice: seedDevice, seedLaunchConfiguration: seedLaunchConfiguration,
+                    seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
+                let requestSender = stateModel.terminalServiceRequestSender
+                let applyControlState = stateModel.controlStateApplier
+                let agentSignalHandler: RemoteGhosttyAgentSignalHandler = { [weak self] events in
+                    guard let self else { return [String]() }
+                    return self.applyRemoteAgentSignals(events)
                 }
                 let remoteClientStore = RemoteTerminalWindowClientStore()
-                let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
-                let detachClientAction: @Sendable (String) throws -> Void
-                let sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)?
-                let sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)?
-                let takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)?
-                if let remoteRoute {
-                    let requestSender = remoteRoute.requestSender
-                    attachClientAction = { client, attachmentMode in
-                        remoteClientStore.set(client.id)
-                        let response = try Self.sendRemoteTerminalControl(
-                            sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
-                            paths: paths, requestSender: requestSender, refreshMirror: true)
-                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
+                    remoteClientStore.set(client.id)
+                    let response = try Self.sendDeviceTerminalControl(
+                        sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                        requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
+                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                }
+                let detachClientAction: @Sendable (String) throws -> Void = { clientID in
+                    if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
+                    let response = try Self.sendDeviceTerminalControl(
+                        sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender,
+                        refreshStateAfterControl: true, applyState: applyControlState)
+                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                }
+                let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse = { text, appendNewline in
+                    guard let clientID = remoteClientStore.current() else {
+                        return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
                     }
-                    detachClientAction = { clientID in
-                        if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
-                        let response = try Self.sendRemoteTerminalControl(
-                            sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), paths: paths,
-                            requestSender: requestSender, refreshMirror: true)
-                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                    return try Self.sendDeviceTerminalControl(
+                        sessionID: sessionID,
+                        request: TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline),
+                        requestSender: requestSender, applyState: applyControlState)
+                }
+                let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse = { key in
+                    guard let clientID = remoteClientStore.current() else {
+                        return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
                     }
-                    sendInputAction = { text, appendNewline in
-                        guard let clientID = remoteClientStore.current() else {
-                            return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
-                        }
-                        return try Self.sendRemoteTerminalControl(
-                            sessionID: sessionID,
-                            request: TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline),
-                            paths: paths, requestSender: requestSender, refreshMirror: false)
-                    }
-                    sendKeyAction = { key in
-                        guard let clientID = remoteClientStore.current() else {
-                            return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
-                        }
-                        return try Self.sendRemoteTerminalControl(
-                            sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID), paths: paths,
-                            requestSender: requestSender, refreshMirror: false)
-                    }
-                    takeoverAction = { clientID in
-                        try Self.sendRemoteTerminalControl(
-                            sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), paths: paths,
-                            requestSender: requestSender, refreshMirror: true)
-                    }
-                } else {
-                    attachClientAction = { client, attachmentMode in
-                        let response = try TerminalControlClient.send(
-                            request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
-                            socketPath: paths.controlSocketPath)
-                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                    }
-                    detachClientAction = { clientID in
-                        let response = try TerminalControlClient.send(
-                            request: TerminalControlRequest(command: "detach", clientID: clientID), socketPath: paths.controlSocketPath)
-                        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                    }
-                    sendInputAction = nil
-                    sendKeyAction = nil
-                    takeoverAction = { clientID in
-                        try TerminalControlClient.send(
-                            request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
-                    }
+                    return try Self.sendDeviceTerminalControl(
+                        sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID),
+                        requestSender: requestSender, applyState: applyControlState)
+                }
+                let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
+                    try Self.sendDeviceTerminalControl(
+                        sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
+                        refreshStateAfterControl: true, applyState: applyControlState)
                 }
                 let created = TerminalSessionWindowController(
-                    sessionID: sessionID, paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-                    preferredAttachmentMode: mode, performInitialRefresh: false, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
-                    takeoverAction: takeoverAction, attachClientAction: attachClientAction, detachClientAction: detachClientAction,
-                    detachClientSynchronouslyOnClose: false,
+                    sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: mode, performInitialRefresh: false,
+                    sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction,
+                    attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                     onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
@@ -1271,8 +1355,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     },
                     sessionHostProvider: { launchConfiguration, paths in
                         Self.terminalSessionHost(
-                            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: remoteRoute?.requestSender,
-                            stateStreamSubscriber: remoteRoute?.stateStreamSubscriber, agentSignalHandler: agentSignalHandler)
+                            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
+                            stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
                     })
                 terminalSessionWindowControllers[sessionID] = created
                 controller = created
@@ -1298,44 +1382,57 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func deviceRemoteTerminalSessionRoute(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord) throws
-        -> RemoteTerminalSessionRoute
-    {
-        guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id) else {
-            throw SpacesDeviceClientError.missingTransportKey(deviceName: device.name, isLocal: device.id == SpacesPairedDeviceRecord.localDeviceID)
+    @discardableResult private func openTerminalSessionWindowResolvingMissingSummary(
+        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, seedDevice: SpacesPairedDeviceRecord? = nil,
+        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil
+    ) async -> Int? {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        let needsColdSummary =
+            seedLaunchConfiguration == nil && terminalSessionSummaryMatch(sessionID: sessionID) == nil
+            && Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) == nil
+        let resolvedSummaryMatch = needsColdSummary ? await resolveSessionSummaryMatch(sessionID: sessionID) : nil
+        // The terminal state model opens its own pinned-TLS Device API connections directly, so its
+        // credentials are not re-established by the overview refresh path. When the session is local,
+        // re-bootstrap off-main if the local transport key/token went missing (e.g. an earlier
+        // bootstrap failed while the daemon was down) so the window opens instead of dead-ending on
+        // "Missing secure transport key".
+        let owningDevice = seedDevice ?? resolvedSummaryMatch?.device ?? terminalSessionOwningDevice(sessionID: sessionID)
+        if owningDevice?.id == SpacesPairedDeviceRecord.localDeviceID {
+            let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+            await Task.detached(priority: .userInitiated) { _ = try? SpacesDeviceClient.ensureLocalDeviceCredentials(clientApp: clientApp) }.value
         }
-        let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id)
-        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-        let requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, transportKey: transportKey)
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
-            shell: "/bin/bash", command: nil, createdAt: request.createdAt ?? ISO8601DateFormatter().string(from: Date()),
-            workspaceID: request.workspaceID, kind: request.kind)
-        let runtimeState = request.initialState.map {
-            TerminalSessionRuntimeState(
-                sessionID: request.sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
-                updatedAt: request.updatedAt ?? launchConfiguration.createdAt, title: request.title, workingDirectory: request.workingDirectory)
-        }
-        return RemoteTerminalSessionRoute(
-            requestSender: Self.deviceTerminalServiceRequestSender(requestClient: requestClient, authToken: authToken, clientApp: clientApp),
-            stateStreamSubscriber: { sessionID, onEvent, onDisconnect in
-                let request = SpacesDeviceAPIRequest(
-                    command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)), authToken: authToken,
-                    clientApp: clientApp)
-                let client = try SpacesDeviceAPIStateStreamClient(
-                    request: request, host: device.host, port: device.port, transportKey: transportKey, onEvent: onEvent, onDisconnect: onDisconnect)
-                try client.start()
-                return client
-            }, launchConfiguration: launchConfiguration, initialRuntimeState: runtimeState)
+        return openTerminalSessionWindow(
+            sessionID: sessionID, mode: mode, requestID: requestID, seedDevice: seedDevice, seedLaunchConfiguration: seedLaunchConfiguration,
+            seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
     }
 
-    private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) -> Bool {
-        let route: RemoteTerminalSessionRoute
-        do { route = try deviceRemoteTerminalSessionRoute(request, device: device) } catch {
-            showError(error)
-            return false
+    private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) async
+        -> Bool
+    {
+        // The seed launch configuration wins over the model's own overview lookup, and the
+        // live Device API state payload never resends shell/command, so seed one only when a
+        // real shell is known — from the request (resolved from the source overview) or the
+        // loaded summary for a row-built request. When neither knows it yet (a row opened
+        // before the session reached the overview), pass no seed and resolve through the
+        // missing-summary path, which fetches a fresh overview off-main; fabricating a
+        // "/bin/bash" placeholder here would win over that lookup and mislabel the window's
+        // launch command for the session's lifetime.
+        let summary = terminalSessionSummaryMatch(sessionID: request.sessionID)?.summary
+        let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
+        let seedLaunchConfiguration = (request.shell ?? summary?.shell).map { shell in
+            TerminalSessionLaunchConfiguration(
+                sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
+                shell: shell, command: request.command ?? summary?.command, createdAt: createdAt, workspaceID: request.workspaceID, kind: request.kind
+            )
         }
-        return openTerminalSessionWindow(sessionID: request.sessionID, mode: .owner, requestID: requestID, remoteRouteOverride: route) != nil
+        let initialRuntimeState = request.initialState.map {
+            TerminalSessionRuntimeState(
+                sessionID: request.sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
+                updatedAt: request.updatedAt ?? createdAt, title: request.title, workingDirectory: request.workingDirectory)
+        }
+        return await openTerminalSessionWindowResolvingMissingSummary(
+            sessionID: request.sessionID, mode: .owner, requestID: requestID, seedDevice: device, seedLaunchConfiguration: seedLaunchConfiguration,
+            seedInitialRuntimeState: initialRuntimeState) != nil
     }
 
     nonisolated static func deviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws
@@ -1354,62 +1451,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             scrollMods: request.scrollMods, appendNewline: request.appendNewline)
     }
 
-    nonisolated private static func deviceTerminalServiceRequestSender(
-        requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?, clientApp: SpacesDeviceClientApp
-    ) -> RemoteGhosttyTerminalServiceRequestSender {
-        { request in
-            switch request.command {
-            case .state(let payload):
-                let response = try requestClient.send(
-                    SpacesDeviceAPIRequest(
-                        command: .state(SpacesDeviceTerminalSessionRequest(sessionID: payload.sessionID)), authToken: authToken, clientApp: clientApp)
-                )
-                return TerminalServiceResponse(ok: response.ok, message: response.message, sessionState: response.sessionState)
-            case .control(let payload):
-                let deviceRequest = try deviceTerminalControlRequest(sessionID: payload.sessionID, controlRequest: payload.controlRequest)
-                let response = try requestClient.send(
-                    SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest), authToken: authToken, clientApp: clientApp))
-                return TerminalServiceResponse(
-                    ok: response.ok, message: response.message, sessionState: response.sessionState,
-                    controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
-            default: throw WorkspaceError.invalidArgument(message: "Remote device terminal command '\(request.commandName)' is not supported.")
-            }
+    /// Issues a terminal control request to the session's owning device and returns
+    /// the control response. When the response carries session state (notably a
+    /// successful takeover), it is applied to the state model immediately so the
+    /// window reflects the new owner without waiting for the live subscription.
+    ///
+    /// Attachment-changing controls (attach/detach, and takeover when the daemon
+    /// omits the post-takeover render) do not echo session state, so
+    /// `refreshStateAfterControl` fetches the post-control state and applies the new
+    /// ownership directly. This forces the state model off its pre-control attachment
+    /// snapshot at once rather than depending on the live subscription to redeliver
+    /// the change — the subscription may be connecting or reconnecting during window
+    /// open/close, which would otherwise leave the window showing the wrong owner (or
+    /// retrying attachments) until another stream event arrives. The follow-up fetch
+    /// is best-effort: the control already succeeded, and a stale-by-emission payload
+    /// is dropped by the model, so a failed refresh falls back to the subscription
+    /// instead of failing the completed control.
+    nonisolated static func sendDeviceTerminalControl(
+        sessionID: String, request: TerminalControlRequest, requestSender: RemoteGhosttyTerminalServiceRequestSender,
+        refreshStateAfterControl: Bool = false, applyState: @Sendable (GhosttyRemoteSessionStatePayload) -> Void
+    ) throws -> TerminalControlResponse {
+        let response = try requestSender(TerminalServiceRequest(command: .control(.init(sessionID: sessionID, controlRequest: request))))
+        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+        if let sessionState = response.sessionState {
+            applyState(sessionState)
+        } else if refreshStateAfterControl,
+            let stateResponse = try? requestSender(TerminalServiceRequest(command: .state(.init(sessionID: sessionID)))),
+            let sessionState = stateResponse.sessionState
+        {
+            applyState(sessionState)
         }
-    }
-
-    private func ensureRemoteTerminalSessionMirror(_ route: RemoteTerminalSessionRoute, paths: TerminalSessionPaths) throws {
-        if (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) == nil {
-            try TerminalSessionPersistence.writeLaunchConfiguration(route.launchConfiguration, paths: paths)
-        }
-        if let initialRuntimeState = route.initialRuntimeState, (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) == nil {
-            try TerminalSessionPersistence.writeRuntimeState(initialRuntimeState, paths: paths)
-        }
+        return response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message)
     }
 
     private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) -> [String] {
-        // This fires only for a remote terminal mirror. Agent state is recorded by the
-        // daemon that owns the session and reaches this client through the overview, so the
-        // mirror only acknowledges delivery to release the remote terminal service's queue.
+        // Agent state is recorded by the daemon that owns the session and reaches this
+        // client through the overview, so the window only acknowledges delivery to
+        // release the owning terminal service's signal queue.
         events.map(\.id)
     }
 
-    private func refreshRemoteTerminalSessionMirror(
-        sessionID: String, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender
-    ) throws {
-        let response = try requestSender(TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        guard let payload = response.sessionState else {
-            throw WorkspaceError.invalidArgument(message: "Remote spacesd did not return terminal state.")
-        }
-        if (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) == nil {
-            let workspaceID = clientWorkspaceID(forTerminalSession: sessionID)
-            let kind = remoteTerminalSessionKind(sessionID: sessionID)
-            try TerminalSessionPersistence.writeLaunchConfiguration(
-                Self.remoteTerminalLaunchConfiguration(sessionID: sessionID, workspaceID: workspaceID, kind: kind, payload: payload), paths: paths)
-        }
-        try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
-    }
-
+    /// Resolves a session's kind from the loaded device overview (not the daemon
+    /// database): top-level sessions carry their row kind, and process/agent rows
+    /// identify configured sessions. Used to decide whether an ad hoc session stops
+    /// when its window closes.
     private func remoteTerminalSessionKind(sessionID: String) -> TerminalSessionKind {
         for overview in deviceSections.compactMap({ $0.overview }) {
             if let session = overview.sessions.first(where: { $0.id == sessionID }) { return Self.terminalSessionKind(rowKind: session.rowKind) }
@@ -1419,40 +1504,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
         }
         return .shell
-    }
-
-    nonisolated private static func sendRemoteTerminalControl(
-        sessionID: String, request: TerminalControlRequest, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender,
-        refreshMirror: Bool
-    ) throws -> TerminalControlResponse {
-        let response = try requestSender(TerminalServiceRequest(command: .control(.init(sessionID: sessionID, controlRequest: request))))
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        if let payload = response.sessionState {
-            try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
-        } else if refreshMirror {
-            try refreshRemoteTerminalSessionMirror(sessionID: sessionID, paths: paths, requestSender: requestSender)
-        }
-        return response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message)
-    }
-
-    nonisolated private static func refreshRemoteTerminalSessionMirror(
-        sessionID: String, paths: TerminalSessionPaths, requestSender: RemoteGhosttyTerminalServiceRequestSender
-    ) throws {
-        let response = try requestSender(TerminalServiceRequest(command: .state(.init(sessionID: sessionID))))
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        guard let payload = response.sessionState else {
-            throw WorkspaceError.invalidArgument(message: "Remote spacesd did not return terminal state.")
-        }
-        try TerminalSessionPersistence.writeRemoteStateMirror(payload, paths: paths)
-    }
-
-    nonisolated private static func remoteTerminalLaunchConfiguration(
-        sessionID: String, workspaceID: String?, kind: TerminalSessionKind, payload: GhosttyRemoteSessionStatePayload
-    ) -> TerminalSessionLaunchConfiguration {
-        TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: payload.runtimeState?.backend ?? .ghosttyEmbedded, title: payload.title,
-            workingDirectory: payload.workingDirectory, shell: "/bin/bash", command: nil,
-            createdAt: payload.runtimeState?.updatedAt ?? payload.emittedAt, workspaceID: workspaceID, kind: kind)
     }
 
     private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
@@ -1479,6 +1530,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func focusTerminalSessionWindow(sessionID: String, requestID: String? = nil) {
+        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+        guard let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) else {
+            Task { @MainActor [weak self] in await self?.focusTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, requestID: requestID)
+            }
+            return
+        }
+        let startedAt = Date()
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        cancelDeferredExternalWindowHide()
+        logPerfMetric(
+            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: 0, success: true, detail: "stage=start\(requestDetail)")
+        focusTerminalSessionWindowController(
+            resolved.controller, route: resolved.route, sessionID: sessionID, requestID: requestID, startedAt: startedAt)
+    }
+
+    @discardableResult private func focusTerminalSessionWindowController(
+        _ controller: TerminalSessionWindowController, route: String, sessionID: String, requestID: String?, startedAt: Date
+    ) -> Bool {
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        logPerfMetric(
+            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "stage=resolved_controller route=\(route)\(requestDetail)")
+        controller.focusWindow(requestID: requestID, route: route)
+        logPerfMetric(
+            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "route=\(route)\(requestDetail)")
+        return true
+    }
+
+    @discardableResult private func focusTerminalSessionWindowResolvingMissingSummary(sessionID: String, requestID: String? = nil) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1489,7 +1570,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) {
             controllerAndRoute = resolved
         } else {
-            openTerminalSessionWindow(sessionID: sessionID, mode: .owner, requestID: requestID)
+            await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner, requestID: requestID)
             pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
             controllerAndRoute = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID).map
             { ($0.controller, "summoned_owner") }
@@ -1498,15 +1579,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             logPerfMetric(
                 "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
                 detail: "route=missing\(requestDetail)")
-            return
+            return false
         }
-        logPerfMetric(
-            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "stage=resolved_controller route=\(route)\(requestDetail)")
-        controller.focusWindow(requestID: requestID, route: route)
-        logPerfMetric(
-            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "route=\(route)\(requestDetail)")
+        return focusTerminalSessionWindowController(controller, route: route, sessionID: sessionID, requestID: requestID, startedAt: startedAt)
     }
 
     static func liveTerminalSessionWindowController(_ controller: TerminalSessionWindowController?) -> TerminalSessionWindowController? {
@@ -2795,6 +2870,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let title: String
         let workingDirectory: String
         let kind: TerminalSessionKind
+        /// Shell and launch command from the overview summary, threaded through so the
+        /// seeded launch configuration shows the session's real shell/command rather than a
+        /// placeholder. `nil` when the request is built from a row that predates the
+        /// session's overview entry; the open path then falls back to the loaded summary.
+        let shell: String?
+        let command: String?
         let initialState: TerminalSessionState?
         let servicePID: Int32?
         let childPID: Int32?
@@ -2802,15 +2883,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let updatedAt: String?
 
         init(
-            workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
-            initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil, createdAt: String? = nil,
-            updatedAt: String? = nil
+            workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind, shell: String? = nil,
+            command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
+            createdAt: String? = nil, updatedAt: String? = nil
         ) {
             self.workspaceID = workspaceID
             self.sessionID = sessionID
             self.title = title
             self.workingDirectory = workingDirectory
             self.kind = kind
+            self.shell = shell
+            self.command = command
             self.initialState = initialState
             self.servicePID = servicePID
             self.childPID = childPID
@@ -3248,8 +3331,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let session {
             return DeviceTerminalOpenRequest(
                 workspaceID: session.workspaceID ?? fallbackWorkspaceID, sessionID: session.id, title: session.title,
-                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), initialState: session.state,
-                servicePID: session.servicePID, childPID: session.childPID, createdAt: session.createdAt, updatedAt: session.updatedAt)
+                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell,
+                command: session.command, initialState: session.state, servicePID: session.servicePID, childPID: session.childPID,
+                createdAt: session.createdAt, updatedAt: session.updatedAt)
         }
         guard let workspace = overview?.workspaces.first(where: { $0.id == fallbackWorkspaceID }),
             let row = workspace.terminalRows.first(where: { $0.sessionID == sessionID })
@@ -3760,6 +3844,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             userInfo: [
                 NSLocalizedDescriptionKey: "Spaces has not finished loading.",
                 NSLocalizedRecoverySuggestionErrorKey: "Wait for Spaces to load, or reload Spaces, and try again.",
+            ])
+    }
+
+    /// Raised when a terminal window is opened by id but neither the caller nor a fresh
+    /// device overview knows the session, so its real launch configuration cannot be read.
+    private static func terminalSessionNotFoundError() -> NSError {
+        NSError(
+            domain: "Spaces", code: 1002,
+            userInfo: [
+                NSLocalizedDescriptionKey: "That terminal session is no longer available.",
+                NSLocalizedRecoverySuggestionErrorKey: "Reload Spaces and try again.",
             ])
     }
 
@@ -8419,10 +8514,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             if let request = Self.deviceTerminalOpenRequest(
                                 workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? localDeviceOverview)
                             {
-                                _ = openDeviceTerminalSession(request, device: device)
+                                _ = await openDeviceTerminalSession(request, device: device)
                             }
                         } else {
-                            _ = openTerminalSessionWindow(sessionID: sessionID, mode: .owner)
+                            _ = await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner)
                         }
                     }
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
@@ -9102,12 +9197,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// local session opens a native window and a remote session opens a Device API mirror.
     @discardableResult private func focusClientSessionWindow(
         _ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
-    ) -> Bool {
+    ) async -> Bool {
         if isRemoteDeviceID(deviceID(forWorkspaceID: request.workspaceID)) {
-            return openDeviceTerminalSession(request, device: device, requestID: requestID)
+            return await openDeviceTerminalSession(request, device: device, requestID: requestID)
         }
-        focusTerminalSessionWindow(sessionID: request.sessionID, requestID: requestID)
-        return true
+        return await focusTerminalSessionWindowResolvingMissingSummary(sessionID: request.sessionID, requestID: requestID)
     }
 
     /// Focuses the local Chrome window for a workspace browser session. A browser session is a
@@ -9267,7 +9361,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             Self.setClientActiveWorkspaceID(request.workspaceID)
-            guard focusClientSessionWindow(request, device: device, requestID: requestID) else { return nil }
+            guard await focusClientSessionWindow(request, device: device, requestID: requestID) else { return nil }
             return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
             guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {

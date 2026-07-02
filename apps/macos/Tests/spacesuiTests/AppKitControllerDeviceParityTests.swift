@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import spacesclientcore
 import spacesdeviceapi
@@ -372,8 +373,8 @@ import workspacecore
             request
                 == AppKitController.DeviceTerminalOpenRequest(
                     workspaceID: "workspace-1", sessionID: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature",
-                    kind: .shell, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
-                    updatedAt: "2026-06-22T12:00:01Z"))
+                    kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
+                    createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
     }
 
     @Test func deviceShortcutResolvesStartingTerminalRowWithSessionMetadata() {
@@ -398,8 +399,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-shell", title: "shell-1",
-                        workingDirectory: "/device/project-feature", kind: .shell, initialState: .starting, servicePID: 321, childPID: nil,
-                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
+                        workingDirectory: "/device/project-feature", kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting,
+                        servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceShortcutResolvesStartingProcessWithSessionMetadata() {
@@ -428,8 +429,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-process", title: "web", workingDirectory: "/device/project-feature",
-                        kind: .process, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
-                        updatedAt: "2026-06-22T12:00:01Z")))
+                        kind: .process, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
+                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceShortcutResolvesStartingAgentWithSessionMetadata() {
@@ -455,8 +456,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-agent", title: "Codex", workingDirectory: "/device/project-feature",
-                        kind: .agent, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
-                        updatedAt: "2026-06-22T12:00:01Z")))
+                        kind: .agent, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
+                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceTerminalControlRequestTranslatesRendererControlPayload() throws {
@@ -556,5 +557,127 @@ import workspacecore
             workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-06-22T12:00:00Z",
             updatedAt: "2026-06-22T12:00:01Z", isControlAvailable: false, isSubscriptionAvailable: false,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: rowKind)
+    }
+
+    @Test func coldTerminalOverviewLookupRunsOffMainThread() async {
+        let recorder = ThreadRecorder()
+        let device = SpacesPairedDeviceRecord(
+            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
+            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
+        let clientApp = SpacesDeviceClientApp(
+            installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
+        let summary = SpacesDeviceTerminalSessionSummary(
+            id: "session-cold", title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
+            lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: nil, workspaceTitle: nil, projectID: nil, projectName: nil,
+            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+
+        let match = await AppKitController.resolveSessionSummaryMatchOffMain(
+            sessionID: "session-cold", device: device, clientApp: clientApp,
+            resolveOverview: { device, _ in
+                recorder.record(Thread.isMainThread)
+                return SpacesDeviceOverviewResolution(
+                    overview: SpacesDeviceOverview(device: device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary])),
+                    daemonStatus: nil, compatibility: nil)
+            })
+
+        #expect(match == AppKitController.TerminalSessionSummaryMatch(device: device, summary: summary))
+        #expect(recorder.values == [false])
+    }
+
+    @Test func attachControlRefreshesSessionStateWhenResponseOmitsIt() throws {
+        // The Device API does not echo session state for attach/detach controls, so the
+        // control helper must fetch the post-control state and apply the new ownership
+        // immediately instead of waiting for the live subscription to redeliver it.
+        let refreshedSnapshot = attachmentSnapshot(ownerID: "mac-window")
+        let refreshedState = sessionStatePayload(attachmentSnapshot: refreshedSnapshot)
+        let recorder = ControlRequestRecorder(stateResponseSnapshot: refreshedState)
+        let applied = AppliedStateBox()
+
+        let response = try AppKitController.sendDeviceTerminalControl(
+            sessionID: "session-1",
+            request: TerminalControlRequest(
+                command: "attach",
+                client: TerminalClient(
+                    id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
+                attachmentMode: .owner), requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
+
+        #expect(response.ok)
+        #expect(recorder.issuedStateFetch)
+        #expect(applied.payload?.attachmentSnapshot == refreshedSnapshot)
+    }
+
+    @Test func sendControlDoesNotFetchStateWhenRefreshNotRequested() throws {
+        // Input controls (send/key) carry no ownership change, so the helper must not
+        // pay for a follow-up state fetch and must leave the cached state untouched.
+        let recorder = ControlRequestRecorder(stateResponseSnapshot: nil)
+        let applied = AppliedStateBox()
+
+        let response = try AppKitController.sendDeviceTerminalControl(
+            sessionID: "session-1", request: TerminalControlRequest(command: "send", text: "ls", clientID: "mac-window", appendNewline: true),
+            requestSender: recorder.send, refreshStateAfterControl: false, applyState: { applied.store($0) })
+
+        #expect(response.ok)
+        #expect(!recorder.issuedStateFetch)
+        #expect(applied.payload == nil)
+    }
+
+    private func sessionStatePayload(attachmentSnapshot: TerminalSessionAttachmentSnapshot) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-06-22T12:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil)
+    }
+
+    private func attachmentSnapshot(ownerID: String) -> TerminalSessionAttachmentSnapshot {
+        let client = TerminalClient(id: ownerID, kind: .localWindow, identity: .init(label: ownerID), connectedAt: "2026-06-22T12:00:00Z")
+        return TerminalSessionAttachmentSnapshot(
+            clients: [client],
+            attachments: [TerminalAttachment(sessionID: "session-1", clientID: ownerID, mode: .owner, attachedAt: "2026-06-22T12:00:00Z")])
+    }
+
+    /// Records whether the helper issued the follow-up `.state` fetch and replies to it
+    /// with a fixed snapshot, so a test can assert the post-control refresh behavior.
+    private final class ThreadRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var recordedValues: [Bool] = []
+
+        var values: [Bool] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedValues
+        }
+
+        func record(_ value: Bool) {
+            lock.lock()
+            recordedValues.append(value)
+            lock.unlock()
+        }
+    }
+
+    private final class ControlRequestRecorder: @unchecked Sendable {
+        private let stateResponseSnapshot: GhosttyRemoteSessionStatePayload?
+        private(set) var issuedStateFetch = false
+
+        init(stateResponseSnapshot: GhosttyRemoteSessionStatePayload?) { self.stateResponseSnapshot = stateResponseSnapshot }
+
+        var send: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse {
+            { [self] request in
+                switch request.command {
+                case .control:
+                    return TerminalServiceResponse(
+                        ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
+                case .state:
+                    issuedStateFetch = true
+                    return TerminalServiceResponse(ok: true, message: "", sessionState: stateResponseSnapshot)
+                default: return TerminalServiceResponse(ok: false, message: "unexpected command")
+                }
+            }
+        }
+    }
+
+    private final class AppliedStateBox: @unchecked Sendable {
+        private(set) var payload: GhosttyRemoteSessionStatePayload?
+        func store(_ payload: GhosttyRemoteSessionStatePayload) { self.payload = payload }
     }
 }
