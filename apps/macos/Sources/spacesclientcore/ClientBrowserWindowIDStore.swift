@@ -28,7 +28,6 @@ public struct ClientBrowserWindowIDStore: Sendable {
             try $0.clearBrowserSessionWindowID(deviceID: deviceID, workspaceID: workspaceID, targetURL: targetURL)
         }
     }
-
     /// All dedicated Chrome windows tracked for a workspace, used to close them when the
     /// workspace stops.
     public func windowIDs(workspaceID: String) throws -> [(targetURL: String, windowID: Int)] {

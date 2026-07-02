@@ -19,8 +19,6 @@
         private let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
         private let terminalView: GhosttyMirrorTerminalView
         private var latestState: GhosttyRemoteSessionStatePayload?
-        private var persistedFinalStateLoaded = false
-        private var persistedFinalStateLoadInProgress = false
         private var stateReducer = TerminalRemoteStateReducer()
         private var stateStreamClient: GhosttyRemoteSessionStateStreamClient?
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
@@ -134,10 +132,7 @@
         public func activeOwnerClientID() -> String? {
             ensureStateStreamStartedIfNeeded()
             guard isInteractiveRuntimeStateForControl() else { return nil }
-            if let attachmentSnapshot = latestState?.attachmentSnapshot {
-                return attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
-            }
-            return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
+            return latestState?.attachmentSnapshot?.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID
         }
 
         public func hasRenderableSurface() -> Bool { terminalView.hasRenderedContent }
@@ -200,13 +195,12 @@
 
         public var effectiveTitle: String {
             ensureStateStreamStartedIfNeeded()
-            return latestState?.title ?? ((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.title) ?? launchConfiguration.title
+            return latestState?.title ?? latestState?.runtimeState?.title ?? launchConfiguration.title
         }
 
         public var effectiveWorkingDirectory: String {
             ensureStateStreamStartedIfNeeded()
-            return latestState?.workingDirectory ?? ((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.workingDirectory)
-                ?? launchConfiguration.workingDirectory
+            return latestState?.workingDirectory ?? latestState?.runtimeState?.workingDirectory ?? launchConfiguration.workingDirectory
         }
 
         private func ensureStateStreamStartedIfNeeded(now: Date = Date()) {
@@ -218,10 +212,10 @@
                 requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.initial)
                 return
             }
-            guard isInteractiveRuntimeStateForControl() else {
-                loadPersistedFinalStateIfAvailable()
-                return
-            }
+            // No device-backed state route was injected (e.g. unit tests). A
+            // non-interactive session has no live source and no on-disk final-render
+            // cache, so there is nothing to attach.
+            guard isInteractiveRuntimeStateForControl() else { return }
             if stateStreamClient?.isConnected == true { return }
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
@@ -235,10 +229,9 @@
         }
 
         private func startDirectStateStreamIfNeeded(stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber, now: Date) {
-            guard isInteractiveRuntimeStateForControl() else {
-                loadPersistedFinalStateIfAvailable()
-                return
-            }
+            // Register with the device-backed state model even for non-interactive
+            // sessions: the model's catch-up `.state` request delivers the final
+            // render, replacing the former on-disk final-render cache.
             if directStateStreamClient != nil { return }
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
@@ -321,23 +314,9 @@
         private func handleStreamDisconnect() {
             stateStreamClient = nil
             lastSubscriptionAttemptAt = Date()
-            if !isInteractiveRuntimeStateForControl() { loadPersistedFinalStateIfAvailable() }
-        }
-
-        @discardableResult private func loadPersistedFinalStateIfAvailable() -> Bool {
-            guard !persistedFinalStateLoaded, !persistedFinalStateLoadInProgress else { return latestState != nil }
-            if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), runtimeState.state.isInteractive { return false }
-            guard let payload = try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) else { return false }
-            guard payload.runtimeState?.state.isInteractive != true else { return false }
-            persistedFinalStateLoadInProgress = true
-            persistedFinalStateLoaded = true
-            defer { persistedFinalStateLoadInProgress = false }
-            applyRemoteState(payload, postNotifications: false)
-            return true
         }
 
         private func isInteractiveRuntimeStateForControl() -> Bool {
-            if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) { return runtimeState.state.isInteractive }
             if let runtimeState = latestState?.runtimeState { return runtimeState.state.isInteractive }
             return true
         }
@@ -350,7 +329,6 @@
         }
 
         private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
-            if incomingPayload.runtimeState?.state.isInteractive == true { persistedFinalStateLoaded = false }
             let decodeStartedAt = Date()
             let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
             let reduction = stateReducer.reduce(
@@ -365,7 +343,6 @@
             let dropReason = reduction.dropReason
             latestState = reduction.storedPayload
             if reduction.didRequestResync { requestRenderUpdateStateResync() }
-            try? TerminalSessionPersistence.writeRemoteStateMirror(latestState ?? payload, paths: paths)
             lastSubscriptionAttemptAt = nil
             let frameForUpdate = reduction.frameToApply
             let applyStartedAt = Date()

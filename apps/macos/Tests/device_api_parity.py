@@ -59,8 +59,9 @@ def send(command: str, payload: dict | None, args: argparse.Namespace, app: dict
         args.host,
         "--port",
         str(args.port),
-        "--transport-key",
-        args.transport_key,
+        # Equals form: transport keys are base64url and may start with "-", which argparse would
+        # otherwise treat as another option.
+        f"--transport-key={args.transport_key}",
         "--request-json",
         json.dumps(typed_request(command, payload, args, app), separators=(",", ":")),
     ]

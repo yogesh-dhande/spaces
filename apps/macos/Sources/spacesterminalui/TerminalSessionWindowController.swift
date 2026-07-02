@@ -4,6 +4,11 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
+/// Raised when the injected state provider has no device-owned state to render
+/// yet. The window controller surfaces the existing "unavailable" UI rather than
+/// reading the daemon's `spaces.db` directly.
+enum TerminalSessionStateUnavailableError: Error { case launchConfigurationUnavailable }
+
 @MainActor private final class TerminalSessionWindow: NSWindow {
     var terminalKeyEventHandler: ((NSEvent) -> Bool)?
     var terminalCommandKeyEquivalentHandler: ((NSEvent) -> Bool)?
@@ -132,6 +137,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     let sessionID: String
     private let paths: TerminalSessionPaths
+    /// Device-owned terminal state (launch config, runtime state, attachment
+    /// ownership, latest render payload), reached through the Device API by the
+    /// injected provider. The window controller never opens the daemon's
+    /// `spaces.db`; all session state reads go through this provider.
+    private let stateProvider: any TerminalSessionStateProviding
     private var launchConfiguration: TerminalSessionLaunchConfiguration?
     let client: TerminalClient
     var rendererMode: TerminalRendererMode
@@ -185,7 +195,11 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
     let detachClientSynchronouslyOnClose: Bool
-    private let usesCustomAttachClientAction: Bool
+    /// When true, `show()` does not eagerly attach the live Ghostty client; the
+    /// deferred-presentation path attaches it once the owner surface is ready. The
+    /// app passes false so an injected attach happens immediately; metadata-only
+    /// callers (and tests) pass true to refresh title/ownership without a live surface.
+    private let defersInitialOwnerClientAttach: Bool
     let copySelectionAction: (@MainActor () -> Bool)?
     let pasteClipboardAction: (@MainActor () -> Bool)?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
@@ -238,25 +252,28 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     private static let deferredInitialOwnerPresentationTimeout: TimeInterval = 5
 
     public convenience init(
-        sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
+        sessionID: String, paths: TerminalSessionPaths, stateProvider: any TerminalSessionStateProviding,
+        preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
-        attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
-        detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
-        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
+        detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
+        detachClientSynchronouslyOnClose: Bool = true, defersInitialOwnerClientAttach: Bool = false,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
         runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)? = nil,
-        loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
-        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
+        loadWindowFrameAction: @escaping (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?,
+        saveWindowFrameAction: @escaping (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.init(
-            sessionID: sessionID, paths: paths, preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
-            sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-            detachClientAction: detachClientAction, copySelectionAction: copySelectionAction,
-            detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, pasteClipboardAction: pasteClipboardAction,
+            sessionID: sessionID, paths: paths, stateProvider: stateProvider, preferredAttachmentMode: preferredAttachmentMode,
+            performInitialRefresh: performInitialRefresh, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
+            takeoverAction: takeoverAction, attachClientAction: attachClientAction, detachClientAction: detachClientAction,
+            copySelectionAction: copySelectionAction, detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose,
+            defersInitialOwnerClientAttach: defersInitialOwnerClientAttach, pasteClipboardAction: pasteClipboardAction,
             ownerWindowFocusAction: ownerWindowFocusAction, ownerSurfaceFocusAction: ownerSurfaceFocusAction, onWindowFocus: onWindowFocus,
             onWindowClose: onWindowClose, runtimeControlsProvider: runtimeControlsProvider, loadWindowFrameAction: loadWindowFrameAction,
             saveWindowFrameAction: saveWindowFrameAction,
@@ -266,25 +283,28 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     }
 
     init(
-        sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
+        sessionID: String, paths: TerminalSessionPaths, stateProvider: any TerminalSessionStateProviding,
+        preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
-        attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
-        detachClientAction: (@Sendable (String) throws -> Void)? = nil, copySelectionAction: (@MainActor () -> Bool)? = nil,
-        detachClientSynchronouslyOnClose: Bool = true, pasteClipboardAction: (@MainActor () -> Bool)? = nil,
-        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
-        onWindowFocus: (@MainActor (String) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
+        detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
+        detachClientSynchronouslyOnClose: Bool = true, defersInitialOwnerClientAttach: Bool = false,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
+        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
         runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)? = nil,
-        loadWindowFrameAction: ((TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?)? = nil,
-        saveWindowFrameAction: ((TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void)? = nil,
+        loadWindowFrameAction: @escaping (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame?,
+        saveWindowFrameAction: @escaping (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void,
         sessionHostProvider: @escaping @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     ) {
         self.sessionID = sessionID
         self.paths = paths
+        self.stateProvider = stateProvider
         self.preferredAttachmentMode = preferredAttachmentMode
         ownerAttachmentRequested = preferredAttachmentMode == .owner
-        let resolvedLaunchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+        let resolvedLaunchConfiguration = stateProvider.currentLaunchConfiguration
         launchConfiguration = resolvedLaunchConfiguration
         let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .ghosttyEmbedded
         backend = resolvedBackend
@@ -309,17 +329,10 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 try TerminalControlClient.send(
                     request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
             }
-        usesCustomAttachClientAction = attachClientAction != nil
-        self.attachClientAction =
-            attachClientAction ?? { client, mode in
-                try TerminalSessionPersistence.attachClient(
-                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: ISO8601DateFormatter().string(from: Date()))
-            }
-        self.detachClientAction =
-            detachClientAction ?? { clientID in
-                try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
-            }
+        self.attachClientAction = attachClientAction
+        self.detachClientAction = detachClientAction
         self.detachClientSynchronouslyOnClose = detachClientSynchronouslyOnClose
+        self.defersInitialOwnerClientAttach = defersInitialOwnerClientAttach
         self.copySelectionAction = copySelectionAction
         self.pasteClipboardAction = pasteClipboardAction
         self.ownerWindowFocusAction = ownerWindowFocusAction
@@ -327,9 +340,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         self.onWindowFocus = onWindowFocus
         self.onWindowClose = onWindowClose
         self.runtimeControlsProvider = runtimeControlsProvider
-        self.loadWindowFrameAction = loadWindowFrameAction ?? { mode in try TerminalSessionPersistence.readWindowFrame(mode: mode, paths: paths) }
-        self.saveWindowFrameAction =
-            saveWindowFrameAction ?? { frame, mode in try TerminalSessionPersistence.writeWindowFrame(frame, mode: mode, paths: paths) }
+        self.loadWindowFrameAction = loadWindowFrameAction
+        self.saveWindowFrameAction = saveWindowFrameAction
         self.sessionHostProvider = sessionHostProvider
 
         let contentRect = NSRect(x: 0, y: 0, width: 980, height: 640)
@@ -356,12 +368,13 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     public func show(requestID: String? = nil, route: String? = nil) {
         guard let window else { return }
+        stateProvider.refreshState()
         let startedAt = Date()
         let wasVisible = isWindowPresented(window) && !didCloseWindow
-        let defersGhosttyClientAttach = backend == .ghosttyEmbedded && !usesCustomAttachClientAction
+        let defersGhosttyClientAttach = backend == .ghosttyEmbedded && defersInitialOwnerClientAttach
         didCloseWindow = false
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
-        lastObservedRuntimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastObservedRuntimeState
+        lastObservedRuntimeState = (stateProvider.currentRuntimeState) ?? lastObservedRuntimeState
         let attachStartedAt = Date()
         if !defersGhosttyClientAttach, backend != .ghosttyEmbedded || canAttachToGhosttyRuntime(lastObservedRuntimeState) {
             attachLocalClientIfNeeded(mode: initialAttachmentModeForShow())
@@ -397,9 +410,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
 
     private func initialAttachmentModeForShow() -> TerminalAttachmentMode {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return preferredAttachmentMode }
-        guard let ownerClient = activeOwnerClient(snapshot: try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) else {
-            return preferredAttachmentMode
-        }
+        guard let ownerClient = activeOwnerClient(snapshot: stateProvider.currentAttachmentSnapshot) else { return preferredAttachmentMode }
         return ownerClient.id == client.id ? .owner : .viewer
     }
 
@@ -547,8 +558,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         ownerAttachmentRequested = true
         preferredAttachmentMode = .owner
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
-        lastObservedRuntimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastObservedRuntimeState
-        let currentOwnerClient = activeOwnerClient(snapshot: try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths))
+        lastObservedRuntimeState = (stateProvider.currentRuntimeState) ?? lastObservedRuntimeState
+        let currentOwnerClient = activeOwnerClient(snapshot: stateProvider.currentAttachmentSnapshot)
         lastObservedOwnerClientID = currentOwnerClient?.id
         let hasDifferentActiveOwner = currentOwnerClient != nil && currentOwnerClient?.id != client.id
         if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
@@ -655,7 +666,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             }
             switchGhosttySessionHostIfNeeded(host)
             try host.attach(client: client, mode: preferredAttachmentMode, into: terminalContainer)
-            if !usesCustomAttachClientAction { isClientAttached = true }
+            if defersInitialOwnerClientAttach { isClientAttached = true }
             lastObservedAttachmentMode = preferredAttachmentMode
             lastObservedOwnerClientID = host.activeOwnerClientID()
             syncGhosttyOwnerFocus(reason: "attach_owner_surface", requestWindowFocus: requestWindowFocus && preferredAttachmentMode == .owner)
@@ -750,18 +761,20 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
             if let launchConfiguration {
                 currentLaunchConfiguration = launchConfiguration
+            } else if let providerLaunchConfiguration = stateProvider.currentLaunchConfiguration {
+                currentLaunchConfiguration = providerLaunchConfiguration
             } else {
-                currentLaunchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+                throw TerminalSessionStateUnavailableError.launchConfigurationUnavailable
             }
             launchConfiguration = currentLaunchConfiguration
             if backend != currentLaunchConfiguration.backend {
                 backend = currentLaunchConfiguration.backend
                 rendererMode = TerminalRendererResolver.resolveGhosttyEmbeddedMode(backend: currentLaunchConfiguration.backend)
             }
-            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+            let runtimeState = stateProvider.currentRuntimeState
             lastObservedRuntimeState = runtimeState
             updateGhosttySessionHostReference(for: currentLaunchConfiguration)
-            var attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            var attachmentSnapshot = stateProvider.currentAttachmentSnapshot
             var currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
             let isInteractive = isInteractiveRuntimeState(runtimeState)
             let canAttachToRuntime = canAttachToGhosttyRuntime(runtimeState)
@@ -799,7 +812,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
                 }
                 if let attachmentModeToRequest {
                     attachLocalClientIfNeeded(mode: attachmentModeToRequest)
-                    attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+                    attachmentSnapshot = stateProvider.currentAttachmentSnapshot
                     currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
                 }
             }
@@ -912,7 +925,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         guard backend != .ghosttyEmbedded || canAttachToGhosttyRuntime(lastObservedRuntimeState) else { return }
         var attachmentMode = mode ?? (ownerAttachmentRequested ? .owner : preferredAttachmentMode)
         if backend == .ghosttyEmbedded, attachmentMode == .owner, !force {
-            let currentOwnerClient = activeOwnerClient(snapshot: try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths))
+            let currentOwnerClient = activeOwnerClient(snapshot: stateProvider.currentAttachmentSnapshot)
             if let currentOwnerClient, currentOwnerClient.id != client.id {
                 ownerAttachmentRequested = false
                 preferredAttachmentMode = .viewer

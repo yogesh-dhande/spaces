@@ -549,6 +549,11 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let id: String
     public let title: String
     public let workingDirectory: String
+    /// Shell and launch command from the session's persisted launch configuration, so a
+    /// device-backed window shows the same shell/command the daemon launched with rather
+    /// than a hard-coded default.
+    public let shell: String
+    public let command: String?
     public let state: TerminalSessionState
     public let backend: TerminalSessionBackendKind
     public let lifetimePolicy: TerminalSessionLifetimePolicy
@@ -569,15 +574,18 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint?
 
     public init(
-        id: String, title: String, workingDirectory: String, state: TerminalSessionState, backend: TerminalSessionBackendKind,
-        lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String?, workspaceTitle: String?,
-        projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool, isSubscriptionAvailable: Bool,
-        attachmentSnapshot: TerminalSessionAttachmentSnapshot, rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil,
-        hasFinalRender: Bool = false, daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
+        id: String, title: String, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
+        backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String?,
+        workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
+        isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
+        rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
+        daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
     ) {
         self.id = id
         self.title = title
         self.workingDirectory = workingDirectory
+        self.shell = shell
+        self.command = command
         self.state = state
         self.backend = backend
         self.lifetimePolicy = lifetimePolicy
@@ -602,6 +610,8 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         case id
         case title
         case workingDirectory
+        case shell
+        case command
         case state
         case backend
         case lifetimePolicy
@@ -627,6 +637,8 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         id = try container.decode(String.self, forKey: .id)
         title = try container.decode(String.self, forKey: .title)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
+        shell = try container.decode(String.self, forKey: .shell)
+        command = try container.decodeIfPresent(String.self, forKey: .command)
         state = try container.decode(TerminalSessionState.self, forKey: .state)
         backend = try container.decode(TerminalSessionBackendKind.self, forKey: .backend)
         lifetimePolicy = try container.decode(TerminalSessionLifetimePolicy.self, forKey: .lifetimePolicy)

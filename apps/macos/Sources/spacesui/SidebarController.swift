@@ -45,6 +45,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     typealias AlertsGroup = AppKitController.AlertsGroup
     typealias SidebarArrowSelectionTarget = AppKitController.SidebarArrowSelectionTarget
 
+    enum RemoteOverviewDisconnectAction: Equatable {
+        case ignoreIntentionalRemoval
+        case recordStartupDisconnect
+        case markOffline
+    }
+
+    nonisolated static func remoteOverviewDisconnectAction(hasStoredSubscription: Bool, isOpeningSubscription: Bool) -> RemoteOverviewDisconnectAction
+    {
+        if hasStoredSubscription { return .markOffline }
+        if isOpeningSubscription { return .recordStartupDisconnect }
+        return .ignoreIntentionalRemoval
+    }
+
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     /// Memoized filtered+sorted visible workspaces per project. `visibleWorkspaces`
     /// is on the NSOutlineView data-source hot path (queried per row); caching keeps

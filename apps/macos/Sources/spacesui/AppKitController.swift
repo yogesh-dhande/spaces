@@ -354,6 +354,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
 
         let kind: Kind
+        let deviceID: String?
         let workspaceID: String
         let sessionID: String
         let title: String
@@ -366,6 +367,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let canRun: Bool
         let canStop: Bool
         let canRestart: Bool
+
+        init(
+            kind: Kind, deviceID: String? = nil, workspaceID: String, sessionID: String, title: String, processID: String?,
+            processTemplateID: String?, processKey: String?, agentID: String?, agentLauncherID: String?, agentLauncherName: String?, canRun: Bool,
+            canStop: Bool, canRestart: Bool
+        ) {
+            self.kind = kind
+            self.deviceID = deviceID
+            self.workspaceID = workspaceID
+            self.sessionID = sessionID
+            self.title = title
+            self.processID = processID
+            self.processTemplateID = processTemplateID
+            self.processKey = processKey
+            self.agentID = agentID
+            self.agentLauncherID = agentLauncherID
+            self.agentLauncherName = agentLauncherName
+            self.canRun = canRun
+            self.canStop = canStop
+            self.canRestart = canRestart
+        }
     }
 
     enum WindowFocusRequest: Sendable {
@@ -1226,9 +1248,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     }
                 }
                 let created = TerminalSessionWindowController(
-                    sessionID: sessionID, paths: paths, preferredAttachmentMode: mode, performInitialRefresh: false, sendInputAction: sendInputAction,
-                    sendKeyAction: sendKeyAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
-                    detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                    sessionID: sessionID, paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
+                    preferredAttachmentMode: mode, performInitialRefresh: false, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
+                    takeoverAction: takeoverAction, attachClientAction: attachClientAction, detachClientAction: detachClientAction,
+                    detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                     onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
@@ -1279,7 +1302,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         -> RemoteTerminalSessionRoute
     {
         guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id) else {
-            throw SpacesDeviceClientError.missingTransportKey(device.name)
+            throw SpacesDeviceClientError.missingTransportKey(deviceName: device.name, isLocal: device.id == SpacesPairedDeviceRecord.localDeviceID)
         }
         let authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id)
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
@@ -1600,7 +1623,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     static func terminalRuntimeControlDescriptor(
-        sessionID: String, workspaceID: String, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
+        sessionID: String, workspaceID: String, deviceID: String? = nil, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
         agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord], isSessionRunning: Bool
     ) -> TerminalRuntimeControlDescriptor? {
         guard let normalizedSessionID = normalizedTerminalSessionID(sessionID) else { return nil }
@@ -1610,7 +1633,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let processKey = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName)
             let isRunning = process.status != .exited && isSessionRunning
             return TerminalRuntimeControlDescriptor(
-                kind: .process, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: process.id,
+                kind: .process, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: process.id,
                 processTemplateID: template?.id, processKey: processKey, agentID: nil, agentLauncherID: nil, agentLauncherName: nil,
                 canRun: template != nil && !isRunning, canStop: true, canRestart: template != nil)
         }
@@ -1621,8 +1644,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let title = trimmedNonEmpty(launcher?.name) ?? codingAgentDisplayName(label: agent.label, runtimeWindowTitle: windowTitle)
             let isRunning = agent.status != .done && isSessionRunning
             return TerminalRuntimeControlDescriptor(
-                kind: .codingAgent, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
-                processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
+                kind: .codingAgent, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil,
+                processTemplateID: nil, processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
                 canRun: launcher != nil && !isRunning, canStop: true, canRestart: launcher != nil)
         }
 
@@ -1631,8 +1654,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail)
             } ?? "Terminal"
         return TerminalRuntimeControlDescriptor(
-            kind: .workspaceTerminal, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil, processTemplateID: nil,
-            processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true, canRestart: false)
+            kind: .workspaceTerminal, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil,
+            processTemplateID: nil, processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true,
+            canRestart: false)
     }
 
     private static func configuredProcessTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
@@ -1804,6 +1828,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         return ownerAttachment.clientID
     }
+
+    nonisolated static func shouldTerminateAdHocBuiltInTerminalSession(
+        hasLiveAttachments: Bool, isConfiguredProcessSession: Bool, isAppTerminatingAndKeepingSessions: Bool = false
+    ) -> Bool { !isAppTerminatingAndKeepingSessions && !isConfiguredProcessSession && !hasLiveAttachments }
 
     nonisolated static func shouldTerminateAdHocBuiltInTerminalSession(
         paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, isAppTerminatingAndKeepingSessions: Bool = false, now: Date = Date()
@@ -7362,6 +7390,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let preparedGitURL = refs.preparedGitURL
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
+                refs.preparedGitDeviceID = nil
                 refs.gitPreparationID = nil
                 let originalTitle = sender.title
                 sender.isEnabled = false
@@ -7445,23 +7474,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // A git source is prepared once the daemon has cloned it (handle held), so the form is
             // populated from spaces.yaml and Create can adopt the existing clone.
             return refs.gitPreparationID == nil && refs.preparedGitProjectHandle != nil && refs.preparedGitURL == repoURL
+                && refs.preparedGitDeviceID == refs.selectedDeviceID
         }
         let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return !directoryPath.isEmpty && refs.preparedLocalDirectoryPath == directoryPath
     }
 
     nonisolated static func preparedGitProjectResultMatchesActiveRequest(
-        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentPreparationID: UUID?,
-        completionPreparationID: UUID
-    ) -> Bool { isActiveForm && selectedSegment == 1 && currentRepoURL == requestedRepoURL && currentPreparationID == completionPreparationID }
+        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentDeviceID: String,
+        requestedDeviceID: String, currentPreparationID: UUID?, completionPreparationID: UUID
+    ) -> Bool {
+        isActiveForm && selectedSegment == 1 && currentRepoURL == requestedRepoURL && currentDeviceID == requestedDeviceID
+            && currentPreparationID == completionPreparationID
+    }
 
     nonisolated static func localProjectPreviewResultMatchesActiveRequest(
         isActiveForm: Bool, selectedSegment: Int, currentDirectoryPath: String, requestedDirectoryPath: String
     ) -> Bool { isActiveForm && selectedSegment == 0 && currentDirectoryPath == requestedDirectoryPath }
 
-    nonisolated static func preparedGitProjectDiscardKey(repoURL: String?) -> String? {
+    nonisolated static func preparedGitProjectMatchesCurrentSelection(
+        preparedGitProjectHandle: String?, preparedGitURL: String?, preparedGitDeviceID: String?, currentRepoURL: String, selectedDeviceID: String,
+        currentPreparationID: UUID?
+    ) -> Bool {
+        guard preparedGitProjectHandle != nil, currentPreparationID == nil else { return false }
+        return preparedGitURL == currentRepoURL && preparedGitDeviceID == selectedDeviceID
+    }
+
+    nonisolated static func preparedGitProjectDiscardKey(repoURL: String?, deviceID: String) -> String? {
         guard let key = repoURL?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
-        return key
+        return "\(deviceID)\n\(key)"
     }
 
     private func isActiveAddProjectForm(_ refs: AddProjectFieldRefs) -> Bool {
@@ -7575,11 +7616,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 if case .failure(let error) = discardResult {
                     refs.preparedGitProjectHandle = nil
                     refs.preparedGitURL = nil
+                    refs.preparedGitDeviceID = nil
                     showError(error)
                     return
                 }
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
+                refs.preparedGitDeviceID = nil
             }
             if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL), case .failure(let error) = discardResult {
                 showError(error)
@@ -7593,6 +7636,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .failure(let error):
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
+                refs.preparedGitDeviceID = nil
                 showError(error)
                 return
             case .success(let result): preparation = result
@@ -7603,6 +7647,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .failure(let error):
                     refs.preparedGitProjectHandle = nil
                     refs.preparedGitURL = nil
+                    refs.preparedGitDeviceID = nil
                     showError(error)
                     return
                 case .success(let result): preparation = result
@@ -7612,7 +7657,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 Self.preparedGitProjectResultMatchesActiveRequest(
                     isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
                     currentRepoURL: refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), requestedRepoURL: repoURL,
-                    currentPreparationID: refs.gitPreparationID, completionPreparationID: preparationID)
+                    currentDeviceID: refs.selectedDeviceID, requestedDeviceID: device.id, currentPreparationID: refs.gitPreparationID,
+                    completionPreparationID: preparationID)
             else {
                 // The form moved on while cloning; discard the clone we just made.
                 if let handle = preparation.preparedGitProjectHandle {
@@ -7626,6 +7672,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             refs.preparedGitProjectHandle = handle
             refs.preparedGitURL = repoURL
+            refs.preparedGitDeviceID = device.id
             hydrateAddProjectSettings(refs, from: config)
         }
     }
@@ -7646,6 +7693,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let device = deviceRecord(forDeviceID: refs.selectedDeviceID)
         refs.preparedGitProjectHandle = nil
         refs.preparedGitURL = nil
+        refs.preparedGitDeviceID = nil
         guard let device else { return }
         let discardTask = beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device)
         Task { @MainActor [weak self] in
@@ -7670,6 +7718,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .restoreToForm:
             refs.preparedGitProjectHandle = handle
             refs.preparedGitURL = repoURL
+            refs.preparedGitDeviceID = device.id
         case .discardOrphan: beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device)
         }
     }
@@ -7697,6 +7746,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         else { return nil }
         refs.preparedGitProjectHandle = nil
         refs.preparedGitURL = nil
+        refs.preparedGitDeviceID = nil
         do {
             _ = try SpacesDeviceClient.discardPreparedGitProject(
                 preparedGitProjectHandle: handle, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -7707,7 +7757,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @discardableResult private func beginPreparedGitProjectDiscard(handle: String, repoURL: String?, device: SpacesPairedDeviceRecord) -> Task<
         Result<Void, Error>, Never
     > {
-        let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL)
+        let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: device.id)
         let previousTask = key.flatMap { preparedGitProjectDiscardTasksByURL[$0]?.task }
         let task = Task<Result<Void, Error>, Never> {
             if let previousTask { _ = await previousTask.value }
@@ -7725,7 +7775,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func activePreparedGitProjectDiscardResult(repoURL: String) async -> Result<Void, Error>? {
-        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL), let entry = preparedGitProjectDiscardTasksByURL[key] else { return nil }
+        let deviceID =
+            activeAddProjectFormTag.flatMap { AddProjectFieldCache.shared.cache[$0]?.selectedDeviceID } ?? SpacesPairedDeviceRecord.localDeviceID
+        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: deviceID), let entry = preparedGitProjectDiscardTasksByURL[key]
+        else { return nil }
         return await entry.task.value
     }
 
@@ -9291,6 +9344,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     ) -> Bool { appIsActive && !mainWindowIsFocused && !commandPaletteIsFocused }
 
     nonisolated static func shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: Bool) -> Bool { appIsActive }
+
+    nonisolated static func shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: String?) -> Bool {
+        frontmostApplicationBundleIdentifier == "com.google.Chrome"
+    }
+
+    nonisolated static func activeWorkspaceIDForGlobalNavigation(appIsActive: Bool, activeWorkspaceID: String?) -> String? {
+        appIsActive ? activeWorkspaceID : nil
+    }
+
+    nonisolated static func shouldReloadSidebarForTerminalOverviewSignal(
+        didStartBackgroundServices: Bool, notificationObject: String?, profileObject: String
+    ) -> Bool { didStartBackgroundServices && notificationObject == profileObject }
 
     nonisolated static func preferredWorkspaceIDForGlobalNavigation(
         focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?, rememberedTerminalSessionWorkspaceID: String?,

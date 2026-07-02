@@ -20,7 +20,7 @@ import workspacecore
 #endif
 
 protocol SpacesDevicePairingStoreProtocol: Sendable {
-    func issueToken(for clientApp: SpacesDeviceClientApp) throws -> String
+    func issueToken(for clientApp: SpacesDeviceClientApp, presentedToken: String?) throws -> String
     func listDevices() throws -> [SpacesDevicePairedClient]
     func revoke(installationID: String) throws
     func removeAll() throws
@@ -902,6 +902,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// committed write pushes a fresh overview to subscribed clients. Cross-platform
     /// (POSIX socket + NotificationCenter), with the macOS distributed observer
     /// added so cross-process writes (the CLI sharing this profile) are caught too.
+    /// Linux cross-process writes are bridged by spacesd into the same in-process
+    /// notification.
     private func startOverviewStreamServer() {
         guard overviewStreamServer == nil else { return }
         let server = DeviceOverviewStreamServer(
@@ -1031,7 +1033,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             try pairingStore.validate(clientApp: clientApp)
             try pairingCoordinator.validate(code: payload.pairingCode, nonce: payload.pairingNonce, peerID: peerID)
-            let issuedToken = try pairingStore.issueToken(for: clientApp)
+            // A fresh pairing always mints a new token; there is no prior token to preserve.
+            let issuedToken = try pairingStore.issueToken(for: clientApp, presentedToken: nil)
             onPairingSucceeded?(clientApp)
             return SpacesDeviceAPIResponse(ok: true, message: "Paired iOS client.", result: .issuedAuthToken(.init(authToken: issuedToken)))
         case .ping: return SpacesDeviceAPIResponse(ok: true, message: "pong")

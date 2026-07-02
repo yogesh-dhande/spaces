@@ -91,8 +91,14 @@ import workspacecore
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
+    #if os(Linux)
+        private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
+    #endif
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
     private var databaseChangeObserver: NSObjectProtocol?
+    #if os(Linux)
+        private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
+    #endif
     #if os(macOS)
         private var databaseDistributedChangeObserver: NSObjectProtocol?
         private var caddyRouteRegistryDistributedChangeObserver: NSObjectProtocol?
@@ -166,6 +172,15 @@ import workspacecore
         databaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
             [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() }
         }
+        #if os(Linux)
+            do {
+                let receiver = try DatabaseChangeSignalReceiver(socketPath: nil, queue: databaseChangeSignalQueue) {
+                    NotificationCenter.default.post(name: IPCNotification.databaseDidChange, object: nil)
+                }
+                try receiver.start()
+                databaseChangeSignalReceiver = receiver
+            } catch { writeStandardError("spacesd database_change_signal_error error=\(error)\n") }
+        #endif
         #if os(macOS)
             databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
@@ -216,6 +231,10 @@ import workspacecore
             NotificationCenter.default.removeObserver(databaseChangeObserver)
             self.databaseChangeObserver = nil
         }
+        #if os(Linux)
+            databaseChangeSignalReceiver?.stop()
+            databaseChangeSignalReceiver = nil
+        #endif
         #if os(macOS)
             if let databaseDistributedChangeObserver {
                 DistributedNotificationCenter.default().removeObserver(databaseDistributedChangeObserver)
@@ -1331,6 +1350,7 @@ private enum SpacesDaemonMobileCredentialStore {
 @main struct SpacesDaemonMain {
     static func main() {
         configureProcessSignals()
+        configureCLISearchPath()
 
         if environmentValue("SPACESD_PRINT_CERTIFICATE_FINGERPRINT") == "1" {
             do {
@@ -1375,6 +1395,21 @@ private enum SpacesDaemonMobileCredentialStore {
             _ = signal(SIGPIPE, SIG_IGN)
             _ = signal(SIGHUP, SIG_IGN)
         #endif
+    }
+
+    /// spacesd is the parent of every terminal shell, workspace runtime process, and
+    /// coding-agent hook it spawns, and those children resolve `spaces` from this
+    /// process's PATH. Prepend the daemon executable's own directory (which ships the
+    /// version-matched CLI) so children inherit a PATH that resolves `spaces` without
+    /// root-owned symlinks or daemon-specific shell-profile edits. This must run before
+    /// anything snapshots the environment.
+    private static func configureCLISearchPath() {
+        guard
+            let path = SpacesCLISearchPath.pathPrependingSiblingCLIDirectory(
+                executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath),
+                currentPATH: environmentValue("PATH"))
+        else { return }
+        setenv("PATH", path, 1)
     }
 
     #if canImport(Glibc)

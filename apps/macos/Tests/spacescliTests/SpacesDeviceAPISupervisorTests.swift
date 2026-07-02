@@ -434,8 +434,8 @@ import workspacecore
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: "process-dead-service", workspaceID: workspace.id, templateName: "dead-process", command: "sleep 300",
-                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
-                    status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T12:00:00Z", exitedAt: nil))
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running,
+                    logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T12:00:00Z", exitedAt: nil))
 
             let transportKey = SpacesDeviceAPISettings.generateTransportKey()
             let clientApp = SpacesDeviceClientApp(
@@ -1170,7 +1170,7 @@ private final class BlockingAuthorizePairingStore: SpacesDevicePairingStoreProto
 
     init(clientApp: SpacesDeviceClientApp) { self.clientApp = clientApp }
 
-    func issueToken(for clientApp: SpacesDeviceClientApp) throws -> String {
+    func issueToken(for clientApp: SpacesDeviceClientApp, presentedToken _: String?) throws -> String {
         try validate(clientApp: clientApp)
         lock.lock()
         isPaired = true

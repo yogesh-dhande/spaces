@@ -149,7 +149,14 @@ final class TerminalSessionModelTests: XCTestCase {
             sessionID: sessionID, client: client, mode: .owner, paths: sessionPaths, attachedAt: "2026-05-08T00:00:01Z")
 
         var snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: sessionPaths)
-        XCTAssertEqual(snapshot.clients, [client])
+        // The snapshot reports the lease the attach seeded, so liveness can be judged off-device.
+        XCTAssertEqual(
+            snapshot.clients,
+            [
+                TerminalClient(
+                    id: "client-1", kind: .localWindow, identity: client.identity, connectedAt: client.connectedAt,
+                    leaseRefreshedAt: "2026-05-08T00:00:01Z")
+            ])
         XCTAssertEqual(snapshot.attachments.count, 1)
         XCTAssertEqual(snapshot.attachments.first?.mode, .owner)
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: sessionPaths).count, 1)
@@ -210,6 +217,30 @@ final class TerminalSessionModelTests: XCTestCase {
         let snapshot = try TerminalSessionPersistence.readAttachmentSnapshot(paths: sessionPaths)
         XCTAssertEqual(snapshot.clients.first(where: { $0.id == remoteClient.id })?.connectedAt, "2026-05-08T00:00:00Z")
         XCTAssertEqual(snapshot.clients.first(where: { $0.id == staleRemoteClient.id })?.connectedAt, "2026-05-08T00:00:00Z")
+    }
+
+    /// The off-device cleanup path judges liveness from a wire snapshot (no DB), so the
+    /// snapshot helper must apply the same lease rule: an expired remote viewer that never
+    /// sent a detach is not live, a freshly leased remote viewer is, and a local window —
+    /// which carries no lease — is always live while attached.
+    func testSnapshotLiveAttachmentsApplyLeaseRuleOffDevice() {
+        let now = ISO8601DateFormatter().date(from: "2026-05-08T00:01:01Z")!
+        func snapshot(kind: TerminalClientKind, leaseRefreshedAt: String?, detachedAt: String? = nil) -> TerminalSessionAttachmentSnapshot {
+            let client = TerminalClient(
+                id: "client", kind: kind, identity: TerminalClientIdentity(label: "device"), connectedAt: "2026-05-08T00:00:00Z",
+                leaseRefreshedAt: leaseRefreshedAt)
+            let attachment = TerminalAttachment(
+                sessionID: "session", clientID: "client", mode: kind == .localWindow ? .owner : .viewer, attachedAt: "2026-05-08T00:00:00Z",
+                detachedAt: detachedAt)
+            return TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment])
+        }
+
+        XCTAssertTrue(snapshot(kind: .remoteViewer, leaseRefreshedAt: "2026-05-08T00:00:00Z").liveAttachments(now: now).isEmpty)
+        XCTAssertEqual(snapshot(kind: .remoteViewer, leaseRefreshedAt: "2026-05-08T00:00:45Z").liveAttachments(now: now).map(\.clientID), ["client"])
+        XCTAssertEqual(snapshot(kind: .localWindow, leaseRefreshedAt: nil).liveAttachments(now: now).map(\.clientID), ["client"])
+        XCTAssertTrue(
+            snapshot(kind: .remoteViewer, leaseRefreshedAt: "2026-05-08T00:00:45Z", detachedAt: "2026-05-08T00:00:50Z").liveAttachments(now: now)
+                .isEmpty)
     }
 
     func testTransferOwnershipKeepsOldOwnerAttachedAsViewer() throws {

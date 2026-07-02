@@ -134,9 +134,10 @@ struct SpacesDeviceOverviewBuilder {
     ) -> SpacesDeviceTerminalSessionSummary {
         let isInteractive = session.runtimeState.state.isInteractive
         return SpacesDeviceTerminalSessionSummary(
-            id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, state: session.runtimeState.state,
-            backend: session.launchConfiguration.backend, lifetimePolicy: session.launchConfiguration.lifetimePolicy,
-            servicePID: session.runtimeState.servicePID, childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
+            id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, shell: session.launchConfiguration.shell,
+            command: session.launchConfiguration.command, state: session.runtimeState.state, backend: session.launchConfiguration.backend,
+            lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
+            childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
             workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
             projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
             isControlAvailable: isInteractive && session.isControlAvailable,

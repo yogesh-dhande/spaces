@@ -88,6 +88,30 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertEqual(deviceAPIHost, "100.64.12.34")
     }
 
+    func testSSHControlArgumentsReuseOneSocketPerDestination() {
+        let args = SpacesDevicePairingClient.sshControlArguments(destination: "dev@studio-mac", port: 2222)
+        XCTAssertEqual(args.first, "-o")
+        let controlOption = try? XCTUnwrap(args.last)
+        XCTAssertTrue(controlOption?.hasPrefix("ControlPath=") ?? false)
+
+        // Same destination resolves to the same master socket so back-to-back commands multiplex.
+        XCTAssertEqual(
+            SpacesDevicePairingClient.sshControlPath(destination: "dev@studio-mac", port: 2222),
+            SpacesDevicePairingClient.sshControlPath(destination: "dev@studio-mac", port: 2222))
+        // Different targets never collide on one socket.
+        XCTAssertNotEqual(
+            SpacesDevicePairingClient.sshControlPath(destination: "dev@studio-mac", port: 2222),
+            SpacesDevicePairingClient.sshControlPath(destination: "dev@studio-mac", port: 22))
+        XCTAssertNotEqual(
+            SpacesDevicePairingClient.sshControlPath(destination: "dev@studio-mac", port: nil),
+            SpacesDevicePairingClient.sshControlPath(destination: "other@studio-mac", port: nil))
+
+        // Stay well under the ~104-char AF_UNIX socket path limit.
+        let socketPath = SpacesDevicePairingClient.sshControlPath(destination: "dev@studio-mac", port: 2222)
+        XCTAssertLessThan(socketPath.utf8.count, 104)
+        XCTAssertTrue(socketPath.hasSuffix(".sock"))
+    }
+
     func testSSHConfigurationLookupUsesRemoteDestinationAndPort() {
         XCTAssertEqual(
             SpacesDevicePairingClient.sshConfigurationArguments(destination: "dev@studio-mac", port: 2222),

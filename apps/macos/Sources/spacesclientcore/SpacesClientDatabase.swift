@@ -274,6 +274,57 @@ public final class SpacesClientDatabase {
         return TerminalSessionWindowFrame(x: x, y: y, width: width, height: height)
     }
 
+    /// Records the desktop (yabai) window ID captured for a runtime target on the local desktop.
+    public func setDesktopWindowID(deviceID: String, workspaceID: String, runtimeTargetID: String, windowID: Int) throws {
+        try execute(
+            sql: """
+                INSERT INTO desktop_window_ids(device_id, workspace_id, runtime_target_id, window_id, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(device_id, workspace_id, runtime_target_id) DO UPDATE SET
+                  window_id = excluded.window_id,
+                  updated_at = excluded.updated_at
+                """, bindings: [deviceID, workspaceID, runtimeTargetID, windowID, Self.timestamp()])
+    }
+
+    public func desktopWindowID(deviceID: String, workspaceID: String, runtimeTargetID: String) throws -> Int? {
+        try queryRow(
+            sql: "SELECT window_id FROM desktop_window_ids WHERE device_id = ? AND workspace_id = ? AND runtime_target_id = ?",
+            bindings: [deviceID, workspaceID, runtimeTargetID])?.first.flatMap(Int.init)
+    }
+
+    public func desktopWindowIDs(deviceID: String, workspaceID: String) throws -> [String: Int] {
+        let rows = try queryRows(
+            sql: "SELECT runtime_target_id, window_id FROM desktop_window_ids WHERE device_id = ? AND workspace_id = ?",
+            bindings: [deviceID, workspaceID])
+        var result: [String: Int] = [:]
+        for row in rows {
+            guard row.count >= 2, let windowID = Int(row[1]) else { continue }
+            result[row[0]] = windowID
+        }
+        return result
+    }
+
+    public func clearDesktopWindowID(deviceID: String, workspaceID: String, runtimeTargetID: String) throws {
+        try execute(
+            sql: "DELETE FROM desktop_window_ids WHERE device_id = ? AND workspace_id = ? AND runtime_target_id = ?",
+            bindings: [deviceID, workspaceID, runtimeTargetID])
+    }
+
+    /// Reverse lookup for "which runtime targets own this desktop window", most-recently-updated first.
+    public func desktopWindowIDMatches(deviceID: String, windowID: Int) throws -> [(workspaceID: String, runtimeTargetID: String)] {
+        try queryRows(
+            sql: """
+                SELECT workspace_id, runtime_target_id
+                FROM desktop_window_ids
+                WHERE device_id = ? AND window_id = ?
+                ORDER BY updated_at DESC
+                """, bindings: [deviceID, windowID]
+        ).compactMap { row in
+            guard row.count >= 2 else { return nil }
+            return (row[0], row[1])
+        }
+    }
+
     /// Records the dedicated Chrome window opened for a workspace browser session on the local
     /// desktop. A browser "window" is client/desktop-local state (not daemon state), keyed by
     /// the session's resolved target URL so re-focus returns to the same window.
@@ -313,8 +364,7 @@ public final class SpacesClientDatabase {
     }
 
     public func clearBrowserSessionWindowIDs(deviceID: String, workspaceID: String) throws {
-        try execute(
-            sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
+        try execute(sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
     }
 
     public func backupURLs() throws -> [URL] { try backupManager.existingBackups() }
@@ -553,6 +603,8 @@ public final class SpacesClientDatabase {
 
             \(clientStateSchemaSQL)
 
+            \(desktopWindowIDsSchemaSQL)
+
             \(browserSessionWindowIDsSchemaSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
@@ -642,6 +694,20 @@ public final class SpacesClientDatabase {
             );
         """
 
+    // Desktop (yabai) window IDs are client/desktop-local: they only exist for the local device
+    // and are keyed by the daemon-owned runtime-target id. Keeping this client-side lets the GUI
+    // focus desktop windows identically whether the daemon is local or remote.
+    private static let desktopWindowIDsSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS desktop_window_ids (
+              device_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              runtime_target_id TEXT NOT NULL,
+              window_id INTEGER NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (device_id, workspace_id, runtime_target_id)
+            );
+        """
+
     // Browser session windows are client/desktop-local: the dedicated Chrome window opened for
     // a workspace browser session exists only on this desktop and is keyed by the session's
     // resolved target URL. Keeping it client-side replaces the daemon's former
@@ -661,13 +727,12 @@ public final class SpacesClientDatabase {
         SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
             try executeClientBatch(database: database, sql: clientStateSchemaSQL)
         },
-        SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Reserve client desktop window-ID schema slot") { _ in },
+        SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Add client-owned desktop window IDs") { database in
+            try executeClientBatch(database: database, sql: desktopWindowIDsSchemaSQL)
+        },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
             try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
-        },
-        SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop client-owned desktop window IDs") { database in
-            try executeClientBatch(database: database, sql: "DROP TABLE IF EXISTS desktop_window_ids;")
-        },
+        }, SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Reserve merged client schema version") { _ in },
     ]
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }

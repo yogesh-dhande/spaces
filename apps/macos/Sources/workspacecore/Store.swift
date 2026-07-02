@@ -22,8 +22,15 @@ public final class SQLiteStore {
     /// counter is sufficient.
     private var openTransactionCount = 0
 
-    public init(path: String) throws {
+    /// Desktop (yabai) window IDs live outside the daemon database. The GUI injects a
+    /// client-database-backed store so window-ID reads/writes are correlated to daemon-owned
+    /// runtime targets without persisting any desktop state in `spaces.db`. The daemon and CLI
+    /// leave this nil — they have no desktop session and never focus windows.
+    public let desktopWindowIDStore: DesktopWindowIDStore?
+
+    public init(path: String, desktopWindowIDStore: DesktopWindowIDStore? = nil) throws {
         databasePath = path
+        self.desktopWindowIDStore = desktopWindowIDStore
         var handle: OpaquePointer?
         let openFlags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(path, &handle, openFlags, nil) != SQLITE_OK {
@@ -65,15 +72,7 @@ public final class SQLiteStore {
     /// to avoid cross-process noise.
     private static func postDatabaseDidChange() {
         guard NSClassFromString("XCTest") == nil else { return }
-        // In-process signal (cross-platform): the daemon's own writes reach its
-        // Device API overview producer directly — the only available channel on
-        // Linux, where DistributedNotificationCenter does not exist.
-        NotificationCenter.default.post(name: IPCNotification.databaseDidChange, object: nil)
-        #if os(macOS)
-            // Cross-process signal (macOS): app/CLI writes reach the local app's
-            // sidebar reload and the daemon's overview producer in other processes.
-            try? IPCNotification.post(IPCNotification.databaseDidChange)
-        #endif
+        DatabaseChangeSignal.post()
     }
 
     public func setting(key: String) throws -> String? {
@@ -158,6 +157,25 @@ public final class SQLiteStore {
         guard !runtimeTargetID.isEmpty || !app.isEmpty || !trackingID.isEmpty else { return nil }
         return TerminalTargetRecord(
             runtimeTargetID: runtimeTargetID.isEmpty ? nil : runtimeTargetID, trackingID: trackingID.isEmpty ? nil : trackingID)
+    }
+
+    // MARK: - Desktop window-ID correlation
+
+    /// Reads the captured desktop window ID for a runtime target, if a client store is injected.
+    /// Best-effort: a lookup failure yields nil so focus can fall back to session/IPC paths.
+    func overlaidWindowID(workspaceID: String, runtimeTargetID: String?) -> Int? {
+        guard let desktopWindowIDStore, let runtimeTargetID, !runtimeTargetID.isEmpty else { return nil }
+        return try? desktopWindowIDStore.desktopWindowID(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
+    }
+
+    /// Persists (or clears) the captured desktop window ID for a runtime target.
+    func persistDesktopWindowID(workspaceID: String, runtimeTargetID: String, windowID: Int?) throws {
+        guard let desktopWindowIDStore else { return }
+        if let windowID {
+            try desktopWindowIDStore.setDesktopWindowID(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID, windowID: windowID)
+        } else {
+            try desktopWindowIDStore.clearDesktopWindowID(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
+        }
     }
 
     func nextRuntimeTargetOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
