@@ -81,24 +81,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case warning
     }
 
-    private enum InlineWorkspaceDetailField {
-        case branch
-        case notes
-    }
-
-    private struct InlineWorkspaceDetailFieldRefs {
-        let workspaceID: String
-        let field: InlineWorkspaceDetailField
-        let valueLabel: NSTextField
-        let editorContainer: NSView
-        let textField: NSTextField?
-        let textView: NSTextView?
-        let saveButton: NSButton?
-        let cancelButton: NSButton?
-        var originalValue: String
-        var isEditing: Bool
-    }
-
     struct AlertsAttentionEntry: Sendable {
         let attentionID: String
         let icon: String
@@ -178,7 +160,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     let outlineView = SidebarOutlineView()
     lazy var sidebar = SidebarController(host: self)
     let detailContainer = NSView()
-    private weak var workspaceShortcutFooterRowView: NSStackView?
+    /// The right panel's footer strip: workspace details for the selected workspace.
+    private weak var workspaceDetailFooterRow: NSStackView?
+    private var workspaceNotesPopover: NSPopover?
+    private weak var workspaceNotesEditorTextView: NSTextView?
+    private var workspaceNotesEditorWorkspaceID: String?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
     var projects: [ProjectSummary] = []
     var workspacesByProject: [String: [WorkspaceSummary]] = [:] { didSet { sidebar.invalidateVisibleWorkspacesCache() } }
@@ -304,10 +290,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private let shortcutLabelColumnWidth: CGFloat = 250
     private var isApplyingSplitViewWidth = false
     private var hasAppliedSplitViewWidth = false
-    private var inlineWorkspaceFieldRefsByTag: [Int: InlineWorkspaceDetailFieldRefs] = [:]
-    private var inlineWorkspaceFieldTagByObjectID: [ObjectIdentifier: Int] = [:]
-    private var inlineWorkspaceLabelTagByObjectID: [ObjectIdentifier: Int] = [:]
-    private var inlineWorkspaceOutsideClickMonitor: Any?
     var activeAddWorkspaceFormTag: Int? { didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
@@ -543,7 +525,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deferredHotkeySelectionRefreshTask?.cancel()
         browserSSHForwardManager.stopAll()
         sidebar.cancelSidebarReloadTask()
-        teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
         DistributedNotificationCenter.default().removeObserver(self)
@@ -3453,25 +3434,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         let content = NSView()
         content.translatesAutoresizingMaskIntoConstraints = false
-        let footerSeparator = NSBox()
-        footerSeparator.boxType = .separator
-        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
-        let footerRow = workspaceDetailShortcutFooterRow()
-        footerRow.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(splitView)
-        content.addSubview(footerSeparator)
-        content.addSubview(footerRow)
         NSLayoutConstraint.activate([
             splitView.leadingAnchor.constraint(equalTo: content.leadingAnchor), splitView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: content.topAnchor), splitView.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
-            footerSeparator.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            footerSeparator.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            footerSeparator.bottomAnchor.constraint(equalTo: footerRow.topAnchor),
-            footerRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            footerRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            footerRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -6), footerRow.heightAnchor.constraint(equalToConstant: 28),
+            splitView.topAnchor.constraint(equalTo: content.topAnchor), splitView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
-        refreshWorkspaceShortcutFooterRow()
         window.contentView = content
     }
 
@@ -3483,9 +3450,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let topBarRow = sidebar.makeSidebarTopBarRow()
         topBarRow.translatesAutoresizingMaskIntoConstraints = false
-
-        let alertsRow = sidebar.makeAlertsSidebarRow()
-        alertsRow.translatesAutoresizingMaskIntoConstraints = false
 
         let sectionHeader = sidebarSectionHeader(
             title: "Projects",
@@ -3518,27 +3482,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         scroll.documentView = outlineView
 
+        // The sidebar owns its own footer strip (the app-level Alerts entry), separate
+        // from the right panel's workspace footer.
+        let footerSeparator = NSBox()
+        footerSeparator.boxType = .separator
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        let alertsRow = sidebar.makeAlertsSidebarRow()
+        alertsRow.translatesAutoresizingMaskIntoConstraints = false
+
         container.addSubview(topBarRow)
-        container.addSubview(alertsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
+        container.addSubview(footerSeparator)
+        container.addSubview(alertsRow)
 
         NSLayoutConstraint.activate([
             topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             topBarRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
 
-            alertsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            alertsRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
-
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
+            sectionHeader.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
+
+            footerSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            footerSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            alertsRow.topAnchor.constraint(equalTo: footerSeparator.bottomAnchor, constant: 2),
+            alertsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            alertsRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
+            alertsRow.heightAnchor.constraint(equalToConstant: 26),
         ])
 
         return container
@@ -3561,11 +3538,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func showAlertsDetail() { alerts.showAlertsDetail() }
 
     private func makeRightPane() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.wantsLayer = true
+        container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+
+        // The right panel's own footer strip: workspace details for the selected
+        // workspace (populated by the detail paths), empty otherwise.
+        let footerSeparator = NSBox()
+        footerSeparator.boxType = .separator
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.spacing = 6
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        workspaceDetailFooterRow = footer
+
+        container.addSubview(detailContainer)
+        container.addSubview(footerSeparator)
+        container.addSubview(footer)
+        NSLayoutConstraint.activate([
+            detailContainer.topAnchor.constraint(equalTo: container.topAnchor),
+            detailContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            detailContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            detailContainer.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
+            footerSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            footerSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            footer.topAnchor.constraint(equalTo: footerSeparator.bottomAnchor, constant: 2),
+            footer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            footer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
+            footer.heightAnchor.constraint(equalToConstant: 26),
+        ])
         showPlaceholder()
-        return detailContainer
+        return container
     }
 
     func reloadData(forceRemoteRefresh: Bool = false) { sidebar.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh) }
@@ -3962,6 +3973,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
+        clearWorkspaceDetailFooter()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         let placeholder = NSTextField(labelWithString: message)
         placeholder.font = .systemFont(ofSize: 14)
@@ -4012,6 +4024,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         suppressOutlineSelectionChanges = false
         refreshSidebarSelectionRows(
             previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
+        clearWorkspaceDetailFooter()
         for view in detailContainer.subviews { view.removeFromSuperview() }
 
         let status = deviceDaemonStatus(forDeviceID: deviceID)
@@ -4198,7 +4211,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         if closingWindow === addWorkspaceWindow {
-            clearInlineWorkspaceFieldRefs()
             clearActiveAddWorkspaceFormState()
             return
         }
@@ -4946,7 +4958,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // The new-workspace form is git-only: non-git projects own a single workspace
         // (the project directory) and offer no way to add more.
         guard project.isGitRepo else { return }
-        clearInlineWorkspaceFieldRefs()
         clearActiveAddWorkspaceFormState()
 
         let stack = NSStackView()
@@ -5100,6 +5111,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        // Every workspace-detail surface (panel, loading, setup) shares the footer
+        // strip with the workspace's identity and actions.
+        if let (_, workspace) = findWorkspace(id: workspaceID) {
+            populateWorkspaceDetailFooter(workspace: workspace)
+        } else {
+            clearWorkspaceDetailFooter()
+        }
     }
 
     func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
@@ -5126,13 +5144,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         stopWorkspaceSetupDetailRefreshTimer()
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        // The right panel is the workspace's panel (tabs of terminal panes) and
+        // nothing else; workspace identity and actions live in the footer strip below.
+        // The panel view instance is stable per workspace, so overview ticks re-parent
+        // it without recreating hosted terminal surfaces.
+        let scope = PanelScope.workspace(deviceID: workspaceDeviceID, workspaceID: workspace.id)
+        panelCoordinator.restoreLayoutIfNeeded(scope: scope)
+        let panelView = panelCoordinator.panelView(for: scope)
+        panelView.removeFromSuperview()
+        detailContainer.addSubview(panelView)
+        NSLayoutConstraint.activate([
+            panelView.topAnchor.constraint(equalTo: detailContainer.topAnchor),
+            panelView.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
+            panelView.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
+            panelView.bottomAnchor.constraint(equalTo: detailContainer.bottomAnchor),
+        ])
+        panelCoordinator.restoreSelection(scope: scope)
+        detailContainer.layoutSubtreeIfNeeded()
+    }
 
-        // --- Header with status dot ---
+    /// Fills the right panel's footer strip with the selected workspace's identity and
+    /// actions — status dot, name, branch, directory, notes, runtime warning, and the
+    /// launch/restart, stop, and overflow controls.
+    private func populateWorkspaceDetailFooter(workspace: WorkspaceSummary) {
+        guard let footer = workspaceDetailFooterRow else { return }
+        clearWorkspaceDetailFooter()
         let accentColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
         let runtimeStatus =
             workspaceRuntimeStatusByID[workspace.id]
@@ -5141,157 +5177,187 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 hasTrackedRuntimeIndicators: false, runningProcessCount: 0, exitedProcessCount: 0, waitingAgentWindowCount: 0,
                 missingConfiguredProcessCount: 0, missingConfiguredBrowserSessionCount: 0)
         let isLifecycleRunning = runtimeStatus.lifecycleState == .running
+
         let statusDot = NSImageView()
         statusDot.image = NSImage(
-            systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: isLifecycleRunning ? "Running" : "Stopped")
+            systemSymbolName: isLifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: isLifecycleRunning ? "Running" : "Stopped")?
+            .withSymbolConfiguration(.init(pointSize: 8, weight: .regular))
         statusDot.contentTintColor = isLifecycleRunning ? accentColor : .tertiaryLabelColor
         statusDot.toolTip = isLifecycleRunning ? "Running" : "Stopped"
         statusDot.setContentHuggingPriority(.required, for: .horizontal)
-        let workspaceTitleLabel = NSTextField(labelWithString: workspace.displayName)
-        workspaceTitleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
-        workspaceTitleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
-        workspaceTitleLabel.lineBreakMode = .byTruncatingTail
-        workspaceTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        workspaceTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        workspaceTitleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
+        footer.addArrangedSubview(statusDot)
 
-        let runtimeWarningIcon = NSImageView()
-        runtimeWarningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")
-        runtimeWarningIcon.contentTintColor = .systemOrange
-        runtimeWarningIcon.toolTip = runtimeStatus.warningSummary
-        runtimeWarningIcon.translatesAutoresizingMaskIntoConstraints = false
-        runtimeWarningIcon.isHidden = runtimeStatus.warningSummary == nil
-        runtimeWarningIcon.widthAnchor.constraint(equalToConstant: 12).isActive = true
-        runtimeWarningIcon.heightAnchor.constraint(equalToConstant: 12).isActive = true
+        let titleLabel = NSTextField(labelWithString: workspace.displayName)
+        titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleLabel.textColor = sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setAccessibilityIdentifier("workspace-detail-title-label")
+        footer.addArrangedSubview(titleLabel)
 
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 8
-        headerRow.addArrangedSubview(statusDot)
-        headerRow.addArrangedSubview(workspaceTitleLabel)
-        headerRow.addArrangedSubview(runtimeWarningIcon)
-        headerRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        // --- Directory subtitle ---
-        let dirField = NSTextField(string: workspace.dir)
-        dirField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        dirField.textColor = .tertiaryLabelColor
-        dirField.lineBreakMode = .byTruncatingMiddle
-        dirField.isEditable = false
-        dirField.isSelectable = true
-        dirField.drawsBackground = false
-        dirField.isBordered = false
-        dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        dirField.setAccessibilityIdentifier("workspace-detail-dir")
-
-        // --- Branch (read-only) ---
-        let branchValue = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let inlineBranchRow: NSView? =
-            branchValue.isEmpty
-            ? nil
-            : makeInlineWorkspaceMetadataEditRow(
-                workspaceID: workspace.id, field: .branch, icon: "arrow.triangle.branch", labelText: "Branch", value: branchValue, placeholder: "",
-                isEditable: false)
-
-        // --- Inline editable metadata ---
-        let inlineNotesRow = makeInlineWorkspaceMetadataEditRow(
-            workspaceID: workspace.id, field: .notes, icon: "info.circle", labelText: "Notes", value: workspace.notes ?? "",
-            placeholder: "Optional workspace context", isEditable: true)
-        // --- Action buttons (icon-only) ---
-        let iconSymbolConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-        let launchOrRestartButton: NSButton
-        if workspace.isRunning {
-            launchOrRestartButton = NSButton(
-                image: NSImage(systemSymbolName: "arrow.clockwise.circle", accessibilityDescription: "Restart")!.withSymbolConfiguration(
-                    iconSymbolConfig)!, target: self, action: #selector(restartWorkspace(_:)))
-        } else {
-            launchOrRestartButton = NSButton(
-                image: NSImage(systemSymbolName: "play.circle", accessibilityDescription: "Launch")!.withSymbolConfiguration(iconSymbolConfig)!,
-                target: self, action: #selector(launchWorkspace(_:)))
+        if let warningSummary = runtimeStatus.warningSummary {
+            let warningIcon = NSImageView()
+            warningIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Status warning")?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .regular))
+            warningIcon.contentTintColor = .systemOrange
+            warningIcon.toolTip = warningSummary
+            warningIcon.setContentHuggingPriority(.required, for: .horizontal)
+            footer.addArrangedSubview(warningIcon)
         }
-        launchOrRestartButton.bezelStyle = .inline
-        launchOrRestartButton.isBordered = false
-        launchOrRestartButton.toolTip = workspace.isRunning ? "Restart" : "Launch"
+
+        let branch = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !branch.isEmpty {
+            let branchIcon = NSImageView()
+            branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")?
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .regular))
+            branchIcon.contentTintColor = .tertiaryLabelColor
+            branchIcon.setContentHuggingPriority(.required, for: .horizontal)
+            let branchLabel = NSTextField(labelWithString: branch)
+            branchLabel.font = .systemFont(ofSize: 11)
+            branchLabel.textColor = .secondaryLabelColor
+            branchLabel.lineBreakMode = .byTruncatingTail
+            branchLabel.setAccessibilityIdentifier("workspace-detail-branch")
+            footer.addArrangedSubview(branchIcon)
+            footer.addArrangedSubview(branchLabel)
+            footer.setCustomSpacing(3, after: branchIcon)
+        }
+
+        let dirLabel = NSTextField(labelWithString: workspace.dir)
+        dirLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        dirLabel.textColor = .tertiaryLabelColor
+        dirLabel.lineBreakMode = .byTruncatingMiddle
+        dirLabel.toolTip = workspace.dir
+        dirLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        dirLabel.setAccessibilityIdentifier("workspace-detail-dir")
+        footer.addArrangedSubview(dirLabel)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        footer.addArrangedSubview(spacer)
+
+        let notes = (workspace.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let notesButton = footerActionButton(
+            symbol: "note.text", tooltip: notes.isEmpty ? "Add notes" : notes, action: #selector(showWorkspaceNotesEditor(_:)))
+        notesButton.contentTintColor = notes.isEmpty ? .tertiaryLabelColor : accentColor
+        notesButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        notesButton.setAccessibilityIdentifier("workspace-detail-notes")
+        footer.addArrangedSubview(notesButton)
+
+        let launchOrRestartButton = footerActionButton(
+            symbol: workspace.isRunning ? "arrow.clockwise.circle" : "play.circle", tooltip: workspace.isRunning ? "Restart" : "Launch",
+            action: workspace.isRunning ? #selector(restartWorkspace(_:)) : #selector(launchWorkspace(_:)))
         launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
+        footer.addArrangedSubview(launchOrRestartButton)
 
-        let stopButton = NSButton(
-            image: NSImage(systemSymbolName: "stop.circle", accessibilityDescription: "Stop")!.withSymbolConfiguration(iconSymbolConfig)!,
-            target: self, action: #selector(stopWorkspace(_:)))
-        stopButton.bezelStyle = .inline
-        stopButton.isBordered = false
-        stopButton.toolTip = "Stop"
+        let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
         stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         stopButton.setAccessibilityIdentifier("workspace-detail-stop")
+        footer.addArrangedSubview(stopButton)
 
-        let overflowButton = NSButton(
-            image: NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "More actions")!, target: self,
-            action: #selector(showWorkspaceOverflowMenu(_:)))
-        overflowButton.bezelStyle = .inline
-        overflowButton.isBordered = false
-        overflowButton.toolTip = "More actions"
+        let overflowButton = footerActionButton(symbol: "ellipsis.circle", tooltip: "More actions", action: #selector(showWorkspaceOverflowMenu(_:)))
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         overflowButton.setAccessibilityIdentifier("workspace-detail-overflow")
+        footer.addArrangedSubview(overflowButton)
+    }
 
-        // Add action buttons to the right side of the header row
-        let actionSpacer = NSView()
-        actionSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        headerRow.addArrangedSubview(actionSpacer)
-        headerRow.addArrangedSubview(launchOrRestartButton)
-        headerRow.addArrangedSubview(stopButton)
-        headerRow.addArrangedSubview(overflowButton)
+    private func footerActionButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
+        let button = NSButton(
+            image: NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
+                .withSymbolConfiguration(.init(pointSize: 12, weight: .regular)) ?? NSImage(), target: self, action: action)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.toolTip = tooltip
+        button.contentTintColor = .secondaryLabelColor
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        return button
+    }
 
-        let headerAndActionsRow = NSStackView()
-        headerAndActionsRow.orientation = .vertical
-        headerAndActionsRow.alignment = .leading
-        headerAndActionsRow.spacing = 4
-        headerAndActionsRow.addArrangedSubview(headerRow)
-        headerAndActionsRow.addArrangedSubview(dirField)
-        headerAndActionsRow.setCustomSpacing(2, after: headerRow)
-        if let warningSummary = runtimeStatus.warningSummary {
-            let warningLabel = NSTextField(labelWithString: warningSummary)
-            warningLabel.font = .systemFont(ofSize: 11)
-            warningLabel.textColor = .systemOrange
-            warningLabel.lineBreakMode = .byTruncatingTail
-            warningLabel.maximumNumberOfLines = 1
-            headerAndActionsRow.addArrangedSubview(warningLabel)
+    func clearWorkspaceDetailFooter() {
+        workspaceNotesPopover?.close()
+        workspaceNotesPopover = nil
+        guard let footer = workspaceDetailFooterRow else { return }
+        for view in footer.arrangedSubviews {
+            footer.removeArrangedSubview(view)
+            view.removeFromSuperview()
         }
+    }
 
-        stack.addArrangedSubview(headerAndActionsRow)
-        if let inlineBranchRow { stack.addArrangedSubview(inlineBranchRow) }
-        stack.addArrangedSubview(inlineNotesRow)
-        stack.setCustomSpacing(20, after: headerAndActionsRow)
-        if let inlineBranchRow {
-            stack.setCustomSpacing(8, after: headerAndActionsRow)
-            constrainFormFieldToFillWidth(inlineBranchRow, in: stack)
+    /// Opens the notes editor in a popover anchored to the footer's notes button.
+    /// Saving routes through the same workspace-metadata mutation the detail header's
+    /// inline editor used.
+    @objc private func showWorkspaceNotesEditor(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue, let (_, workspace) = findWorkspace(id: workspaceID) else { return }
+        workspaceNotesPopover?.close()
+
+        let textView = makeEditableTextView()
+        textView.string = workspace.notes ?? ""
+        textView.font = .systemFont(ofSize: 12)
+        textView.setAccessibilityIdentifier("workspace-detail-notes-input")
+        textView.onSave = { [weak self, weak textView] in
+            guard let self, let textView else { return }
+            self.saveWorkspaceNotes(workspaceID: workspaceID, text: textView.string)
         }
-        constrainFormFieldToFillWidth(inlineNotesRow, in: stack)
-        constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
-        constrainFormFieldToFillWidth(dirField, in: headerAndActionsRow)
-        constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
+        textView.onCancel = { [weak self] in
+            self?.workspaceNotesPopover?.close()
+            self?.workspaceNotesPopover = nil
+        }
+        let scrollView = scrollableTextView(textView, height: 88)
 
-        // The header strip is fixed at the top; the workspace's panel (tabs of terminal
-        // panes) fills the remaining space. The panel view instance is stable per
-        // workspace, so re-rendering the header on overview ticks re-parents it without
-        // recreating hosted terminal surfaces.
-        let scope = PanelScope.workspace(deviceID: workspaceDeviceID, workspaceID: workspace.id)
-        panelCoordinator.restoreLayoutIfNeeded(scope: scope)
-        let panelView = panelCoordinator.panelView(for: scope)
-        panelView.removeFromSuperview()
-        detailContainer.addSubview(stack)
-        detailContainer.addSubview(panelView)
+        let saveButton = NSButton(title: "Save (⌘↩)", target: self, action: #selector(saveWorkspaceNotesFromPopover(_:)))
+        saveButton.controlSize = .small
+        saveButton.bezelStyle = .rounded
+        saveButton.setAccessibilityIdentifier("workspace-detail-notes-save")
+        workspaceNotesEditorTextView = textView
+        workspaceNotesEditorWorkspaceID = workspaceID
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(label(text: "Notes"))
+        stack.addArrangedSubview(scrollView)
+        stack.addArrangedSubview(saveButton)
+
+        let content = NSViewController()
+        let contentView = NSView()
+        contentView.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
-            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
-            panelView.topAnchor.constraint(equalTo: stack.bottomAnchor, constant: 12),
-            panelView.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
-            panelView.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
-            panelView.bottomAnchor.constraint(equalTo: detailContainer.bottomAnchor),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
+            scrollView.widthAnchor.constraint(equalToConstant: 320),
         ])
-        panelCoordinator.restoreSelection(scope: scope)
-        detailContainer.layoutSubtreeIfNeeded()
+        content.view = contentView
+
+        let popover = NSPopover()
+        popover.contentViewController = content
+        popover.behavior = .transient
+        workspaceNotesPopover = popover
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+        window?.makeFirstResponder(textView)
+    }
+
+    @objc private func saveWorkspaceNotesFromPopover(_ sender: NSButton) {
+        guard let workspaceID = workspaceNotesEditorWorkspaceID, let textView = workspaceNotesEditorTextView else { return }
+        saveWorkspaceNotes(workspaceID: workspaceID, text: textView.string)
+    }
+
+    private func saveWorkspaceNotes(workspaceID: String, text: String) {
+        do {
+            guard let device = deviceForDaemonStateMutation() else {
+                showDeviceNotLoadedError()
+                return
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let response = try SpacesDeviceClient.updateWorkspaceMetadata(
+                workspaceID: workspaceID, notes: trimmed.isEmpty ? nil : trimmed, updatesNotes: true, device: device,
+                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            workspaceNotesPopover?.close()
+            workspaceNotesPopover = nil
+            applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+        } catch { showError(error) }
     }
 
     private func showWorkspaceDetailLoadingPlaceholder(workspace: WorkspaceSummary) {
@@ -5653,13 +5719,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
-    private func clearInlineWorkspaceFieldRefs() {
-        teardownInlineWorkspaceOutsideClickMonitor()
-        inlineWorkspaceFieldRefsByTag.removeAll()
-        inlineWorkspaceFieldTagByObjectID.removeAll()
-        inlineWorkspaceLabelTagByObjectID.removeAll()
-    }
-
     private func clearActiveAddProjectFormState() {
         discardActiveAddProjectPreparedSourceIfNeeded()
         if let activeAddProjectFormTag { AddProjectFieldCache.shared.cache[activeAddProjectFormTag] = nil }
@@ -5673,7 +5732,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func clearActiveAddFormStateAndCloseWindows() {
         clearActiveAddProjectFormState()
-        clearInlineWorkspaceFieldRefs()
         clearActiveAddWorkspaceFormState()
         closeVisibleAddFormWindows()
         flushDeferredSidebarReloadsIfNeeded()
@@ -5683,318 +5741,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if addProjectWindow?.isVisible == true { addProjectWindow?.close() }
         if addWorkspaceWindow?.isVisible == true { addWorkspaceWindow?.close() }
         if projectSettingsWindow?.isVisible == true { projectSettingsWindow?.close() }
-    }
-
-    private func isView(_ view: NSView?, descendantOf ancestor: NSView) -> Bool {
-        var current = view
-        while let node = current {
-            if node === ancestor { return true }
-            current = node.superview
-        }
-        return false
-    }
-
-    private func activeInlineWorkspaceEditTags() -> [Int] { inlineWorkspaceFieldRefsByTag.compactMap { key, refs in refs.isEditing ? key : nil } }
-
-    private func cancelInlineWorkspaceMetadataEdit(tag: Int) { endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: false) }
-
-    private func setupInlineWorkspaceOutsideClickMonitorIfNeeded() {
-        guard inlineWorkspaceOutsideClickMonitor == nil else { return }
-        inlineWorkspaceOutsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
-            guard let self else { return event }
-            let activeTags = self.activeInlineWorkspaceEditTags()
-            guard !activeTags.isEmpty else { return event }
-            guard let contentView = self.window?.contentView else { return event }
-            let point = contentView.convert(event.locationInWindow, from: nil)
-            let hitView = contentView.hitTest(point)
-            for tag in activeTags {
-                guard let refs = self.inlineWorkspaceFieldRefsByTag[tag] else { continue }
-                if self.isView(hitView, descendantOf: refs.editorContainer)
-                    || (refs.saveButton.map { self.isView(hitView, descendantOf: $0) } ?? false)
-                    || (refs.cancelButton.map { self.isView(hitView, descendantOf: $0) } ?? false)
-                {
-                    return event
-                }
-            }
-            for tag in activeTags { self.cancelInlineWorkspaceMetadataEdit(tag: tag) }
-            return event
-        }
-    }
-
-    private func teardownInlineWorkspaceOutsideClickMonitor() {
-        if let inlineWorkspaceOutsideClickMonitor {
-            NSEvent.removeMonitor(inlineWorkspaceOutsideClickMonitor)
-            self.inlineWorkspaceOutsideClickMonitor = nil
-        }
-    }
-
-    private func inlineWorkspaceFieldDisplayValue(_ value: String, field: InlineWorkspaceDetailField) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch field {
-        case .notes: return trimmed.isEmpty ? "No notes" : trimmed
-        case .branch: return trimmed
-        }
-    }
-
-    private func isProtectedBranchName(_ branch: String) -> Bool {
-        let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized == "main" || normalized == "master"
-    }
-
-    private func makeInlineWorkspaceMetadataEditRow(
-        workspaceID: String, field: InlineWorkspaceDetailField, icon: String, labelText: String, value: String, placeholder: String, isEditable: Bool
-    ) -> NSView {
-        let automationID: String =
-            switch field {
-            case .branch: "workspace-detail-branch"
-            case .notes: "workspace-detail-notes"
-            }
-        let isMultiline = field == .notes
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = isMultiline ? .top : .centerY
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.setAccessibilityIdentifier("\(automationID)-row")
-
-        let iconContainer = NSView()
-        iconContainer.translatesAutoresizingMaskIntoConstraints = false
-        iconContainer.setContentHuggingPriority(.required, for: .horizontal)
-        iconContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let iconView = NSImageView()
-        let iconConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: labelText)?.withSymbolConfiguration(iconConfig)
-        iconView.contentTintColor = .secondaryLabelColor
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconContainer.addSubview(iconView)
-
-        NSLayoutConstraint.activate([
-            iconContainer.widthAnchor.constraint(equalToConstant: 16), iconContainer.heightAnchor.constraint(equalToConstant: 16),
-            iconView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
-            iconView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor, constant: 1),
-        ])
-
-        let valueLabel = NSTextField(labelWithString: inlineWorkspaceFieldDisplayValue(value, field: field))
-        valueLabel.font = .systemFont(ofSize: 12)
-        valueLabel.textColor = .secondaryLabelColor
-        valueLabel.lineBreakMode = isMultiline ? .byWordWrapping : .byTruncatingTail
-        if isMultiline { valueLabel.maximumNumberOfLines = 0 }
-        valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        valueLabel.setAccessibilityIdentifier("\(automationID)-label")
-        valueLabel.toolTip =
-            isEditable
-            ? "Double-click to edit \(labelText.lowercased())."
-            : (field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable.")
-
-        let textField: NSTextField?
-        let textView: NSTextView?
-        let editorContainer: NSView
-        if isMultiline {
-            let multilineTextView = makeEditableTextView()
-            multilineTextView.string = value
-            multilineTextView.font = .systemFont(ofSize: 12)
-            multilineTextView.setAccessibilityIdentifier("\(automationID)-input")
-            let scrollView = scrollableTextView(multilineTextView, height: 72)
-            scrollView.isHidden = true
-            scrollView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            textField = nil
-            textView = multilineTextView
-            editorContainer = scrollView
-        } else {
-            let singleLineField = NSTextField(string: value)
-            singleLineField.placeholderString = placeholder
-            singleLineField.delegate = self
-            singleLineField.isEnabled = isEditable
-            singleLineField.isHidden = true
-            singleLineField.font = .systemFont(ofSize: 12)
-            singleLineField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            singleLineField.setAccessibilityIdentifier("\(automationID)-input")
-            textField = singleLineField
-            textView = nil
-            editorContainer = singleLineField
-        }
-
-        let saveButtonTitle = isMultiline ? "Save (⌘↩)" : "Save (↩)"
-        let saveButton = NSButton(title: saveButtonTitle, target: self, action: #selector(saveInlineWorkspaceMetadata(_:)))
-        saveButton.controlSize = .small
-        saveButton.bezelStyle = .rounded
-        saveButton.isHidden = true
-        saveButton.setAccessibilityIdentifier("\(automationID)-save")
-        saveButton.toolTip = isMultiline ? "Save notes (⌘↩)." : "Save (↩)."
-
-        let cancelButton = NSButton(title: "Cancel (Esc)", target: self, action: #selector(cancelInlineWorkspaceMetadata(_:)))
-        cancelButton.controlSize = .small
-        cancelButton.bezelStyle = .rounded
-        cancelButton.isHidden = true
-        cancelButton.setAccessibilityIdentifier("\(automationID)-cancel")
-        cancelButton.toolTip = isMultiline ? "Cancel notes edit (Esc)." : "Cancel (Esc)."
-
-        row.addArrangedSubview(iconContainer)
-        if isMultiline {
-            let contentStack = NSStackView()
-            contentStack.orientation = .vertical
-            contentStack.alignment = .leading
-            contentStack.spacing = 6
-            contentStack.translatesAutoresizingMaskIntoConstraints = false
-            contentStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-            let buttonRow = NSStackView()
-            buttonRow.orientation = .horizontal
-            buttonRow.alignment = .centerY
-            buttonRow.spacing = 8
-            buttonRow.translatesAutoresizingMaskIntoConstraints = false
-            buttonRow.addArrangedSubview(cancelButton)
-            buttonRow.addArrangedSubview(saveButton)
-
-            contentStack.addArrangedSubview(valueLabel)
-            contentStack.addArrangedSubview(editorContainer)
-            contentStack.addArrangedSubview(buttonRow)
-            row.addArrangedSubview(contentStack)
-        } else {
-            row.addArrangedSubview(valueLabel)
-            row.addArrangedSubview(editorContainer)
-            row.addArrangedSubview(cancelButton)
-            row.addArrangedSubview(saveButton)
-        }
-
-        if isEditable {
-            let tag = UUID().uuidString.hashValue
-            let refs = InlineWorkspaceDetailFieldRefs(
-                workspaceID: workspaceID, field: field, valueLabel: valueLabel, editorContainer: editorContainer, textField: textField,
-                textView: textView, saveButton: saveButton, cancelButton: cancelButton, originalValue: value, isEditing: false)
-            inlineWorkspaceFieldRefsByTag[tag] = refs
-            if let textField { inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] = tag }
-            inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] = tag
-            saveButton.tag = tag
-            cancelButton.tag = tag
-            if let textView = textView as? InlineWorkspaceEditorTextView {
-                textView.onSave = { [weak self] in self?.saveInlineWorkspaceMetadata(tag: tag) }
-                textView.onCancel = { [weak self] in self?.cancelInlineWorkspaceMetadataEdit(tag: tag) }
-            }
-
-            let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(beginInlineWorkspaceMetadataEdit(_:)))
-            doubleClick.numberOfClicksRequired = 2
-            valueLabel.addGestureRecognizer(doubleClick)
-        } else {
-            editorContainer.toolTip = field == .branch ? "Protected branch names main/master cannot be renamed." : "\(labelText) is not editable."
-        }
-
-        return row
-    }
-
-    private func inlineWorkspaceEditorValue(_ refs: InlineWorkspaceDetailFieldRefs) -> String {
-        if let textField = refs.textField { return textField.stringValue }
-        if let textView = refs.textView { return textView.string }
-        return ""
-    }
-
-    private func setInlineWorkspaceEditorValue(_ value: String, refs: InlineWorkspaceDetailFieldRefs) {
-        refs.textField?.stringValue = value
-        refs.textView?.string = value
-    }
-
-    private func setInlineWorkspaceEditorHidden(_ isHidden: Bool, refs: InlineWorkspaceDetailFieldRefs) {
-        refs.editorContainer.isHidden = isHidden
-        refs.textField?.isHidden = isHidden
-    }
-
-    private func focusInlineWorkspaceEditor(_ refs: InlineWorkspaceDetailFieldRefs) {
-        if let textField = refs.textField {
-            textField.isEnabled = true
-            textField.becomeFirstResponder()
-            return
-        }
-        if let textView = refs.textView {
-            window?.makeFirstResponder(textView)
-            return
-        }
-    }
-
-    private func normalizeInlineWorkspaceMetadataValue(_ value: String, for field: InlineWorkspaceDetailField) -> String {
-        switch field {
-        case .branch: return value.trimmingCharacters(in: .whitespacesAndNewlines)
-        case .notes: return value.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-
-    private func updateInlineWorkspaceMetadataButtons(tag: Int) {
-        guard let refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
-        refs.saveButton?.isHidden = !refs.isEditing
-        refs.cancelButton?.isHidden = !refs.isEditing
-    }
-
-    @objc private func beginInlineWorkspaceMetadataEdit(_ sender: NSClickGestureRecognizer) {
-        guard let valueLabel = sender.view as? NSTextField else { return }
-        guard let tag = inlineWorkspaceLabelTagByObjectID[ObjectIdentifier(valueLabel)] else { return }
-        beginInlineWorkspaceMetadataEdit(tag: tag)
-    }
-
-    private func beginInlineWorkspaceMetadataEdit(tag: Int) {
-        if let refs = inlineWorkspaceFieldRefsByTag[tag], refs.field == .branch, isProtectedBranchName(refs.originalValue) { return }
-        for activeTag in activeInlineWorkspaceEditTags() where activeTag != tag { cancelInlineWorkspaceMetadataEdit(tag: activeTag) }
-        guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
-        refs.isEditing = true
-        refs.valueLabel.isHidden = true
-        setInlineWorkspaceEditorValue(refs.originalValue, refs: refs)
-        setInlineWorkspaceEditorHidden(false, refs: refs)
-        setupInlineWorkspaceOutsideClickMonitorIfNeeded()
-        inlineWorkspaceFieldRefsByTag[tag] = refs
-        focusInlineWorkspaceEditor(refs)
-        updateInlineWorkspaceMetadataButtons(tag: tag)
-    }
-
-    private func endInlineWorkspaceMetadataEdit(tag: Int, keepCurrentValueAsOriginal: Bool) {
-        guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
-        if keepCurrentValueAsOriginal {
-            refs.originalValue = normalizeInlineWorkspaceMetadataValue(inlineWorkspaceEditorValue(refs), for: refs.field)
-        } else {
-            setInlineWorkspaceEditorValue(refs.originalValue, refs: refs)
-        }
-        refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
-        refs.valueLabel.isHidden = false
-        setInlineWorkspaceEditorHidden(true, refs: refs)
-        refs.isEditing = false
-        refs.saveButton?.isHidden = true
-        refs.cancelButton?.isHidden = true
-        inlineWorkspaceFieldRefsByTag[tag] = refs
-        if activeInlineWorkspaceEditTags().isEmpty { teardownInlineWorkspaceOutsideClickMonitor() }
-    }
-
-    private func saveInlineWorkspaceMetadata(tag: Int) {
-        guard var refs = inlineWorkspaceFieldRefsByTag[tag] else { return }
-        do {
-            if let device = deviceForDaemonStateMutation() {
-                let response: SpacesDeviceAPIResponse
-                switch refs.field {
-                case .branch:
-                    let branch = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-                    response = try SpacesDeviceClient.updateWorkspaceMetadata(
-                        workspaceID: refs.workspaceID, branch: branch, updatesBranch: true, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    refs.originalValue = branch
-                case .notes:
-                    let trimmedNotes = inlineWorkspaceEditorValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
-                    let notes = trimmedNotes.isEmpty ? nil : trimmedNotes
-                    response = try SpacesDeviceClient.updateWorkspaceMetadata(
-                        workspaceID: refs.workspaceID, notes: notes, updatesNotes: true, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    refs.originalValue = notes ?? ""
-                }
-                refs.valueLabel.stringValue = inlineWorkspaceFieldDisplayValue(refs.originalValue, field: refs.field)
-                inlineWorkspaceFieldRefsByTag[tag] = refs
-                endInlineWorkspaceMetadataEdit(tag: tag, keepCurrentValueAsOriginal: true)
-                applyDeviceMutationResponse(response, selectedWorkspaceID: refs.workspaceID)
-                return
-            }
-            showDeviceNotLoadedError()
-        } catch { showError(error) }
-    }
-
-    @objc private func saveInlineWorkspaceMetadata(_ sender: NSButton) { saveInlineWorkspaceMetadata(tag: sender.tag) }
-
-    @objc private func cancelInlineWorkspaceMetadata(_ sender: NSButton) {
-        endInlineWorkspaceMetadataEdit(tag: sender.tag, keepCurrentValueAsOriginal: false)
     }
 
     private func label(text: String) -> NSTextField {
@@ -6334,58 +6080,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
         if setting.usesDigitRangeCapture { return displayShortcut(spec, keyText: "1-9") }
         return displayShortcut(spec)
-    }
-
-    private func workspaceDetailShortcutFooterRow() -> NSStackView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 5
-        workspaceShortcutFooterRowView = row
-        populateWorkspaceShortcutFooterRow(row)
-        return row
-    }
-
-    private func populateWorkspaceShortcutFooterRow(_ row: NSStackView) {
-        for view in row.arrangedSubviews {
-            row.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-        for (index, segment) in workspaceDetailShortcutFooterSegments().enumerated() {
-            if index > 0 {
-                let sep = NSTextField(labelWithString: "|")
-                sep.font = .systemFont(ofSize: 10, weight: .thin)
-                sep.textColor = .quaternaryLabelColor
-                row.addArrangedSubview(sep)
-            }
-            let group = NSStackView()
-            group.orientation = .horizontal
-            group.alignment = .centerY
-            group.spacing = 3
-            let chip = footerShortcutHint(for: segment.setting)
-            if !chip.isEmpty { group.addArrangedSubview(RowPrimitives.shortcutChip(chip)) }
-            let lbl = NSTextField(labelWithString: segment.label)
-            lbl.font = .systemFont(ofSize: 10.5, weight: .regular)
-            lbl.textColor = .secondaryLabelColor
-            lbl.lineBreakMode = .byTruncatingTail
-            lbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            group.addArrangedSubview(lbl)
-            row.addArrangedSubview(group)
-        }
-        row.addArrangedSubview(NSView())
-    }
-
-    private func refreshWorkspaceShortcutFooterRow() {
-        guard let row = workspaceShortcutFooterRowView else { return }
-        populateWorkspaceShortcutFooterRow(row)
-    }
-
-    private func workspaceDetailShortcutFooterSegments() -> [(label: String, setting: ShortcutSetting)] {
-        [
-            ("Toggle app", .guiHotkey), ("Palette", .guiCommandPaletteHotkey), ("Alerts", .guiAlertsShortcut), ("Settings", .guiOpenSettingsShortcut),
-            ("Open editor", .guiOpenEditorShortcut), ("New terminal", .guiOpenTerminalShortcut), ("Next window", .guiNextShortcut),
-            ("Prev window", .guiPreviousShortcut),
-        ]
     }
 
     func footerShortcutHint(for setting: ShortcutSetting) -> String {
@@ -7644,10 +7338,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             scheduleAddProjectDirectoryPreview(refs)
             return
         }
-        if let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(changedField)] {
-            updateInlineWorkspaceMetadataButtons(tag: tag)
-            return
-        }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
             guard refs.existingBranchField === changedField || refs.newBranchField === changedField else { continue }
             if let existingBranchField = refs.existingBranchField, existingBranchField === changedField {
@@ -7716,15 +7406,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return true
             }
             return false
-        }
-        guard let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] else { return false }
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            saveInlineWorkspaceMetadata(tag: tag)
-            return true
-        }
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            cancelInlineWorkspaceMetadataEdit(tag: tag)
-            return true
         }
         return false
     }
@@ -8780,7 +8461,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
-        refreshWorkspaceShortcutFooterRow()
     }
 
     private func loadShortcutSpec(setting: ShortcutSetting) -> HotkeySpec? {

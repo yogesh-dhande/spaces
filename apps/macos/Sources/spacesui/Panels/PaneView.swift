@@ -1,5 +1,4 @@
 import AppKit
-import systembridge
 
 /// One pane's chrome and content host: a compact header (title, split-right,
 /// split-down, close) above the content view. Start/stop/restart controls are part of
@@ -30,8 +29,6 @@ import systembridge
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = UIRadius.regular
-        layer?.borderWidth = 1
         buildChrome()
         updateFocusChrome()
     }
@@ -41,7 +38,6 @@ import systembridge
     private func buildChrome() {
         headerView.translatesAutoresizingMaskIntoConstraints = false
         headerView.wantsLayer = true
-        headerView.layer?.backgroundColor = Theme.surface2.cgColor
 
         titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
         titleLabel.textColor = Theme.muted
@@ -116,9 +112,11 @@ import systembridge
         ])
     }
 
+    /// Panes are flat — no card border or corner radius — so keyboard focus reads from
+    /// the header tint alone.
     private func updateFocusChrome() {
-        layer?.borderColor = isFocusedPane ? Theme.rowSelectedCardBorder.cgColor : Theme.border.cgColor
-        headerView.layer?.backgroundColor = isFocusedPane ? Theme.rowSelectedCard.cgColor : Theme.surface2.cgColor
+        headerView.layer?.backgroundColor = isFocusedPane ? Theme.rowSelectedCard.cgColor : NSColor.clear.cgColor
+        titleLabel.textColor = isFocusedPane ? Theme.text : Theme.muted
     }
 
     override func mouseDown(with event: NSEvent) {

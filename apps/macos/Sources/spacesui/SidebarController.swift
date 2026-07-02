@@ -1619,14 +1619,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let row = NSView()
         row.setAccessibilityIdentifier("sidebar-alerts")
 
+        let bellIcon = NSImageView()
+        bellIcon.image = NSImage(systemSymbolName: "bell", accessibilityDescription: "Alerts")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        bellIcon.contentTintColor = .secondaryLabelColor
+        bellIcon.setContentHuggingPriority(.required, for: .horizontal)
+
         let titleLabel = NSTextField(labelWithString: "Alerts")
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
         titleLabel.textColor = .labelColor
-
-        let hintLabel = NSTextField(labelWithString: host.footerShortcutHint(for: .guiAlertsShortcut))
-        hintLabel.font = .systemFont(ofSize: 10, weight: .regular)
-        hintLabel.textColor = .tertiaryLabelColor
-        hintLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         let badge = NSTextField(labelWithString: "")
         badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
@@ -1649,12 +1650,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 8)
+        stack.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
         stack.wantsLayer = true
         stack.layer?.cornerRadius = UIRadius.regular
         stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(bellIcon)
         stack.addArrangedSubview(titleLabel)
-        stack.addArrangedSubview(hintLabel)
         stack.addArrangedSubview(NSView())  // spacer
         stack.addArrangedSubview(badge)
         alertsRowStack = stack

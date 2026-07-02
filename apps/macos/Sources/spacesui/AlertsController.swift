@@ -89,6 +89,7 @@ import workspacecore
             previousProjectID: previousProjectID, currentProjectID: nil, previousWorkspaceID: previousWorkspaceID, currentWorkspaceID: nil)
         host.updateAlertsRowAppearance()
 
+        host.clearWorkspaceDetailFooter()
         for view in host.detailContainer.subviews { view.removeFromSuperview() }
         host.detailContainer.wantsLayer = true
         host.detailContainer.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor

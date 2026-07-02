@@ -45,9 +45,9 @@ import AppKit
             tabBar.topAnchor.constraint(equalTo: topAnchor), tabBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             tabBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             paneTree.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
-            paneTree.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            paneTree.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            paneTree.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            paneTree.leadingAnchor.constraint(equalTo: leadingAnchor),
+            paneTree.trailingAnchor.constraint(equalTo: trailingAnchor),
+            paneTree.bottomAnchor.constraint(equalTo: bottomAnchor),
             emptyStateLabel.centerXAnchor.constraint(equalTo: centerXAnchor), emptyStateLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
