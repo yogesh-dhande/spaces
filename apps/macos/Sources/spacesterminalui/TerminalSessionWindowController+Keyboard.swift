@@ -204,7 +204,7 @@ extension TerminalSessionWindowController {
     }
 
     @discardableResult private func pasteImageFromPasteboardIfPresent() -> Bool {
-        guard let pasteImageAction else { return false }
+        guard pasteImageAction != nil else { return false }
         switch pasteboardImageReadAction() {
         case .noImage:
             return false
@@ -213,14 +213,19 @@ extension TerminalSessionWindowController {
             NSSound.beep()
             return true
         case .image(let image):
-            do {
-                let response = try pasteImageAction(image)
-                updateInputStatus(message: response.message, isError: !response.ok)
-                if !response.ok { NSSound.beep() }
-                refreshNow()
-            } catch {
-                updateInputStatus(message: String(describing: error), isError: true)
-                NSSound.beep()
+            Task { @MainActor [weak self] in
+                guard let pasteImageAction = self?.pasteImageAction else { return }
+                do {
+                    let response = try await pasteImageAction(image)
+                    guard let self else { return }
+                    updateInputStatus(message: response.message, isError: !response.ok)
+                    if !response.ok { NSSound.beep() }
+                    refreshNow()
+                } catch {
+                    guard let self else { return }
+                    updateInputStatus(message: String(describing: error), isError: true)
+                    NSSound.beep()
+                }
             }
             return true
         }

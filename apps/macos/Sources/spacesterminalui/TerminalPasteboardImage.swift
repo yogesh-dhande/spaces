@@ -25,6 +25,7 @@ public enum TerminalPasteboardImageReadResult: Equatable {
 }
 
 public enum TerminalPasteboardImageReader {
+    private static let oversizedImageMessage = "Image paste is limited to 10 MiB."
     private static let jpegType = NSPasteboard.PasteboardType("public.jpeg")
     private static let supportedFileExtensions: Set<String> = [
         "avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp",
@@ -44,22 +45,29 @@ public enum TerminalPasteboardImageReader {
         else { return .noImage }
         let fileExtension = url.pathExtension.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines)).lowercased()
         guard supportedFileExtensions.contains(fileExtension) else { return .noImage }
+        guard let fileSize = imageFileSize(at: url) else { return .noImage }
+        guard fileSize <= TerminalPasteboardImage.maxByteCount else { return .rejected(oversizedImageMessage) }
         guard let data = try? Data(contentsOf: url) else { return .noImage }
         if fileExtension == "tif" || fileExtension == "tiff" { return normalizedTIFFImage(data: data) }
         return validatedImage(data: data, fileExtension: fileExtension)
     }
 
     private static func normalizedTIFFImage(data: Data) -> TerminalPasteboardImageReadResult {
+        guard !data.isEmpty else { return .noImage }
+        guard data.count <= TerminalPasteboardImage.maxByteCount else { return .rejected(oversizedImageMessage) }
         guard let pngData = pngData(fromTIFFData: data) else { return .noImage }
         return validatedImage(data: pngData, fileExtension: "png")
     }
 
     private static func validatedImage(data: Data, fileExtension: String) -> TerminalPasteboardImageReadResult {
-        guard !data.isEmpty, NSImage(data: data) != nil else { return .noImage }
-        guard data.count <= TerminalPasteboardImage.maxByteCount else {
-            return .rejected("Image paste is limited to 10 MiB.")
-        }
+        guard !data.isEmpty else { return .noImage }
+        guard data.count <= TerminalPasteboardImage.maxByteCount else { return .rejected(oversizedImageMessage) }
+        guard NSImage(data: data) != nil else { return .noImage }
         return .image(TerminalPasteboardImage(fileExtension: fileExtension, imageData: data))
+    }
+
+    private static func imageFileSize(at url: URL) -> Int? {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
     }
 
     private static func pngData(fromTIFFData data: Data) -> Data? {

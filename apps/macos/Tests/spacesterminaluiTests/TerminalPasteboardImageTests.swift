@@ -72,11 +72,22 @@ final class TerminalPasteboardImageTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let imageURL = root.appendingPathComponent("oversized.bmp")
-        try imageData(type: .bmp, width: 2_000, height: 2_000).write(to: imageURL)
-        XCTAssertGreaterThan(try Data(contentsOf: imageURL).count, TerminalPasteboardImage.maxByteCount)
+        let imageURL = root.appendingPathComponent("oversized.png")
+        XCTAssertTrue(FileManager.default.createFile(atPath: imageURL.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: imageURL)
+        try handle.truncate(atOffset: UInt64(TerminalPasteboardImage.maxByteCount + 1))
+        try handle.close()
         let pasteboard = pasteboard()
         pasteboard.writeObjects([imageURL as NSURL])
+
+        let result = TerminalPasteboardImageReader.readImage(from: pasteboard)
+
+        XCTAssertEqual(result, .rejected("Image paste is limited to 10 MiB."))
+    }
+
+    func testRejectsOversizedPasteboardImageDataBeforeDecoding() throws {
+        let pasteboard = pasteboard()
+        pasteboard.setData(Data(repeating: 0, count: TerminalPasteboardImage.maxByteCount + 1), forType: .png)
 
         let result = TerminalPasteboardImageReader.readImage(from: pasteboard)
 

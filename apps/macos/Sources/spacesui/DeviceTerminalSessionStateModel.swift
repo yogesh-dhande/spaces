@@ -152,16 +152,19 @@
             { [weak self] payload in Task { @MainActor [weak self] in self?.applyControlResponseState(payload) } }
         }
 
-        func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64) throws -> TerminalControlResponse {
-            let response = try requestClient.send(
-                SpacesDeviceAPIRequest(
-                    command: .terminalPasteImage(
-                        SpacesDeviceTerminalPasteImageRequest(
-                            sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: image.fileExtension,
-                            imageData: image.imageData)),
-                    authToken: authToken,
-                    clientApp: clientApp))
-            return TerminalControlResponse(ok: response.ok, message: response.message)
+        func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64) async throws -> TerminalControlResponse {
+            let requestClient = self.requestClient
+            let request = SpacesDeviceAPIRequest(
+                command: .terminalPasteImage(
+                    SpacesDeviceTerminalPasteImageRequest(
+                        sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: image.fileExtension,
+                        imageData: image.imageData)),
+                authToken: authToken,
+                clientApp: clientApp)
+            return try await Task.detached(priority: .userInitiated) {
+                let response = try requestClient.send(request)
+                return TerminalControlResponse(ok: response.ok, message: response.message)
+            }.value
         }
 
         /// State-stream subscriber for the Ghostty render host. Instead of opening a

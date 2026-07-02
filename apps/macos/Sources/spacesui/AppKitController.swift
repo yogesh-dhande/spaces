@@ -1327,12 +1327,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID),
                         requestSender: requestSender, applyState: applyControlState)
                 }
-                let pasteImageAction: @MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse = { image in
+                let pasteImageAction: @MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse = { image in
                     guard let clientID = remoteClientStore.current() else {
                         return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
                     }
                     let ownerEpoch = stateModel.latestRemoteStatePayload?.renderOwnerEpoch ?? 0
-                    return try stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
+                    return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
                 }
                 let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                     try Self.sendDeviceTerminalControl(

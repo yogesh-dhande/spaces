@@ -260,7 +260,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil, detachClientAction: (@Sendable (String) throws -> Void)? = nil,
         copySelectionAction: (@MainActor () -> Bool)? = nil, detachClientSynchronouslyOnClose: Bool = true,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil,
-        pasteImageAction: (@MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse)? = nil,
+        pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
         onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
@@ -1847,7 +1847,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
-    @MainActor func testGhosttyOwnerCommandVPastesImageBeforeTextPaste() throws {
+    @MainActor func testGhosttyOwnerCommandVPastesImageBeforeTextPaste() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1865,6 +1865,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
 
         var pastedImages: [TerminalPasteboardImage] = []
         var textPasteCalls = 0
+        let pastedImage = expectation(description: "image pasted")
         let host = FakeGhosttySessionHost()
         host.snapshotValue = ghosttySnapshot(text: "owner")
         let controller = makeGhosttyController(
@@ -1875,11 +1876,13 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             },
             pasteImageAction: { image in
                 pastedImages.append(image)
+                pastedImage.fulfill()
                 return TerminalControlResponse(ok: true, message: "Pasted image path.")
             },
             pasteboardImageReadAction: { .image(image) })
 
         controller.paste(nil)
+        await fulfillment(of: [pastedImage], timeout: 1)
 
         XCTAssertEqual(pastedImages.count, 1)
         XCTAssertEqual(pastedImages.first?.fileExtension, "png")
@@ -1929,7 +1932,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         XCTAssertTrue(host.pastedClipboard)
     }
 
-    @MainActor func testGhosttyOwnerControlVPastesImageAndConsumesTerminalKey() throws {
+    @MainActor func testGhosttyOwnerControlVPastesImageAndConsumesTerminalKey() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1948,10 +1951,12 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
         let host = FakeGhosttySessionHost()
         host.snapshotValue = ghosttySnapshot(text: "owner")
         var pastedImages: [TerminalPasteboardImage] = []
+        let pastedImage = expectation(description: "image pasted")
         let controller = makeGhosttyController(
             sessionID: "session-control-v-image", paths: paths, host: host,
             pasteImageAction: { image in
                 pastedImages.append(image)
+                pastedImage.fulfill()
                 return TerminalControlResponse(ok: true, message: "Pasted image path.")
             },
             pasteboardImageReadAction: { .image(image) })
@@ -1961,6 +1966,7 @@ final class TerminalSessionWindowControllerTests: XCTestCase {
             keyCode: kVK_ANSI_V, characters: "\u{16}", modifiers: .control, window: controller.window, charactersIgnoringModifiers: "v")
 
         controller.window?.sendEvent(event)
+        await fulfillment(of: [pastedImage], timeout: 1)
 
         XCTAssertEqual(pastedImages.count, 1)
         XCTAssertTrue(host.handledKeySpecifiers.isEmpty)

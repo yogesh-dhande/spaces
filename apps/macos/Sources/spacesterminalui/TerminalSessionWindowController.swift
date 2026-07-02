@@ -191,7 +191,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var isViewerTakeoverShellActive = false
     let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
-    let pasteImageAction: (@MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse)?
+    let pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)?
     let pasteboardImageReadAction: @MainActor () -> TerminalPasteboardImageReadResult
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
@@ -258,7 +258,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
-        pasteImageAction: (@MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse)? = nil,
+        pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
@@ -292,7 +292,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
-        pasteImageAction: (@MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse)? = nil,
+        pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
         pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
