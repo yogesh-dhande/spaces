@@ -84,6 +84,15 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+# Normalize the output directory to an absolute path. `package_artifact` cd's into
+# the staging directory before writing the archive, so a relative --output-dir (e.g.
+# `dist/remote`, as release-and-deploy.sh passes) would otherwise resolve against the
+# wrong working directory and fail with "Cannot open: No such file or directory".
+case "$OUTPUT_DIR" in
+    /*) ;;
+    *) OUTPUT_DIR="$PWD/$OUTPUT_DIR" ;;
+esac
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }

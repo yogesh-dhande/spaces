@@ -57,14 +57,14 @@ import workspacecore
     }
 
     @Test func portsReloadDoesNotAccumulateDividers() {
-        let section = PortsSection(ports: [PortDefinition(name: "web"), PortDefinition(name: "api")])
+        let section = PortsSection(ports: [ServiceDefinition(name: "web"), ServiceDefinition(name: "api")])
 
         #expect(section.rowsStackArrangedSubviewCountForTesting == 2)
 
-        section.reload(ports: [PortDefinition(name: "web")])
+        section.reload(ports: [ServiceDefinition(name: "web")])
         #expect(section.rowsStackArrangedSubviewCountForTesting == 1)
 
-        section.reload(ports: [PortDefinition(name: "web"), PortDefinition(name: "api"), PortDefinition(name: "jobs")])
+        section.reload(ports: [ServiceDefinition(name: "web"), ServiceDefinition(name: "api"), ServiceDefinition(name: "jobs")])
         #expect(section.rowsStackArrangedSubviewCountForTesting == 3)
     }
 }

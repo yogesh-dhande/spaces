@@ -270,7 +270,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         (IPCNotification.performTerminalSessionWindowShortcut, #selector(handlePerformTerminalSessionWindowShortcutIPC(_:))),
         (IPCNotification.focusTerminalSessionWindow, #selector(handleFocusTerminalSessionWindowIPC(_:))),
         (IPCNotification.databaseDidChange, #selector(handleDatabaseDidChangeIPC(_:))),
-        (TerminalOverviewSignal.name, #selector(handleTerminalOverviewDidChangeIPC(_:))),
         (IPCNotification.deliverUserNotification, #selector(handleDeliverUserNotificationIPC(_:))),
     ]
     private var appDidBecomeActiveObserver: NSObjectProtocol?
@@ -279,7 +278,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
-    var setupManager: SetupManager?
+    private let browserSSHForwardManager = BrowserSSHForwardManager()
+    private var remoteBrowserForwardRevisions: [String: Int] = [:]
+    var chromeAutomationSetupController: ChromeAutomationSetupController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
     private var didLogFirstStartupInteraction = false
@@ -300,7 +301,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var inlineWorkspaceOutsideClickMonitor: Any?
     var activeAddWorkspaceFormTag: Int? { didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
-    private var preparedGitProjectDiscardTasksByDeviceAndURL: [String: PreparedGitProjectDiscardEntry] = [:]
+    private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     var showingAlerts = false
@@ -355,8 +356,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
 
         let kind: Kind
+        let deviceID: String?
         let workspaceID: String
-        let deviceID: String
         let sessionID: String
         let title: String
         let processID: String?
@@ -368,6 +369,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let canRun: Bool
         let canStop: Bool
         let canRestart: Bool
+
+        init(
+            kind: Kind, deviceID: String? = nil, workspaceID: String, sessionID: String, title: String, processID: String?,
+            processTemplateID: String?, processKey: String?, agentID: String?, agentLauncherID: String?, agentLauncherName: String?, canRun: Bool,
+            canStop: Bool, canRestart: Bool
+        ) {
+            self.kind = kind
+            self.deviceID = deviceID
+            self.workspaceID = workspaceID
+            self.sessionID = sessionID
+            self.title = title
+            self.processID = processID
+            self.processTemplateID = processTemplateID
+            self.processKey = processKey
+            self.agentID = agentID
+            self.agentLauncherID = agentLauncherID
+            self.agentLauncherName = agentLauncherName
+            self.canRun = canRun
+            self.canStop = canStop
+            self.canRestart = canRestart
+        }
     }
 
     enum WindowFocusRequest: Sendable {
@@ -466,8 +488,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard let self else { return }
                 self.buildShellWindow()
                 self.logStartupProfile("shell_window_ready")
-                self.enterSetupFlow()
-                self.logStartupProfile("setup_started")
+                self.startWorkspaceUIAfterPermissionCheck()
                 self.ensureMainWindowVisibleOnLaunch()
             }
         }
@@ -514,6 +535,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NSLog("spaces: prepared add-project cleanup failed during termination: \(String(describing: error))")
         }
         deferredHotkeySelectionRefreshTask?.cancel()
+        browserSSHForwardManager.stopAll()
         sidebar.cancelSidebarReloadTask()
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
@@ -576,23 +598,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.sidebar.handleDatabaseDidChange()
         }
     }
-
-    @objc private nonisolated func handleTerminalOverviewDidChangeIPC(_ notification: Notification) {
-        let object = notification.object as? String
-        Task { @MainActor [weak self, object] in
-            guard let self else { return }
-            guard
-                Self.shouldReloadSidebarForTerminalOverviewSignal(
-                    didStartBackgroundServices: self.didStartBackgroundServices, notificationObject: object, profileObject: self.ipcNotificationObject
-                )
-            else { return }
-            self.sidebar.handleLocalTerminalOverviewDidChange()
-        }
-    }
-
-    nonisolated static func shouldReloadSidebarForTerminalOverviewSignal(
-        didStartBackgroundServices: Bool, notificationObject: String?, profileObject: String
-    ) -> Bool { didStartBackgroundServices && notificationObject == profileObject }
 
     @objc private nonisolated func handleShowMainWindowIPC(_ notification: Notification) {
         let object = notification.object as? String
@@ -810,16 +815,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // when it currently has an open Chrome tab. Scan Chrome once (when any browser is
         // configured) for the open tab URLs and the frontmost tab URL; the latter resolves
         // the current target when no built-in terminal session is focused.
-        let shouldReadFrontmostChromeURL = Self.shouldUseFocusedChromeWindowForWorkspaceLookup(
-            frontmostApplicationBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         let chromeState: (openTabURLs: [String], frontmostURL: String?) =
             detail.config.resolvedBrowserSessions.isEmpty
             ? ([], nil)
             : await Task.detached(priority: .userInitiated) {
                 let chrome = ChromeAdapter()
                 guard chrome.isAvailable() else { return ([], nil) }
-                let frontmostURL = shouldReadFrontmostChromeURL ? (try? chrome.frontmostActiveTabURL()) : nil
-                return ((try? chrome.allTabs())?.map(\.url) ?? [], frontmostURL)
+                return ((try? chrome.allTabs())?.map(\.url) ?? [], try? chrome.frontmostActiveTabURL())
             }.value
         let openBrowserSessions = detail.config.resolvedBrowserSessions.filter { session in
             guard let url = session.url, !url.isEmpty else { return false }
@@ -1406,23 +1408,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
     }
 
-    private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) -> Bool {
-        // The seed launch configuration wins over the model's own overview lookup, so it
-        // must carry the session's real shell/command. Prefer the request (resolved from
-        // the source overview), then the loaded summary for a row-built request, and only
-        // fall back to a default shell when neither knows the session yet.
+    private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) async
+        -> Bool
+    {
+        // The seed launch configuration wins over the model's own overview lookup, and the
+        // live Device API state payload never resends shell/command, so seed one only when a
+        // real shell is known — from the request (resolved from the source overview) or the
+        // loaded summary for a row-built request. When neither knows it yet (a row opened
+        // before the session reached the overview), pass no seed and resolve through the
+        // missing-summary path, which fetches a fresh overview off-main; fabricating a
+        // "/bin/bash" placeholder here would win over that lookup and mislabel the window's
+        // launch command for the session's lifetime.
         let summary = terminalSessionSummaryMatch(sessionID: request.sessionID)?.summary
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
-            shell: request.shell ?? summary?.shell ?? "/bin/bash", command: request.command ?? summary?.command,
-            createdAt: request.createdAt ?? ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID, kind: request.kind)
+        let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
+        let seedLaunchConfiguration = (request.shell ?? summary?.shell).map { shell in
+            TerminalSessionLaunchConfiguration(
+                sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
+                shell: shell, command: request.command ?? summary?.command, createdAt: createdAt, workspaceID: request.workspaceID, kind: request.kind
+            )
+        }
         let initialRuntimeState = request.initialState.map {
             TerminalSessionRuntimeState(
                 sessionID: request.sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
-                updatedAt: request.updatedAt ?? launchConfiguration.createdAt, title: request.title, workingDirectory: request.workingDirectory)
+                updatedAt: request.updatedAt ?? createdAt, title: request.title, workingDirectory: request.workingDirectory)
         }
-        return openTerminalSessionWindow(
-            sessionID: request.sessionID, mode: .owner, requestID: requestID, seedDevice: device, seedLaunchConfiguration: launchConfiguration,
+        return await openTerminalSessionWindowResolvingMissingSummary(
+            sessionID: request.sessionID, mode: .owner, requestID: requestID, seedDevice: device, seedLaunchConfiguration: seedLaunchConfiguration,
             seedInitialRuntimeState: initialRuntimeState) != nil
     }
 
@@ -1592,7 +1603,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         let startedAt = Date()
         let workspaceLookupStartedAt = Date()
-        guard let workspaceMatch = clientWorkspaceMatch(forTerminalSession: sessionID) else {
+        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID) else {
             let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID) != nil
             logTerminalRuntimeControlsRefresh(
                 sessionID: sessionID, startedAt: startedAt, cause: cause, requestID: requestID,
@@ -1600,7 +1611,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 runtimeStateMS: 0, descriptorBuildMS: 0, descriptorChanged: descriptorChanged, success: false)
             return nil
         }
-        let workspaceID = workspaceMatch.workspaceID
         let workspaceLookupMS = windowShortcutElapsedMS(since: workspaceLookupStartedAt)
 
         // The runtime-controls descriptor is built from the workspace's overview rows
@@ -1619,12 +1629,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let trackedWindows = detail.map { Self.deviceTerminalWindows(from: $0.terminalRows) } ?? []
         let windowsMS = windowShortcutElapsedMS(since: windowsStartedAt)
         let runtimeStateStartedAt = Date()
-        let isSessionRunning = terminalSessionIsRunning(sessionID: sessionID)
+        let isSessionRunning = Self.terminalSessionIsRunning(sessionID: sessionID)
         let runtimeStateMS = windowShortcutElapsedMS(since: runtimeStateStartedAt)
         let descriptorBuildStartedAt = Date()
         let descriptor = Self.terminalRuntimeControlDescriptor(
-            sessionID: sessionID, workspaceID: workspaceID, deviceID: workspaceMatch.deviceID, settings: settings, runningProcesses: runningProcesses,
-            agentWindows: agentWindows, trackedWindows: trackedWindows, isSessionRunning: isSessionRunning)
+            sessionID: sessionID, workspaceID: workspaceID, settings: settings, runningProcesses: runningProcesses, agentWindows: agentWindows,
+            trackedWindows: trackedWindows, isSessionRunning: isSessionRunning)
         let descriptorBuildMS = windowShortcutElapsedMS(since: descriptorBuildStartedAt)
         let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID[sessionID] != descriptor
         if let descriptor {
@@ -1690,7 +1700,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     static func terminalRuntimeControlDescriptor(
-        sessionID: String, workspaceID: String, deviceID: String, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
+        sessionID: String, workspaceID: String, deviceID: String? = nil, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
         agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord], isSessionRunning: Bool
     ) -> TerminalRuntimeControlDescriptor? {
         guard let normalizedSessionID = normalizedTerminalSessionID(sessionID) else { return nil }
@@ -1700,7 +1710,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let processKey = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName)
             let isRunning = process.status != .exited && isSessionRunning
             return TerminalRuntimeControlDescriptor(
-                kind: .process, workspaceID: workspaceID, deviceID: deviceID, sessionID: normalizedSessionID, title: title, processID: process.id,
+                kind: .process, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: process.id,
                 processTemplateID: template?.id, processKey: processKey, agentID: nil, agentLauncherID: nil, agentLauncherName: nil,
                 canRun: template != nil && !isRunning, canStop: true, canRestart: template != nil)
         }
@@ -1711,7 +1721,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let title = trimmedNonEmpty(launcher?.name) ?? codingAgentDisplayName(label: agent.label, runtimeWindowTitle: windowTitle)
             let isRunning = agent.status != .done && isSessionRunning
             return TerminalRuntimeControlDescriptor(
-                kind: .codingAgent, workspaceID: workspaceID, deviceID: deviceID, sessionID: normalizedSessionID, title: title, processID: nil,
+                kind: .codingAgent, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil,
                 processTemplateID: nil, processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
                 canRun: launcher != nil && !isRunning, canStop: true, canRestart: launcher != nil)
         }
@@ -1721,7 +1731,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail)
             } ?? "Terminal"
         return TerminalRuntimeControlDescriptor(
-            kind: .workspaceTerminal, workspaceID: workspaceID, deviceID: deviceID, sessionID: normalizedSessionID, title: title, processID: nil,
+            kind: .workspaceTerminal, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil,
             processTemplateID: nil, processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true,
             canRestart: false)
     }
@@ -1785,16 +1795,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return slug.isEmpty ? "remote-device" : slug
     }
 
-    private func terminalSessionIsRunning(sessionID: String) -> Bool {
-        // The loaded device overview is the client-side source of truth for session
-        // state; treat an unknown session as running so its window is not prematurely
-        // marked stopped before the overview catches up.
-        guard let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary else { return true }
-        return summary.state.isInteractive
+    private static func terminalSessionIsRunning(sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+            let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        else { return true }
+        return state.state.isInteractive
     }
 
     private func runTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForMutation(deviceID: descriptor.deviceID) {
+        if let device = deviceForDaemonStateMutation() {
             performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_run", descriptor: descriptor, device: device) { device in
                 switch descriptor.kind {
                 case .process:
@@ -1820,7 +1829,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func stopTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForMutation(deviceID: descriptor.deviceID) {
+        if let device = deviceForDaemonStateMutation() {
             performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_stop", descriptor: descriptor, device: device) { device in
                 switch descriptor.kind {
                 case .process:
@@ -1845,7 +1854,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func restartTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForMutation(deviceID: descriptor.deviceID) {
+        if let device = deviceForDaemonStateMutation() {
             performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_restart", descriptor: descriptor, device: device) { device in
                 switch descriptor.kind {
                 case .process:
@@ -1890,16 +1899,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Whether closing a window should stop its ad hoc built-in terminal session.
-    /// Liveness comes from the device overview's attachment snapshot, not the
-    /// daemon database; `hasLiveAttachments` should be `true` when liveness is
-    /// unknown so a session is never stopped out from under another client.
+    static func activeOwnerClientID(paths: TerminalSessionPaths) -> String? {
+        guard let ownerAttachment = try? TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner }) else {
+            return nil
+        }
+        return ownerAttachment.clientID
+    }
+
     nonisolated static func shouldTerminateAdHocBuiltInTerminalSession(
         hasLiveAttachments: Bool, isConfiguredProcessSession: Bool, isAppTerminatingAndKeepingSessions: Bool = false
+    ) -> Bool { !isAppTerminatingAndKeepingSessions && !isConfiguredProcessSession && !hasLiveAttachments }
+
+    nonisolated static func shouldTerminateAdHocBuiltInTerminalSession(
+        paths: TerminalSessionPaths?, isConfiguredProcessSession: Bool, isAppTerminatingAndKeepingSessions: Bool = false, now: Date = Date()
     ) -> Bool {
         guard !isAppTerminatingAndKeepingSessions else { return false }
-        guard !isConfiguredProcessSession else { return false }
-        return !hasLiveAttachments
+        guard !isConfiguredProcessSession, let paths, let activeAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now)
+        else { return false }
+        return activeAttachments.isEmpty
     }
 
     private func removeTerminalSessionWindowController(sessionID: String, clientID: String, sessionIsTerminating: Bool) {
@@ -1932,48 +1949,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stopAdHocTerminalSession(sessionID: sessionID)
     }
 
-    private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String) {
-        guard !keepsTerminalSessionsRunningDuringTermination else { return }
+    private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String, now: Date = Date()) {
         // A session owned by a configured process or agent is not ad hoc; the overview's
         // session kind tells us without a daemon-DB read.
-        guard remoteTerminalSessionKind(sessionID: sessionID) == .shell else { return }
-        guard let device = terminalSessionOwningDevice(sessionID: sessionID) else { return }
-        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            // The loaded overview may not yet reflect the detach/expiry that triggered this
-            // cleanup, so decide on the authoritative attachment snapshot fetched from the
-            // owning device. A device that does not answer leaves the session untouched.
-            guard let fetched = await Self.fetchSessionAttachmentSnapshot(sessionID: sessionID, device: device, clientApp: clientApp) else { return }
-            // A remote viewer can stop refreshing its lease without ever sending a detach,
-            // leaving its attachment row with detachedAt == nil. Judge liveness with the
-            // lease rule — against the daemon's own clock — so an expired viewer does not keep
-            // an otherwise-unattached ad hoc session alive, and clock skew does not expire a
-            // live one.
-            let hasLiveAttachments = !fetched.snapshot.liveAttachments(now: fetched.daemonNow).isEmpty
-            guard
-                Self.shouldTerminateAdHocBuiltInTerminalSession(
-                    hasLiveAttachments: hasLiveAttachments, isConfiguredProcessSession: false,
-                    isAppTerminatingAndKeepingSessions: self.keepsTerminalSessionsRunningDuringTermination)
-            else { return }
-            self.stopAdHocTerminalSession(sessionID: sessionID)
-        }
-    }
-
-    /// Fetches the authoritative attachment snapshot for a session from its owning device,
-    /// along with the daemon's emission time. The snapshot's lease timestamps are stamped by
-    /// that daemon, so liveness must be judged against `daemonNow` rather than this Mac's
-    /// clock — a remote device's clock can skew past the 60s lease interval.
-    nonisolated private static func fetchSessionAttachmentSnapshot(
-        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp
-    ) async -> (snapshot: TerminalSessionAttachmentSnapshot, daemonNow: Date)? {
-        await Task.detached(priority: .utility) {
-            let response = try? SpacesDeviceClient.request(
-                SpacesDeviceAPIRequest(command: .state(SpacesDeviceTerminalSessionRequest(sessionID: sessionID))), device: device,
-                clientApp: clientApp)
-            guard let state = response?.sessionState, let snapshot = state.attachmentSnapshot else { return nil }
-            return (snapshot, GhosttyRemoteSessionStateTimestamp.date(from: state.emittedAt) ?? Date())
-        }.value
+        let sessionOwnsTrackedRuntime = remoteTerminalSessionKind(sessionID: sessionID) != .shell
+        let paths = try? TerminalSessionPaths.forSession(id: sessionID)
+        guard
+            Self.shouldTerminateAdHocBuiltInTerminalSession(
+                paths: paths, isConfiguredProcessSession: sessionOwnsTrackedRuntime,
+                isAppTerminatingAndKeepingSessions: keepsTerminalSessionsRunningDuringTermination, now: now)
+        else { return }
+        stopAdHocTerminalSession(sessionID: sessionID)
     }
 
     /// Stops an ad hoc built-in terminal session through the owning daemon's Device API.
@@ -2084,9 +2070,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Flushes sidebar reloads that were deferred because the user was mid-edit.
-    /// Reload triggers are one-shot, so this runs at natural idle points (forms
-    /// closing or app re-activation) in place of the old poll re-check.
-    func flushDeferredSidebarReloadsIfNeeded() { sidebar.flushPendingSidebarSignalReloadIfNeeded() }
+    /// Reload triggers (the daemon's `databaseDidChange`) are one-shot, so this
+    /// runs at natural idle points (forms closing, app re-activation) in place of
+    /// the old poll re-check.
+    func flushDeferredSidebarReloadsIfNeeded() { sidebar.flushPendingDatabaseReloadIfNeeded() }
 
     func canReloadAfterBackgroundWorkspaceRefresh() -> Bool {
         !projectHasUnsavedChanges && activeAddWorkspaceFormTag == nil && activeAddProjectFormTag == nil && !isTextInputFocused()
@@ -2167,28 +2154,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var daemonStatus: TerminalServiceDaemonStatus?
         var compatibility: SpacesWireCompatibility?
     }
-
-    /// A remote overview stream is valid only after the compatibility-aware pull path has loaded a
-    /// normal overview. Reachable-but-incompatible devices intentionally have no overview so their
-    /// compatibility block stays visible instead of being replaced by an unsupported stream failure.
-    nonisolated static func remoteOverviewSubscriptionIsEligible(section: DeviceSection) -> Bool {
-        guard !section.isLocal, section.loadState == .loaded, section.overview != nil else { return false }
-        return section.compatibility?.isCompatible != false
-    }
-
-    /// Normal subscription opens require a loaded compatible overview. Offline retry candidates are
-    /// different: a failed pull or dropped stream has no overview, but the stream sends a fresh overview
-    /// immediately on connect and is the recovery path.
-    nonisolated static func remoteOverviewSubscriptionIsDesired(section: DeviceSection, isReconnectCandidate: Bool) -> Bool {
-        if remoteOverviewSubscriptionIsEligible(section: section) { return true }
-        guard isReconnectCandidate, !section.isLocal, section.loadState.isOffline else { return false }
-        return section.compatibility?.isCompatible != false
-    }
-
-    /// A failed compatibility-aware pull can immediately attempt an overview stream because it has no
-    /// existing connection to throttle. A dropped stream has already scheduled the delayed reconnect, so
-    /// refreshing subscriptions during the offline transition would bypass that backoff.
-    nonisolated static func shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: Bool) -> Bool { !isStreamDisconnect }
 
     /// Whether the current sidebar selection points at a workspace or project owned by `section`. Used
     /// when a device transitions to offline: its rows are about to drop out of the merged sidebar data,
@@ -2689,12 +2654,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return SidebarProjectActions(showsSettings: actions.showsSettings, showsAddWorkspace: actions.showsAddWorkspace)
     }
 
-    nonisolated private static func localPortDefinition(from port: SpacesDevicePortDefinition) -> PortDefinition {
-        PortDefinition(id: port.id, name: port.name)
+    nonisolated private static func localServiceDefinition(from port: SpacesDeviceServiceDefinition) -> ServiceDefinition {
+        ServiceDefinition(id: port.id, name: port.name)
     }
 
-    nonisolated private static func devicePortDefinition(from port: PortDefinition) -> SpacesDevicePortDefinition {
-        SpacesDevicePortDefinition(id: port.id, name: port.name)
+    nonisolated private static func deviceServiceDefinition(from port: ServiceDefinition) -> SpacesDeviceServiceDefinition {
+        SpacesDeviceServiceDefinition(id: port.id, name: port.name)
     }
 
     nonisolated private static func localProcessTemplate(from process: SpacesDeviceProcessTemplate) -> ProcessTemplate {
@@ -2725,7 +2690,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func localWorkspaceSettings(from config: SpacesDeviceWorkspaceConfig) -> WorkspaceSettings {
         WorkspaceSettings(
-            stopScript: config.stopScript, ports: config.ports.map(localPortDefinition(from:)),
+            stopScript: config.stopScript, ports: config.ports.map(localServiceDefinition(from:)),
             processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
             agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:)))
     }
@@ -2734,18 +2699,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         from settings: WorkspaceSettings, resolvedBrowserSessions: [SpacesDeviceBrowserSession] = []
     ) -> SpacesDeviceWorkspaceConfig {
         SpacesDeviceWorkspaceConfig(
-            stopScript: settings.stopScript, ports: settings.ports.map(devicePortDefinition(from:)),
+            stopScript: settings.stopScript, ports: settings.ports.map(deviceServiceDefinition(from:)),
             processes: settings.processes.map(deviceProcessTemplate(from:)),
             browserSessions: settings.browserSessions.map(deviceBrowserSession(from:)), resolvedBrowserSessions: resolvedBrowserSessions,
             agentLaunchers: settings.agentLaunchers.map(deviceAgentLauncher(from:)))
     }
 
     nonisolated private static func localProjectSettings(from config: SpacesDeviceProjectConfig) -> (
-        setupScript: String?, stopScript: String?, ports: [PortDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
+        setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
         agentLaunchers: [AgentLauncher]
     ) {
         (
-            setupScript: config.setupScript, stopScript: config.stopScript, ports: config.ports.map(localPortDefinition(from:)),
+            setupScript: config.setupScript, stopScript: config.stopScript, ports: config.ports.map(localServiceDefinition(from:)),
             processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
             agentLaunchers: config.agentLaunchers.map(localAgentLauncher(from:))
         )
@@ -2755,7 +2720,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceProjectConfig(
             setupScript: refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue,
             stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
-            ports: refs.portsSection.currentPorts.map(devicePortDefinition(from:)),
+            ports: refs.portsSection.currentPorts.map(deviceServiceDefinition(from:)),
             processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
             browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
             agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
@@ -2765,7 +2730,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceProjectConfig(
             setupScript: refs.setupScriptSection.currentValue.isEmpty ? nil : refs.setupScriptSection.currentValue,
             stopScript: refs.stopScriptSection.currentValue.isEmpty ? nil : refs.stopScriptSection.currentValue,
-            ports: refs.portsSection.currentPorts.map(devicePortDefinition(from:)),
+            ports: refs.portsSection.currentPorts.map(deviceServiceDefinition(from:)),
             processes: refs.processesSection.currentProcesses.map(deviceProcessTemplate(from:)),
             browserSessions: refs.browserSessionsSection.currentSessions.map(deviceBrowserSession(from:)),
             agentLaunchers: refs.agentLaunchersSection.currentLaunchers.map(deviceAgentLauncher(from:)))
@@ -2941,8 +2906,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// A device-agnostic window-focus target resolved from the overview. The dispatcher
     /// focuses the client's window for the target; only two leaves vary by where the
-    /// workspace's daemon runs — browser tab focus (local) vs URL open (remote), and
-    /// native vs mirror terminal-window open — both keyed off the carried `workspaceID`.
+    /// workspace's daemon runs: browser URLs may need remote-service routing, and terminal
+    /// windows use native sessions locally vs Device API mirrors remotely.
     enum DeviceWindowShortcutResolution: Sendable, Equatable {
         case openURL(workspaceID: String, targetURL: String)
         case openTerminal(DeviceTerminalOpenRequest)
@@ -3144,14 +3109,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let existingOrder = result[targetID] ?? Int.max
             result[targetID] = min(existingOrder, window.orderIndex)
         }
-        let terminalOrderByWindowID: [Int: Int] = windows.reduce(into: [:]) { result, window in
-            guard window.role == "terminal", let windowID = window.windowID else { return }
-            let existingOrder = result[windowID] ?? Int.max
-            result[windowID] = min(existingOrder, window.orderIndex)
-        }
         func processOrder(_ process: RunningProcessRecord) -> Int {
             if let targetID = process.terminalTrackingKey, let order = terminalOrderByTargetID[targetID] { return order }
-            if let windowID = process.windowID, let order = terminalOrderByWindowID[windowID] { return order }
             return Int.max
         }
         let processesByTerminalID: [String: [RunningProcessRecord]] = {
@@ -3170,36 +3129,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             return map
         }()
-        let processesByWindowID: [Int: [RunningProcessRecord]] = {
-            var map: [Int: [RunningProcessRecord]] = [:]
-            for process in processes {
-                guard let windowID = process.windowID else { continue }
-                map[windowID, default: []].append(process)
-            }
-            for (windowID, list) in map {
-                map[windowID] = list.sorted { lhs, rhs in
-                    let lhsOrder = processOrder(lhs)
-                    let rhsOrder = processOrder(rhs)
-                    if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
-                    if lhs.templateName != rhs.templateName {
-                        return lhs.templateName.localizedStandardCompare(rhs.templateName) == .orderedAscending
-                    }
-                    return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
-                }
-            }
-            return map
-        }()
         let agentTerminalIDs = Set(agentWindows.flatMap { agentTerminalTrackingKeys(for: $0) })
-        let agentWindowIDs = Set(agentWindows.compactMap { $0.yabaiWindowID ?? $0.windowID })
-        let eligibleProcesses = processes.filter { process in
-            let claimedByTerminalID = process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
-            let claimedByWindowID = process.windowID.map(agentWindowIDs.contains) ?? false
-            return !claimedByTerminalID && !claimedByWindowID
-        }
+        let eligibleProcesses = processes.filter { process in !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) }
         let agentClaimedProcessKeys = Set(
-            processes.filter { process in
-                (process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) || (process.windowID.map(agentWindowIDs.contains) ?? false)
-            }.map { processRuntimeKey(name: $0.templateName) })
+            processes.filter { process in process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false }.map {
+                processRuntimeKey(name: $0.templateName)
+            })
         var processQueuesByKey: [String: [RunningProcessRecord]] = [:]
         for process in eligibleProcesses { processQueuesByKey[processRuntimeKey(name: process.templateName), default: []].append(process) }
         for (key, list) in processQueuesByKey {
@@ -3236,20 +3171,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         for (windowIdx, window) in windows.enumerated() where window.role != "browser" {
             let windowProcesses: [RunningProcessRecord]
             if window.role == "terminal" {
-                let linkedByTrackingID = window.terminalTrackingKey.flatMap { processesByTerminalID[$0] } ?? []
-                let linkedByWindowID = window.windowID.flatMap { processesByWindowID[$0] } ?? []
-                var seen = Set<String>()
-                windowProcesses = (linkedByTrackingID + linkedByWindowID).filter { seen.insert($0.id).inserted }
+                windowProcesses = window.terminalTrackingKey.flatMap { processesByTerminalID[$0] } ?? []
             } else {
                 windowProcesses = []
             }
-            let isAgentClaimedWindow =
-                (window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) || (window.windowID.map(agentWindowIDs.contains) ?? false)
-            let nonAgentWindowProcesses = windowProcesses.filter { process in
-                let claimedByTerminalID = process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
-                let claimedByWindowID = process.windowID.map(agentWindowIDs.contains) ?? false
-                return !claimedByTerminalID && !claimedByWindowID
-            }
+            let isAgentClaimedWindow = window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
+            let nonAgentWindowProcesses = windowProcesses.filter { process in !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) }
             if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
             if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
                 for process in nonAgentWindowProcesses where !matchedProcessIDs.contains(process.id) {
@@ -3559,41 +3486,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func makeStartupLoadingContentView() -> NSView {
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 10
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let spinner = NSProgressIndicator()
-        spinner.style = .spinning
-        spinner.controlSize = .regular
-        spinner.startAnimation(nil)
-        spinner.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(spinner)
-
-        let title = NSTextField(labelWithString: "Starting Spaces…")
-        title.font = .systemFont(ofSize: 14, weight: .medium)
-        title.textColor = .labelColor
-        stack.addArrangedSubview(title)
-
-        let detail = NSTextField(labelWithString: "Checking dependencies and loading workspace data.")
-        detail.font = .systemFont(ofSize: 12)
-        detail.textColor = .secondaryLabelColor
-        detail.alignment = .center
-        stack.addArrangedSubview(detail)
-
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: content.centerXAnchor), stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-        ])
-        return content
-    }
-
     /// Builds the split view layout + footer and sets it as window.contentView.
     private func buildMainWindowContent() {
         let splitView = NSSplitView()
@@ -3783,65 +3675,93 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         didStartBackgroundServices = false
     }
 
-    enum SetupFlowEntryContext {
-        case appLaunch
-        case deferredRequirement
+    func reconcileRemoteBrowserForwards(device: SpacesPairedDeviceRecord, overview: SpacesDeviceOverviewPayload) {
+        guard device.id != localDeviceID else { return }
+        let manager = browserSSHForwardManager
+        let revision = nextRemoteBrowserForwardRevision(deviceID: device.id)
+        Task.detached(priority: .utility) { manager.reconcile(device: device, overview: overview, revision: revision) }
     }
 
-    nonisolated static func shouldShowStartupSplashBeforeSetup(entryContext: SetupFlowEntryContext) -> Bool { entryContext == .appLaunch }
-    nonisolated static func shouldDeferSetupChecksUntilAfterSplash(entryContext: SetupFlowEntryContext) -> Bool {
-        shouldShowStartupSplashBeforeSetup(entryContext: entryContext)
+    func stopRemoteBrowserForwards(deviceID: String) {
+        guard deviceID != localDeviceID else { return }
+        let manager = browserSSHForwardManager
+        let revision = nextRemoteBrowserForwardRevision(deviceID: deviceID)
+        Task.detached(priority: .utility) { manager.stop(deviceID: deviceID, revision: revision) }
     }
+
+    private func nextRemoteBrowserForwardRevision(deviceID: String) -> Int {
+        let next = (remoteBrowserForwardRevisions[deviceID] ?? 0) + 1
+        remoteBrowserForwardRevisions[deviceID] = next
+        return next
+    }
+
     nonisolated static func scheduleAfterNextRunLoopTurn(_ action: @escaping @MainActor () -> Void) {
         RunLoop.main.perform { Task { @MainActor in action() } }
     }
 
-    private func enterSetupFlow(preferredInitialCheckID: SetupCheckID? = nil, entryContext: SetupFlowEntryContext = .appLaunch) {
-        stopBackgroundServices()
-        setupManager?.stop()
-        let mgr = SetupManager()
-        setupManager = mgr
-        let startSetupChecks = { [weak self] in
-            guard let self, self.setupManager === mgr else { return }
-            guard let setupView = mgr.begin(preferredInitialCheckID: preferredInitialCheckID) else { return }
-            self.window.contentView = setupView
+    /// Whether launch should block on the Chrome Automation permission screen. Spaces focuses
+    /// browser sessions by scripting Chrome, so a denied or not-yet-decided grant blocks the main
+    /// UI. An `unavailable` reading (Chrome not installed / permission unverifiable) does not block
+    /// — there is nothing to grant — and a `granted` reading proceeds straight to the workspace UI.
+    static func requiresChromeAutomationSetup(_ status: ChromeAutomationStatus) -> Bool {
+        switch status {
+        case .denied, .notDetermined: return true
+        case .granted, .unavailable: return false
         }
-        if Self.shouldShowStartupSplashBeforeSetup(entryContext: entryContext) {
-            // Show a neutral startup view before running setup checks so launch never
-            // presents an empty window while the app decides between onboarding and
-            // the normal workspace UI.
-            window.contentView = makeStartupLoadingContentView()
-        }
-        mgr.onComplete = { [weak self] in
-            self?.logStartupProfile("setup_complete")
-            self?.setupManager = nil
-            self?.buildMainWindowContent()
-            self?.logStartupProfile("main_content_ready")
-            self?.showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Spaces is preparing your workspace data.")
-            self?.logStartupProfile("loading_placeholder_ready")
-            Task { @MainActor [weak self] in await self?.sidebar.loadInitialSidebarData() }
-        }
-        if Self.shouldDeferSetupChecksUntilAfterSplash(entryContext: entryContext) {
-            Self.scheduleAfterNextRunLoopTurn { startSetupChecks() }
+    }
+
+    /// Decides at launch whether to show the blocking Chrome Automation permission screen or open
+    /// straight to the workspace UI.
+    private func startWorkspaceUIAfterPermissionCheck() {
+        if Self.requiresChromeAutomationSetup(ChromeAutomationPermission.status()) {
+            enterChromeAutomationSetupFlow()
         } else {
-            startSetupChecks()
+            presentMainWorkspaceUI()
         }
     }
 
-    func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
-        guard Self.shouldRouteToDeferredSetup(for: error) else { return false }
-        enterSetupFlow(preferredInitialCheckID: .yabaiServiceRunning, entryContext: .deferredRequirement)
-        return true
+    /// Builds the main split-view content and kicks off the initial sidebar load. Shared by the
+    /// normal launch path and the Chrome Automation setup screen's completion handler.
+    private func presentMainWorkspaceUI() {
+        chromeAutomationSetupController?.stop()
+        chromeAutomationSetupController = nil
+        buildMainWindowContent()
+        logStartupProfile("main_content_ready")
+        showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Spaces is preparing your workspace data.")
+        logStartupProfile("loading_placeholder_ready")
+        Task { @MainActor [weak self] in await self?.sidebar.loadInitialSidebarData() }
     }
 
-    static func shouldRouteToDeferredSetup(for error: Error) -> Bool {
-        if case WorkspaceError.yabaiUnavailable(let message) = error { return message.localizedStandardContains("failed to connect to socket") }
-        let message = error.localizedDescription
-        return message.localizedStandardContains("yabai-msg") && message.localizedStandardContains("failed to connect to socket")
+    /// Presents the blocking permission screen and advances to the workspace UI once the user
+    /// grants Chrome Automation. The controller polls so granting via System Settings (where macOS
+    /// no longer offers an in-app prompt after a denial) advances the app without a restart.
+    private func enterChromeAutomationSetupFlow() {
+        logStartupProfile("chrome_automation_setup_started")
+        chromeAutomationSetupController?.stop()
+        let controller = ChromeAutomationSetupController()
+        chromeAutomationSetupController = controller
+        // Capture `controller` weakly: it owns `onGranted`, so a strong capture would retain the
+        // controller (and its view hierarchy) past the point where `presentMainWorkspaceUI` clears
+        // `chromeAutomationSetupController`, leaking a setup controller each time the flow is shown.
+        controller.onGranted = { [weak self, weak controller] in
+            guard let self, let controller, self.chromeAutomationSetupController === controller else { return }
+            self.logStartupProfile("chrome_automation_setup_complete")
+            self.presentMainWorkspaceUI()
+        }
+        window.contentView = controller.begin()
+    }
+
+    /// The app has no prerequisite/onboarding flow: background-refresh failures are always
+    /// logged rather than routed to a setup screen. Retained so call sites that previously
+    /// short-circuited on a deferred-setup requirement keep a single, explicit no-op.
+    func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
+        _ = error
+        return false
     }
 
     static func backgroundRefreshFailureAction(for error: Error) -> BackgroundRefreshFailureAction {
-        shouldRouteToDeferredSetup(for: error) ? .deferredSetup : .logOnly
+        _ = error
+        return .logOnly
     }
 
     func handleBackgroundRefreshFailure(_ error: Error, source: String) {
@@ -3979,6 +3899,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 localDeviceOverview = overview
                 deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
             }
+        }
+        if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
+            reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
         rebuildFlatSidebarData()
         if let preferredWorkspaceID, findWorkspace(id: preferredWorkspaceID) != nil {
@@ -4485,8 +4408,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let projectSettings:
             (
-                setupScript: String?, stopScript: String?, ports: [PortDefinition], processes: [ProcessTemplate], browserSessions: [BrowserSession],
-                agentLaunchers: [AgentLauncher]
+                setupScript: String?, stopScript: String?, ports: [ServiceDefinition], processes: [ProcessTemplate],
+                browserSessions: [BrowserSession], agentLaunchers: [AgentLauncher]
             )
         if let activeProject = deviceProjectSummary(projectID: project.id).map({ SpacesDeviceProjectSettingsViewModel(project: $0) }) {
             projectSettings = Self.localProjectSettings(from: activeProject.config)
@@ -4520,7 +4443,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
             value: projectSettings.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
-        let portsSection = PortsSection(ports: projectSettings.ports, subtitle: "Per-workspace named ports, exposed as env vars.")
+        let portsSection = PortsSection(ports: projectSettings.ports, subtitle: "Per-workspace services, routed through Caddy.")
         let processesSection = ProcessesSection(
             processes: projectSettings.processes, subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(
@@ -4940,14 +4863,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func projectDeviceChanged(_ sender: NSPopUpButton) {
         guard let tag = activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[tag] else { return }
-        let selectedDeviceID = (sender.selectedItem?.representedObject as? String) ?? localProjectCreationDeviceID()
-        guard refs.selectedDeviceID != selectedDeviceID else { return }
-        refs.selectedDeviceID = selectedDeviceID
-        discardPreparedAddProjectGitSourceIfNeeded(refs)
+        refs.selectedDeviceID = (sender.selectedItem?.representedObject as? String) ?? localProjectCreationDeviceID()
         // The folder lives on the chosen device, so re-validate any typed path there.
         refs.preparedLocalDirectoryPath = nil
         refs.directoryCompletions = []
-        updateAddProjectSourceUI(refs)
+        updateAddProjectProgressiveDisclosure(refs)
         scheduleAddProjectDirectoryPreview(refs)
         scheduleAddProjectDirectorySuggestions(refs)
     }
@@ -5703,7 +5623,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     guard $0.role == "terminal" else { return false }
                     if let trackingID = agentWindow.terminalTrackingID, !trackingID.isEmpty, $0.terminalTrackingID == trackingID { return true }
                     if let nativeID = agentWindow.terminalNativeID, !nativeID.isEmpty, $0.terminalNativeID == nativeID { return true }
-                    if let windowID = agentWindow.yabaiWindowID ?? agentWindow.windowID, $0.windowID == windowID { return true }
                     return false
                 })
             else { return }
@@ -7217,14 +7136,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // being consumed; on failure it is restored (or discarded) so it never leaks.
                 let preparedGitProjectHandle = refs.preparedGitProjectHandle
                 let preparedGitURL = refs.preparedGitURL
-                if refs.sourceSegmented.selectedSegment == 1 {
-                    guard
-                        Self.preparedGitProjectMatchesCurrentSelection(
-                            preparedGitProjectHandle: preparedGitProjectHandle, preparedGitURL: preparedGitURL,
-                            preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: gitURL ?? "", selectedDeviceID: refs.selectedDeviceID,
-                            currentPreparationID: refs.gitPreparationID)
-                    else { throw WorkspaceError.invalidArgument(message: "Clone the Git repository before creating the project.") }
-                }
                 refs.preparedGitProjectHandle = nil
                 refs.preparedGitURL = nil
                 refs.preparedGitDeviceID = nil
@@ -7289,10 +7200,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.localSourceSection.isHidden = cloneSelected
         refs.cloneSourceSection.isHidden = !cloneSelected
         let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let gitPrepared = Self.preparedGitProjectMatchesCurrentSelection(
-            preparedGitProjectHandle: refs.preparedGitProjectHandle, preparedGitURL: refs.preparedGitURL,
-            preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: repoURL, selectedDeviceID: refs.selectedDeviceID,
-            currentPreparationID: refs.gitPreparationID)
+        let gitPrepared = refs.preparedGitProjectHandle != nil && refs.preparedGitURL == repoURL
         let gitPreparing = refs.gitPreparationID != nil
         // The daemon clones the repo and returns its spaces.yaml config to pre-fill the form, so the
         // Clone step is shown for git sources on any device (local or remote).
@@ -7313,10 +7221,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             // A git source is prepared once the daemon has cloned it (handle held), so the form is
             // populated from spaces.yaml and Create can adopt the existing clone.
-            return Self.preparedGitProjectMatchesCurrentSelection(
-                preparedGitProjectHandle: refs.preparedGitProjectHandle, preparedGitURL: refs.preparedGitURL,
-                preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: repoURL, selectedDeviceID: refs.selectedDeviceID,
-                currentPreparationID: refs.gitPreparationID)
+            return refs.gitPreparationID == nil && refs.preparedGitProjectHandle != nil && refs.preparedGitURL == repoURL
+                && refs.preparedGitDeviceID == refs.selectedDeviceID
         }
         let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return !directoryPath.isEmpty && refs.preparedLocalDirectoryPath == directoryPath
@@ -7330,16 +7236,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             && currentPreparationID == completionPreparationID
     }
 
+    nonisolated static func localProjectPreviewResultMatchesActiveRequest(
+        isActiveForm: Bool, selectedSegment: Int, currentDirectoryPath: String, requestedDirectoryPath: String
+    ) -> Bool { isActiveForm && selectedSegment == 0 && currentDirectoryPath == requestedDirectoryPath }
+
     nonisolated static func preparedGitProjectMatchesCurrentSelection(
         preparedGitProjectHandle: String?, preparedGitURL: String?, preparedGitDeviceID: String?, currentRepoURL: String, selectedDeviceID: String,
         currentPreparationID: UUID?
     ) -> Bool {
-        currentPreparationID == nil && preparedGitProjectHandle != nil && preparedGitURL == currentRepoURL && preparedGitDeviceID == selectedDeviceID
+        guard preparedGitProjectHandle != nil, currentPreparationID == nil else { return false }
+        return preparedGitURL == currentRepoURL && preparedGitDeviceID == selectedDeviceID
     }
-
-    nonisolated static func localProjectPreviewResultMatchesActiveRequest(
-        isActiveForm: Bool, selectedSegment: Int, currentDirectoryPath: String, requestedDirectoryPath: String
-    ) -> Bool { isActiveForm && selectedSegment == 0 && currentDirectoryPath == requestedDirectoryPath }
 
     nonisolated static func preparedGitProjectDiscardKey(repoURL: String?, deviceID: String) -> String? {
         guard let key = repoURL?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
@@ -7416,7 +7323,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func prepareAddProjectGitSource(_ refs: AddProjectFieldRefs) {
         let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let requestedDeviceID = refs.selectedDeviceID
         guard !repoURL.isEmpty else {
             showError(WorkspaceError.invalidArgument(message: "Git repository URL is required."))
             return
@@ -7425,15 +7331,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             updateAddProjectSourceUI(refs)
             return
         }
-        if Self.preparedGitProjectMatchesCurrentSelection(
-            preparedGitProjectHandle: refs.preparedGitProjectHandle, preparedGitURL: refs.preparedGitURL,
-            preparedGitDeviceID: refs.preparedGitDeviceID, currentRepoURL: repoURL, selectedDeviceID: requestedDeviceID,
-            currentPreparationID: refs.gitPreparationID)
-        {
+        if refs.preparedGitProjectHandle != nil, refs.preparedGitURL == repoURL {
             updateAddProjectSourceUI(refs)
             return
         }
-        guard let device = deviceRecord(forDeviceID: requestedDeviceID) else {
+        guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else {
             showDeviceNotLoadedError()
             return
         }
@@ -7458,15 +7360,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             // Discard any repository prepared earlier for this form before preparing a new one.
             if let previousHandle = refs.preparedGitProjectHandle {
-                guard let preparedDeviceID = refs.preparedGitDeviceID, let preparedDevice = deviceRecord(forDeviceID: preparedDeviceID) else {
-                    refs.preparedGitProjectHandle = nil
-                    refs.preparedGitURL = nil
-                    refs.preparedGitDeviceID = nil
-                    showDeviceNotLoadedError()
-                    return
-                }
-                let discardResult = await beginPreparedGitProjectDiscard(handle: previousHandle, repoURL: refs.preparedGitURL, device: preparedDevice)
-                    .value
+                let discardResult = await beginPreparedGitProjectDiscard(handle: previousHandle, repoURL: refs.preparedGitURL, device: device).value
                 if case .failure(let error) = discardResult {
                     refs.preparedGitProjectHandle = nil
                     refs.preparedGitURL = nil
@@ -7478,9 +7372,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 refs.preparedGitURL = nil
                 refs.preparedGitDeviceID = nil
             }
-            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL, deviceID: requestedDeviceID),
-                case .failure(let error) = discardResult
-            {
+            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL), case .failure(let error) = discardResult {
                 showError(error)
                 return
             }
@@ -7513,7 +7405,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 Self.preparedGitProjectResultMatchesActiveRequest(
                     isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
                     currentRepoURL: refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), requestedRepoURL: repoURL,
-                    currentDeviceID: refs.selectedDeviceID, requestedDeviceID: requestedDeviceID, currentPreparationID: refs.gitPreparationID,
+                    currentDeviceID: refs.selectedDeviceID, requestedDeviceID: device.id, currentPreparationID: refs.gitPreparationID,
                     completionPreparationID: preparationID)
             else {
                 // The form moved on while cloning; discard the clone we just made.
@@ -7528,7 +7420,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             refs.preparedGitProjectHandle = handle
             refs.preparedGitURL = repoURL
-            refs.preparedGitDeviceID = requestedDeviceID
+            refs.preparedGitDeviceID = device.id
             hydrateAddProjectSettings(refs, from: config)
         }
     }
@@ -7546,7 +7438,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func discardPreparedAddProjectGitSourceIfNeeded(_ refs: AddProjectFieldRefs) {
         guard let handle = refs.preparedGitProjectHandle else { return }
         let repoURL = refs.preparedGitURL
-        let device = refs.preparedGitDeviceID.flatMap { deviceRecord(forDeviceID: $0) }
+        let device = deviceRecord(forDeviceID: refs.selectedDeviceID)
         refs.preparedGitProjectHandle = nil
         refs.preparedGitURL = nil
         refs.preparedGitDeviceID = nil
@@ -7598,7 +7490,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func discardActiveAddProjectPreparedSourceSynchronouslyIfNeeded() -> Result<Void, Error>? {
         guard let activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[activeAddProjectFormTag],
-            let handle = refs.preparedGitProjectHandle, let deviceID = refs.preparedGitDeviceID, let device = deviceRecord(forDeviceID: deviceID)
+            let handle = refs.preparedGitProjectHandle, let device = deviceRecord(forDeviceID: refs.selectedDeviceID)
         else { return nil }
         refs.preparedGitProjectHandle = nil
         refs.preparedGitURL = nil
@@ -7614,25 +7506,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Result<Void, Error>, Never
     > {
         let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: device.id)
-        let previousTask = key.flatMap { preparedGitProjectDiscardTasksByDeviceAndURL[$0]?.task }
+        let previousTask = key.flatMap { preparedGitProjectDiscardTasksByURL[$0]?.task }
         let task = Task<Result<Void, Error>, Never> {
             if let previousTask { _ = await previousTask.value }
             return await Self.discardPreparedGitProjectResult(preparedGitProjectHandle: handle, device: device)
         }
         guard let key else { return task }
         let id = UUID()
-        preparedGitProjectDiscardTasksByDeviceAndURL[key] = PreparedGitProjectDiscardEntry(id: id, task: task)
+        preparedGitProjectDiscardTasksByURL[key] = PreparedGitProjectDiscardEntry(id: id, task: task)
         Task { @MainActor [weak self] in
             _ = await task.value
-            guard let self, self.preparedGitProjectDiscardTasksByDeviceAndURL[key]?.id == id else { return }
-            self.preparedGitProjectDiscardTasksByDeviceAndURL[key] = nil
+            guard let self, self.preparedGitProjectDiscardTasksByURL[key]?.id == id else { return }
+            self.preparedGitProjectDiscardTasksByURL[key] = nil
         }
         return task
     }
 
-    private func activePreparedGitProjectDiscardResult(repoURL: String, deviceID: String) async -> Result<Void, Error>? {
-        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: deviceID),
-            let entry = preparedGitProjectDiscardTasksByDeviceAndURL[key]
+    private func activePreparedGitProjectDiscardResult(repoURL: String) async -> Result<Void, Error>? {
+        let deviceID =
+            activeAddProjectFormTag.flatMap { AddProjectFieldCache.shared.cache[$0]?.selectedDeviceID } ?? SpacesPairedDeviceRecord.localDeviceID
+        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: deviceID), let entry = preparedGitProjectDiscardTasksByURL[key]
         else { return nil }
         return await entry.task.value
     }
@@ -7914,7 +7807,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sender?.isEnabled = true
             if let result {
                 switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+                case .success(let response):
+                    // Restart goes through the daemon stop path; the daemon does not own the
+                    // client-side dedicated Chrome windows, so close them here too for a clean
+                    // restarted state (a later browser focus then opens a fresh window).
+                    self.closeLocalBrowserSessionWindows(workspaceID: id)
+                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
                 case .failure(let error): showError(error)
                 }
             } else {
@@ -7940,12 +7838,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sender?.isEnabled = true
             if let result {
                 switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+                case .success(let response):
+                    self.closeLocalBrowserSessionWindows(workspaceID: id)
+                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
                 case .failure(let error): showError(error)
                 }
             } else {
                 showDeviceNotLoadedError()
             }
+        }
+    }
+
+    /// Closes the workspace browser-session tabs the app opened (in their dedicated Chrome windows)
+    /// and clears their tracking rows. Browser-session windows are client/desktop-local, so the
+    /// daemon cannot close them when a workspace stops — the GUI tears them down here. A no-op when
+    /// the workspace has no tracked browser windows (e.g. a remote workspace, whose browser sessions
+    /// open a URL without a dedicated tracked window).
+    ///
+    /// Called from two disjoint triggers: the GUI's own stop/restart/archive handlers (eager, and
+    /// the only reliable signal for a restart's transient stop), and the sidebar's daemon-observed
+    /// transition diff (the net for stop/archive initiated outside this GUI — CLI, MCP, the Device
+    /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
+    /// re-observes the same stopped workspace finds nothing to close.
+    func closeLocalBrowserSessionWindows(workspaceID: String) {
+        Task.detached(priority: .utility) {
+            let store = ClientBrowserWindowIDStore()
+            guard let tracked = try? store.windowIDs(workspaceID: workspaceID), !tracked.isEmpty else { return }
+            let chrome = ChromeAdapter()
+            // Gate on `isRunning()` (a no-Apple-Events check) so stopping a workspace never launches
+            // Chrome: if the user already quit Chrome, the tracked tabs are gone — scripting Chrome
+            // would only relaunch it. Just clear the tracking rows below.
+            if chrome.isRunning() {
+                // Close only the session's matching tab, never the whole window: the window may hold
+                // other tabs the user opened, and a tracked id can be stale (Chrome reuses window
+                // ids after a restart) so the URL must still match.
+                for entry in tracked { _ = try? chrome.closeMatchingTabsInWindow(windowID: entry.windowID, urlPrefix: entry.targetURL) }
+            }
+            try? store.clearAll(workspaceID: workspaceID)
         }
     }
 
@@ -8007,6 +7936,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch result {
                 case .success(let response):
                     button?.isEnabled = true
+                    self.closeLocalBrowserSessionWindows(workspaceID: id)
                     applyDeviceMutationResponse(response, selectedProjectID: project.id)
                 case .failure(let error):
                     requestSidebarReload()
@@ -8248,7 +8178,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             if let request = Self.deviceTerminalOpenRequest(
                                 workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? localDeviceOverview)
                             {
-                                _ = openDeviceTerminalSession(request, device: device)
+                                _ = await openDeviceTerminalSession(request, device: device)
                             }
                         } else {
                             _ = await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner)
@@ -8808,17 +8738,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return AppConfig(editor: editor, portRange: .default)
     }
 
-    func clientWindowFocusPulseEnabled() -> Bool {
-        guard let raw = try? clientDatabase().setting(key: SettingsKey.windowFocusPulseEnabled) else {
-            return SettingsKey.defaultWindowFocusPulseEnabled
-        }
-        return raw != "0"
-    }
-
-    func clientWindowFocusPulseColor() -> (r: Int, g: Int, b: Int) {
-        SettingsKey.windowFocusPulseColor(from: try? clientDatabase().setting(key: SettingsKey.windowFocusPulseColor))
-    }
-
     private func clientActiveWorkspaceID() -> String? { try? clientDatabase().setting(key: SettingsKey.activeWorkspaceID) }
 
     nonisolated static func setClientActiveWorkspaceID(_ workspaceID: String?) {
@@ -8944,7 +8863,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         _ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
     ) async -> Bool {
         if isRemoteDeviceID(deviceID(forWorkspaceID: request.workspaceID)) {
-            return openDeviceTerminalSession(request, device: device, requestID: requestID)
+            return await openDeviceTerminalSession(request, device: device, requestID: requestID)
         }
         return await focusTerminalSessionWindowResolvingMissingSummary(sessionID: request.sessionID, requestID: requestID)
     }
@@ -8956,7 +8875,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// that specific window by id; only when it is gone does the app open a fresh dedicated
     /// window. Scoping to the tracked window id means focus never lands on an unrelated window
     /// that merely has the same URL open. `NSWorkspace.open` is a last resort when Chrome
-    /// cannot be scripted. Used for local sessions; remote sessions only open the URL.
+    /// cannot be scripted. Remote service sessions use this after their URL has been routed through
+    /// the Mac Caddy router.
     private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
         let focused = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
@@ -9057,8 +8977,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// action, or nil when nothing was focused (the executor surfaces its own errors).
     /// Shared by the numbered-shortcut, command-palette, and cycle focus paths so all
     /// three behave identically. Only two leaves depend on where the workspace's daemon
-    /// runs: browser tab focus (local) vs URL open (remote), and native vs mirror
-    /// terminal windows.
+    /// runs: browser URLs may need remote-service routing before local Chrome focus, and
+    /// terminal windows use native sessions locally vs Device API mirrors remotely.
     @discardableResult func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution, requestID: String? = nil) async
         -> ExternalWindowAction?
     {
@@ -9069,7 +8989,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
-                NSWorkspace.shared.open(url)
+                guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
+                    showDeviceNotLoadedError()
+                    return nil
+                }
+                guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else {
+                    showError(WorkspaceError.invalidArgument(message: "Workspace not found on the selected device."))
+                    return nil
+                }
+                // Opening a missing workspace SSH forward and reconciling the Caddy route blocks (spawns
+                // `ssh`, polls local ports and router config up to the timeout), so run it off the main
+                // actor to keep the focus keypress from freezing the UI. The manager is `Sendable` and
+                // serializes its own state, so the detached task can safely own the reconciliation.
+                let manager = browserSSHForwardManager
+                let routeResult: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
+                    do { return .success(try manager.routedURL(targetURL: targetURL, workspace: workspace, device: device)) } catch {
+                        return .failure(error)
+                    }
+                }.value
+                switch routeResult {
+                case .success(let routedURL):
+                    await focusLocalChromeTab(workspaceID: workspaceID, targetURL: routedURL.absoluteString, fallbackURL: routedURL)
+                case .failure(let error):
+                    showError(error)
+                    return nil
+                }
             } else {
                 await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, fallbackURL: url)
             }
@@ -9166,6 +9110,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func activeWorkspaceIDForGlobalNavigation(appIsActive: Bool, activeWorkspaceID: String?) -> String? {
         appIsActive ? activeWorkspaceID : nil
     }
+
+    nonisolated static func shouldReloadSidebarForTerminalOverviewSignal(
+        didStartBackgroundServices: Bool, notificationObject: String?, profileObject: String
+    ) -> Bool { didStartBackgroundServices && notificationObject == profileObject }
 
     nonisolated static func preferredWorkspaceIDForGlobalNavigation(
         focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?, rememberedTerminalSessionWorkspaceID: String?,
@@ -9291,19 +9239,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Resolves the workspace owning a terminal session from the overview (sessions and
     /// process/agent/terminal rows all carry both the session id and workspace id),
-    /// replacing the orchestrator's daemon-DB lookup. The private match also carries
-    /// the owning device so terminal-window actions do not depend on sidebar selection.
-    func clientWorkspaceID(forTerminalSession sessionID: String) -> String? { clientWorkspaceMatch(forTerminalSession: sessionID)?.workspaceID }
-
-    private func clientWorkspaceMatch(forTerminalSession sessionID: String) -> (workspaceID: String, deviceID: String)? {
-        for section in deviceSections {
-            guard let overview = section.overview else { continue }
-            if let workspaceID = overview.sessions.first(where: { $0.id == sessionID })?.workspaceID { return (workspaceID, section.deviceID) }
+    /// replacing the orchestrator's daemon-DB lookup. Searches every paired device's
+    /// overview so mirrored remote sessions resolve too.
+    func clientWorkspaceID(forTerminalSession sessionID: String) -> String? {
+        for overview in deviceSections.compactMap({ $0.overview }) {
+            if let workspaceID = overview.sessions.first(where: { $0.id == sessionID })?.workspaceID { return workspaceID }
             for workspace in overview.workspaces
             where workspace.processRows.contains(where: { $0.sessionID == sessionID })
                 || workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID })
                 || workspace.terminalRows.contains(where: { $0.sessionID == sessionID })
-            { return (workspace.id, section.deviceID) }
+            { return workspace.id }
         }
         return nil
     }
@@ -9312,10 +9257,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// window, by matching the frontmost tab URL to a configured browser session in the
     /// overview. A focused built-in terminal is resolved earlier by its session id.
     func clientWorkspaceIDForFocusedWindow() -> String? {
-        guard
-            Self.shouldUseFocusedChromeWindowForWorkspaceLookup(
-                frontmostApplicationBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
-        else { return nil }
         let chrome = ChromeAdapter()
         guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
         var best: (workspaceID: String, prefixLength: Int)?
@@ -9383,7 +9324,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil, rememberedTerminalSessionWorkspaceID == nil {
             let lookupStartedAt = Date()
-            activeWorkspaceID = Self.activeWorkspaceIDForGlobalNavigation(appIsActive: NSApp.isActive, activeWorkspaceID: clientActiveWorkspaceID())
+            activeWorkspaceID = clientActiveWorkspaceID()
             activeWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
             activeWorkspaceStatus = activeWorkspaceID == nil ? "miss" : "hit"
         }
@@ -9761,7 +9702,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func presentProjectPortRemoveConfirmation(port: PortDefinition, confirm: @escaping (Bool) -> Void) {
+    private func presentProjectPortRemoveConfirmation(port: ServiceDefinition, confirm: @escaping (Bool) -> Void) {
         let alert = NSAlert()
         alert.messageText = "Remove port \"\(port.name)\"?"
         alert.informativeText = "This removes the port definition from the project."

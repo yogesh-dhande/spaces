@@ -7,6 +7,92 @@ import systembridge
 
 extension OrchestratorTests {
 
+    // Running a single configured process (the ⌘-number "run process" shortcut → runConfiguredProcess)
+    // on a stopped workspace must release the placeholder port reservation, just as full-workspace launch
+    // does. Otherwise PortReserver keeps the assigned port and the launched server dies with EADDRINUSE.
+    func testRunConfiguredProcessReleasesPortReservationSoServerCanBind() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [ServiceDefinition(name: "web")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
+        }
+        // The workspace is stopped, so saving settings reserved its assigned port via PortReserver.
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+
+        try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web")
+
+        XCTAssertFalse(
+            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+            "Running a configured process must release the reservation so the server can bind its port.")
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
+    // If a single-process launch fails after its placeholder reservation was released, the reservation
+    // must be restored — otherwise the stopped workspace leaves its pinned port unheld and another
+    // process could grab it before the next launch. Mirrors the full-workspace launch restore path.
+    func testRunConfiguredProcessRestoresPortReservationWhenLaunchFails() throws {
+        struct TerminalLaunchFailure: Error {}
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionLauncher: { _ in throw TerminalLaunchFailure() })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [ServiceDefinition(name: "web")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
+        }
+        // Saving settings for a stopped workspace reserves its assigned port via PortReserver.
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+
+        XCTAssertThrowsError(try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web"))
+
+        XCTAssertFalse(
+            try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning, "A failed single-process launch must leave the workspace stopped.")
+        XCTAssertTrue(
+            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+            "A failed single-process launch must restore the placeholder port reservation it released.")
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
+    // If a workspace is already running because of an ad-hoc terminal, a failed configured-process
+    // launch must not restore placeholder reservations. Running workspaces intentionally leave service
+    // ports unreserved; users resolve conflicts manually if another process claims one.
+    func testRunConfiguredProcessDoesNotRestorePortReservationWhenAlreadyRunningLaunchFails() throws {
+        struct TerminalLaunchFailure: Error {}
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionLauncher: { _ in throw TerminalLaunchFailure() })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [ServiceDefinition(name: "web")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
+        }
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-07-01T00:00:00Z")
+
+        XCTAssertThrowsError(try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web"))
+
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertFalse(
+            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+            "A failed launch from an already-running workspace must leave service ports unreserved.")
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
     func testValidateProcessTemplateAcceptsShellVariableSyntax() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
@@ -60,7 +146,7 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create a process with a PID that doesn't exist
         let deadProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: deadProcess)
@@ -83,7 +169,7 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create a process that just started (within grace period)
         let newProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
         try store.upsert(runningProcess: newProcess)
@@ -106,7 +192,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let recentDeadProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: 99999, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)), exitedAt: nil)
         try store.upsert(runningProcess: recentDeadProcess)
@@ -144,8 +230,8 @@ extension OrchestratorTests {
                     updatedAt: "2026-05-09T17:00:00Z"), paths: paths)
             let process = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
             try store.upsert(runningProcess: process)
 
             XCTAssertTrue(try orchestrator.runningOwnedProcessPIDs().contains(Int(getpid())))
@@ -166,163 +252,15 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let process = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api",
-            terminalApp: TerminalHost.spaces.appName, windowID: 123, terminalTrackingID: "session-without-runtime-state", pid: nil,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
+            terminalTrackingID: "session-without-runtime-state", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
         try store.upsert(runningProcess: process)
 
         try withEnv(name: SpacesProfile.runtimeDirectoryEnvironmentVariable, value: runtimeDir.path) {
             XCTAssertTrue(try orchestrator.runningOwnedProcessPIDs().isEmpty)
         }
     }
-
-    func testCheckAndUpdateProcessStatusesHonorsExitedRuntimeStateInsideStartupGrace() throws {
-        let root = try makeTempDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        let sessionID = "session-\(UUID().uuidString)"
-        let processID = UUID().uuidString
-        let process = RunningProcessRecord(
-            id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-            windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
-        try store.upsert(runningProcess: process)
-
-        let exitedAt = ISO8601DateFormatter().string(from: Date())
-        try writeTerminalSessionFixture(
-            sessionID: sessionID, workspace: workspace, kind: .process,
-            runtimeState: .init(
-                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil, state: .exited,
-                updatedAt: exitedAt, exitedAt: exitedAt))
-
-        XCTAssertTrue(try orchestrator.checkAndUpdateProcessStatuses())
-        let updated = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first { $0.id == processID })
-        XCTAssertEqual(updated.status, .exited)
-        XCTAssertNotNil(updated.exitedAt)
-    }
-
-    func testCheckAndUpdateProcessStatusesKeepsStartingRuntimeStateRunningAfterStartupGrace() throws {
-        let root = try makeTempDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let projectDir = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let project = try orchestrator.addProject(dir: projectDir.path)
-        let workspace = try orchestrator.createWorkspace(projectID: project.id)
-        let sessionID = "session-\(UUID().uuidString)"
-        let processID = UUID().uuidString
-        let process = RunningProcessRecord(
-            id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-            windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20.0)), exitedAt: nil)
-        try store.upsert(runningProcess: process)
-
-        try writeTerminalSessionFixture(
-            sessionID: sessionID, workspace: workspace, kind: .process,
-            runtimeState: .init(
-                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: ProcessInfo.processInfo.processIdentifier, childPID: nil,
-                state: .starting, updatedAt: ISO8601DateFormatter().string(from: Date())))
-
-        XCTAssertFalse(try orchestrator.checkAndUpdateProcessStatuses())
-        let updated = try XCTUnwrap(store.runningProcesses(workspaceID: workspace.id).first { $0.id == processID })
-        XCTAssertEqual(updated.status, .running)
-        XCTAssertNil(updated.exitedAt)
-    }
-
-    #if os(macOS)
-        @MainActor func testProcessExitMonitorRuntimeStateExitReconcilesPIDLessProcessInsideStartupGrace() throws {
-            let root = try makeTempDirectory()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let databasePath = root.appendingPathComponent("spaces-test.db").path
-            let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
-            try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
-
-            try withEnvironmentValues([
-                SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDir.path,
-            ]) {
-                let store = try SQLiteStore(path: databasePath)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                let projectDir = root.appendingPathComponent("project", isDirectory: true)
-                try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-                let project = try orchestrator.addProject(dir: projectDir.path)
-                let workspace = try orchestrator.createWorkspace(projectID: project.id)
-                let sessionID = "session-\(UUID().uuidString)"
-                let processID = UUID().uuidString
-                let process = RunningProcessRecord(
-                    id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                    windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
-                    lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
-                try store.upsert(runningProcess: process)
-
-                let monitor = ProcessExitMonitorService(databasePath: databasePath)
-                monitor.start()
-                defer { monitor.stop() }
-
-                let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                try paths.ensureDirectories()
-                let exitedAt = ISO8601DateFormatter().string(from: Date())
-                try TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(getpid()), childPID: nil, state: .exited,
-                        updatedAt: exitedAt, exitedAt: exitedAt), paths: paths)
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-
-                let updated = try waitForRunningProcess(store: store, workspaceID: workspace.id, processID: processID) { $0.status == .exited }
-                XCTAssertEqual(updated.status, .exited)
-                XCTAssertNotNil(updated.exitedAt)
-            }
-        }
-
-        @MainActor func testProcessExitMonitorRuntimeStatePIDReconcilesPIDLessProcessInsideStartupGrace() throws {
-            let root = try makeTempDirectory()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let databasePath = root.appendingPathComponent("spaces-test.db").path
-            let runtimeDir = root.appendingPathComponent("runtime", isDirectory: true)
-            try FileManager.default.createDirectory(at: runtimeDir, withIntermediateDirectories: true)
-
-            try withEnvironmentValues([
-                SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeDir.path,
-            ]) {
-                let store = try SQLiteStore(path: databasePath)
-                let orchestrator = WorkspaceOrchestrator(store: store)
-                let projectDir = root.appendingPathComponent("project", isDirectory: true)
-                try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-                let project = try orchestrator.addProject(dir: projectDir.path)
-                let workspace = try orchestrator.createWorkspace(projectID: project.id)
-                let sessionID = "session-\(UUID().uuidString)"
-                let processID = UUID().uuidString
-                let process = RunningProcessRecord(
-                    id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                    windowID: 123, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
-                    lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date()), exitedAt: nil)
-                try store.upsert(runningProcess: process)
-
-                let monitor = ProcessExitMonitorService(databasePath: databasePath)
-                monitor.start()
-                defer { monitor.stop() }
-
-                let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                try paths.ensureDirectories()
-                try TerminalSessionPersistence.writeRuntimeState(
-                    .init(
-                        sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(getpid()), childPID: Int32(getpid()), state: .running,
-                        updatedAt: ISO8601DateFormatter().string(from: Date())), paths: paths)
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-
-                let updated = try waitForRunningProcess(store: store, workspaceID: workspace.id, processID: processID) {
-                    $0.pid == Int(getpid()) && $0.status == .running
-                }
-                XCTAssertEqual(updated.pid, Int(getpid()))
-                XCTAssertEqual(updated.status, .running)
-            }
-        }
-    #endif
 
     func testCheckAndUpdateProcessStatusesTreatsZombiePIDAsExited() throws {
         let root = try makeTempDirectory()
@@ -368,7 +306,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         let zombieProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", terminalNativeID: "spaces-terminal", pid: zombiePID, status: .running, logPath: nil,
             lastOutputAt: nil, startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: zombieProcess)
@@ -393,7 +331,7 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create a process without a PID (still starting up)
         let noPidProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: nil)
         try store.upsert(runningProcess: noPidProcess)
@@ -415,7 +353,7 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         // Create an already-exited process
         let exitedProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces", windowID: 123,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm start", terminalApp: "Spaces",
             terminalTrackingID: "workspace-session", pid: 99999, status: .exited, logPath: nil, lastOutputAt: nil,
             startedAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20)), exitedAt: ISO8601DateFormatter().string(from: Date()))
         try store.upsert(runningProcess: exitedProcess)
@@ -462,11 +400,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
-            }
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
 
         let launchedConfigurationSnapshot = launchedConfigurations.snapshot()
         XCTAssertEqual(launchedConfigurationSnapshot.count, 1)
@@ -502,11 +436,7 @@ extension OrchestratorTests {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(id: "process-api", name: "api", command: "echo api")])
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
-            }
-        }
+        try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
 
         let configuration = try XCTUnwrap(launches.snapshot().first)
         XCTAssertEqual(configuration.workspaceID, workspace.id)
@@ -526,8 +456,8 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "api", command: "zsh", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: "session-456", terminalNativeID: "session-456", pid: 1234, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "2026-05-10T18:05:00Z", exitedAt: nil))
+                terminalTrackingID: "session-456", terminalNativeID: "session-456", pid: 1234, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "2026-05-10T18:05:00Z", exitedAt: nil))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-456"), workspace.id)
     }
@@ -535,7 +465,7 @@ extension OrchestratorTests {
     func testRefreshWorkspaceWindowsKeepsBuiltInProcessTerminalWindowAfterOwnerCloses() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -547,8 +477,8 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "window-process-api", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
@@ -564,9 +494,7 @@ extension OrchestratorTests {
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 4321,
                     state: .running, updatedAt: "now"), paths: paths)
 
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-            }
+            _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
         }
 
         let windows = try orchestrator.windows(workspaceID: workspace.id)
@@ -606,13 +534,11 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "LegacyTerminal",
-                windowID: 999, terminalTrackingID: "session-old", terminalNativeID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "session-old", terminalNativeID: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: "now", exitedAt: nil))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
-            }
+            try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
         }
 
         XCTAssertEqual(capture.modes, [.owner])
@@ -664,8 +590,8 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: 999_999, status: .running,
-                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", pid: 999_999, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "old-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
@@ -674,7 +600,7 @@ extension OrchestratorTests {
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             try withEnv(name: "SPACES_TEST_KILL_LOG", value: killLog) {
-                try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "kill": killMock]) {
+                try withMockCommands(["kill": killMock]) {
                     try orchestrator.restartWorkspaceProcess(workspaceID: workspace.id, processID: "process-api")
                 }
             }
@@ -696,11 +622,7 @@ extension OrchestratorTests {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
-            }
-        }
+        try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.templateName), ["api"])
@@ -740,15 +662,11 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: TerminalHost.spaces.appName,
-                windowID: 222, terminalTrackingID: "session-web", terminalNativeID: "session-web", pid: 2222, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalTrackingID: "session-web", terminalNativeID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
-                }
-            }
+            try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
         }
 
         XCTAssertEqual(capture.modes, [.owner])
@@ -798,11 +716,7 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") {
-                    try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
-                }
-            }
+            try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
         }
 
         XCTAssertEqual(capture.modes, [.owner])
@@ -822,12 +736,10 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
                 terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
-        }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
 
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.count, 1)
@@ -838,18 +750,16 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "web", command: "npm run web")])
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [24000], names: ["API_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [24000], names: ["api"])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
                 terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-                settings.processes = [ProcessTemplate(name: "worker", command: "npm run worker")]
-                settings.ports = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
-            }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "worker", command: "npm run worker")]
+            settings.ports = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
         }
 
         let processes = try store.runningProcesses(workspaceID: workspace.id)
@@ -858,15 +768,16 @@ extension OrchestratorTests {
 
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(namedPorts.map(\.port), [24000, 20000])
-        XCTAssertEqual(namedPorts.map(\.name), ["API_PORT", "WEB_PORT"])
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        XCTAssertEqual(namedPorts.map(\.name), ["api", "web"])
+        // A settings sync persists port assignments but must not re-bind the reservation sockets while
+        // the workspace runs: its server processes already own those ports, and re-grabbing one would
+        // race the real server for it (EADDRINUSE).
+        XCTAssertFalse(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)
         XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
         XCTAssertNil(runtimeStatus.warningSummary)
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
     func testUpdateRunningWorkspaceProcessesRelabelsRunningProcessAndUpdatesOnExit() throws {
@@ -878,7 +789,7 @@ extension OrchestratorTests {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
                 terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
@@ -910,14 +821,12 @@ extension OrchestratorTests {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
                 terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.updateRunningWorkspaceProcesses(
-                workspaceID: workspace.id, processes: [ProcessTemplate(id: process.id, name: "frontend", command: "npm run web:v2", onExit: .notify)],
-                restartChangedCommands: true)
-        }
+        try orchestrator.updateRunningWorkspaceProcesses(
+            workspaceID: workspace.id, processes: [ProcessTemplate(id: process.id, name: "frontend", command: "npm run web:v2", onExit: .notify)],
+            restartChangedCommands: true)
 
         let configured = try store.workspaceProcesses(workspaceID: workspace.id)
         XCTAssertEqual(configured.count, 1)
@@ -941,7 +850,7 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 222,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
                 terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         XCTAssertThrowsError(
@@ -966,15 +875,13 @@ extension OrchestratorTests {
         let processID = UUID().uuidString
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "LegacyTerminal", windowID: 222,
+                id: processID, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "LegacyTerminal",
                 terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.updateRunningWorkspaceProcesses(
-                workspaceID: workspace.id,
-                processes: [
-                    ProcessTemplate(id: process.id, name: "web", command: "cd $SPACES_WORKSPACE_DIR && npm run web | tee log.txt", onExit: .none)
-                ], restartChangedCommands: true)
-        }
+        try orchestrator.updateRunningWorkspaceProcesses(
+            workspaceID: workspace.id,
+            processes: [
+                ProcessTemplate(id: process.id, name: "web", command: "cd $SPACES_WORKSPACE_DIR && npm run web | tee log.txt", onExit: .none)
+            ], restartChangedCommands: true)
 
         let running = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(running.map(\.templateName), ["web"])
@@ -995,13 +902,12 @@ extension OrchestratorTests {
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "running-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 221,
+                id: "running-web", workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
                 terminalTrackingID: "session-web", pid: 1111, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "running-worker", workspaceID: workspace.id, templateName: "worker", command: "npm run worker", terminalApp: "Spaces",
-                windowID: 222, terminalTrackingID: "session-worker", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
-                exitedAt: nil))
+                terminalTrackingID: "session-worker", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "window-web", workspaceID: workspace.id, app: "Spaces", name: "web", detail: "npm run web", windowID: 221,
@@ -1031,8 +937,8 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.lifecycleState, .stopped)
@@ -1049,8 +955,8 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
-                pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later"))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later"))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.lifecycleState, .running)
@@ -1069,7 +975,7 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "name:api", command: "npm run api", terminalApp: "Spaces",
-                windowID: 501, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
@@ -1087,7 +993,8 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "web server", command: "PORT=20003 npm run dev",
-                terminalApp: "Spaces", windowID: 501, pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalApp: "Spaces", terminalTarget: nil, pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now",
+                exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.lifecycleState, .running)
@@ -1104,8 +1011,8 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
-                pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                terminalTarget: nil, pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.lifecycleState, .running)
@@ -1123,8 +1030,8 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", windowID: 501,
-                pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
+                terminalTarget: nil, pid: 999, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)
@@ -1169,15 +1076,13 @@ extension OrchestratorTests {
                 lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 501,
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Mocked dependencies: window close via `yabai` and Spaces cleanup via `osascript`.
+        // Mocked dependency: Spaces cleanup via `osascript`.
         // Why: verify cleanup semantics without touching real windows/processes.
         // Remaining risk: real process/window teardown can fail or race differently than this mocked path.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try orchestrator.stopWorkspace(workspaceID: workspace.id)
-        }
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) { try orchestrator.stopWorkspace(workspaceID: workspace.id) }
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
         XCTAssertTrue(try orchestrator.windows(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
@@ -1225,21 +1130,21 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "frontend", command: "npm run dev",
-                terminalApp: TerminalHost.spaces.appName, windowID: 501, terminalTrackingID: "spaces-frontend", terminalNativeID: "spaces-frontend",
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "spaces-frontend", terminalNativeID: "spaces-frontend", pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "backend", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, windowID: 502, terminalTrackingID: "spaces-backend", terminalNativeID: "spaces-backend",
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "spaces-backend", terminalNativeID: "spaces-backend", pid: nil,
+                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { _ = try orchestrator.stopWorkspace(workspaceID: workspace.id) }
+        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
         XCTAssertEqual(closeCapture.sessionIDs, ["spaces-frontend", "spaces-backend"])
         XCTAssertEqual(terminateCapture.sessionIDs, ["spaces-frontend", "spaces-backend"])
     }
 
-    func testStopWorkspaceClosesBuiltInTerminalSessionWithoutTrackedYabaiWindowID() throws {
+    func testStopWorkspaceClosesBuiltInTerminalSessionWithoutTrackedDesktopWindowID() throws {
         let store = try makeTemporaryStore()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -1256,8 +1161,8 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "running-process-spaces", workspaceID: workspace.id, templateName: "api", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "tracked-window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
@@ -1315,8 +1220,8 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: "process-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: nil, targetURL: nil,
@@ -1334,7 +1239,7 @@ extension OrchestratorTests {
     func testLaunchWorkspaceWithoutProcessesDoesNotRequireTerminalRuntime() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        try orchestrator.launchWorkspace(workspaceID: workspace.id)
 
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
@@ -1350,12 +1255,10 @@ extension OrchestratorTests {
                 lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces", windowID: 501,
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
-            try orchestrator.restartWorkspace(workspaceID: workspace.id)
-        }
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) { try orchestrator.restartWorkspace(workspaceID: workspace.id) }
 
         let running = try orchestrator.runningProcesses(workspaceID: workspace.id)
         XCTAssertTrue(running.isEmpty)
@@ -1366,7 +1269,7 @@ extension OrchestratorTests {
     func testUpWorkspaceLaunchesWhenStopped() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
+        try orchestrator.upWorkspace(workspaceID: workspace.id)
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertTrue(try orchestrator.runningProcesses(workspaceID: workspace.id).isEmpty)
@@ -1379,10 +1282,10 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces", windowID: 501,
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
+        try orchestrator.upWorkspace(workspaceID: workspace.id)
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertEqual(try orchestrator.runningProcesses(workspaceID: workspace.id).count, 1)
@@ -1394,10 +1297,10 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo web", terminalApp: "Spaces", windowID: nil,
-                pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "echo web", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now"))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
+        try orchestrator.upWorkspace(workspaceID: workspace.id)
 
         let processes = try orchestrator.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(processes.count, 1)
@@ -1411,10 +1314,10 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces", windowID: 501,
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "old", command: "echo old", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
             try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
         }
 
@@ -1433,13 +1336,11 @@ extension OrchestratorTests {
                 role: "terminal", orderIndex: 200, lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 559,
+                id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
                 terminalTrackingID: "workspace-session", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         )
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
-        }
+        try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
 
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
@@ -1463,17 +1364,15 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: processID, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil,
-                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
                 targetURL: nil, windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
-        }
+        try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
 
         XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
@@ -1496,8 +1395,8 @@ extension OrchestratorTests {
 
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 200,
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 200, role: "terminal", orderIndex: 0,
@@ -1568,14 +1467,11 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, windowID: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Mocked dependencies: yabai for stop and re-launch.
         // Why: exercise the restartIfRunning=true branch which calls stop then launch.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true) }
-        }
+        try orchestrator.upWorkspace(workspaceID: workspace.id, restartIfRunning: true)
 
         // After restart, process list is cleared and workspace re-launched.
         XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
@@ -1593,10 +1489,10 @@ extension OrchestratorTests {
 
         // Add port definitions so that portDefinitions.count > 0 with no ports allocated yet.
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.ports = [PortDefinition(name: "web"), PortDefinition(name: "api")]
+            settings.ports = [ServiceDefinition(name: "web"), ServiceDefinition(name: "api")]
         }
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.upWorkspace(workspaceID: workspace.id) }
+        try orchestrator.upWorkspace(workspaceID: workspace.id)
 
         // Ports should now be allocated.
         let allocatedPorts = try store.workspacePorts(workspaceID: workspace.id)
@@ -1621,20 +1517,18 @@ extension OrchestratorTests {
         // Mark workspace as running so stop can proceed.
         var runningWorkspace = workspace
         runningWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)",
-            dirname: workspace.dirname, branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault,
-            isArchived: workspace.isArchived, isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
+            id: workspace.id, projectID: workspace.projectID, dir: "/nonexistent/workspace-\(UUID().uuidString)", dirname: workspace.dirname,
+            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
+            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
         // Stop should succeed (skip script because dir is missing) rather than throw.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
-            XCTAssertTrue(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
-        }
+        let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+        XCTAssertTrue(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
-    // Tests stopWorkspace closes non-Spaces tracked windows via yabai by arranging representative inputs and asserting the expected result.
-    func testStopWorkspaceClosesNonSpacesTrackedWindowsViaYabai() throws {
+    // Tests stopWorkspace removes non-Spaces tracked window records by arranging representative inputs and asserting the expected result.
+    func testStopWorkspaceClosesNonSpacesTrackedWindows() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let root = try makeTempDirectory()
@@ -1651,13 +1545,13 @@ extension OrchestratorTests {
 
         // Mark workspace as running.
         let runningWorkspace = WorkspaceRecord(
-            id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname,
-            branch: workspace.branch, baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived,
-            isHidden: workspace.isHidden, isRunning: true, lastLaunchedAt: nil, notes: nil)
+            id: workspace.id, projectID: workspace.projectID, dir: projectDir.path, dirname: workspace.dirname, branch: workspace.branch,
+            baseBranch: workspace.baseBranch, isDefault: workspace.isDefault, isArchived: workspace.isArchived, isHidden: workspace.isHidden,
+            isRunning: true, lastLaunchedAt: nil, notes: nil)
         try store.upsert(workspace: runningWorkspace)
 
-        // Stop workspace: should attempt to close the editor window via yabai (yabai.closeWindow may fail silently).
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { _ = try orchestrator.stopWorkspace(workspaceID: workspace.id) }
+        // Stop workspace: removes the tracked editor window record.
+        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
 
         // The window records should be deleted after stop.
         let remainingWindows = try store.windows(workspaceID: workspace.id)
@@ -1694,7 +1588,7 @@ extension OrchestratorTests {
         // Insert a process with a dead PID but very recent startedAt (within 10-second grace)
         let recentStart = ISO8601DateFormatter().string(from: Date())
         let proc = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1", terminalApp: "Terminal", windowID: nil,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1", terminalApp: "Terminal",
             terminalTrackingID: nil, pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: recentStart, exitedAt: nil)
         try store.upsert(runningProcess: proc)
 
@@ -1748,7 +1642,7 @@ extension OrchestratorTests {
         Thread.sleep(forTimeInterval: 0.2)
 
         let process = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1", terminalApp: "Terminal", windowID: nil,
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "web", command: "sleep 1", terminalApp: "Terminal",
             terminalTrackingID: nil, pid: zombiePID, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2020-01-01T00:00:00Z",
             exitedAt: nil)
         try store.upsert(runningProcess: process)
@@ -1775,18 +1669,5 @@ extension OrchestratorTests {
         XCTAssertThrowsError(try orchestrator.upWorkspace(workspaceID: workspace.id)) { error in
             XCTAssertTrue(error.localizedDescription.contains("archived"))
         }
-    }
-
-    private func waitForRunningProcess(
-        store: SQLiteStore, workspaceID: String, processID: String, timeout: TimeInterval = 2.0, matching predicate: (RunningProcessRecord) -> Bool
-    ) throws -> RunningProcessRecord {
-        let deadline = Date().addingTimeInterval(timeout)
-        var latest: RunningProcessRecord?
-        repeat {
-            latest = try store.runningProcesses(workspaceID: workspaceID).first { $0.id == processID }
-            if let latest, predicate(latest) { return latest }
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
-        } while Date() < deadline
-        return try XCTUnwrap(latest)
     }
 }

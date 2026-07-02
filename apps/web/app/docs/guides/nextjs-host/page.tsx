@@ -18,14 +18,14 @@ export default function NextjsHostGuidePage() {
   return (
     <DocsShell
       title="Guide: Next.js (No Docker)"
-      description="Use this when your frontend runs directly on your machine (no containers) and you want multiple workspaces without port conflicts."
+      description="Use this when your frontend runs directly on your machine (no containers) and you want multiple workspaces with isolated services and stable URLs."
       pagePath="/docs/guides"
     >
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
         <p className={prose}>
           You have one Next.js repo and run <code>npm run dev</code> directly.
-          You want multiple Spaces workspaces active at once, each with isolated ports
+          You want multiple Spaces workspaces active at once, each with isolated services
           and browser tabs.
         </p>
       </article>
@@ -33,12 +33,12 @@ export default function NextjsHostGuidePage() {
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Port Definitions</h3>
+        <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
         <pre className={code}>
-          <code>{`FRONTEND_PORT`}</code>
+          <code>{`frontend`}</code>
         </pre>
         <p className={prose}>
-          Reserve a named port per workspace. This avoids collisions when two branches both run a dev server.
+          Declare a named service per workspace. Spaces assigns each service its own local port and a stable URL, so two branches can both run a dev server without collisions.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
@@ -56,18 +56,18 @@ cp .env.example .env`}</code>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Processes</h3>
         <pre className={code}>
-          <code>{`PORT=$FRONTEND_PORT npm run dev`}</code>
+          <code>{`PORT=$SPACES_FRONTEND_PORT npm run dev`}</code>
         </pre>
         <p className={prose}>
-          This binds Next.js to the workspace-reserved host port, so browser sessions target the correct workspace instance.
+          This binds Next.js to the service's assigned local port, so browser sessions target the correct workspace instance.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
         <pre className={code}>
-          <code>{`http://localhost:$FRONTEND_PORT`}</code>
+          <code>{`$SPACES_FRONTEND_URL`}</code>
         </pre>
         <p className={prose}>
-          Browser session URLs should use named ports so each workspace opens its own app tab reliably.
+          Browser session URLs should use named services so each workspace opens its own app tab reliably. <code>$SPACES_FRONTEND_URL</code> resolves to <code>http://frontend.&lt;slug&gt;.localhost:8088</code>, routed by the bundled Caddy proxy. Chrome treats <code>*.localhost</code> as a secure context, so this works over plain HTTP without certificates.
         </p>
 
       </article>

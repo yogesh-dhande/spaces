@@ -185,7 +185,6 @@ public final class WorkspaceOrchestrator {
     struct SpacesTerminalSessionHandle {
         let sessionID: String
         let childPID: Int?
-        let windowID: Int?
         let outputPath: String
     }
 
@@ -218,11 +217,7 @@ public final class WorkspaceOrchestrator {
     }
 
     enum ManagedTerminalFocusResult {
-        case existingWindow
-        case trackedTerminal
         case sessionRequest
-        case reboundSession(windowID: Int?)
-        case reopenedSession(windowID: Int?)
         case unavailable
     }
 
@@ -243,7 +238,6 @@ public final class WorkspaceOrchestrator {
 
     public let store: SQLiteStore
     let git: GitClient
-    let yabai: YabaiAdapter
     let currentDate: () -> Date
     let notificationDeliverer: (String, String, String?) -> Void
     let builtInTerminalWindowOpener: BuiltInTerminalWindowOpener
@@ -251,34 +245,25 @@ public final class WorkspaceOrchestrator {
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
-    let windowFocusPulseEnabledProvider: () throws -> Bool
-    let windowFocusPulseColorProvider: () throws -> (r: Int, g: Int, b: Int)
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleLock = NSLock()
     private var workspaceLifecycleInFlight: Set<String> = []
     let workspaceSetupLock = NSLock()
     var workspaceSetupInFlight: Set<String> = []
-    let terminalFocusPulseController: TerminalFocusPulseControlling
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
-        yabai: YabaiAdapter = .init(), terminalFocusPulseController: TerminalFocusPulseControlling = TerminalFocusPulseController(),
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, windowFocusPulseEnabledProvider: (() throws -> Bool)? = nil,
-        windowFocusPulseColorProvider: (() throws -> (r: Int, g: Int, b: Int))? = nil, currentDate: @escaping () -> Date = Date.init
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
-        self.yabai = yabai
         self.workspacesRootDirectoryURL = workspacesRootDirectory
-        self.terminalFocusPulseController = terminalFocusPulseController
         self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
-        self.windowFocusPulseEnabledProvider = windowFocusPulseEnabledProvider ?? { SettingsKey.defaultWindowFocusPulseEnabled }
-        self.windowFocusPulseColorProvider = windowFocusPulseColorProvider ?? { SettingsKey.windowFocusPulseColor(from: nil) }
         #if canImport(Darwin)
             self.builtInTerminalWindowOpener =
                 builtInTerminalWindowOpener ?? { sessionID, mode in
@@ -404,8 +389,8 @@ public final class WorkspaceOrchestrator {
         let previousProcesses = existing.processes
         let previousAgentLaunchers = existing.agentLaunchers
         update(&existing)
-        existing.ports = normalizePortDefinitionIDs(previous: previousPorts, updated: existing.ports)
-        existing.ports = try normalizedPortDefinitions(existing.ports)
+        existing.ports = normalizeServiceDefinitionIDs(previous: previousPorts, updated: existing.ports)
+        existing.ports = try normalizedServiceDefinitions(existing.ports)
         existing.processes = normalizeProcessTemplateIDs(previous: previousProcesses, updated: existing.processes)
         existing.agentLaunchers = normalizeAgentLauncherIDs(previous: previousAgentLaunchers, updated: existing.agentLaunchers)
         try validateProcessTemplates(existing.processes)
@@ -413,7 +398,7 @@ public final class WorkspaceOrchestrator {
             workspaceID: workspace.id, processes: existing.processes, browserSessions: existing.browserSessions,
             agentLaunchers: existing.agentLaunchers, agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: existing.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: existing.ports)
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: existing.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: existing.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: existing.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: existing.agentLaunchers)
@@ -860,7 +845,7 @@ public final class WorkspaceOrchestrator {
             throw WorkspaceError.invalidArgument(message: "Workspace is already running. Use restart.")
         }
         let config = try loadWorkspaceSettings(project: project, workspace: workspace)
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         let ports = try store.workspacePorts(workspaceID: workspace.id)
         if ports.count != portDefinitions.count {
             let portRange = try store.appConfig().portRange
@@ -874,12 +859,12 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        let shouldReleaseReservedPortsForLaunch = !(config?.processes.isEmpty ?? true)
+        let shouldReleaseReservedPortsForLaunch = !assignedPorts.isEmpty
         if shouldReleaseReservedPortsForLaunch {
-            // Workspace port assignments remain pinned in the store until archive, but
-            // the placeholder reservation sockets must step aside while a real process
-            // binds the port during launch.
-            PortReserver.shared.releasePorts(workspaceID: workspace.id)
+            // Workspace port assignments remain pinned in the store until archive, but placeholder
+            // reservation sockets exist only while the workspace is stopped. Once any runtime starts,
+            // users resolve conflicts manually if another process claims an assigned port.
+            releaseReservedPortsForRuntimeStart(workspaceID: workspace.id)
         }
         var shouldRestoreReservedPorts = shouldReleaseReservedPortsForLaunch
         defer { if shouldRestoreReservedPorts { try? PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) } }
@@ -902,14 +887,8 @@ public final class WorkspaceOrchestrator {
         }
 
         var index = 0
-        let browserWindowIDsWithTarget = Set(
-            newWindows.compactMap { window -> Int? in
-                guard window.role == "browser", window.targetURL != nil else { return nil }
-                return window.windowID
-            })
         var seenKeys = Set<String>()
         let uniqueWindows = newWindows.filter { window in
-            if window.role == "browser", window.targetURL == nil, let id = window.windowID, browserWindowIDsWithTarget.contains(id) { return false }
             let key = windowTrackingKey(window)
             if seenKeys.contains(key) { return false }
             seenKeys.insert(key)
@@ -924,7 +903,7 @@ public final class WorkspaceOrchestrator {
             try store.upsert(window: stored)
         }
 
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nowISO8601())
+        try markWorkspaceRunning(workspace, launchedAt: nowISO8601())
         shouldRestoreReservedPorts = false
     }
 
@@ -942,7 +921,6 @@ public final class WorkspaceOrchestrator {
             runtimeManifest: runtimePlan.manifest)
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
-        var closedManagedTerminalWindowIDs = Set<Int>()
         var closedBuiltInTerminalSessionIDs = Set<String>()
         var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         for process in processes {
@@ -951,7 +929,6 @@ public final class WorkspaceOrchestrator {
                     terminateBuiltInTerminalSession(sessionID)
                     closedBuiltInTerminalSessionIDs.insert(sessionID)
                 }
-                if let windowID = process.windowID { closedManagedTerminalWindowIDs.insert(windowID) }
             } else if let pid = resolvedRuntimePID(for: process) {
                 terminateProcessGroup(pid: pid)
             }
@@ -971,28 +948,21 @@ public final class WorkspaceOrchestrator {
                 skippedStopScriptBecauseWorkspaceDirectoryMissing = true
             }
         }
-        for window in windows {
-            if window.role == "browser" {
-                closeTrackedBrowserTab(window)
-                continue
+        // Browser windows are client-owned (the app tracks each session's Chrome window) and
+        // are never closed by the daemon on stop; only Spaces-managed terminal sessions are
+        // terminated by session id here.
+        for window in windows where window.role == "terminal" && isManagedTerminalApp(window.app) {
+            guard let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) else { continue }
+            if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
+                terminateBuiltInTerminalSession(sessionID)
+                closedBuiltInTerminalSessionIDs.insert(sessionID)
             }
-            if window.role == "terminal", isManagedTerminalApp(window.app) {
-                if let windowID = window.windowID, closedManagedTerminalWindowIDs.contains(windowID) { continue }
-                guard let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) else { continue }
-                if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
-                    terminateBuiltInTerminalSession(sessionID)
-                    closedBuiltInTerminalSessionIDs.insert(sessionID)
-                }
-                continue
-            }
-            if let id = window.windowID { _ = try? yabai.closeWindow(id: id) }
         }
         if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         try store.deleteAgentWindows(workspaceID: workspace.id)
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-        try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
+        try markWorkspaceStopped(workspace)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
@@ -1252,36 +1222,8 @@ public final class WorkspaceOrchestrator {
 
     @discardableResult public func refreshWorkspaceWindows(workspaceID: String) throws -> Bool {
         _ = try indexedWorkspaceWindows(workspaceID: workspaceID)
-        let refreshedTerminalTitles = try refreshUnmanagedTerminalWindowTitles(workspaceID: workspaceID)
         let pruned = try pruneMissingWindows(workspaceID: workspaceID)
-        return refreshedTerminalTitles > 0 || pruned > 0
-    }
-
-    @discardableResult private func refreshUnmanagedTerminalWindowTitles(workspaceID: String) throws -> Int {
-        let windows = try store.windows(workspaceID: workspaceID)
-        let processWindowIDs = Set(try store.runningProcesses(workspaceID: workspaceID).compactMap(\.windowID))
-        let terminalWindowsToRefresh = windows.filter { window in
-            guard window.role == "terminal", let windowID = window.windowID else { return false }
-            return !processWindowIDs.contains(windowID)
-        }
-        guard !terminalWindowsToRefresh.isEmpty else { return 0 }
-
-        let liveWindowsByID = Dictionary(uniqueKeysWithValues: try yabai.listWindows().map { ($0.id, $0) })
-        var refreshedCount = 0
-        for window in terminalWindowsToRefresh {
-            guard let windowID = window.windowID, let liveWindow = liveWindowsByID[windowID] else { continue }
-            let refreshedName = window.name
-            let refreshedDetail = preservesForegroundAgentCommandDetail(window) ? window.detail : liveWindow.title
-            let refreshedApp = isManagedTerminalApp(window.app) ? TerminalHost.spaces.appName : liveWindow.app
-            guard window.name != refreshedName || window.detail != refreshedDetail || window.app != refreshedApp else { continue }
-            let refreshedWindow = WindowRecord(
-                id: window.id, workspaceID: window.workspaceID, app: refreshedApp, name: refreshedName, detail: refreshedDetail,
-                targetURL: window.targetURL, windowID: windowID, terminalTrackingID: window.terminalTrackingID,
-                terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: window.lastSeenAt)
-            try store.upsert(window: refreshedWindow)
-            refreshedCount += 1
-        }
-        return refreshedCount
+        return pruned > 0
     }
 
     public func refreshAllWorkspaceWindows() throws -> RefreshResult {
@@ -1330,10 +1272,7 @@ public final class WorkspaceOrchestrator {
             shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: .shell)
 
         let session = try builtInTerminalSessionLauncher(launchConfiguration)
-        if !workspace.isRunning {
-            let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
-            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
-        }
+        try markWorkspaceRunningIfNeeded(workspace)
         return session
     }
 
@@ -1373,10 +1312,7 @@ public final class WorkspaceOrchestrator {
             window: WindowRecord(
                 id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil, windowID: nil,
                 terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
-        if !workspace.isRunning {
-            let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
-            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
-        }
+        try markWorkspaceRunningIfNeeded(workspace)
         return WorkspaceTerminalLaunchReservation(
             sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
             title: generatedTitle, launchConfiguration: launchConfiguration, createdAt: createdAt, orderIndex: nextOrder)
@@ -1405,7 +1341,7 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: reservation.windowRecordID, workspaceID: reservation.workspaceID, app: reservation.appName, name: reservation.title,
-                    detail: nil, targetURL: nil, windowID: session.windowID ?? existingWindow?.windowID, terminalTrackingID: session.sessionID,
+                    detail: nil, targetURL: nil, windowID: existingWindow?.windowID, terminalTrackingID: session.sessionID,
                     terminalNativeID: session.sessionID, role: "terminal", orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspaceID: reservation.workspaceID, launchedAtFallback: reservation.createdAt)
             return session.sessionID
@@ -1445,8 +1381,8 @@ public final class WorkspaceOrchestrator {
     }
 
     private func markWorkspaceRunningIfNeeded(workspaceID: String, launchedAtFallback: String) throws {
-        guard let workspace = try store.workspace(id: workspaceID), !workspace.isRunning else { return }
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: workspace.lastLaunchedAt ?? launchedAtFallback)
+        guard let workspace = try store.workspace(id: workspaceID) else { return }
+        try markWorkspaceRunningIfNeeded(workspace, launchedAtFallback: launchedAtFallback)
     }
 
     private func reservedWorkspaceTerminalWindowExists(_ reservation: WorkspaceTerminalLaunchReservation) throws -> Bool {
@@ -1473,18 +1409,6 @@ public final class WorkspaceOrchestrator {
             }
             return map.mapValues { value in value.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending } }
         }()
-        let processesByWindowID: [Int: [RunningProcessRecord]] = {
-            var map: [String: [RunningProcessRecord]] = [:]
-            for process in processes {
-                guard let windowID = process.windowID else { continue }
-                map[String(windowID), default: []].append(process)
-            }
-            return Dictionary(
-                uniqueKeysWithValues: map.compactMap { key, value in
-                    guard let windowID = Int(key) else { return nil }
-                    return (windowID, value.sorted { $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending })
-                })
-        }()
         var matchedProcessIDs = Set<String>()
 
         var targets: [WorkspaceNavigationTarget] = []
@@ -1498,14 +1422,10 @@ public final class WorkspaceOrchestrator {
         for window in windows where window.role != "browser" {
             let windowTerminalID = terminalTargetID(window: window)
             let windowProcesses: [RunningProcessRecord]
-            if window.role == "terminal" {
-                if let matchedByWindowID = processesByWindowID[window.windowID ?? -1], !matchedByWindowID.isEmpty {
-                    windowProcesses = matchedByWindowID
-                } else if let windowTerminalID, let matchedByTerminalID = processesByTerminalID[windowTerminalID], !matchedByTerminalID.isEmpty {
-                    windowProcesses = matchedByTerminalID
-                } else {
-                    windowProcesses = []
-                }
+            if window.role == "terminal", let windowTerminalID, let matchedByTerminalID = processesByTerminalID[windowTerminalID],
+                !matchedByTerminalID.isEmpty
+            {
+                windowProcesses = matchedByTerminalID
             } else {
                 windowProcesses = []
             }
@@ -1720,14 +1640,6 @@ public final class WorkspaceOrchestrator {
 
     static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
 
-    public func listSpaceOptions() throws -> [SpaceOption] {
-        let spaces = try yabai.listSpaces()
-        return spaces.map { SpaceOption(displayIndex: $0.display, spaceIndex: $0.index) }.sorted { lhs, rhs in
-            if lhs.displayIndex == rhs.displayIndex { return lhs.spaceIndex < rhs.spaceIndex }
-            return lhs.displayIndex < rhs.displayIndex
-        }
-    }
-
     public func alertsDismissedAttentionItemIDs() throws -> Set<String> {
         guard let raw = try store.setting(key: SettingsKey.alertsDismissedAttentionItems), !raw.isEmpty else { return [] }
         guard let data = raw.data(using: .utf8) else { return [] }
@@ -1772,7 +1684,7 @@ public final class WorkspaceOrchestrator {
         try store.upsert(workspace: workspace)
         try seedWorkspaceSettings(project: project, workspace: workspace)
         let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
     }
 
@@ -1807,7 +1719,7 @@ public final class WorkspaceOrchestrator {
             if try store.workspaceSettingsExists(workspaceID: workspace.id) {
                 settings = WorkspaceSettings(
                     stopScript: try store.workspaceStopScript(workspaceID: workspace.id),
-                    ports: try store.workspacePortDefinitions(workspaceID: workspace.id),
+                    ports: try store.workspaceServiceDefinitions(workspaceID: workspace.id),
                     processes: try store.workspaceProcesses(workspaceID: workspace.id),
                     browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id),
                     agentLaunchers: try store.workspaceAgentLaunchers(workspaceID: workspace.id))
@@ -1832,7 +1744,7 @@ public final class WorkspaceOrchestrator {
         }
 
         try store.setWorkspaceStopScript(workspaceID: snapshot.workspace.id, stopScript: settings.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
+        try store.setWorkspaceServiceDefinitions(workspaceID: snapshot.workspace.id, definitions: settings.ports)
         try store.setWorkspaceProcesses(workspaceID: snapshot.workspace.id, processes: settings.processes)
         try store.setWorkspaceBrowserSessions(workspaceID: snapshot.workspace.id, sessions: settings.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: snapshot.workspace.id, launchers: settings.agentLaunchers)
@@ -1840,8 +1752,10 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspacePorts(
             workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
             definitionIDs: snapshot.assignedPorts.map { $0.definitionID })
-        if !snapshot.workspace.isArchived, !snapshot.assignedPorts.isEmpty {
-            PortReserver.shared.reservePorts(workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port })
+        if snapshot.workspace.isArchived {
+            PortReserver.shared.releasePorts(workspaceID: snapshot.workspace.id)
+        } else {
+            try PortAllocator(store: store).reserveExistingPorts(workspaceID: snapshot.workspace.id)
         }
     }
 
@@ -1850,7 +1764,7 @@ public final class WorkspaceOrchestrator {
             workspaceID: workspace.id, processes: project.processes, browserSessions: project.browserSessions, agentLaunchers: project.agentLaunchers,
             agentWindows: try store.agentWindows(workspaceID: workspace.id))
         try store.setWorkspaceStopScript(workspaceID: workspace.id, stopScript: project.stopScript)
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: project.ports)
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: project.ports)
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: seededWorkspaceProcesses(from: project.processes))
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: project.browserSessions)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: project.agentLaunchers)
@@ -1861,7 +1775,7 @@ public final class WorkspaceOrchestrator {
         let hasSettings = try store.workspaceSettingsExists(workspaceID: workspace.id)
         if !hasSettings { try seedWorkspaceSettings(project: project, workspace: workspace) }
         let stopScript = try store.workspaceStopScript(workspaceID: workspace.id)
-        let ports = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let ports = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         let processes = try store.workspaceProcesses(workspaceID: workspace.id)
         let browserSessions = try store.workspaceBrowserSessions(workspaceID: workspace.id)
         let agentLaunchers = try store.workspaceAgentLaunchers(workspaceID: workspace.id)
@@ -1873,7 +1787,7 @@ public final class WorkspaceOrchestrator {
 
     private func initializeWorkspaceRuntime(project: ProjectRecord, workspace: WorkspaceRecord, runSetupScript: Bool) throws {
         let appConfig = try store.appConfig()
-        let portDefinitions = try store.workspacePortDefinitions(workspaceID: workspace.id)
+        let portDefinitions = try store.workspaceServiceDefinitions(workspaceID: workspace.id)
         _ = try PortAllocator(store: store).allocatePorts(workspaceID: workspace.id, definitions: portDefinitions, range: appConfig.portRange)
         if runSetupScript {
             try runWorkspaceSetup(project: project, workspace: workspace)
@@ -1886,11 +1800,9 @@ public final class WorkspaceOrchestrator {
         project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)], runtimeManifest: WorkspaceRuntimeManifest? = nil
     ) -> [String: String] {
         var env: [String: String] = [:]
-        for namedPort in namedPorts {
-            let key = namedPort.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !key.isEmpty else { continue }
-            env[key] = String(namedPort.port)
-        }
+        // The runtime manifest is the authoritative source of the per-service port variables
+        // (SPACES_<SVC>_PORT) and the workspace identity variables (SPACES_WORKSPACE_SLUG / _HOST),
+        // so they stay consistent across the local and remote daemon paths. Merge it first.
         let manifest =
             runtimeManifest
             ?? SpacesDevicePlanner.runtimeManifest(
@@ -1902,6 +1814,19 @@ public final class WorkspaceOrchestrator {
         let workspacePath = runtimeWorkspacePath.flatMap { $0.isEmpty ? nil : $0 } ?? workspace.runtimePath
         env["SPACES_WORKSPACE_DIR"] = workspacePath
         env["SPACES_PROJECT_DIR"] = manifest.location == .remote ? workspacePath : project.dir
+        // Browser-facing per-service URL variables. Remote/Linux services still receive these values
+        // so app servers can allowlist the host/origin for CORS or framework host checks; the URL is
+        // the client-facing identity, not evidence that the remote daemon itself runs Caddy.
+        // These need the shared router port, which is app configuration available here but not inside
+        // the pure planner, so they live only here.
+        let slug = SpacesProfile.workspaceHostSlug(
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+        let routerPort = (try? store.appConfig().routerPort) ?? AppConfig.defaultRouterPort
+        for namedPort in namedPorts {
+            let name = namedPort.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            env[ServiceName.urlEnvVar(for: name)] = "http://\(name).\(slug).localhost:\(routerPort)"
+        }
         return env
     }
 
@@ -1928,92 +1853,40 @@ public final class WorkspaceOrchestrator {
         var keyChanged: Bool { previousKey != updatedKey }
     }
 
+    /// Prunes tracked terminal rows whose Spaces session has ended. Browser windows are
+    /// client-owned and never pruned here; terminal liveness is determined entirely by the
+    /// session id, so there is no desktop-window enumeration.
     @discardableResult private func pruneMissingWindows(workspaceID: String) throws -> Int {
-        let existingIDs = Set(try yabai.listWindows().map(\.id))
         let windows = try store.windows(workspaceID: workspaceID)
         let agentWindows = try store.agentWindows(workspaceID: workspaceID)
         var prunedTerminalTrackingKeys = Set<String>()
-        var prunedTerminalWindowIDs = Set<Int>()
         var pruned = 0
-        for window in windows {
-            guard let id = window.windowID else {
-                if managedTrackedTerminalWindowIsStillLive(window: window) { continue }
-                if window.role == "terminal", let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
-                try store.deleteWindow(id: window.id)
-                pruned += 1
-                continue
-            }
-            if !existingIDs.contains(id) {
-                if managedTrackedTerminalWindowIsStillLive(window: window) {
-                    if builtInTrackedWindowBelongsToAgent(window) {
-                        try clearStaleBuiltInTerminalWindowBinding(window)
-                        pruned += 1
-                    }
-                    continue
-                }
-                if window.role == "browser" { continue }
-                if window.role == "terminal" {
-                    prunedTerminalWindowIDs.insert(id)
-                    if let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
-                }
-                try store.deleteWindow(id: window.id)
-                pruned += 1
-            }
+        for window in windows where window.role != "browser" {
+            if managedTrackedTerminalWindowIsStillLive(window: window) { continue }
+            if window.role == "terminal", let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
+            try store.deleteWindow(id: window.id)
+            pruned += 1
         }
         pruned += try pruneOrphanedAgentWindows(
-            workspaceID: workspaceID, agents: agentWindows, prunedTerminalTrackingKeys: prunedTerminalTrackingKeys,
-            prunedTerminalWindowIDs: prunedTerminalWindowIDs)
+            workspaceID: workspaceID, agents: agentWindows, prunedTerminalTrackingKeys: prunedTerminalTrackingKeys)
         return pruned
     }
 
     private func windowTrackingKey(_ window: WindowRecord) -> String {
-        let idPart = window.windowID.map(String.init) ?? "none"
-        if window.role == "browser" { return "browser:\(idPart):\(window.targetURL ?? "")" }
-        if window.role == "terminal", window.windowID == nil {
+        if window.role == "browser" { return "browser:\(window.targetURL ?? "")" }
+        if window.role == "terminal" {
             let app = window.app.lowercased()
             if let terminalNativeID = window.terminalNativeID, !terminalNativeID.isEmpty { return "terminal:\(app):native:\(terminalNativeID)" }
             if let terminalTrackingID = window.terminalTrackingID, !terminalTrackingID.isEmpty {
                 return "terminal:\(app):tracking:\(terminalTrackingID)"
             }
         }
-        return "\(window.role):\(idPart)"
+        return "\(window.role):none"
     }
 
     static func nextWindowOrderIndex(existing: [WindowRecord], role: String, orderOffset: Int) -> Int {
         let maxIndex = existing.filter { $0.role == role }.map(\.orderIndex).max() ?? (orderOffset - 1)
         return max(maxIndex + 1, orderOffset)
-    }
-
-    private func captureNewWindows(snapshot: [YabaiWindow], role: String, appName: String, workspaceID: String, orderOffset: Int) throws
-        -> [WindowRecord]
-    { try captureNewWindows(snapshot: snapshot, role: role, appNames: [appName], workspaceID: workspaceID, orderOffset: orderOffset) }
-
-    private func captureCreatedAppWindow(snapshot: [YabaiWindow], appName: String) throws -> YabaiWindow? {
-        let previousIDs = Set(snapshot.map(\.id))
-        return try yabai.listWindows().first(where: { $0.app == appName && !previousIDs.contains($0.id) })
-    }
-
-    private func captureCreatedAppWindowID(snapshot: [YabaiWindow], appName: String) throws -> Int? {
-        try captureCreatedAppWindow(snapshot: snapshot, appName: appName)?.id
-    }
-
-    func bestEffortYabaiWindowSnapshot() -> [YabaiWindow] { (try? yabai.listWindows()) ?? [] }
-
-    func bestEffortCaptureNewAppWindowID(snapshot: [YabaiWindow], appName: String) -> Int? {
-        try? captureCreatedAppWindowID(snapshot: snapshot, appName: appName)
-    }
-
-    private func captureNewWindows(snapshot: [YabaiWindow], role: String, appNames: Set<String>, workspaceID: String, orderOffset: Int) throws
-        -> [WindowRecord]
-    {
-        let after = try yabai.listWindows()
-        let snapshotIDs = Set(snapshot.map(\.id))
-        let created = after.filter { !snapshotIDs.contains($0.id) && appNames.contains($0.app) }
-        return created.enumerated().map { idx, win in
-            WindowRecord(
-                id: UUID().uuidString, workspaceID: workspaceID, app: win.app, name: win.title, detail: win.title, windowID: win.id, role: role,
-                orderIndex: orderOffset + idx, lastSeenAt: nowISO8601())
-        }
     }
 
     func runtimeDirectory() throws -> String { try SpacesProfile.current().runtimeDirectory }
@@ -2463,10 +2336,17 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord) throws {
-        guard !workspace.isRunning else { return }
-        let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
+    func markWorkspaceRunning(_ workspace: WorkspaceRecord, launchedAt: String) throws {
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
+    }
+
+    func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord, launchedAtFallback: String? = nil) throws {
+        guard !workspace.isRunning else {
+            PortReserver.shared.releasePorts(workspaceID: workspace.id)
+            return
+        }
+        try markWorkspaceRunning(workspace, launchedAt: workspace.lastLaunchedAt ?? launchedAtFallback ?? nowISO8601())
     }
 
     func markWorkspaceRunningIfNeeded(workspaceID: String) throws {
@@ -2476,7 +2356,12 @@ public final class WorkspaceOrchestrator {
 
     func clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: String) throws {
         guard try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) else { return }
+        try markWorkspaceStopped(workspace)
+    }
+
+    func markWorkspaceStopped(_ workspace: WorkspaceRecord) throws {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+        if !workspace.isArchived { try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) }
     }
 
     func safeFilename(_ raw: String) -> String {

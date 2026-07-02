@@ -203,8 +203,11 @@ final class CommandPaletteController {
     func toggleCommandPaletteFromHotkey() {
         let perfContext = host.captureHotkeyPerfContext()
         host.logHotkeyDebug("toggle_palette begin \(host.hotkeyWindowStateSummary())")
-        guard host.setupManager == nil else {
-            host.logHotkeyDebug("toggle_palette reroute_setup_manager")
+        // The Chrome Automation permission screen blocks the main UI; the command palette must not
+        // surface workspace actions behind it, so the palette hotkey only shows/hides the window
+        // until the gate completes.
+        guard host.chromeAutomationSetupController == nil else {
+            host.logHotkeyDebug("toggle_palette reroute_permission_setup")
             host.toggleWindowFromHotkey()
             return
         }

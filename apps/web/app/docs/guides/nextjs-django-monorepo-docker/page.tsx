@@ -30,13 +30,13 @@ export default function NextjsDjangoMonorepoDockerGuidePage() {
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Port Definitions</h3>
+        <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
         <pre className={code}>
-          <code>{`FRONTEND_PORT
-API_PORT`}</code>
+          <code>{`frontend
+api`}</code>
         </pre>
         <p className={prose}>
-          Spaces allocates host ports per workspace. Compose maps them to container ports.
+          Spaces allocates a host port per service per workspace. Compose maps them to container ports.
         </p>
         <h4 className="mt-4 text-sm font-semibold text-foreground">docker-compose.yml example</h4>
         <pre className={code}>
@@ -44,14 +44,14 @@ API_PORT`}</code>
   frontend:
     build: ./frontend
     ports:
-      - "\${FRONTEND_PORT}:3000"
+      - "\${SPACES_FRONTEND_PORT}:3000"
     environment:
       - API_URL=http://backend:8000
 
   backend:
     build: ./backend
     ports:
-      - "\${API_PORT}:8000"`}</code>
+      - "\${SPACES_API_PORT}:8000"`}</code>
         </pre>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
@@ -64,7 +64,7 @@ API_PORT`}</code>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Process</h3>
         <pre className={code}>
-          <code>{`FRONTEND_PORT=$FRONTEND_PORT API_PORT=$API_PORT docker compose up --build`}</code>
+          <code>{`SPACES_FRONTEND_PORT=$SPACES_FRONTEND_PORT SPACES_API_PORT=$SPACES_API_PORT docker compose up --build`}</code>
         </pre>
         <p className={prose}>
           One Compose process starts both services and streams logs in a single terminal.
@@ -76,14 +76,14 @@ API_PORT`}</code>
         </p>
         <pre className={code}>
           <code>{`# frontend browser session
-http://localhost:$FRONTEND_PORT`}</code>
+$SPACES_FRONTEND_URL`}</code>
         </pre>
         <pre className={code}>
           <code>{`# backend browser session
-http://localhost:$API_PORT/admin`}</code>
+$SPACES_API_URL/admin`}</code>
         </pre>
         <p className={prose}>
-          Using named-port URLs keeps browser targets tied to the correct workspace instance.
+          Using named-service URLs keeps browser targets tied to the correct workspace instance.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Stop Command Strategy</h3>

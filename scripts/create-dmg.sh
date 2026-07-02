@@ -149,17 +149,21 @@ APP_PATH="/Applications/Spaces.app"
 CLI_DIR="/usr/local/bin"
 CLI_PATH="$CLI_DIR/spaces"
 SERVICE_PATH="$CLI_DIR/spacesd"
+CADDY_PATH="$CLI_DIR/spaces-caddy"
 /bin/mkdir -p /Applications /usr/local/bin
 /bin/rm -rf "$APP_PATH"
 /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
 /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 /bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
 /bin/cp "$APP_PATH/Contents/Resources/spacesd" "$SERVICE_PATH"
+/bin/cp "$APP_PATH/Contents/Resources/caddy" "$CADDY_PATH"
 /bin/chmod 755 "$CLI_PATH"
 /bin/chmod 755 "$SERVICE_PATH"
+/bin/chmod 755 "$CADDY_PATH"
 copy_ghostty_vt_dylibs
 /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
 /usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
+/usr/bin/xattr -d com.apple.quarantine "$CADDY_PATH" 2>/dev/null || true
 install_user_state_paths "$INSTALL_HOME"
 LAUNCH_AGENT_PATH="$(install_launch_agent "$SERVICE_PATH" "$INSTALL_HOME" "$INSTALL_UID")"
 emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH" "$LAUNCH_AGENT_PATH"

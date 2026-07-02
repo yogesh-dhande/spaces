@@ -101,8 +101,10 @@ import workspacecore
     #endif
     #if os(macOS)
         private var databaseDistributedChangeObserver: NSObjectProtocol?
+        private var caddyRouteRegistryDistributedChangeObserver: NSObjectProtocol?
         private var processExitMonitor: ProcessExitMonitorService?
         private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
+        private var caddyRouterService: CaddyRouterService?
     #endif
     private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
         builtInTerminalSessionTerminator: { [weak self] sessionID in
@@ -161,6 +163,11 @@ import workspacecore
             }
             foregroundAgentReconciler.start()
             terminalForegroundAgentReconciler = foregroundAgentReconciler
+            let caddyRouter = CaddyRouterService(databasePath: databasePath) { error in
+                writeStandardError("spacesd caddy_router_error error=\(error)\n")
+            }
+            caddyRouter.start()
+            caddyRouterService = caddyRouter
         #endif
         databaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
             [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() }
@@ -178,6 +185,9 @@ import workspacecore
             databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
             ) { [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() } }
+            caddyRouteRegistryDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
+                forName: IPCNotification.caddyRouteRegistryDidChange, object: try? IPCNotification.currentObject(), queue: nil
+            ) { [weak self] _ in Task { @MainActor in self?.caddyRouterService?.reconcile() } }
         #endif
     }
 
@@ -185,6 +195,7 @@ import workspacecore
         worktreeDiscoveryService?.refreshWatchers()
         #if os(macOS)
             processExitMonitor?.refreshObservers()
+            caddyRouterService?.reconcile()
         #endif
     }
 
@@ -229,6 +240,10 @@ import workspacecore
                 DistributedNotificationCenter.default().removeObserver(databaseDistributedChangeObserver)
                 self.databaseDistributedChangeObserver = nil
             }
+            if let caddyRouteRegistryDistributedChangeObserver {
+                DistributedNotificationCenter.default().removeObserver(caddyRouteRegistryDistributedChangeObserver)
+                self.caddyRouteRegistryDistributedChangeObserver = nil
+            }
         #endif
         worktreeDiscoveryService?.stop()
         worktreeDiscoveryService = nil
@@ -237,6 +252,8 @@ import workspacecore
             processExitMonitor = nil
             terminalForegroundAgentReconciler?.stop()
             terminalForegroundAgentReconciler = nil
+            caddyRouterService?.stop()
+            caddyRouterService = nil
         #endif
         deviceAPISupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
@@ -1333,6 +1350,7 @@ private enum SpacesDaemonMobileCredentialStore {
 @main struct SpacesDaemonMain {
     static func main() {
         configureProcessSignals()
+        configureCLISearchPath()
 
         if environmentValue("SPACESD_PRINT_CERTIFICATE_FINGERPRINT") == "1" {
             do {
@@ -1377,6 +1395,21 @@ private enum SpacesDaemonMobileCredentialStore {
             _ = signal(SIGPIPE, SIG_IGN)
             _ = signal(SIGHUP, SIG_IGN)
         #endif
+    }
+
+    /// spacesd is the parent of every terminal shell, workspace runtime process, and
+    /// coding-agent hook it spawns, and those children resolve `spaces` from this
+    /// process's PATH. Prepend the daemon executable's own directory (which ships the
+    /// version-matched CLI) so children inherit a PATH that resolves `spaces` without
+    /// root-owned symlinks or daemon-specific shell-profile edits. This must run before
+    /// anything snapshots the environment.
+    private static func configureCLISearchPath() {
+        guard
+            let path = SpacesCLISearchPath.pathPrependingSiblingCLIDirectory(
+                executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath),
+                currentPATH: environmentValue("PATH"))
+        else { return }
+        setenv("PATH", path, 1)
     }
 
     #if canImport(Glibc)

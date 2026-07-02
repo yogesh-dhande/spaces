@@ -16,10 +16,9 @@ export default function TroubleshootingDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Quick Triage</h2>
         <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>1. Check that yabai and Chrome are installed.</li>
-          <li>2. Check that Spaces and yabai have Accessibility permission in System Settings.</li>
-          <li>3. Confirm the workspace isn&apos;t archived.</li>
-          <li>4. If launch complains about existing runtime, run <code>spaces workspace restart --workspace &lt;id&gt;</code>.</li>
+          <li>1. Check that Chrome is installed.</li>
+          <li>2. Confirm the workspace isn&apos;t archived.</li>
+          <li>3. If launch complains about existing runtime, run <code>spaces workspace restart --workspace &lt;id&gt;</code>.</li>
         </ol>
       </article>
 
@@ -29,6 +28,7 @@ export default function TroubleshootingDocsPage() {
           <li>• <strong>&ldquo;Workspace is already running&rdquo;</strong> &mdash; use <code>spaces workspace restart --workspace &lt;id&gt;</code> to reset state.</li>
           <li>• <strong>No terminal windows appear</strong> &mdash; confirm your processes are running.</li>
           <li>• <strong>Focusing a browser session opens nothing</strong> &mdash; confirm Chrome is installed and the session has a valid URL. Browser sessions open only when you focus them, not at launch.</li>
+          <li>• <strong>Browser sessions never open or focus Chrome</strong> &mdash; Spaces needs permission to control Google Chrome. Enable Spaces for Google Chrome under System Settings ▸ Privacy &amp; Security ▸ Automation.</li>
           <li>• <strong>Something is left running after stop</strong> &mdash; add the teardown command to the project or workspace stop script to clean up state not managed by Spaces.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">

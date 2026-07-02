@@ -100,16 +100,7 @@ spaces_profile_mac_client_installation_id() {
   local cli="$1"
   local e2e_cli
   e2e_cli="$(spaces_profile_e2e_cli "$cli")"
-  "$e2e_cli" profile-show --json | python3 -c '
-import json, sys
-payload = json.load(sys.stdin)
-profile_root = payload["profileRoot"]
-value = 14695981039346656037
-for byte in profile_root.encode("utf-8"):
-    value ^= byte
-    value = (value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
-print(f"macos-{value:x}")
-'
+  "$e2e_cli" mac-client-installation-id
 }
 
 spaces_profile_socket_owner_pids() {

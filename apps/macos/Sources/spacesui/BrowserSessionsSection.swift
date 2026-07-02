@@ -201,8 +201,9 @@ import workspacecore
         ])
         let shortcutView = shortcut.map { RowPrimitives.shortcutChip($0) }
         let collapsedLine = Self.makeCollapsedLine(
-            shortcut: shortcutView, nameLabel: nameLabel, detailLabel: detailLabel, onEdit: { [weak self] in self?.onBeginEdit?() },
-            onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
+            shortcut: shortcutView, nameLabel: nameLabel, detailLabel: detailLabel,
+            accessibilityIdentifier: Self.collapsedAccessibilityIdentifier(session: session, displayURL: displayURL),
+            onEdit: { [weak self] in self?.onBeginEdit?() }, onRemove: { [weak self] in self?.onRemove?() }, onFocus: onFocus)
         collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
@@ -225,6 +226,8 @@ import workspacecore
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
+        collapsedContainer.arrangedSubviews.first?.setAccessibilityIdentifier(
+            Self.collapsedAccessibilityIdentifier(session: session, displayURL: displayURL))
     }
 
     func enterEditing(prefill: BrowserSession?, animated: Bool) {
@@ -282,6 +285,18 @@ import workspacecore
         return fromState.isEmpty ? (session?.url ?? session?.name ?? "") : fromState
     }
 
+    private static func automationSlug(_ value: String) -> String {
+        let mapped = value.lowercased().unicodeScalars.map { scalar in CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "-" }
+        let collapsed = String(mapped).split(separator: "-").joined(separator: "-")
+        return collapsed.isEmpty ? "unnamed" : collapsed
+    }
+
+    private static func collapsedAccessibilityIdentifier(session: BrowserSession, displayURL: String?) -> String {
+        let visibleURL = displayURL ?? session.url
+        let primaryText = session.name ?? visibleURL ?? "(unnamed)"
+        return "browser-session-row-\(automationSlug(primaryText))"
+    }
+
     func formSnapshot() -> BrowserSession {
         let name = nameField?.stringValue.trimmingCharacters(in: .whitespaces)
         let url = urlField?.stringValue.trimmingCharacters(in: .whitespaces)
@@ -289,8 +304,8 @@ import workspacecore
     }
 
     private static func makeCollapsedLine(
-        shortcut: NSView? = nil, nameLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void,
-        onFocus: (() -> Void)?
+        shortcut: NSView? = nil, nameLabel: NSTextField, detailLabel: NSTextField, accessibilityIdentifier: String, onEdit: @escaping () -> Void,
+        onRemove: @escaping () -> Void, onFocus: (() -> Void)?
     ) -> (row: NSStackView, actionButtons: [NSButton]) {
         var contentViews: [NSView] = []
         contentViews.append(RowPrimitives.statusSlot())
@@ -309,13 +324,21 @@ import workspacecore
         spacer.setContentHuggingPriority(.fittingSizeCompression, for: .horizontal)
         contentViews.append(spacer)
 
-        let contentArea = NSStackView(views: contentViews)
+        let contentArea = BrowserSessionActionAreaView()
+        contentViews.forEach { contentArea.addArrangedSubview($0) }
         contentArea.orientation = .horizontal
         contentArea.alignment = .centerY
         contentArea.spacing = 10
         contentArea.setContentHuggingPriority(.defaultLow, for: .horizontal)
         contentArea.translatesAutoresizingMaskIntoConstraints = false
-        if let onFocus { attachRowClickAction(to: contentArea, action: onFocus) }
+        contentArea.setAccessibilityElement(true)
+        contentArea.setAccessibilityRole(.button)
+        contentArea.setAccessibilityLabel("Browser Session")
+        contentArea.setAccessibilityIdentifier(accessibilityIdentifier)
+        if let onFocus {
+            contentArea.pressAction = onFocus
+            attachRowClickAction(to: contentArea, action: onFocus)
+        }
 
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("browser-session-row-edit")
@@ -425,6 +448,16 @@ extension BrowserSessionRowView {
     var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
     var collapsedDetailTextForTesting: String { detailLabel.stringValue }
     var editingURLValueForTesting: String? { urlField?.stringValue }
+}
+
+@MainActor private final class BrowserSessionActionAreaView: NSStackView {
+    var pressAction: (() -> Void)?
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let pressAction else { return false }
+        pressAction()
+        return true
+    }
 }
 
 @MainActor private final class BrowserSessionFormTarget: NSObject, NSTextFieldDelegate {

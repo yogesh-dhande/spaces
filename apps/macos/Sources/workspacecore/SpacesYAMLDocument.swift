@@ -7,19 +7,20 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
     public var version: Int
     public var setupScript: String?
     public var stopScript: String?
-    public var ports: [Port]
+    /// Service names declared by the project. Each is a DNS-1123 label and routes through Caddy.
+    public var services: [String]
     public var processes: [Process]
     public var browserSessions: [BrowserSessionConfig]
     public var agentLaunchers: [AgentLauncherConfig]
 
     public init(
-        version: Int = Self.currentVersion, setupScript: String? = nil, stopScript: String? = nil, ports: [Port] = [], processes: [Process] = [],
+        version: Int = Self.currentVersion, setupScript: String? = nil, stopScript: String? = nil, services: [String] = [], processes: [Process] = [],
         browserSessions: [BrowserSessionConfig] = [], agentLaunchers: [AgentLauncherConfig] = []
     ) {
         self.version = version
         self.setupScript = Self.normalizedOptionalString(setupScript)
         self.stopScript = Self.normalizedOptionalString(stopScript)
-        self.ports = ports
+        self.services = services
         self.processes = processes
         self.browserSessions = browserSessions
         self.agentLaunchers = agentLaunchers
@@ -27,12 +28,12 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
 
     public init(project: ProjectRecord) {
         self.init(
-            setupScript: project.setupScript, stopScript: project.stopScript, ports: project.ports.map(Port.init),
+            setupScript: project.setupScript, stopScript: project.stopScript, services: project.ports.map(\.name),
             processes: project.processes.map(Process.init), browserSessions: project.browserSessions.map(BrowserSessionConfig.init),
             agentLaunchers: project.agentLaunchers.map(AgentLauncherConfig.init))
     }
 
-    public var portDefinitions: [PortDefinition] { ports.map(\.portDefinition) }
+    public var serviceDefinitions: [ServiceDefinition] { services.map { ServiceDefinition(name: $0) } }
     public var processTemplates: [ProcessTemplate] { processes.map(\.processTemplate) }
     public var configuredBrowserSessions: [BrowserSession] { browserSessions.map(\.browserSession) }
     public var configuredAgentLaunchers: [AgentLauncher] { agentLaunchers.map(\.agentLauncher) }
@@ -40,7 +41,7 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
     public func applying(to project: inout ProjectRecord) {
         project.setupScript = setupScript
         project.stopScript = stopScript
-        project.ports = portDefinitions
+        project.ports = serviceDefinitions
         project.processes = processTemplates
         project.browserSessions = configuredBrowserSessions
         project.agentLaunchers = configuredAgentLaunchers
@@ -50,7 +51,7 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         case version
         case setupScript = "setup_script"
         case stopScript = "stop_script"
-        case ports
+        case services
         case processes
         case browserSessions = "browser_sessions"
         case agentLaunchers = "agent_launchers"
@@ -67,7 +68,7 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         version = decodedVersion
         setupScript = Self.normalizedOptionalString(try container.decodeIfPresent(String.self, forKey: .setupScript))
         stopScript = Self.normalizedOptionalString(try container.decodeIfPresent(String.self, forKey: .stopScript))
-        ports = try container.decodeIfPresent([Port].self, forKey: .ports) ?? []
+        services = try container.decodeIfPresent([String].self, forKey: .services) ?? []
         processes = try container.decodeIfPresent([Process].self, forKey: .processes) ?? []
         browserSessions = try container.decodeIfPresent([BrowserSessionConfig].self, forKey: .browserSessions) ?? []
         agentLaunchers = try container.decodeIfPresent([AgentLauncherConfig].self, forKey: .agentLaunchers) ?? []
@@ -78,7 +79,7 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
         try container.encode(version, forKey: .version)
         try container.encode(setupScript ?? "", forKey: .setupScript)
         try container.encode(stopScript ?? "", forKey: .stopScript)
-        try container.encode(ports, forKey: .ports)
+        try container.encode(services, forKey: .services)
         try container.encode(processes, forKey: .processes)
         try container.encode(browserSessions, forKey: .browserSessions)
         try container.encode(agentLaunchers, forKey: .agentLaunchers)
@@ -91,16 +92,6 @@ public struct SpacesYAMLDocument: Codable, Equatable, Sendable {
 }
 
 extension SpacesYAMLDocument {
-    public struct Port: Codable, Equatable, Sendable {
-        public var name: String
-
-        public init(name: String) { self.name = name }
-
-        public init(_ definition: PortDefinition) { self.init(name: definition.name) }
-
-        public var portDefinition: PortDefinition { PortDefinition(name: name) }
-    }
-
     public struct Process: Codable, Equatable, Sendable {
         public var name: String?
         public var command: String
@@ -170,9 +161,14 @@ public enum SpacesYAMLService {
     public static let fileName = "spaces.yaml"
 
     public static func decode(_ yaml: String) throws -> SpacesYAMLDocument {
-        do { return try YAMLDecoder().decode(SpacesYAMLDocument.self, from: yaml) } catch let error as DecodingError {
+        let document: SpacesYAMLDocument
+        do { document = try YAMLDecoder().decode(SpacesYAMLDocument.self, from: yaml) } catch let error as DecodingError {
             throw WorkspaceError.invalidArgument(message: "Invalid spaces.yaml: \(decodingMessage(for: error))")
         } catch { throw WorkspaceError.invalidArgument(message: "Invalid spaces.yaml: \(error.localizedDescription)") }
+        // Service names become DNS hostnames, so validate them at the import boundary. Done here
+        // rather than inside `init(from:)` so the precise message is not wrapped by the YAML decoder.
+        for service in document.services { try ServiceName.validated(service) }
+        return document
     }
 
     public static func load(from url: URL) throws -> SpacesYAMLDocument {

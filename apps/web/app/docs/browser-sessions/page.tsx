@@ -20,7 +20,8 @@ export default function BrowserSessionsDocsPage() {
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Each session has a URL and an optional name.</li>
-          <li>• URLs can reference your named ports, for example <code>http://localhost:$FRONTEND_PORT</code>.</li>
+          <li>• URLs can reference a service&apos;s assigned port or its Caddy URL, for example <code>http://localhost:$SPACES_WEB_PORT</code> or <code>$SPACES_WEB_URL</code>. Chrome treats <code>*.localhost</code> as a secure loopback context, so these hosts resolve without extra setup.</li>
+          <li>• For remote Linux workspaces, service browser sessions use the same Caddy URL on the Mac while Spaces forwards the daemon-local service port over SSH.</li>
           <li>• Attach as many as you need to a workspace.</li>
         </ul>
       </article>
@@ -38,8 +39,8 @@ export default function BrowserSessionsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Example</h2>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
-          <code>{`frontend   http://localhost:$FRONTEND_PORT
-admin      http://localhost:$FRONTEND_PORT/admin
+          <code>{`web        $SPACES_WEB_URL
+admin      $SPACES_WEB_URL/admin
 pr-review  https://github.com/org/repo/pull/912
            https://docs.example.com/runbook/checkout`}</code>
         </pre>

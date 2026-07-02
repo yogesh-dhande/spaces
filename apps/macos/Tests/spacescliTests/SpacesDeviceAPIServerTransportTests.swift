@@ -230,9 +230,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-PARITY-OVERVIEW", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let config = SpacesDeviceProjectConfig(
-                setupScript: "echo setup", stopScript: "echo stop", ports: [SpacesDevicePortDefinition(id: "port-api", name: "API")],
+                setupScript: "echo setup", stopScript: "echo stop", ports: [SpacesDeviceServiceDefinition(id: "port-api", name: "api")],
                 processes: [SpacesDeviceProcessTemplate(id: "process-api", name: "api", command: "npm run api")],
-                browserSessions: [SpacesDeviceBrowserSession(name: "api-browser", url: "http://localhost:$API")],
+                browserSessions: [SpacesDeviceBrowserSession(name: "api-browser", url: "http://localhost:$SPACES_API_PORT")],
                 agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")])
 
             let createResponse = try sendTLSRequest(
@@ -246,9 +246,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let project = try XCTUnwrap(createResponse.overview?.projects.first(where: { $0.id == projectID }))
             XCTAssertEqual(project.config.setupScript, "echo setup")
             XCTAssertEqual(project.config.stopScript, "echo stop")
-            XCTAssertEqual(project.config.ports.first?.name, "API")
+            XCTAssertEqual(project.config.ports.first?.name, "api")
             XCTAssertEqual(project.config.processes.first?.command, "npm run api")
-            XCTAssertEqual(project.config.browserSessions.first?.url, "http://localhost:$API")
+            XCTAssertEqual(project.config.browserSessions.first?.url, "http://localhost:$SPACES_API_PORT")
             XCTAssertEqual(project.config.agentLaunchers.first?.name, "Codex")
 
             let hideResponse = try sendTLSRequest(
@@ -258,6 +258,38 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
             XCTAssertTrue(hideResponse.ok, hideResponse.message)
             XCTAssertEqual(hideResponse.overview?.workspaces.first(where: { $0.id == workspaceID })?.isHidden, true)
+        }
+    }
+
+    func testCreateProjectOverviewResolvesServiceURLBrowserSessions() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let projectDir = root.appendingPathComponent("service-url-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-SERVICE-URL", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let config = SpacesDeviceProjectConfig(
+                ports: [SpacesDeviceServiceDefinition(id: "service-web", name: "web")],
+                processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "webserver", command: "PORT=$SPACES_WEB_PORT npm run dev")],
+                browserSessions: [SpacesDeviceBrowserSession(name: "weburl", url: "$SPACES_WEB_URL")])
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: projectDir.path, gitURL: nil, config: config)), authToken: pairingStore.authToken,
+                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok, response.message)
+            let workspaceID = try XCTUnwrap(response.workspaceID)
+            let workspace = try XCTUnwrap(response.overview?.workspaces.first(where: { $0.id == workspaceID }))
+            let slug = SpacesProfile.workspaceHostSlug(
+                branch: workspace.branch, projectName: projectDir.lastPathComponent, isGitRepo: false, workspaceID: workspaceID)
+            XCTAssertEqual(workspace.config.browserSessions.first?.url, "$SPACES_WEB_URL")
+            XCTAssertEqual(workspace.config.resolvedBrowserSessions.first?.url, "http://web.\(slug).localhost:\(AppConfig.defaultRouterPort)")
         }
     }
 
@@ -297,8 +329,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: "old-process", workspaceID: workspace.id, templateID: "process-api", templateName: "api", command: "echo old",
-                    terminalApp: TerminalHost.spaces.appName, windowID: nil, terminalTrackingID: "old-session", terminalNativeID: "old-session",
-                    pid: 777, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-18T12:00:01Z", exitedAt: nil))
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "old-session", terminalNativeID: "old-session", pid: 777,
+                    status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-18T12:00:01Z", exitedAt: nil))
             try store.upsert(
                 window: WindowRecord(
                     id: "browser-window", workspaceID: workspace.id, app: "Google Chrome", name: "docs", detail: "http://localhost:9000/docs",
@@ -316,7 +348,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "old-agent", workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "agent-session",
-                    terminalNativeID: "agent-session", codexThreadID: nil, windowID: 19, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
+                    terminalNativeID: "agent-session", codexThreadID: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
                     updatedAt: "2026-06-18T12:00:04Z"))
 
             let clientApp = SpacesDeviceClientApp(
@@ -380,12 +412,12 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "spinning-agent", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "spin-session",
-                    terminalNativeID: "spin-session", codexThreadID: nil, windowID: 21, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
+                    terminalNativeID: "spin-session", codexThreadID: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
                     updatedAt: "2026-06-18T12:00:04Z"))
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "waiting-agent", workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "wait-session",
-                    terminalNativeID: "wait-session", codexThreadID: nil, windowID: 22, status: .waiting, createdAt: "2026-06-18T12:00:05Z",
+                    terminalNativeID: "wait-session", codexThreadID: nil, status: .waiting, createdAt: "2026-06-18T12:00:05Z",
                     updatedAt: "2026-06-18T12:00:05Z"))
 
             let clientApp = SpacesDeviceClientApp(

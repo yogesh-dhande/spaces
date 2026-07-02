@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 4
+    public static let currentVersion = 5
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -349,6 +349,22 @@ public final class SpacesClientDatabase {
         try execute(
             sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ? AND target_url = ?",
             bindings: [deviceID, workspaceID, targetURL])
+    }
+
+    /// Every dedicated Chrome window tracked for a workspace's browser sessions, so the GUI can
+    /// close them all when the workspace stops.
+    public func browserSessionWindowIDs(deviceID: String, workspaceID: String) throws -> [(targetURL: String, windowID: Int)] {
+        try queryRows(
+            sql: "SELECT target_url, window_id FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?",
+            bindings: [deviceID, workspaceID]
+        ).compactMap { row in
+            guard row.count >= 2, let windowID = Int(row[1]) else { return nil }
+            return (row[0], windowID)
+        }
+    }
+
+    public func clearBrowserSessionWindowIDs(deviceID: String, workspaceID: String) throws {
+        try execute(sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
     }
 
     public func backupURLs() throws -> [URL] { try backupManager.existingBackups() }
@@ -716,7 +732,7 @@ public final class SpacesClientDatabase {
         },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
             try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
-        },
+        }, SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Reserve merged client schema version") { _ in },
     ]
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }

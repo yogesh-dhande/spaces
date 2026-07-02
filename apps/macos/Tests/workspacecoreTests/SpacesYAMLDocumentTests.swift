@@ -13,7 +13,7 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertEqual(document.version, 1)
         XCTAssertNil(document.setupScript)
         XCTAssertNil(document.stopScript)
-        XCTAssertTrue(document.ports.isEmpty)
+        XCTAssertTrue(document.services.isEmpty)
         XCTAssertEqual(document.processes.first?.command, "npm run api")
         XCTAssertNil(document.processes.first?.name)
         XCTAssertEqual(document.processes.first?.onExit, ProcessExitAction.none)
@@ -21,26 +21,27 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertTrue(document.agentLaunchers.isEmpty)
     }
 
-    func testDecodeIgnoresLegacyProcessExecutionMode() throws {
+    func testDecodeServicesList() throws {
         let document = try SpacesYAMLService.decode(
             """
-            processes:
-              - command: npm run api
-                execution_mode: shell
+            services:
+              - web
+              - backend
             """)
 
-        XCTAssertEqual(document.processes.first?.command, "npm run api")
+        XCTAssertEqual(document.services, ["web", "backend"])
+        XCTAssertEqual(document.serviceDefinitions.map(\.name), ["web", "backend"])
     }
 
-    func testDecodeTreatsMissingVersionAsVersionOne() throws {
+    func testDecodeTreatsMissingVersionAsCurrent() throws {
         let document = try SpacesYAMLService.decode(
             """
-            ports:
-              - name: API_PORT
+            services:
+              - api
             """)
 
         XCTAssertEqual(document.version, 1)
-        XCTAssertEqual(document.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(document.services, ["api"])
     }
 
     func testDecodeRejectsFutureVersion() throws {
@@ -49,10 +50,18 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         }
     }
 
+    func testDecodeRejectsInvalidServiceNames() throws {
+        for invalid in ["Web", "web_1", "web.api", "-web", "web-", String(repeating: "a", count: 64)] {
+            XCTAssertThrowsError(try SpacesYAMLService.decode("services:\n  - \(invalid)\n"), "expected \(invalid) to be rejected") { error in
+                XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("service name"))
+            }
+        }
+    }
+
     func testEncodeExportsCanonicalFieldsWithoutInternalIDs() throws {
         let project = ProjectRecord(
             id: "project-id", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil, setupScript: "npm install",
-            stopScript: "npm stop", ports: [PortDefinition(id: "port-id", name: "API_PORT")],
+            stopScript: "npm stop", ports: [ServiceDefinition(id: "service-id", name: "web")],
             processes: [ProcessTemplate(id: "process-id", name: "api", command: "npm run api", onExit: .notify)],
             browserSessions: [BrowserSession(name: "app", url: "http://localhost:3000")],
             agentLaunchers: [AgentLauncher(name: "Codex", command: "codex")])
@@ -62,20 +71,21 @@ final class SpacesYAMLDocumentTests: XCTestCase {
         XCTAssertTrue(yaml.contains("version: 1"))
         XCTAssertTrue(yaml.contains("setup_script: npm install"))
         XCTAssertTrue(yaml.contains("stop_script: npm stop"))
-        XCTAssertTrue(yaml.contains("name: API_PORT"))
+        XCTAssertTrue(yaml.contains("services:"))
+        XCTAssertTrue(yaml.contains("- web"))
         XCTAssertTrue(yaml.contains("command: npm run api"))
         XCTAssertTrue(yaml.contains("on_exit: notify"))
         XCTAssertFalse(yaml.contains("execution_mode"))
         XCTAssertTrue(yaml.contains("browser_sessions:"))
         XCTAssertTrue(yaml.contains("agent_launchers:"))
         XCTAssertFalse(yaml.contains("project-id"))
-        XCTAssertFalse(yaml.contains("port-id"))
+        XCTAssertFalse(yaml.contains("service-id"))
         XCTAssertFalse(yaml.contains("process-id"))
     }
 
     func testRoundTripPreservesSupportedFields() throws {
         let original = SpacesYAMLDocument(
-            setupScript: "npm install", stopScript: "npm stop", ports: [.init(name: "API_PORT")],
+            setupScript: "npm install", stopScript: "npm stop", services: ["web"],
             processes: [.init(name: "api", command: "npm run api", onExit: .restart)],
             browserSessions: [.init(name: "app", url: "http://localhost:3000")], agentLaunchers: [.init(name: "Codex", command: "codex")])
 

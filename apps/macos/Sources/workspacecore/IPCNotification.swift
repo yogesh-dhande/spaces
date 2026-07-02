@@ -34,6 +34,9 @@ public enum IPCNotification {
     /// reload sidebar metadata from external CLI/daemon edits without polling or
     /// watching database files.
     public static let databaseDidChange = Notification.Name("spaces.ipc.database-did-change")
+    /// Posted by the macOS client after changing client-owned Caddy route registry entries, so the
+    /// local daemon can reload Caddy without treating the registry as daemon database state.
+    public static let caddyRouteRegistryDidChange = Notification.Name("spaces.ipc.caddy-route-registry-did-change")
     /// Posted by the daemon to ask the client to show an OS notification, because a
     /// bundle-less daemon cannot post one itself. Carries `titleUserInfoKey`,
     /// `detailUserInfoKey` (body), and optional `notificationSubtitleUserInfoKey`.

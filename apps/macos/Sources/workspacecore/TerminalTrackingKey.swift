@@ -7,7 +7,6 @@ extension RunningProcessRecord {
     public var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let sessionID = terminalNativeID, !sessionID.isEmpty { return .session(sessionID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
-        if let windowID { return .window(windowID) }
         return nil
     }
 
@@ -15,7 +14,6 @@ extension RunningProcessRecord {
     public var terminalFocusIdentity: TerminalTrackingIdentity? {
         if let sessionID = terminalNativeID, !sessionID.isEmpty { return .session(sessionID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
-        if let windowID { return .window(windowID) }
         return nil
     }
 
@@ -27,7 +25,6 @@ extension WindowRecord {
     public var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let sessionID = terminalNativeID, !sessionID.isEmpty { return .session(sessionID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
-        if let windowID { return .window(windowID) }
         return nil
     }
 
@@ -35,7 +32,6 @@ extension WindowRecord {
     public var terminalFocusIdentity: TerminalTrackingIdentity? {
         if let sessionID = terminalNativeID, !sessionID.isEmpty { return .session(sessionID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
-        if let windowID { return .window(windowID) }
         return nil
     }
 
@@ -47,7 +43,6 @@ extension AgentWindowRecord {
     public var terminalTrackingIdentity: TerminalTrackingIdentity? {
         if let sessionID = terminalNativeID, !sessionID.isEmpty { return .session(sessionID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
-        if let windowID = yabaiWindowID ?? windowID { return .window(windowID) }
         return nil
     }
 
@@ -55,7 +50,6 @@ extension AgentWindowRecord {
     public var terminalFocusIdentity: TerminalTrackingIdentity? {
         if let sessionID = terminalNativeID, !sessionID.isEmpty { return .session(sessionID) }
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return .session(sessionID) }
-        if let windowID = yabaiWindowID ?? windowID { return .window(windowID) }
         return nil
     }
 

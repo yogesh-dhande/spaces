@@ -1,11 +1,28 @@
 import Foundation
 
+#if canImport(AppKit)
+    import AppKit
+#endif
+
 public final class ChromeAdapter {
     private static let appleScriptTimeoutSeconds = 10
+    private static let chromeBundleID = "com.google.Chrome"
 
     public init() {}
 
     public func isAvailable() -> Bool { (try? runChromeScript("tell application \"Google Chrome\" to version")) != nil }
+
+    /// Whether Chrome is already running, checked without sending Apple Events so the check itself
+    /// never launches Chrome. Teardown paths use this to skip browser cleanup when the user has
+    /// already quit Chrome: scripting it then (via `isAvailable`/`closeMatchingTabsInWindow`) would
+    /// relaunch Chrome just to close tabs that no longer exist.
+    public func isRunning() -> Bool {
+        #if canImport(AppKit)
+            return !NSRunningApplication.runningApplications(withBundleIdentifier: Self.chromeBundleID).isEmpty
+        #else
+            return false
+        #endif
+    }
 
     public func openWindow(url: String, background: Bool = false) throws -> Int {
         let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
@@ -20,6 +37,43 @@ public final class ChromeAdapter {
             """
         let output = try runChromeScript(script)
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+    }
+
+    /// Closes the tabs whose URL begins with `urlPrefix` inside the Chrome window with the given
+    /// AppleScript window id. Returns true when at least one matching tab was closed.
+    ///
+    /// Used to tear down a workspace browser session's tab when the workspace stops. Only the
+    /// matching tabs are closed, never the whole window, so any other tabs the user opened in that
+    /// window survive (and Chrome closes the window itself only if the session tab was its last).
+    /// The URL guard mirrors `focusMatchingTabInWindow`: Chrome reuses AppleScript window ids after
+    /// a restart, so a tracked id can point at an unrelated user window — without the URL match a
+    /// tab there could be closed by mistake.
+    @discardableResult public func closeMatchingTabsInWindow(windowID: Int, urlPrefix: String) throws -> Bool {
+        let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Google Chrome"
+              set requestedWindowID to "\(windowID)"
+              set closedCount to 0
+              repeat with w in windows
+                if (id of w as string) is requestedWindowID then
+                  set tabCount to count of tabs of w
+                  repeat with i from tabCount to 1 by -1
+                    set u to URL of tab i of w
+                    if u is not missing value then
+                      if u starts with "\(escaped)" then
+                        close tab i of w
+                        set closedCount to closedCount + 1
+                      end if
+                    end if
+                  end repeat
+                  exit repeat
+                end if
+              end repeat
+              return (closedCount as string)
+            end tell
+            """
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (Int(output) ?? 0) > 0
     }
 
     public func allTabs() throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: nil) }

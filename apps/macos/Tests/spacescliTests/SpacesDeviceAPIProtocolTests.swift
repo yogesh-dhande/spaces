@@ -113,7 +113,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
                     .init(
                         projectDir: "/repo", gitURL: nil,
                         config: SpacesDeviceProjectConfig(
-                            setupScript: "make setup", ports: [SpacesDevicePortDefinition(id: "port-web", name: "WEB")],
+                            setupScript: "make setup", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                             processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev")]))), authToken: "SECRET"),
             SpacesDeviceAPIRequest(command: .deleteProject(.init(projectID: "project-1")), authToken: "SECRET"),
             SpacesDeviceAPIRequest(command: .importProject(.init(projectID: "project-1", updateAllWorkspaces: true)), authToken: "SECRET"),

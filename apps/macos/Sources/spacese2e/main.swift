@@ -32,10 +32,10 @@ struct SpacesE2ECommand: ParsableCommand {
             TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self,
             PlanWorkspaceRuntimeCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
-            ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self,
-            MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self, TerminalServiceTLSRequestCommand.self,
-            TerminalServiceTLSSessionCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self,
-            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
+            ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
+            TerminalServiceTLSRequestCommand.self, TerminalServiceTLSSessionCommand.self, RenderUpdateTextCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -450,6 +450,13 @@ private struct ProfileShowCommand: ParsableCommand {
         if let worktreeRoot = payload.worktreeRoot { print("worktree-root\t\(worktreeRoot)") }
         if let branch = payload.branchName { print("branch\t\(branch)") }
     }
+}
+
+private struct MacClientInstallationIDCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mac-client-installation-id", abstract: "Show this profile's macOS Device API client installation id.")
+
+    func run() throws { print(SpacesDevicePairingClient.localMacClientInstallationID()) }
 }
 
 private struct ProfileSocketPathsCommand: ParsableCommand {
@@ -1136,15 +1143,15 @@ private struct SeedFixtureCommand: ParsableCommand {
         let frontendCommand = fixtureServiceCommand(
             executable: "/usr/bin/env",
             arguments: [
-                "python3", "-m", "spaces_e2e_demo", "frontend", "--port", "$APP_PORT", "--site-dir", ".spaces-e2e-demo/site", "--backend-url",
-                "http://127.0.0.1:$API_PORT",
+                "python3", "-m", "spaces_e2e_demo", "frontend", "--port", "$SPACES_APP_PORT", "--site-dir", ".spaces-e2e-demo/site", "--backend-url",
+                "http://127.0.0.1:$SPACES_API_PORT",
             ])
         let backendCommand = fixtureServiceCommand(
             executable: "/usr/bin/env",
-            arguments: ["python3", "-m", "spaces_e2e_demo", "backend", "--port", "$API_PORT", "--data-dir", ".spaces-e2e-demo/api"])
-        let fixturePorts = [PortDefinition(name: "APP_PORT"), PortDefinition(name: "API_PORT")]
+            arguments: ["python3", "-m", "spaces_e2e_demo", "backend", "--port", "$SPACES_API_PORT", "--data-dir", ".spaces-e2e-demo/api"])
+        let fixturePorts = [ServiceDefinition(name: "app"), ServiceDefinition(name: "api")]
         let fixtureStopScript =
-            #"bash -lc 'for port in "$APP_PORT" "$API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
+            #"bash -lc 'for port in "$SPACES_APP_PORT" "$SPACES_API_PORT"; do if [ -n "$port" ]; then pids=(); while IFS= read -r pid; do [ -n "$pid" ] && pids+=("$pid"); done < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); for pid in "${pids[@]}"; do kill "$pid" >/dev/null 2>&1 || true; done; sleep 0.5; for pid in "${pids[@]}"; do kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true; done; fi; done; printf "project-stop:%s\n" "${SPACES_WORKSPACE_DIR}" >> "${SPACES_E2E_EVENTS_LOG:-/tmp/spaces-e2e-events.log}"'"#
         let fixtureProcesses = [
             ProcessTemplate(name: "frontend", command: frontendCommand), ProcessTemplate(name: "backend", command: backendCommand),
         ]
@@ -1342,7 +1349,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID, windowID: $0.windowID)
+                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID)
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
@@ -1352,7 +1359,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             agentWindows: try orchestrator.agentWindows(workspaceID: workspace.id).map {
                 AgentWindowPayload(
                     id: $0.id, label: $0.label, provider: $0.provider.rawValue, status: $0.status.rawValue, terminalTrackingID: $0.terminalTrackingID,
-                    terminalNativeID: $0.terminalNativeID, windowID: $0.windowID, yabaiWindowID: $0.yabaiWindowID)
+                    terminalNativeID: $0.terminalNativeID)
             })
         try emitJSON(payload)
     }
@@ -1532,18 +1539,15 @@ private struct SurfaceSnapshotCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "surface-snapshot")
 
     @Option(name: .long) var spacesPID: Int32?
-    @Flag(name: .long) var includeYabaiFocusedWindow = false
 
     func run() throws {
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         let frontmostPID = frontmostApplication.map { Int($0.processIdentifier) }
-        let focusedWindowID = includeYabaiFocusedWindow ? (try? YabaiAdapter().focusedWindow()?.id) : nil
         let spacesSurface = spacesPID.map { snapshotSpacesSurface(pid: $0, frontmostPID: frontmostPID) }
         try emitJSON(
             SurfaceSnapshotPayload(
                 frontmostProcessID: frontmostPID, frontmostApplicationName: frontmostApplication?.localizedName,
-                frontmostApplicationBundleID: frontmostApplication?.bundleIdentifier, yabaiFocusedWindowID: focusedWindowID ?? nil,
-                spaces: spacesSurface))
+                frontmostApplicationBundleID: frontmostApplication?.bundleIdentifier, spaces: spacesSurface))
     }
 }
 
@@ -1932,7 +1936,6 @@ private struct RunningProcessPayload: Codable {
     let terminalApp: String?
     let terminalTrackingID: String?
     let terminalNativeID: String?
-    let windowID: Int?
 }
 
 private struct WindowPayload: Codable {
@@ -1953,15 +1956,12 @@ private struct AgentWindowPayload: Codable {
     let status: String
     let terminalTrackingID: String?
     let terminalNativeID: String?
-    let windowID: Int?
-    let yabaiWindowID: Int?
 }
 
 private struct SurfaceSnapshotPayload: Codable {
     let frontmostProcessID: Int?
     let frontmostApplicationName: String?
     let frontmostApplicationBundleID: String?
-    let yabaiFocusedWindowID: Int?
     let spaces: SpacesSurfacePayload?
 }
 
@@ -2153,9 +2153,7 @@ private func emitJSON<T: Encodable>(_ value: T) throws {
 // Desktop window IDs are client-owned (in spaces-client.db), so the e2e harness — which drives real
 // desktop focus through an in-process orchestrator just like the app — must inject the same client
 // store. Without it the harness would neither persist captured window IDs nor read them back.
-private func makeOrchestrator() throws -> WorkspaceOrchestrator {
-    try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath(), desktopWindowIDStore: ClientDesktopWindowIDStore()))
-}
+private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath())) }
 
 /// Resolves a workspace directory to its stable id from the store. The harness uses this
 /// only to address IPC focus commands at the running app; the focus itself runs in the app.

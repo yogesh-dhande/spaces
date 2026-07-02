@@ -5,13 +5,14 @@ import workspacecore
     // MARK: Public surface
 
     let view: NSView
-    var onCommit: (([PortDefinition]) -> Void)?
-    var presentRemoveConfirmation: ((PortDefinition, @escaping (Bool) -> Void) -> Void)?
+    var onCommit: (([ServiceDefinition]) -> Void)?
+    var presentRemoveConfirmation: ((ServiceDefinition, @escaping (Bool) -> Void) -> Void)?
 
     // MARK: State
 
-    private var ports: [PortDefinition]
+    private var ports: [ServiceDefinition]
     private var collapsedDisplayPorts: [Int?]
+    private var collapsedDisplayURLs: [String?]
     private let rowsStack = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private var rows: [PortRowView] = []
@@ -19,9 +20,10 @@ import workspacecore
 
     // MARK: Init
 
-    init(ports: [PortDefinition] = [], collapsedDisplayPorts: [Int?] = [], subtitle: String? = nil) {
+    init(ports: [ServiceDefinition] = [], collapsedDisplayPorts: [Int?] = [], collapsedDisplayURLs: [String?] = [], subtitle: String? = nil) {
         self.ports = ports
         self.collapsedDisplayPorts = collapsedDisplayPorts
+        self.collapsedDisplayURLs = collapsedDisplayURLs
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -30,7 +32,7 @@ import workspacecore
         container.translatesAutoresizingMaskIntoConstraints = false
 
         let header = RowSectionHeader.make(
-            title: "Ports", addButtonAccessibilityIdentifier: "ports-section-add", countLabel: countLabel, subtitle: subtitle)
+            title: "Services", addButtonAccessibilityIdentifier: "services-section-add", countLabel: countLabel, subtitle: subtitle)
         container.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
 
@@ -54,22 +56,23 @@ import workspacecore
 
     // MARK: Public API
 
-    func reload(ports: [PortDefinition], collapsedDisplayPorts: [Int?]? = nil) {
-        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, preservingEditing: true)
+    func reload(ports: [ServiceDefinition], collapsedDisplayPorts: [Int?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
+        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: true)
     }
 
-    func replace(ports: [PortDefinition], collapsedDisplayPorts: [Int?]? = nil) {
+    func replace(ports: [ServiceDefinition], collapsedDisplayPorts: [Int?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
         pendingDraftIndex = nil
-        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, preservingEditing: false)
+        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: false)
     }
 
-    private func update(ports: [PortDefinition], collapsedDisplayPorts: [Int?]?, preservingEditing: Bool) {
+    private func update(ports: [ServiceDefinition], collapsedDisplayPorts: [Int?]?, collapsedDisplayURLs: [String?]?, preservingEditing: Bool) {
         self.ports = ports
         if let collapsedDisplayPorts { self.collapsedDisplayPorts = collapsedDisplayPorts }
+        if let collapsedDisplayURLs { self.collapsedDisplayURLs = collapsedDisplayURLs }
         refreshRows(animated: true, preservingEditing: preservingEditing)
     }
     var rowCount: Int { rows.count }
-    var currentPorts: [PortDefinition] { ports }
+    var currentPorts: [ServiceDefinition] { ports }
     var hasOpenEditor: Bool { rows.contains { $0.isEditing } }
     func row(at index: Int) -> PortRowView? { index >= 0 && index < rows.count ? rows[index] : nil }
     func isEditing(at index: Int) -> Bool { index >= 0 && index < rows.count ? rows[index].isEditing : false }
@@ -77,17 +80,18 @@ import workspacecore
     // MARK: Row lifecycle
 
     private func refreshRows(animated: Bool, preservingEditing: Bool = true) {
-        let existingEditing: [String: PortDefinition] =
+        let existingEditing: [String: ServiceDefinition] =
             preservingEditing
             ? Dictionary(
-                uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, PortDefinition)? in
+                uniqueKeysWithValues: rows.enumerated().compactMap { index, row -> (String, ServiceDefinition)? in
                     guard row.isEditing else { return nil }
                     return (row.identity(from: ports[safe: index]), row.formSnapshot())
                 }) : [:]
         rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
         for (index, port) in ports.enumerated() {
-            let row = PortRowView(port: port, reservedPort: collapsedDisplayPorts[safe: index] ?? nil)
+            let row = PortRowView(
+                port: port, reservedPort: collapsedDisplayPorts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
@@ -115,12 +119,13 @@ import workspacecore
         row.exitEditing(animated: true)
     }
 
-    private func handleSave(row: PortRowView, edited: PortDefinition) {
+    private func handleSave(row: PortRowView, edited: ServiceDefinition) {
         guard let index = rows.firstIndex(of: row), index < ports.count else { return }
         ports[index] = edited
         if pendingDraftIndex == index { pendingDraftIndex = nil }
         row.exitEditing(animated: true)
-        row.rebindCollapsedContent(from: edited, reservedPort: collapsedDisplayPorts[safe: index] ?? nil)
+        row.rebindCollapsedContent(
+            from: edited, reservedPort: collapsedDisplayPorts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
         onCommit?(ports)
     }
 
@@ -138,12 +143,12 @@ import workspacecore
             if commitAfterRemove { self.onCommit?(self.ports) }
         }
         RowSectionRemoveConfirmation.confirm(
-            messageText: "Remove port \"\(target.name)\"?", informativeText: "This removes the port definition from the workspace.", isDraft: isDraft,
+            messageText: "Remove service \"\(target.name)\"?", informativeText: "This removes the service from the workspace.", isDraft: isDraft,
             presenter: presentRemoveConfirmation.map { presenter in { presenter(target, $0) } }, onDecision: confirm)
     }
 
     @objc func handleAdd(_ sender: NSButton) {
-        let blank = PortDefinition(name: "")
+        let blank = ServiceDefinition(name: "")
         ports.append(blank)
         pendingDraftIndex = ports.count - 1
         refreshRows(animated: true)
@@ -156,7 +161,7 @@ import workspacecore
 @MainActor final class PortRowView: HoverRevealRowView {
     var onBeginEdit: (() -> Void)?
     var onCancel: (() -> Void)?
-    var onSave: ((PortDefinition) -> Void)?
+    var onSave: ((ServiceDefinition) -> Void)?
     var onRemove: (() -> Void)?
 
     private let body = NSStackView()
@@ -166,10 +171,10 @@ import workspacecore
 
     private let nameLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
-    private var currentPort: PortDefinition
+    private var currentPort: ServiceDefinition
     private var nameField: NSTextField?
 
-    init(port: PortDefinition, reservedPort: Int? = nil) {
+    init(port: ServiceDefinition, reservedPort: Int? = nil, displayURL: String? = nil) {
         self.currentPort = port
         super.init(frame: .zero)
         body.orientation = .vertical
@@ -188,24 +193,31 @@ import workspacecore
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         configureActionButtonsForHover(collapsedLine.actionButtons)
-        rebindCollapsedContent(from: port, reservedPort: reservedPort)
+        rebindCollapsedContent(from: port, reservedPort: reservedPort, displayURL: displayURL)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    func rebindCollapsedContent(from port: PortDefinition, reservedPort: Int? = nil) {
+    func rebindCollapsedContent(from port: ServiceDefinition, reservedPort: Int? = nil, displayURL: String? = nil) {
         currentPort = port
         nameLabel.stringValue = port.name.isEmpty ? "(unnamed)" : port.name
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
         nameLabel.isSelectable = true
-        detailLabel.stringValue = reservedPort.map(String.init) ?? ""
+        // Prefer the derived service URL (the stable, browser-facing identity); fall back to the bare
+        // assigned port number when no URL is available (e.g. the project-level template section).
+        let trimmedURL = displayURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedURL, !trimmedURL.isEmpty {
+            detailLabel.stringValue = trimmedURL
+        } else {
+            detailLabel.stringValue = reservedPort.map(String.init) ?? ""
+        }
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
     }
 
-    func enterEditing(prefill: PortDefinition?, animated: Bool) {
+    func enterEditing(prefill: ServiceDefinition?, animated: Bool) {
         guard !isEditing else { return }
         isEditing = true
         let seed = prefill ?? currentPort
@@ -252,13 +264,13 @@ import workspacecore
         nameField = nil
     }
 
-    func identity(from port: PortDefinition?) -> String {
+    func identity(from port: ServiceDefinition?) -> String {
         let fromState = currentPort.id
         let fromArg = port?.id ?? ""
         return fromState.isEmpty ? fromArg : fromState
     }
 
-    func formSnapshot() -> PortDefinition { PortDefinition(id: currentPort.id, name: nameField?.stringValue ?? "") }
+    func formSnapshot() -> ServiceDefinition { ServiceDefinition(id: currentPort.id, name: nameField?.stringValue ?? "") }
 
     var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
     var collapsedPrimaryTextIsSelectableForTesting: Bool { nameLabel.isSelectable }
@@ -269,9 +281,9 @@ import workspacecore
     ) -> (row: NSStackView, actionButtons: [NSButton]) {
         let leading: [NSView] = [RowPrimitives.typeIconTile(.port, symbol: "network", accessibilityLabel: "Port")]
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
-        editButton.setAccessibilityIdentifier("port-row-edit")
+        editButton.setAccessibilityIdentifier("service-row-edit")
         let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
-        removeButton.setAccessibilityIdentifier("port-row-remove")
+        removeButton.setAccessibilityIdentifier("service-row-remove")
         let textStack = NSStackView(views: [nameLabel, detailLabel])
         textStack.orientation = .horizontal
         textStack.alignment = .firstBaseline
@@ -291,28 +303,29 @@ import workspacecore
         return (row, [editButton, removeButton])
     }
 
-    private static func makeEditingForm(port: PortDefinition, onCancel: @escaping () -> Void, onSave: @escaping (PortDefinition) -> Void) -> (
+    private static func makeEditingForm(port: ServiceDefinition, onCancel: @escaping () -> Void, onSave: @escaping (ServiceDefinition) -> Void) -> (
         NSStackView, NSTextField
     ) {
         let nameField = NSTextField(string: port.name)
-        nameField.placeholderString = "Env var name (e.g. PORT)"
+        nameField.placeholderString = "Service name (e.g. web)"
         nameField.font = .systemFont(ofSize: 13, weight: .medium)
         nameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        nameField.setAccessibilityIdentifier("port-row-edit-name")
+        nameField.setAccessibilityIdentifier("service-row-edit-name")
 
         let cancelButton = buildActionButton(symbol: "xmark", tooltip: "Cancel") { _ in onCancel() }
-        cancelButton.setAccessibilityIdentifier("port-row-edit-cancel")
+        cancelButton.setAccessibilityIdentifier("service-row-edit-cancel")
 
+        // A service name is a DNS label (it becomes a hostname), so only commit valid labels.
         let doSave = { [weak nameField] in
             let name = nameField?.stringValue ?? ""
-            guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-            onSave(PortDefinition(id: port.id, name: name))
+            guard ServiceName.isValidLabel(name) else { return }
+            onSave(ServiceDefinition(id: port.id, name: name.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
         let saveButton = buildActionButton(symbol: "checkmark", tooltip: "Save") { _ in doSave() }
-        saveButton.setAccessibilityIdentifier("port-row-edit-save")
+        saveButton.setAccessibilityIdentifier("service-row-edit-save")
 
         let refreshSaveEnabled: () -> Void = { [weak saveButton, weak nameField] in
-            saveButton?.isEnabled = !(nameField?.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ?? true)
+            saveButton?.isEnabled = ServiceName.isValidLabel(nameField?.stringValue ?? "")
         }
 
         let target = PortFormTarget()
