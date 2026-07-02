@@ -191,6 +191,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     var isViewerTakeoverShellActive = false
     let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
+    let pasteImageAction: (@MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse)?
+    let pasteboardImageReadAction: @MainActor () -> TerminalPasteboardImageReadResult
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
@@ -256,6 +258,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
+        pasteImageAction: (@MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse)? = nil,
+        pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
         detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
@@ -271,6 +275,7 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         self.init(
             sessionID: sessionID, paths: paths, stateProvider: stateProvider, preferredAttachmentMode: preferredAttachmentMode,
             performInitialRefresh: performInitialRefresh, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
+            pasteImageAction: pasteImageAction, pasteboardImageReadAction: pasteboardImageReadAction,
             takeoverAction: takeoverAction, attachClientAction: attachClientAction, detachClientAction: detachClientAction,
             copySelectionAction: copySelectionAction, detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose,
             defersInitialOwnerClientAttach: defersInitialOwnerClientAttach, pasteClipboardAction: pasteClipboardAction,
@@ -287,6 +292,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
         preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
+        pasteImageAction: (@MainActor (TerminalPasteboardImage) throws -> TerminalControlResponse)? = nil,
+        pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
         detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
@@ -324,6 +331,8 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
             sendKeyAction ?? { [socketPath = paths.controlSocketPath, client] key in
                 try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key, clientID: client.id), socketPath: socketPath)
             }
+        self.pasteImageAction = pasteImageAction
+        self.pasteboardImageReadAction = pasteboardImageReadAction ?? { TerminalPasteboardImageReader.readImage() }
         self.takeoverAction =
             takeoverAction ?? { clientID in
                 try TerminalControlClient.send(

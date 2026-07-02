@@ -233,8 +233,8 @@ public enum SpacesLeaseCoordinator {
             var buffer = [CChar](repeating: 0, count: 4096)
             let length = readlink(path, &buffer, buffer.count - 1)
             guard length > 0 else { return nil }
-            buffer[Int(length)] = 0
-            return SpacesProfile.canonicalPath(String(cString: buffer))
+            let utf8Bytes = buffer[..<Int(length)].map { UInt8(bitPattern: $0) }
+            return SpacesProfile.canonicalPath(String(decoding: utf8Bytes, as: UTF8.self))
         #else
             var buffer = [CChar](repeating: 0, count: 4096)
             let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))

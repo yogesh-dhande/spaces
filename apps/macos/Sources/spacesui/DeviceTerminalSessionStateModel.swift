@@ -5,6 +5,7 @@
     import spacesdevicecore
     import spacesterminalcore
     import spacesterminalghostty
+    import spacesterminalui
     import workspacecore
 
     /// Device-backed terminal session state for the mac GUI.
@@ -149,6 +150,18 @@
         /// closures. It hops back to the main actor to update cached state and fan out.
         var controlStateApplier: @Sendable (GhosttyRemoteSessionStatePayload) -> Void {
             { [weak self] payload in Task { @MainActor [weak self] in self?.applyControlResponseState(payload) } }
+        }
+
+        func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64) throws -> TerminalControlResponse {
+            let response = try requestClient.send(
+                SpacesDeviceAPIRequest(
+                    command: .terminalPasteImage(
+                        SpacesDeviceTerminalPasteImageRequest(
+                            sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: image.fileExtension,
+                            imageData: image.imageData)),
+                    authToken: authToken,
+                    clientApp: clientApp))
+            return TerminalControlResponse(ok: response.ok, message: response.message)
         }
 
         /// State-stream subscriber for the Ghostty render host. Instead of opening a
