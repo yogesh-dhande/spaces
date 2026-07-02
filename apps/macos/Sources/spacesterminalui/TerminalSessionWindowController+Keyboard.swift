@@ -77,6 +77,7 @@ extension TerminalSessionWindowController {
                 NSSound.beep()
                 return
             }
+            if pasteImageFromPasteboardIfPresent() { return }
             let pasted = pasteClipboardAction?() ?? ghosttyRendererHost?.pasteClipboardContents() ?? false
             guard pasted else {
                 NSSound.beep()
@@ -193,7 +194,41 @@ extension TerminalSessionWindowController {
         guard visibleRenderer == .ghosttyOwner else { return false }
         if isFieldEditorFirstResponder { return false }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
+        if isImagePasteKeyEvent(event), pasteImageFromPasteboardIfPresent() { return true }
         return ghosttyRendererHost?.handleKeyEvent(event, for: client.id) ?? false
+    }
+
+    private func isImagePasteKeyEvent(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .numericPad])
+        return Int(event.keyCode) == kVK_ANSI_V && flags == [.control]
+    }
+
+    @discardableResult private func pasteImageFromPasteboardIfPresent() -> Bool {
+        guard pasteImageAction != nil else { return false }
+        switch pasteboardImageReadAction() {
+        case .noImage:
+            return false
+        case .rejected(let message):
+            updateInputStatus(message: message, isError: true)
+            NSSound.beep()
+            return true
+        case .image(let image):
+            Task { @MainActor [weak self] in
+                guard let pasteImageAction = self?.pasteImageAction else { return }
+                do {
+                    let response = try await pasteImageAction(image)
+                    guard let self else { return }
+                    updateInputStatus(message: response.message, isError: !response.ok)
+                    if !response.ok { NSSound.beep() }
+                    refreshNow()
+                } catch {
+                    guard let self else { return }
+                    updateInputStatus(message: String(describing: error), isError: true)
+                    NSSound.beep()
+                }
+            }
+            return true
+        }
     }
 
     func handleTerminalWindowCommandKeyEquivalent(_ event: NSEvent) -> Bool {

@@ -1327,6 +1327,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID),
                         requestSender: requestSender, applyState: applyControlState)
                 }
+                let pasteImageAction: @MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse = { image in
+                    guard let clientID = remoteClientStore.current() else {
+                        return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
+                    }
+                    let ownerEpoch = stateModel.latestRemoteStatePayload?.renderOwnerEpoch ?? 0
+                    return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
+                }
                 let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                     try Self.sendDeviceTerminalControl(
                         sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
@@ -1334,7 +1341,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: mode, performInitialRefresh: false,
-                    sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction,
+                    sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
                     attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                     onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in

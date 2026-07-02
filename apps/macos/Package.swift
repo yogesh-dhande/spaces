@@ -194,7 +194,7 @@ let testTargets: [Target] = [
     .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
     .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
     .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
-    .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi"]),
+    .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
     .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
     .testTarget(
         name: "spacescliTests",

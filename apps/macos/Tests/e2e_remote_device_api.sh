@@ -384,7 +384,7 @@ agent_launchers:
 def git(*args):
     subprocess.run(["git", "-C", str(project_root), *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-git("init")
+git("init", "-b", "main")
 git("config", "user.email", "spaces-e2e@example.invalid")
 git("config", "user.name", "Spaces E2E")
 git("add", "README.txt", "spaces.yaml")

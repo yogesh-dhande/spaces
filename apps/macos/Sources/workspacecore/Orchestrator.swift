@@ -1925,7 +1925,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private func runtimePID(fromFile path: String) -> Int? {
-        guard let contents = try? String(contentsOfFile: path) else { return nil }
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pid = Int(trimmed), pid > 0 else { return nil }
         return pid
