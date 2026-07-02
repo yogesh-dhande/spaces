@@ -14,9 +14,11 @@ final class CaddyRouteTableTests: XCTestCase {
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [21001, 21002], names: ["web", "backend"])
 
         let routes = try orchestrator.caddyRouteTable()
-        let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+        let slug = SpacesProfile.workspaceHostSlug(
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
 
         XCTAssertEqual(Set(routes.map(\.host)), ["web.\(slug).localhost", "backend.\(slug).localhost"])
+        XCTAssertTrue(slug.hasPrefix("project-"))
         let webRoute = try XCTUnwrap(routes.first { $0.host == "web.\(slug).localhost" })
         XCTAssertEqual(webRoute.upstream, "localhost:21001")
         let backendRoute = try XCTUnwrap(routes.first { $0.host == "backend.\(slug).localhost" })
@@ -50,8 +52,10 @@ final class CaddyRouteTableTests: XCTestCase {
         try store.setWorkspacePorts(workspaceID: second.id, ports: [21002], names: ["web"])
 
         let routes = try orchestrator.caddyRouteTable()
-        let firstSlug = SpacesProfile.workspaceHostSlug(branch: first.branch, workspaceID: first.id)
-        let secondSlug = SpacesProfile.workspaceHostSlug(branch: second.branch, workspaceID: second.id)
+        let firstSlug = SpacesProfile.workspaceHostSlug(
+            branch: first.branch, projectName: firstProject.name, isGitRepo: firstProject.isGitRepo, workspaceID: first.id)
+        let secondSlug = SpacesProfile.workspaceHostSlug(
+            branch: second.branch, projectName: secondProject.name, isGitRepo: secondProject.isGitRepo, workspaceID: second.id)
 
         XCTAssertNotEqual(firstSlug, secondSlug)
         XCTAssertEqual(Set(routes.map(\.host)), ["web.\(firstSlug).localhost", "web.\(secondSlug).localhost"])

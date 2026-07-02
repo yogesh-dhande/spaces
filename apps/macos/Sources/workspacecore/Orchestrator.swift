@@ -1819,7 +1819,8 @@ public final class WorkspaceOrchestrator {
         // the client-facing identity, not evidence that the remote daemon itself runs Caddy.
         // These need the shared router port, which is app configuration available here but not inside
         // the pure planner, so they live only here.
-        let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+        let slug = SpacesProfile.workspaceHostSlug(
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         let routerPort = (try? store.appConfig().routerPort) ?? AppConfig.defaultRouterPort
         for namedPort in namedPorts {
             let name = namedPort.name.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -190,7 +190,8 @@ public enum SpacesDevicePlanner {
         project: ProjectRecord, workspace: WorkspaceRecord, selection: SpacesDeviceSelection, namedPorts: [WorkspaceRuntimePortMapping]
     ) -> WorkspaceRuntimeManifest {
         let workingPath = workspace.runtimePath
-        let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+        let slug = SpacesProfile.workspaceHostSlug(
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug]
         for mapping in namedPorts {
             environment[ServiceName.portEnvVar(for: mapping.name)] = String(mapping.port)

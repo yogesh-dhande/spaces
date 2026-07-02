@@ -494,7 +494,8 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/local/project")
         let workspace = makeWorkspaceRecord(id: "workspace-remote", projectID: project.id, dir: "/local/project/ws", branch: "feature/web")
-        let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+        let slug = SpacesProfile.workspaceHostSlug(
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         let manifest = WorkspaceRuntimeManifest(
             workspaceID: workspace.id, projectID: project.id, deviceID: "linux-device", location: .remote, localPath: workspace.runtimePath,
             remotePath: "/srv/project/ws", branch: workspace.branch, baseBranch: workspace.baseBranch,

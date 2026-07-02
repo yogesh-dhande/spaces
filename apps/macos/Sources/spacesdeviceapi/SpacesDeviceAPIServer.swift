@@ -1194,7 +1194,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let projects = try store.projects()
         let workspaces = try projects.flatMap { project in
             try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
-                let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+                let slug = SpacesProfile.workspaceHostSlug(
+                    branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
                 let resolvedBrowserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
                 return SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),

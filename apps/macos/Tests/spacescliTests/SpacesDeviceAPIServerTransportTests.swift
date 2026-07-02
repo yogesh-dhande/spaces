@@ -286,10 +286,10 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertTrue(response.ok, response.message)
             let workspaceID = try XCTUnwrap(response.workspaceID)
             let workspace = try XCTUnwrap(response.overview?.workspaces.first(where: { $0.id == workspaceID }))
-            let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspaceID)
+            let slug = SpacesProfile.workspaceHostSlug(
+                branch: workspace.branch, projectName: projectDir.lastPathComponent, isGitRepo: false, workspaceID: workspaceID)
             XCTAssertEqual(workspace.config.browserSessions.first?.url, "$SPACES_WEB_URL")
-            XCTAssertEqual(
-                workspace.config.resolvedBrowserSessions.first?.url, "http://web.\(slug).localhost:\(AppConfig.defaultRouterPort)")
+            XCTAssertEqual(workspace.config.resolvedBrowserSessions.first?.url, "http://web.\(slug).localhost:\(AppConfig.defaultRouterPort)")
         }
     }
 

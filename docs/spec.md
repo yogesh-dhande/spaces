@@ -236,7 +236,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - A project declares named services. Each service is a unique DNS-safe name (lowercase letters, digits, and hyphens, starting and ending with a letter or digit, up to 63 characters) and receives one dynamically assigned local port per workspace.
 - Each workspace process, setup script, and stop script runs with service and workspace environment variables available:
   - `SPACES_<SERVICE>_PORT` — the assigned local port for that service, uppercased with hyphens turned into underscores (service `admin-ui` is exposed as `SPACES_ADMIN_UI_PORT`).
-  - `SPACES_WORKSPACE_SLUG` — a DNS-safe per-workspace slug, such as `login-fix-a3f9c2d1847b`.
+  - `SPACES_WORKSPACE_SLUG` — a DNS-safe per-workspace slug, such as `login-fix-a3f9c2d1847b`. Git workspaces use the branch name as the readable slug prefix; non-git workspaces use the project name.
   - `SPACES_<SERVICE>_HOST` — the routed hostname `<service>.<slug>.localhost` for that service, without scheme or port, for framework host allowlists.
   - `SPACES_<SERVICE>_URL` — the routed URL `http://<service>.<slug>.localhost:8088` for that service. Reference this directly (for example `$SPACES_WEB_URL`) instead of composing a URL by hand.
 - A process binds the port Spaces assigns it, for example `PORT=$SPACES_WEB_PORT npm run dev`.

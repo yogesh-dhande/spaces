@@ -23,18 +23,33 @@ final class DNSLabelTests: XCTestCase {
     }
 
     func testWorkspaceHostSlugIsValidAndDeterministic() {
-        let slug = SpacesProfile.workspaceHostSlug(branch: "feature/Foo Bar", workspaceID: "abc-123")
+        let slug = SpacesProfile.workspaceHostSlug(branch: "feature/Foo Bar", projectName: "Project", isGitRepo: true, workspaceID: "abc-123")
         XCTAssertTrue(DNSLabel.isValid(slug))
         XCTAssertTrue(slug.hasPrefix("feature-foo-bar-"))
-        XCTAssertEqual(slug, SpacesProfile.workspaceHostSlug(branch: "feature/Foo Bar", workspaceID: "abc-123"))
-        XCTAssertTrue(DNSLabel.isValid(SpacesProfile.workspaceHostSlug(branch: nil, workspaceID: "x")))
-        XCTAssertTrue(DNSLabel.isValid(SpacesProfile.workspaceHostSlug(branch: "HEAD", workspaceID: "x")))
+        XCTAssertEqual(
+            slug, SpacesProfile.workspaceHostSlug(branch: "feature/Foo Bar", projectName: "Project", isGitRepo: true, workspaceID: "abc-123"))
+        XCTAssertTrue(DNSLabel.isValid(SpacesProfile.workspaceHostSlug(branch: nil, projectName: "Project", isGitRepo: false, workspaceID: "x")))
+        XCTAssertTrue(DNSLabel.isValid(SpacesProfile.workspaceHostSlug(branch: "HEAD", projectName: "Project", isGitRepo: true, workspaceID: "x")))
+    }
+
+    func testWorkspaceHostSlugUsesProjectNameForBranchlessWorkspaces() {
+        let slug = SpacesProfile.workspaceHostSlug(branch: nil, projectName: "My Project", isGitRepo: false, workspaceID: "workspace")
+
+        XCTAssertTrue(DNSLabel.isValid(slug))
+        XCTAssertTrue(slug.hasPrefix("my-project-"))
+    }
+
+    func testWorkspaceHostSlugUsesDetachedHeadForBranchlessGitWorkspaces() {
+        let slug = SpacesProfile.workspaceHostSlug(branch: nil, projectName: "My Project", isGitRepo: true, workspaceID: "workspace")
+
+        XCTAssertTrue(DNSLabel.isValid(slug))
+        XCTAssertTrue(slug.hasPrefix("detached-head-"))
     }
 
     func testWorkspaceHostSlugPreservesHashSuffixForLongBranches() {
         let branch = String(repeating: "feature-", count: 12) + "workspace-router"
-        let first = SpacesProfile.workspaceHostSlug(branch: branch, workspaceID: "workspace-one")
-        let second = SpacesProfile.workspaceHostSlug(branch: branch, workspaceID: "workspace-two")
+        let first = SpacesProfile.workspaceHostSlug(branch: branch, projectName: "Project", isGitRepo: true, workspaceID: "workspace-one")
+        let second = SpacesProfile.workspaceHostSlug(branch: branch, projectName: "Project", isGitRepo: true, workspaceID: "workspace-two")
 
         XCTAssertTrue(DNSLabel.isValid(first))
         XCTAssertTrue(DNSLabel.isValid(second))

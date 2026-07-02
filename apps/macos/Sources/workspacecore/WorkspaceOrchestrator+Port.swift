@@ -30,7 +30,8 @@ extension WorkspaceOrchestrator {
             for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
                 let assigned = try store.workspacePortsAssigned(workspaceID: workspace.id)
                 guard !assigned.isEmpty else { continue }
-                let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+                let slug = SpacesProfile.workspaceHostSlug(
+                    branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
                 for assignment in assigned {
                     let name = assignment.name.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !name.isEmpty else { continue }
@@ -72,8 +73,6 @@ extension WorkspaceOrchestrator {
 
     func normalizedServiceDefinitions(_ definitions: [ServiceDefinition]) throws -> [ServiceDefinition] {
         let names = try ServiceName.validatedUnique(definitions.map(\.name))
-        return zip(definitions, names).map { definition, name in
-            ServiceDefinition(id: definition.id, name: name)
-        }
+        return zip(definitions, names).map { definition, name in ServiceDefinition(id: definition.id, name: name) }
     }
 }
