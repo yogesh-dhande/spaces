@@ -51,7 +51,7 @@ apps/macos/.build/debug/spaces workspace create --project <project-id> --branch 
 apps/macos/.build/debug/spaces workspace restart --workspace <workspace-id>
 ```
 
-Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance and spacesd daemon for that same profile before it relaunches.
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only the running app instance and spacesd daemon for that same profile before it relaunches. When the repo `.env` configures `SPACES_E2E_REMOTE_SSH_HOST`, the script builds or reuses the current-checkout Ubuntu artifact, uploads it, installs it into the remote account's `~/.spaces` daemon, waits for the configured Device API port, and then relaunches the local app.
 
 For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
