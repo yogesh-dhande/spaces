@@ -297,6 +297,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         updateAlertsSidebarBadge()
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
         if host.showingAlerts { host.showAlertsDetail() }
+        host.reopenPersistedPanelWindowsIfPossible()
         loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh)
     }
 
@@ -597,6 +598,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.outlineView.reloadData()
         applySidebarProjectExpansionState()
         updateAlertsSidebarBadge()
+        host.reopenPersistedPanelWindowsIfPossible()
         // Rebuild the Alerts detail when either:
         //  (a) the offline device owned the current selection — its rows are gone from the merged data, so
         //      the workspace/project detail pane is stale and would misroute follow-up actions to the local
@@ -1238,11 +1240,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if !menu.items.isEmpty { menu.addItem(.separator()) }
         addItem("Rename", symbol: "pencil", action: #selector(renameRuntimeTargetMenuItem(_:)))
         if item.kind != .browser {
-            // Enabled once globally-scoped panel windows land; kept visible so the
-            // action is discoverable.
-            addItem("Open in New Window", symbol: "macwindow.badge.plus", action: nil)
+            // Only session-backed targets can move into a panel window; a target that
+            // hasn't started yet keeps the item visible but disabled for discoverability.
+            addItem(
+                "Open in New Window", symbol: "macwindow.badge.plus",
+                action: item.sessionID == nil ? nil : #selector(openRuntimeTargetInNewWindowMenuItem(_:)))
         }
         return menu
+    }
+
+    @objc private func openRuntimeTargetInNewWindowMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        host.openSidebarRuntimeTargetInNewWindow(workspaceID: context.workspaceID, item: context.item)
     }
 
     @objc private func startRuntimeTargetMenuItem(_ sender: NSMenuItem) {

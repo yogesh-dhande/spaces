@@ -54,7 +54,7 @@ extension ProcessInfo: ProcessLifecyclePolicyController {}
 public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitViewDelegate, NSWindowDelegate, NSTextFieldDelegate,
     NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource, NSUserInterfaceValidations
 {
-    private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     private final class MainThreadResultBox<T: Sendable>: @unchecked Sendable {
         private let lock = NSLock()
@@ -236,6 +236,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         coordinator.onLayoutChanged = { [weak self] scope, layout in self?.persistPanelLayout(scope: scope, layout: layout) }
         return coordinator
     }()
+    /// Persisted `panel_windows` rows not yet reopened this launch (nil until first
+    /// read). A row stays pending until every device its panes reference has a loaded
+    /// overview, so an offline remote's windows return when the device does.
+    var pendingPanelWindowRestores: [SpacesClientDatabase.PanelWindowRecord]?
     lazy var alerts = AlertsController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
     lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
@@ -8389,11 +8393,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if self.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
+            if self.handlePanelWindowCloseTabShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if self.handleSidebarArrowNavigation(event: event) { return nil }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
-                if let workspaceID = self.selectedWorkspaceID { self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut) }
+                // In a global panel window the new tab opens there, targeting the
+                // focused pane's workspace; otherwise it lands in the selected
+                // workspace's panel.
+                if let panelWindowID = self.panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) {
+                    self.openNewTerminalTab(scope: .globalWindow(panelWindowID: panelWindowID))
+                } else if let workspaceID = self.selectedWorkspaceID {
+                    self.openWorkspaceTerminal(workspaceID: workspaceID, route: .shortcut)
+                }
                 return nil
             }
             if let openFinderShortcutSpec, matches(event: event, spec: openFinderShortcutSpec) {
@@ -8471,6 +8483,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     {
         guard firstResponderIsTerminalPane else { return .runAppShortcuts }
         return eventModifiers.contains(.command) ? .runAppShortcuts : .passEventToTerminal
+    }
+
+    /// ⌘W in a global panel window closes the selected tab (the last tab closes the
+    /// window); everywhere else ⌘W keeps its default behavior.
+    private func handlePanelWindowCloseTabShortcut(event: NSEvent) -> Bool {
+        guard
+            Self.isPanelWindowCloseTabShortcut(
+                charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+                eventModifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask)),
+            let panelWindowID = panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow)
+        else { return false }
+        panelCoordinator.closeSelectedTab(panelWindowID: panelWindowID)
+        return true
+    }
+
+    /// Plain ⌘W — no other chord modifiers, so terminal/app chords like ⌘⇧W or ⌥⌘W
+    /// stay untouched.
+    nonisolated static func isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: String?, eventModifiers: NSEvent.ModifierFlags) -> Bool {
+        guard charactersIgnoringModifiers?.lowercased() == "w" else { return false }
+        return eventModifiers.intersection([.command, .option, .control, .shift]) == .command
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
@@ -9311,8 +9343,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func preferredWorkspaceIDForAppToggle(focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?) -> String?
     { focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
 
-    /// Terminal panes live inside the main window, so hiding it hides them too; the
-    /// only after-hide restoration is returning focus to the previously frontmost app.
+    /// Terminal panes live inside app windows (the main window and global panel
+    /// windows), all hidden together by the app-wide hide; the only after-hide
+    /// restoration is returning focus to the previously frontmost app.
     nonisolated static func shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: pid_t?) -> Bool {
         returnApplicationProcessID != nil
     }

@@ -23,4 +23,14 @@ import Testing
             AppKitController.shortcutMonitorDisposition(eventModifiers: [.command, .option], firstResponderIsTerminalPane: true)
                 == .runAppShortcuts)
     }
+
+    @Test func panelWindowCloseTabShortcutMatchesPlainCommandWOnly() {
+        #expect(AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command]))
+        #expect(AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "W", eventModifiers: [.command, .capsLock]))
+        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: []))
+        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command, .shift]))
+        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command, .option]))
+        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "q", eventModifiers: [.command]))
+        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: nil, eventModifiers: [.command]))
+    }
 }

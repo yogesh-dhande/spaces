@@ -137,6 +137,22 @@ import Testing
         #expect(layout.focusedPaneID == "a")
     }
 
+    /// The open-in-new-window move: removing the pane from the source layout and
+    /// appending it to a fresh one keeps the session in exactly one layout, and a
+    /// source that held only that pane empties (which is what closes an emptied
+    /// global panel window).
+    @Test func movingPaneBetweenLayoutsKeepsSingleInstance() throws {
+        var source = layoutWithTab("tab-1", paneID: "a")
+        source = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: source))
+        source = PanelLayoutEngine.removePane(paneID: "b", from: source)
+        let destination = PanelLayoutEngine.appendTab(tabID: "tab-new", pane: pane("b"), to: PanelLayout())
+        #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: source) == ["sess-a"])
+        #expect(PanelLayoutEngine.orderedTerminalSessionIDs(in: destination) == ["sess-b"])
+
+        let emptiedSource = PanelLayoutEngine.removePane(paneID: "a", from: source)
+        #expect(emptiedSource.isEmpty)
+    }
+
     @Test func layoutRoundTripsThroughJSON() throws {
         var layout = layoutWithTab("tab-1", paneID: "a")
         layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layout))

@@ -25,14 +25,22 @@ extension AppKitController {
     }
 
     /// Brings the panel's scope on screen: selects the workspace in the main window for
-    /// a workspace scope. (Global panel windows arrive with the multi-window phase.)
+    /// a workspace scope, or fronts the global panel's own window.
     func showPanelScope(_ scope: PanelScope) {
         switch scope {
         case .workspace(_, let workspaceID):
             if selectedWorkspaceID != workspaceID, let (_, workspace) = findWorkspace(id: workspaceID) { selectWorkspace(workspace) }
             if window?.isVisible != true { window?.makeKeyAndOrderFront(nil) }
-        case .globalWindow: break
+        case .globalWindow(let panelWindowID):
+            panelCoordinator.showPanelWindow(panelWindowID: panelWindowID, makeKey: true)
         }
+    }
+
+    /// Moves a sidebar runtime target's terminal session into its own panel window
+    /// (the "Open in New Window" context-menu action).
+    func openSidebarRuntimeTargetInNewWindow(workspaceID: String, item: SidebarRuntimeTargetItem) {
+        guard let sessionID = item.sessionID, let request = paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID) else { return }
+        panelCoordinator.moveSessionToNewPanelWindow(request)
     }
 }
 
@@ -55,7 +63,8 @@ extension AppKitController {
                 if layout.isEmpty {
                     try clientDatabase().deletePanelWindow(id: panelWindowID)
                 } else {
-                    try clientDatabase().upsertPanelWindow(.init(id: panelWindowID, layoutJSON: json, frame: nil))
+                    try clientDatabase().upsertPanelWindow(
+                        .init(id: panelWindowID, layoutJSON: json, frame: panelCoordinator.panelWindowFrame(panelWindowID: panelWindowID)))
                 }
             }
         } catch {
@@ -79,6 +88,63 @@ extension AppKitController {
         else { return nil }
         let liveSessionIDs = Set(overview(forWorkspaceID: workspaceID)?.sessions.map(\.id) ?? [])
         return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: liveSessionIDs)
+    }
+}
+
+// MARK: - Panel window startup reopen
+
+extension AppKitController {
+    /// What to do with one persisted `panel_windows` row during startup reopen.
+    enum PanelWindowRestoreDecision: Equatable {
+        /// Some referenced device has no loaded overview yet — keep the row pending.
+        case waitForDevices
+        /// The row can't be interpreted (decode failure or a future layout version) —
+        /// leave the row in the database untouched and stop considering it this launch.
+        case skip
+        /// Every referenced device is loaded and no session survived pruning — the
+        /// window has nothing to show, delete the row.
+        case discard
+        /// Open a window with this pruned layout.
+        case open(PanelLayout)
+    }
+
+    nonisolated static func panelWindowRestoreDecision(layoutJSON: String, loadedDeviceIDs: Set<String>, liveSessionIDs: Set<String>)
+        -> PanelWindowRestoreDecision
+    {
+        guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)),
+            layout.version == PanelLayout.currentVersion
+        else { return .skip }
+        let referencedDeviceIDs = Set(
+            PanelLayoutEngine.allPanes(in: layout).map { pane in
+                switch pane.content { case .terminalSession(let deviceID, _): deviceID }
+            })
+        guard referencedDeviceIDs.isSubset(of: loadedDeviceIDs) else { return .waitForDevices }
+        let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: liveSessionIDs)
+        return pruned.isEmpty ? .discard : .open(pruned)
+    }
+
+    /// Reopens persisted global panel windows eagerly once possible. Called after
+    /// every device-section load; each row waits for the devices its panes reference
+    /// (a wire-incompatible or offline device has no overview, so its rows are never
+    /// pruned against an empty catalog and destroyed — they simply stay pending).
+    func reopenPersistedPanelWindowsIfPossible() {
+        if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
+        guard let pending = pendingPanelWindowRestores, !pending.isEmpty else { return }
+        let readySections = deviceSections.filter { $0.loadState == .loaded && $0.overview != nil }
+        let loadedDeviceIDs = Set(readySections.map(\.deviceID))
+        let liveSessionIDs = Set(readySections.flatMap { $0.overview?.sessions.map(\.id) ?? [] })
+        var remaining: [SpacesClientDatabase.PanelWindowRecord] = []
+        for record in pending {
+            switch Self.panelWindowRestoreDecision(layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, liveSessionIDs: liveSessionIDs) {
+            case .waitForDevices: remaining.append(record)
+            case .skip: break
+            case .discard: try? clientDatabase().deletePanelWindow(id: record.id)
+            case .open(let layout):
+                let frame = record.frame.map { NSRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }
+                panelCoordinator.restorePanelWindow(panelWindowID: record.id, layout: layout, frame: frame)
+            }
+        }
+        pendingPanelWindowRestores = remaining
     }
 }
 
