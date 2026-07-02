@@ -10,8 +10,8 @@ import AppKit
     var onSelectTab: ((String) -> Void)?
     var onCloseTab: ((String) -> Void)?
     var onNewTab: (() -> Void)?
+    var onRenameTab: ((_ tabID: String, _ title: String?) -> Void)?
     var onSplitPane: ((_ paneID: String, _ direction: PaneSplitDirection) -> Void)?
-    var onClosePane: ((String) -> Void)?
     var onFocusPane: ((String) -> Void)?
     var onSplitWeightsChanged: ((_ splitID: String, _ weights: [Double]) -> Void)?
     /// Resolves a pane's live content controller; nil renders the pane empty (e.g. a
@@ -31,6 +31,11 @@ import AppKit
         tabBar.onSelectTab = { [weak self] tabID in self?.onSelectTab?(tabID) }
         tabBar.onCloseTab = { [weak self] tabID in self?.onCloseTab?(tabID) }
         tabBar.onNewTab = { [weak self] in self?.onNewTab?() }
+        tabBar.onRenameTab = { [weak self] tabID, title in self?.onRenameTab?(tabID, title) }
+        tabBar.onSplitFocusedPane = { [weak self] direction in
+            guard let self, let paneID = self.splitTargetPaneID() else { return }
+            self.onSplitPane?(paneID, direction)
+        }
         paneTree.onSplitWeightsChanged = { [weak self] splitID, weights in self?.onSplitWeightsChanged?(splitID, weights) }
         paneTree.onConfigurePane = { [weak self] paneView, pane in self?.configure(paneView: paneView, pane: pane) }
 
@@ -54,7 +59,6 @@ import AppKit
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-    func paneView(forPaneID paneID: String) -> PaneView? { paneTree.paneView(forPaneID: paneID) }
 
     /// Renders the layout: tab strip, selected tab's pane tree, focused-pane chrome,
     /// and the empty state when no tabs exist. `newTabShortcutHint` labels the empty
@@ -69,22 +73,21 @@ import AppKit
         if layout.isEmpty {
             emptyStateLabel.stringValue = newTabShortcutHint.map { "No open terminals — \($0) opens one" } ?? "No open terminals"
         }
-        applyFocusChrome()
+    }
+
+    /// The pane a tab-bar split targets: the focused pane when it lives in the
+    /// selected tab, else the selected tab's first pane.
+    private func splitTargetPaneID() -> String? {
+        guard let selectedTab = renderedLayout.tabs.first(where: { $0.id == renderedLayout.selectedTabID }) else { return nil }
+        let panes = PanelLayoutEngine.panes(in: selectedTab)
+        if let focusedPaneID = renderedLayout.focusedPaneID, panes.contains(where: { $0.id == focusedPaneID }) { return focusedPaneID }
+        return panes.first?.id
     }
 
     func updateTabTitle(_ title: String, forTabID tabID: String) { tabBar.updateTitle(title, forTabID: tabID) }
 
-    private func applyFocusChrome() {
-        guard let selectedTab = renderedLayout.tabs.first(where: { $0.id == renderedLayout.selectedTabID }) else { return }
-        for pane in PanelLayoutEngine.panes(in: selectedTab) {
-            paneTree.paneView(forPaneID: pane.id)?.isFocusedPane = pane.id == renderedLayout.focusedPaneID
-        }
-    }
-
     private func configure(paneView: PaneView, pane: Pane) {
         let paneID = pane.id
-        paneView.onSplit = { [weak self] direction in self?.onSplitPane?(paneID, direction) }
-        paneView.onClose = { [weak self] in self?.onClosePane?(paneID) }
         paneView.onFocusRequest = { [weak self] in self?.onFocusPane?(paneID) }
         if let content = paneContentProvider?(pane) { paneView.attachContent(content) }
     }

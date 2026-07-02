@@ -95,6 +95,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private var alertsRowView: NSView?
     private var alertsRowStack: NSStackView?
     private var alertsRowBadge: NSTextField?
+    /// Top-bar warning icon shown while another Spaces instance owns desktop control.
+    private(set) weak var desktopControlStatusIcon: NSImageView?
 
     private static let placeholderProject = ProjectSummary(id: "", name: "", dir: "", isGitRepo: false, defaultBranch: nil)
 
@@ -1588,6 +1590,22 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([iconView.widthAnchor.constraint(equalToConstant: 18), iconView.heightAnchor.constraint(equalToConstant: 18)])
 
+        // The window titlebar is hidden, so the app name lives here next to the logo.
+        let appNameLabel = NSTextField(labelWithString: "Spaces")
+        appNameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        appNameLabel.textColor = .labelColor
+        appNameLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Replaces the hidden titlebar's subtitle as the passive desktop-control
+        // signal: visible only while another Spaces instance owns global shortcuts.
+        let statusIcon = NSImageView()
+        statusIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Desktop control unavailable")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .regular))
+        statusIcon.contentTintColor = .systemOrange
+        statusIcon.isHidden = true
+        statusIcon.setContentHuggingPriority(.required, for: .horizontal)
+        desktopControlStatusIcon = statusIcon
+
         let mobileButton = host.sidebarRowIconButton(
             symbol: "desktopcomputer.and.macbook", tooltip: "Devices", action: #selector(AppKitController.showMobileConnection))
         mobileButton.setAccessibilityIdentifier("sidebar-device-pairing")
@@ -1602,7 +1620,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(iconView)
+        stack.addArrangedSubview(appNameLabel)
         stack.addArrangedSubview(NSView())
+        stack.addArrangedSubview(statusIcon)
         stack.addArrangedSubview(mobileButton)
         stack.addArrangedSubview(settingsButton)
         stack.addArrangedSubview(reloadButton)
@@ -1629,6 +1649,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
         titleLabel.textColor = .labelColor
 
+        let hintLabel = NSTextField(labelWithString: host.footerShortcutHint(for: .guiAlertsShortcut))
+        hintLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.setContentHuggingPriority(.required, for: .horizontal)
+
         let badge = NSTextField(labelWithString: "")
         badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
         badge.textColor = .white
@@ -1650,12 +1675,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
+        stack.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 8)
         stack.wantsLayer = true
         stack.layer?.cornerRadius = UIRadius.regular
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(bellIcon)
         stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(hintLabel)
         stack.addArrangedSubview(NSView())  // spacer
         stack.addArrangedSubview(badge)
         alertsRowStack = stack

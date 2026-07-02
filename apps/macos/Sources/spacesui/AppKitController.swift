@@ -162,6 +162,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     let detailContainer = NSView()
     /// The right panel's footer strip: workspace details for the selected workspace.
     private weak var workspaceDetailFooterRow: NSStackView?
+    private weak var workspaceFooterPaneLabel: NSTextField?
+    private weak var workspaceFooterPaneCloseButton: NSButton?
+    private var workspaceFooterWorkspaceID: String?
     private var workspaceNotesPopover: NSPopover?
     private weak var workspaceNotesEditorTextView: NSTextView?
     private var workspaceNotesEditorWorkspaceID: String?
@@ -299,7 +302,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
-    private var terminalRuntimeControlDescriptorsBySessionID: [String: TerminalRuntimeControlDescriptor] = [:]
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -334,50 +336,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let takeoverButtonVisible: Bool?
         let takeoverButtonEnabled: Bool?
         let takeoverMessage: String?
-    }
-
-    struct TerminalRuntimeControlDescriptor: Equatable, Sendable {
-        enum Kind: Equatable, Sendable {
-            case process
-            case codingAgent
-            case workspaceTerminal
-        }
-
-        let kind: Kind
-        let deviceID: String?
-        let workspaceID: String
-        let sessionID: String
-        let title: String
-        let processID: String?
-        let processTemplateID: String?
-        let processKey: String?
-        let agentID: String?
-        let agentLauncherID: String?
-        let agentLauncherName: String?
-        let canRun: Bool
-        let canStop: Bool
-        let canRestart: Bool
-
-        init(
-            kind: Kind, deviceID: String? = nil, workspaceID: String, sessionID: String, title: String, processID: String?,
-            processTemplateID: String?, processKey: String?, agentID: String?, agentLauncherID: String?, agentLauncherName: String?, canRun: Bool,
-            canStop: Bool, canRestart: Bool
-        ) {
-            self.kind = kind
-            self.deviceID = deviceID
-            self.workspaceID = workspaceID
-            self.sessionID = sessionID
-            self.title = title
-            self.processID = processID
-            self.processTemplateID = processTemplateID
-            self.processKey = processKey
-            self.agentID = agentID
-            self.agentLauncherID = agentLauncherID
-            self.agentLauncherName = agentLauncherName
-            self.canRun = canRun
-            self.canStop = canStop
-            self.canRestart = canRestart
-        }
     }
 
     enum WindowFocusRequest: Sendable {
@@ -1386,9 +1344,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction,
                 attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
-                runtimeControlsProvider: { [weak self] sessionID in
-                    self?.terminalRuntimeControls(forSessionID: sessionID, cause: "controller_refresh")
-                },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
                         launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
@@ -1526,180 +1481,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelCoordinator.closePane(forSessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
     }
 
-    private func terminalRuntimeControls(forSessionID sessionID: String, cause: String = "provider", requestID: String? = nil)
-        -> TerminalSessionRuntimeControls?
-    {
-        let startedAt = Date()
-        let workspaceLookupStartedAt = Date()
-        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID) else {
-            let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID) != nil
-            logTerminalRuntimeControlsRefresh(
-                sessionID: sessionID, startedAt: startedAt, cause: cause, requestID: requestID,
-                workspaceLookupMS: windowShortcutElapsedMS(since: workspaceLookupStartedAt), settingsMS: 0, processesMS: 0, agentsMS: 0, windowsMS: 0,
-                runtimeStateMS: 0, descriptorBuildMS: 0, descriptorChanged: descriptorChanged, success: false)
-            return nil
-        }
-        let workspaceLookupMS = windowShortcutElapsedMS(since: workspaceLookupStartedAt)
-
-        // The runtime-controls descriptor is built from the workspace's overview rows
-        // (config, processes, agents, terminals) rather than daemon-DB reads.
-        let settingsStartedAt = Date()
-        let detail = overview(forWorkspaceID: workspaceID).flatMap { Self.workspaceDetail(workspaceID, in: $0) }
-        let settings = detail.map { Self.localWorkspaceSettings(from: $0.config) }
-        let settingsMS = windowShortcutElapsedMS(since: settingsStartedAt)
-        let processesStartedAt = Date()
-        let runningProcesses = detail.map { Self.runningProcesses(from: $0.processRows) } ?? []
-        let processesMS = windowShortcutElapsedMS(since: processesStartedAt)
-        let agentsStartedAt = Date()
-        let agentWindows = detail.map { Self.agentWindows(from: $0.codingAgentRows) } ?? []
-        let agentsMS = windowShortcutElapsedMS(since: agentsStartedAt)
-        let windowsStartedAt = Date()
-        let trackedWindows = detail.map { Self.deviceTerminalWindows(from: $0.terminalRows) } ?? []
-        let windowsMS = windowShortcutElapsedMS(since: windowsStartedAt)
-        let runtimeStateStartedAt = Date()
-        let isSessionRunning = Self.terminalSessionIsRunning(sessionID: sessionID)
-        let runtimeStateMS = windowShortcutElapsedMS(since: runtimeStateStartedAt)
-        let descriptorBuildStartedAt = Date()
-        let descriptor = Self.terminalRuntimeControlDescriptor(
-            sessionID: sessionID, workspaceID: workspaceID, settings: settings, runningProcesses: runningProcesses, agentWindows: agentWindows,
-            trackedWindows: trackedWindows, isSessionRunning: isSessionRunning)
-        let descriptorBuildMS = windowShortcutElapsedMS(since: descriptorBuildStartedAt)
-        let descriptorChanged = terminalRuntimeControlDescriptorsBySessionID[sessionID] != descriptor
-        if let descriptor {
-            terminalRuntimeControlDescriptorsBySessionID[sessionID] = descriptor
-        } else {
-            terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID)
-        }
-        logTerminalRuntimeControlsRefresh(
-            sessionID: sessionID, startedAt: startedAt, cause: cause, requestID: requestID, workspaceLookupMS: workspaceLookupMS,
-            settingsMS: settingsMS, processesMS: processesMS, agentsMS: agentsMS, windowsMS: windowsMS, runtimeStateMS: runtimeStateMS,
-            descriptorBuildMS: descriptorBuildMS, descriptorChanged: descriptorChanged, success: descriptor != nil)
-
-        guard let descriptor, descriptor.canRun || descriptor.canStop || descriptor.canRestart else { return nil }
-        let runAction: (@MainActor @Sendable () -> Void)?
-        if descriptor.canRun {
-            runAction = { @MainActor @Sendable [weak self, descriptor] in
-                guard let self else { return }
-                self.runTerminalRuntime(descriptor)
-            }
-        } else {
-            runAction = nil
-        }
-        let stopAction: (@MainActor @Sendable () -> Void)?
-        if descriptor.canStop {
-            stopAction = { @MainActor @Sendable [weak self, descriptor] in
-                guard let self else { return }
-                self.stopTerminalRuntime(descriptor)
-            }
-        } else {
-            stopAction = nil
-        }
-        let restartAction: (@MainActor @Sendable () -> Void)?
-        if descriptor.canRestart {
-            restartAction = { @MainActor @Sendable [weak self, descriptor] in
-                guard let self else { return }
-                self.restartTerminalRuntime(descriptor)
-            }
-        } else {
-            restartAction = nil
-        }
-        return TerminalSessionRuntimeControls(
-            title: descriptor.title, canRun: descriptor.canRun, canStop: descriptor.canStop, canRestart: descriptor.canRestart, onRun: runAction,
-            onStop: stopAction, onRestart: restartAction)
-    }
-
-    private func logTerminalRuntimeControlsRefresh(
-        sessionID: String, startedAt: Date, cause: String, requestID: String?, workspaceLookupMS: Int, settingsMS: Int, processesMS: Int,
-        agentsMS: Int, windowsMS: Int, runtimeStateMS: Int, descriptorBuildMS: Int, descriptorChanged: Bool, success: Bool
-    ) {
-        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        logPerfMetric(
-            "terminal_runtime_controls_refresh", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-            success: success,
-            detail:
-                "cause=\(cause) workspace_lookup_ms=\(workspaceLookupMS) settings_ms=\(settingsMS) processes_ms=\(processesMS) agents_ms=\(agentsMS) windows_ms=\(windowsMS) runtime_state_ms=\(runtimeStateMS) descriptor_build_ms=\(descriptorBuildMS) descriptor_changed=\(descriptorChanged ? 1 : 0)\(requestDetail)"
-        )
-    }
-
-    private func refreshTerminalRuntimeControls(sessionID: String, cause: String, requestID: String? = nil) {
-        guard let content = panelCoordinator.content(forSessionID: sessionID) else { return }
-        content.setRuntimeControls(terminalRuntimeControls(forSessionID: sessionID, cause: cause, requestID: requestID))
-    }
-
-    static func terminalRuntimeControlDescriptor(
-        sessionID: String, workspaceID: String, deviceID: String? = nil, settings: WorkspaceSettings?, runningProcesses: [RunningProcessRecord],
-        agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord], isSessionRunning: Bool
-    ) -> TerminalRuntimeControlDescriptor? {
-        guard let normalizedSessionID = normalizedTerminalSessionID(sessionID) else { return nil }
-        if let process = runningProcesses.first(where: { terminalSessionID(for: $0) == normalizedSessionID }) {
-            let template = configuredProcessTemplate(for: process, settings: settings)
-            let title = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName) ?? "Process"
-            let processKey = trimmedNonEmpty(template?.name) ?? trimmedNonEmpty(process.templateName)
-            let isRunning = process.status != .exited && isSessionRunning
-            return TerminalRuntimeControlDescriptor(
-                kind: .process, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: process.id,
-                processTemplateID: template?.id, processKey: processKey, agentID: nil, agentLauncherID: nil, agentLauncherName: nil,
-                canRun: template != nil && !isRunning, canStop: true, canRestart: template != nil)
-        }
-
-        if let agent = agentWindows.first(where: { terminalSessionID(for: $0) == normalizedSessionID }) {
-            let launcher = configuredAgentLauncher(for: agent, settings: settings)
-            let windowTitle = terminalWindowTitle(for: agent, trackedWindows: trackedWindows)
-            let title = trimmedNonEmpty(launcher?.name) ?? codingAgentDisplayName(label: agent.label, runtimeWindowTitle: windowTitle)
-            let isRunning = agent.status != .done && isSessionRunning
-            return TerminalRuntimeControlDescriptor(
-                kind: .codingAgent, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil,
-                processTemplateID: nil, processKey: nil, agentID: agent.id, agentLauncherID: launcher?.id, agentLauncherName: launcher?.name,
-                canRun: launcher != nil && !isRunning, canStop: true, canRestart: launcher != nil)
-        }
-
-        let title =
-            trackedWindows.first(where: { terminalSessionID(for: $0) == normalizedSessionID }).flatMap {
-                trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail)
-            } ?? "Terminal"
-        return TerminalRuntimeControlDescriptor(
-            kind: .workspaceTerminal, deviceID: deviceID, workspaceID: workspaceID, sessionID: normalizedSessionID, title: title, processID: nil,
-            processTemplateID: nil, processKey: nil, agentID: nil, agentLauncherID: nil, agentLauncherName: nil, canRun: false, canStop: true,
-            canRestart: false)
-    }
-
-    private static func configuredProcessTemplate(for process: RunningProcessRecord, settings: WorkspaceSettings?) -> ProcessTemplate? {
-        guard let settings else { return nil }
-        if let templateID = trimmedNonEmpty(process.templateID) { return settings.processes.first(where: { $0.id == templateID }) }
-        guard let processKey = trimmedNonEmpty(process.templateName).map(normalizedRunRowName) else { return nil }
-        return settings.processes.first { normalizedRunRowName($0.name ?? "") == processKey }
-    }
-
-    private static func configuredAgentLauncher(for agent: AgentWindowRecord, settings: WorkspaceSettings?) -> AgentLauncher? {
-        guard let settings else { return nil }
-        if let launcherID = trimmedNonEmpty(agent.claimedLauncherID) { return settings.agentLaunchers.first(where: { $0.id == launcherID }) }
-        let candidateNames = [agent.claimedLauncherName, agent.label].compactMap(trimmedNonEmpty)
-        guard let launcherName = candidateNames.first.map(normalizedRunRowName) else { return nil }
-        return settings.agentLaunchers.first { normalizedRunRowName($0.name) == launcherName }
-    }
-
-    private static func terminalWindowTitle(for agent: AgentWindowRecord, trackedWindows: [WindowRecord]) -> String? {
-        guard let key = terminalSessionID(for: agent) else { return nil }
-        return trackedWindows.first(where: { terminalSessionID(for: $0) == key }).flatMap { trimmedNonEmpty($0.name) ?? trimmedNonEmpty($0.detail) }
-    }
-
-    private static func terminalSessionID(for process: RunningProcessRecord) -> String? {
-        normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
-    }
-
-    private static func terminalSessionID(for agent: AgentWindowRecord) -> String? {
-        normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
-    }
-
-    private static func terminalSessionID(for window: WindowRecord) -> String? {
-        normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID)
-    }
-
-    private static func normalizedTerminalSessionID(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-        return trimmed
-    }
-
     private static func trimmedNonEmpty(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
@@ -1720,110 +1501,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         let slug = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return slug.isEmpty ? "remote-device" : slug
-    }
-
-    private static func terminalSessionIsRunning(sessionID: String) -> Bool {
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
-            let state = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
-        else { return true }
-        return state.state.isInteractive
-    }
-
-    private func runTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForDaemonStateMutation() {
-            performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_run", descriptor: descriptor, device: device) { device in
-                switch descriptor.kind {
-                case .process:
-                    guard let processKey = descriptor.processKey else {
-                        throw WorkspaceError.invalidArgument(message: "Configured process not found.")
-                    }
-                    return try SpacesDeviceClient.runWorkspaceProcess(
-                        workspaceID: descriptor.workspaceID, processKey: processKey, processTemplateID: descriptor.processTemplateID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                case .codingAgent:
-                    guard let agentName = descriptor.agentLauncherName else {
-                        throw WorkspaceError.invalidArgument(message: "Configured coding agent not found.")
-                    }
-                    return try SpacesDeviceClient.runCodingAgent(
-                        workspaceID: descriptor.workspaceID, agentName: agentName, agentLauncherID: descriptor.agentLauncherID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Run.")
-                }
-            }
-            return
-        }
-        showDeviceNotLoadedError()
-    }
-
-    private func stopTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForDaemonStateMutation() {
-            performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_stop", descriptor: descriptor, device: device) { device in
-                switch descriptor.kind {
-                case .process:
-                    return try SpacesDeviceClient.stopWorkspaceProcess(
-                        workspaceID: descriptor.workspaceID, processID: descriptor.processID, processKey: descriptor.processKey,
-                        processTemplateID: descriptor.processTemplateID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                case .codingAgent:
-                    return try SpacesDeviceClient.stopCodingAgent(
-                        workspaceID: descriptor.workspaceID, agentID: descriptor.agentID, agentName: descriptor.agentLauncherName,
-                        agentLauncherID: descriptor.agentLauncherID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                case .workspaceTerminal:
-                    return try SpacesDeviceClient.stopWorkspaceTerminal(
-                        workspaceID: descriptor.workspaceID, sessionID: descriptor.sessionID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            }
-            return
-        }
-        showDeviceNotLoadedError()
-    }
-
-    private func restartTerminalRuntime(_ descriptor: TerminalRuntimeControlDescriptor) {
-        if let device = deviceForDaemonStateMutation() {
-            performDeviceTerminalRuntimeMutation(metric: "terminal_runtime_restart", descriptor: descriptor, device: device) { device in
-                switch descriptor.kind {
-                case .process:
-                    return try SpacesDeviceClient.restartWorkspaceProcess(
-                        workspaceID: descriptor.workspaceID, processID: descriptor.processID, processKey: descriptor.processKey,
-                        processTemplateID: descriptor.processTemplateID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                case .codingAgent:
-                    return try SpacesDeviceClient.restartCodingAgent(
-                        workspaceID: descriptor.workspaceID, agentID: descriptor.agentID, agentName: descriptor.agentLauncherName,
-                        agentLauncherID: descriptor.agentLauncherID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                case .workspaceTerminal: throw WorkspaceError.invalidArgument(message: "Workspace terminals do not support Restart.")
-                }
-            }
-            return
-        }
-        showDeviceNotLoadedError()
-    }
-
-    private func performDeviceTerminalRuntimeMutation(
-        metric: String, descriptor: TerminalRuntimeControlDescriptor, device: SpacesPairedDeviceRecord,
-        operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
-    ) {
-        let startedAt = Date()
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await Self.deviceMutation(device: device, operation: operation)
-            switch result {
-            case .success(let response):
-                logPerfMetric(
-                    metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
-                    elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "kind=\(descriptor.kind)")
-                applyDeviceMutationResponse(response, selectedWorkspaceID: descriptor.workspaceID)
-                refreshTerminalRuntimeControls(sessionID: descriptor.sessionID, cause: metric)
-            case .failure(let error):
-                logPerfMetric(
-                    metric, target: "workspace=\(descriptor.workspaceID) session=\(descriptor.sessionID)",
-                    elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false, detail: "kind=\(descriptor.kind)")
-                showError(error)
-            }
-        }
     }
 
     /// Whether an ad hoc built-in terminal session left without a client should stop.
@@ -3391,12 +3068,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Creates and shows the NSWindow shell (size, title, center, delegate, makeKeyAndOrderFront) without setting content.
     private func buildShellWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
-        window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Spaces"
+        // No visible titlebar: content (the sidebar top bar and the panel's tab strip)
+        // reaches the window top, with the app name shown next to the sidebar logo.
+        window.titleVisibility = .hidden
         window.setAccessibilityIdentifier("spaces-main-window")
         window.backgroundColor = sidebarPanelBackgroundColor()
         window.titlebarAppearsTransparent = true
-        refreshDesktopControlStatusUI()
         window.center()
         window.delegate = self
         presentWindowIfAllowed(window)
@@ -3440,6 +3119,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             splitView.topAnchor.constraint(equalTo: content.topAnchor), splitView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         window.contentView = content
+        // The desktop-control indicator lives in the sidebar top bar, which only now
+        // exists — sync it with the lease state resolved during launch.
+        refreshDesktopControlStatusUI()
     }
 
     private func makeLeftPane() -> NSView {
@@ -3482,40 +3164,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         scroll.documentView = outlineView
 
-        // The sidebar owns its own footer strip (the app-level Alerts entry), separate
-        // from the right panel's workspace footer.
-        let footerSeparator = NSBox()
-        footerSeparator.boxType = .separator
-        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
         let alertsRow = sidebar.makeAlertsSidebarRow()
         alertsRow.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(topBarRow)
+        container.addSubview(alertsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
-        container.addSubview(footerSeparator)
-        container.addSubview(alertsRow)
 
         NSLayoutConstraint.activate([
-            topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            // The titlebar is hidden with a full-size content view, so the top bar
+            // sits in the traffic lights' vertical band and clears them on the left.
+            topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 78),
             topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            topBarRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            topBarRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
+
+            alertsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            alertsRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
 
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 10),
+            sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
-            scroll.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
-
-            footerSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            footerSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            alertsRow.topAnchor.constraint(equalTo: footerSeparator.bottomAnchor, constant: 2),
-            alertsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            alertsRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
-            alertsRow.heightAnchor.constraint(equalToConstant: 26),
+            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         return container
@@ -5226,13 +4900,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         dirLabel.textColor = .tertiaryLabelColor
         dirLabel.lineBreakMode = .byTruncatingMiddle
         dirLabel.toolTip = workspace.dir
+        // Selectable so the path can be copied with ⌘C straight from the footer.
+        dirLabel.isSelectable = true
         dirLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         dirLabel.setAccessibilityIdentifier("workspace-detail-dir")
         footer.addArrangedSubview(dirLabel)
 
+        // The focused pane's identity (panes carry no header of their own): title plus
+        // a close-pane control, kept in sync by the panel coordinator.
+        let paneLabel = NSTextField(labelWithString: "")
+        paneLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        paneLabel.textColor = .secondaryLabelColor
+        paneLabel.lineBreakMode = .byTruncatingTail
+        paneLabel.setAccessibilityIdentifier("workspace-detail-focused-pane")
+        let paneCloseButton = footerActionButton(symbol: "xmark", tooltip: "Close pane", action: #selector(closeFocusedPaneFromFooter(_:)))
+        paneCloseButton.setAccessibilityIdentifier("workspace-detail-pane-close")
+        workspaceFooterPaneLabel = paneLabel
+        workspaceFooterPaneCloseButton = paneCloseButton
+        workspaceFooterWorkspaceID = workspace.id
+        footer.addArrangedSubview(paneLabel)
+        footer.addArrangedSubview(paneCloseButton)
+        footer.setCustomSpacing(3, after: paneLabel)
+
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         footer.addArrangedSubview(spacer)
+        refreshWorkspaceFooterFocusedPane(workspaceID: workspace.id)
 
         let notes = (workspace.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let notesButton = footerActionButton(
@@ -5275,11 +4968,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func clearWorkspaceDetailFooter() {
         workspaceNotesPopover?.close()
         workspaceNotesPopover = nil
+        workspaceFooterWorkspaceID = nil
         guard let footer = workspaceDetailFooterRow else { return }
         for view in footer.arrangedSubviews {
             footer.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
+    }
+
+    /// Syncs the footer's focused-pane identity (title + close control) with the
+    /// workspace panel; called by the panel coordinator on layout and title changes.
+    func refreshWorkspaceFooterFocusedPane(workspaceID: String) {
+        guard workspaceFooterWorkspaceID == workspaceID, let paneLabel = workspaceFooterPaneLabel,
+            let closeButton = workspaceFooterPaneCloseButton
+        else { return }
+        let info = panelCoordinator.focusedPaneInfo(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
+        paneLabel.stringValue = info?.title ?? ""
+        paneLabel.isHidden = info == nil
+        closeButton.isHidden = info == nil
+    }
+
+    @objc private func closeFocusedPaneFromFooter(_ sender: NSButton) {
+        guard let workspaceID = workspaceFooterWorkspaceID else { return }
+        panelCoordinator.closeFocusedPane(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
     }
 
     /// Opens the notes editor in a popover anchored to the footer's notes button.
@@ -8133,13 +7844,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         } catch { logHotkeyDebug("desktop_control_recovery_failed error=\(error.localizedDescription)") }
     }
 
+    /// The titlebar is hidden, so the passive desktop-control state surfaces as a
+    /// warning icon in the sidebar top bar instead of the window subtitle.
     private func refreshDesktopControlStatusUI() {
-        guard let window else { return }
-        if passiveDesktopControlOwner != nil {
-            window.subtitle = "Global shortcuts unavailable while another Spaces instance owns desktop control."
-        } else {
-            window.subtitle = ""
-        }
+        guard let statusIcon = sidebar.desktopControlStatusIcon else { return }
+        statusIcon.isHidden = passiveDesktopControlOwner == nil
+        statusIcon.toolTip = "Global shortcuts unavailable while another Spaces instance owns desktop control."
     }
 
     nonisolated static func shouldAttemptDesktopControlRecovery(passiveOwnerPID: Int32?, terminatedApplicationPID: Int32?) -> Bool {

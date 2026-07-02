@@ -78,7 +78,11 @@ import Foundation
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("spaces-ghostty", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let url = directory.appendingPathComponent("embedded-config.ghostty", isDirectory: false)
-            try "window-vsync = false\n".write(to: url, atomically: true, encoding: .utf8)
+            // font-size pins the embedded terminal to the app's text scale (Ghostty's
+            // 13pt default reads oversized next to the 11–12pt UI type), overriding
+            // any personal Ghostty config the default-file load picked up. It also
+            // matches the 12pt cell-metrics estimate the mirror view sizes with.
+            try "window-vsync = false\nfont-size = 12\n".write(to: url, atomically: true, encoding: .utf8)
             return url.path
         }
 

@@ -153,6 +153,15 @@ import Testing
         #expect(emptiedSource.isEmpty)
     }
 
+    @Test func renameTabSetsCustomTitleAndEmptyClearsIt() {
+        var layout = layoutWithTab()
+        layout = PanelLayoutEngine.renameTab(tabID: "tab-1", title: "  build watch  ", in: layout)
+        #expect(layout.tabs[0].title == "build watch")
+        layout = PanelLayoutEngine.renameTab(tabID: "tab-1", title: "   ", in: layout)
+        #expect(layout.tabs[0].title == nil)
+        #expect(PanelLayoutEngine.renameTab(tabID: "missing", title: "x", in: layout) == layout)
+    }
+
     @Test func layoutRoundTripsThroughJSON() throws {
         var layout = layoutWithTab("tab-1", paneID: "a")
         layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layout))

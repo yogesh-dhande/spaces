@@ -50,65 +50,6 @@ import workspacecore
         #expect(updated.contains(.fullScreenAuxiliary))
     }
 
-    @MainActor @Test func terminalRuntimeControlsResolveProcessByStableTemplateID() {
-        let template = ProcessTemplate(id: "template-frontend", name: "frontend", command: "npm run dev")
-        let process = RunningProcessRecord(
-            id: "runtime-frontend", workspaceID: "workspace-1", templateID: template.id, templateName: "old-name", command: "old command",
-            terminalApp: "Spaces", terminalTrackingID: "session-frontend", terminalNativeID: "session-frontend", pid: nil, status: .exited,
-            logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: "2026-06-05T00:00:00Z")
-
-        let descriptor = AppKitController.terminalRuntimeControlDescriptor(
-            sessionID: "session-frontend", workspaceID: "workspace-1", deviceID: "device-a", settings: WorkspaceSettings(processes: [template]),
-            runningProcesses: [process], agentWindows: [], trackedWindows: [], isSessionRunning: false)
-
-        #expect(descriptor?.kind == .process)
-        #expect(descriptor?.deviceID == "device-a")
-        #expect(descriptor?.title == "frontend")
-        #expect(descriptor?.processTemplateID == "template-frontend")
-        #expect(descriptor?.processKey == "frontend")
-        #expect(descriptor?.canRun == true)
-        #expect(descriptor?.canStop == true)
-        #expect(descriptor?.canRestart == true)
-    }
-
-    @MainActor @Test func terminalRuntimeControlsResolveAgentByStableLauncherID() {
-        let launcher = AgentLauncher(id: "launcher-codex", name: "Codex Renamed", command: "codex")
-        let agent = AgentWindowRecord(
-            id: "agent-codex", workspaceID: "workspace-1", provider: .spaces, label: "Codex",
-            terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: launcher.id, claimedLauncherName: "Codex",
-            status: .done, createdAt: "2026-06-05T00:00:00Z", updatedAt: "2026-06-05T00:00:00Z")
-
-        let descriptor = AppKitController.terminalRuntimeControlDescriptor(
-            sessionID: "session-codex", workspaceID: "workspace-1", deviceID: "device-a", settings: WorkspaceSettings(agentLaunchers: [launcher]),
-            runningProcesses: [], agentWindows: [agent], trackedWindows: [], isSessionRunning: false)
-
-        #expect(descriptor?.kind == .codingAgent)
-        #expect(descriptor?.deviceID == "device-a")
-        #expect(descriptor?.title == "Codex Renamed")
-        #expect(descriptor?.agentLauncherID == "launcher-codex")
-        #expect(descriptor?.canRun == true)
-        #expect(descriptor?.canStop == true)
-        #expect(descriptor?.canRestart == true)
-    }
-
-    @MainActor @Test func terminalRuntimeControlsDoNotRestartAgentWithStaleClaimedLauncherID() {
-        let launcher = AgentLauncher(id: "launcher-current", name: "Codex", command: "codex")
-        let agent = AgentWindowRecord(
-            id: "agent-codex", workspaceID: "workspace-1", provider: .spaces, label: "Codex",
-            terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-deleted",
-            claimedLauncherName: launcher.name, status: .done, createdAt: "2026-06-05T00:00:00Z", updatedAt: "2026-06-05T00:00:00Z")
-
-        let descriptor = AppKitController.terminalRuntimeControlDescriptor(
-            sessionID: "session-codex", workspaceID: "workspace-1", deviceID: "device-a", settings: WorkspaceSettings(agentLaunchers: [launcher]),
-            runningProcesses: [], agentWindows: [agent], trackedWindows: [], isSessionRunning: false)
-
-        #expect(descriptor?.kind == .codingAgent)
-        #expect(descriptor?.deviceID == "device-a")
-        #expect(descriptor?.canRun == false)
-        #expect(descriptor?.canStop == true)
-        #expect(descriptor?.canRestart == false)
-    }
-
     @Test func activeSpaceSummonCleanupRemovesOnlyTransientBehavior() {
         let original: NSWindow.CollectionBehavior = [.fullScreenAuxiliary, .managed]
         let summoned = AppKitController.collectionBehaviorForActiveSpaceSummon(original)

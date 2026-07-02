@@ -25,6 +25,9 @@ struct PanelLayout: Codable, Sendable, Equatable {
 
 struct PanelTab: Codable, Sendable, Equatable, Identifiable {
     let id: String
+    /// User-set tab name; nil derives the title from the tab's first pane. Optional in
+    /// the persisted JSON, so layouts saved before renames existed decode unchanged.
+    var title: String?
     var root: PaneNode
 }
 

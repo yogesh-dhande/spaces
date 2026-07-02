@@ -63,10 +63,20 @@ enum PanelLayoutEngine {
     /// Appends a tab holding a single pane, selecting and focusing it.
     static func appendTab(tabID: String, pane: Pane, to layout: PanelLayout) -> PanelLayout {
         var layout = layout
-        layout.tabs.append(PanelTab(id: tabID, root: .leaf(pane)))
+        layout.tabs.append(PanelTab(id: tabID, title: nil, root: .leaf(pane)))
         layout.selectedTabID = tabID
         layout.focusedPaneID = pane.id
         return normalized(layout)
+    }
+
+    /// Sets a tab's user-chosen name; nil (or an empty trim) returns the tab to its
+    /// derived title.
+    static func renameTab(tabID: String, title: String?, in layout: PanelLayout) -> PanelLayout {
+        var layout = layout
+        guard let index = layout.tabs.firstIndex(where: { $0.id == tabID }) else { return layout }
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        layout.tabs[index].title = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        return layout
     }
 
     /// Splits `paneID` in the given direction, placing `newPane` after it. When the
