@@ -101,8 +101,10 @@ import workspacecore
     #endif
     #if os(macOS)
         private var databaseDistributedChangeObserver: NSObjectProtocol?
+        private var caddyRouteRegistryDistributedChangeObserver: NSObjectProtocol?
         private var processExitMonitor: ProcessExitMonitorService?
         private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
+        private var caddyRouterService: CaddyRouterService?
     #endif
     private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
         builtInTerminalSessionTerminator: { [weak self] sessionID in
@@ -161,6 +163,11 @@ import workspacecore
             }
             foregroundAgentReconciler.start()
             terminalForegroundAgentReconciler = foregroundAgentReconciler
+            let caddyRouter = CaddyRouterService(databasePath: databasePath) { error in
+                writeStandardError("spacesd caddy_router_error error=\(error)\n")
+            }
+            caddyRouter.start()
+            caddyRouterService = caddyRouter
         #endif
         databaseChangeObserver = NotificationCenter.default.addObserver(forName: IPCNotification.databaseDidChange, object: nil, queue: nil) {
             [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() }
@@ -178,6 +185,9 @@ import workspacecore
             databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
             ) { [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() } }
+            caddyRouteRegistryDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
+                forName: IPCNotification.caddyRouteRegistryDidChange, object: try? IPCNotification.currentObject(), queue: nil
+            ) { [weak self] _ in Task { @MainActor in self?.caddyRouterService?.reconcile() } }
         #endif
     }
 
@@ -185,6 +195,7 @@ import workspacecore
         worktreeDiscoveryService?.refreshWatchers()
         #if os(macOS)
             processExitMonitor?.refreshObservers()
+            caddyRouterService?.reconcile()
         #endif
     }
 
@@ -229,6 +240,10 @@ import workspacecore
                 DistributedNotificationCenter.default().removeObserver(databaseDistributedChangeObserver)
                 self.databaseDistributedChangeObserver = nil
             }
+            if let caddyRouteRegistryDistributedChangeObserver {
+                DistributedNotificationCenter.default().removeObserver(caddyRouteRegistryDistributedChangeObserver)
+                self.caddyRouteRegistryDistributedChangeObserver = nil
+            }
         #endif
         worktreeDiscoveryService?.stop()
         worktreeDiscoveryService = nil
@@ -237,6 +252,8 @@ import workspacecore
             processExitMonitor = nil
             terminalForegroundAgentReconciler?.stop()
             terminalForegroundAgentReconciler = nil
+            caddyRouterService?.stop()
+            caddyRouterService = nil
         #endif
         deviceAPISupervisor.stop()
         for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }

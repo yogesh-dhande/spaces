@@ -32,10 +32,4 @@ extension WorkspaceOrchestrator {
         }
         return resolved
     }
-
-    func closeTrackedBrowserTab(_ window: WindowRecord) {
-        guard window.role == "browser" else { return }
-        guard let trackedWindowID = window.windowID else { return }
-        _ = try? yabai.closeWindow(id: trackedWindowID)
-    }
 }

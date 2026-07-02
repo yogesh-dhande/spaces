@@ -49,6 +49,7 @@
         private var streamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var refreshInFlight = false
+        private var stateRefreshRetryTask: Task<Void, Never>?
 
         // Emission time of the newest payload already applied. The catch-up `.state`
         // request runs in parallel with the live subscription, so a catch-up response
@@ -88,6 +89,7 @@
             guard Thread.isMainThread else { return }
             MainActor.assumeIsolated {
                 streamClient?.stop()
+                stateRefreshRetryTask?.cancel()
                 requestClient.cancel()
             }
         }
@@ -107,7 +109,14 @@
                 }.value
                 guard let self else { return }
                 self.refreshInFlight = false
-                if case .success(let payload) = result { self.apply(payload) }
+                switch result {
+                case .success(let payload):
+                    self.stateRefreshRetryTask?.cancel()
+                    self.stateRefreshRetryTask = nil
+                    self.apply(payload)
+                case .failure:
+                    self.scheduleStateRefreshRetry()
+                }
             }
         }
 
@@ -168,7 +177,13 @@
             return ListenerHandle(detach: { [weak self] in Task { @MainActor [weak self] in self?.removeListener(id: id) } })
         }
 
-        fileprivate func removeListener(id: UUID) { listeners.removeAll { $0.id == id } }
+        fileprivate func removeListener(id: UUID) {
+            listeners.removeAll { $0.id == id }
+            if listeners.isEmpty {
+                stateRefreshRetryTask?.cancel()
+                stateRefreshRetryTask = nil
+            }
+        }
 
         private func ensureSubscriptionStarted(now: Date = Date()) {
             if streamClient != nil { return }
@@ -221,6 +236,18 @@
                 }
                 self.lastSubscriptionAttemptAt = nil
                 self.ensureSubscriptionStarted()
+            }
+        }
+
+        private func scheduleStateRefreshRetry() {
+            guard !listeners.isEmpty, currentRuntimeState?.state == .starting else { return }
+            guard stateRefreshRetryTask == nil else { return }
+            stateRefreshRetryTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, !Task.isCancelled else { return }
+                self.stateRefreshRetryTask = nil
+                guard !self.listeners.isEmpty, self.currentRuntimeState?.state == .starting else { return }
+                self.refreshState()
             }
         }
 

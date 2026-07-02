@@ -27,9 +27,9 @@ const keyFeatures: Feature[] = [
       "Every feature, branch, or experiment becomes a workspace with its own terminals, tabs, editors, and agents. Switch between them instantly.",
   },
   {
-    title: "Reserved ports per workspace",
+    title: "Stable per-workspace URLs",
     description:
-      "Each workspace owns its ports, exposed as named environment variables like $FRONTEND_PORT and $BACKEND_PORT. Run three instances of your app side by side — no conflicts, no `.env` edits.",
+      "Declare named services and reach each one at a stable, predictable URL like http://web.my-branch.localhost:8088, served by a bundled reverse proxy. Run three instances of your app side by side — isolated, no port conflicts, no `.env` edits.",
   },
   {
     title: "Jump to any workspace",
@@ -100,35 +100,9 @@ const faqItems: FaqItem[] = [
     answer: (
       <ul className="ml-4 list-disc space-y-1">
         <li>macOS 14 Sonoma or later</li>
-        <li>
-          <a
-            href="https://github.com/asmvik/yabai"
-            className="text-accent hover:underline"
-          >
-            yabai
-          </a>{" "}
-          — an open-source window manager used for window tracking and focus switching
-        </li>
+        <li>Google Chrome, used for browser sessions</li>
         <li>Spaces ships its own terminal, so workspaces do not depend on external terminal apps.</li>
       </ul>
-    ),
-  },
-  {
-    question: "What is yabai? Why does it need accessibility permissions?",
-    answer: (
-      <>
-        <a
-          href="https://github.com/asmvik/yabai"
-          className="text-accent hover:underline"
-        >
-          yabai
-        </a>{" "}
-        is an open-source macOS window management utility. Spaces uses it to bring
-        the right window to the front when you switch workspaces. macOS requires
-        accessibility permissions before any app can programmatically control
-        windows on behalf of other processes — yabai uses this to perform focus
-        switching on Spaces&apos;s behalf.
-      </>
     ),
   },
   {
@@ -156,9 +130,9 @@ const faqItems: FaqItem[] = [
     answer: (
       <ul className="ml-4 list-disc space-y-1">
         <li>
-          Yes. A workspace starts every process on its reserved ports in one
-          action, so spinning a project up or down takes no manual server
-          juggling or <code>.env</code> edits.
+          Yes. A workspace starts every process and exposes each named service
+          at a stable per-workspace URL in one action, so spinning a project up
+          or down takes no manual server juggling or <code>.env</code> edits.
         </li>
         <li>
           Tear a workspace down when you&apos;re done and reopen it later exactly
@@ -280,12 +254,12 @@ const workflow: WorkflowStepData[] = [
   {
     n: "01",
     label: "Project",
-    body: "Point Spaces at a repo. Define your setup script, named ports, browser URLs, and the processes you run. Do this once.",
+    body: "Point Spaces at a repo. Define your setup script, named services, browser URLs, and the processes you run. Do this once.",
   },
   {
     n: "02",
     label: "Workspace",
-    body: "Create a workspace for each feature, branch, or experiment. Each one gets its own directory, ports, env, and processes — isolated from the rest. Create as many as you need.",
+    body: "Create a workspace for each feature, branch, or experiment. Each one gets its own directory, services, stable per-workspace URLs, env, and processes — isolated from the rest. Create as many as you need.",
   },
   {
     n: "03",
@@ -337,7 +311,7 @@ const withSpaces: ComparisonStep[] = [
   {
     n: "3",
     title: "Switch projects without cleanup",
-    body: "Each workspace owns its own ports and env. Spin up a worktree alongside your main branch — both run, neither breaks.",
+    body: "Each workspace owns its own named services, stable URLs, and env. Spin up a worktree alongside your main branch — both run on their own per-workspace URLs, neither breaks.",
   },
   {
     n: "4",
@@ -367,8 +341,8 @@ export default function HomePage() {
             <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Native macOS app and CLI for orchestrating parallel coding
               sessions across worktrees, branches, and projects. Each
-              workspace gets isolated ports, environment, and a tracked
-              window set.
+              workspace gets isolated named services with stable URLs,
+              environment, and a tracked window set.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link
@@ -462,8 +436,8 @@ export default function HomePage() {
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               A workspace is one feature, branch, or experiment with its own
-              directory, named ports, processes, browser sessions, and
-              coding-agent terminals. Launching it starts every process and
+              directory, named services on stable URLs, processes, browser
+              sessions, and coding-agent terminals. Launching it starts every process and
               tracks every window. Stopping it shuts everything down. Reopening
               restores the state.
             </p>

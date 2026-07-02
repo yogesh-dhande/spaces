@@ -174,12 +174,9 @@ extension SQLiteStore {
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
         let resolvedTrackingID = row[8].isEmpty ? row[9] : row[8]
-        // The captured desktop window belongs to the linked runtime target (row[4]); an agent
-        // detached from its target has none, so its window ID resolves to nil.
         let terminalTarget = decodeTerminalTarget(
             runtimeTargetID: row[4], app: row[5].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[5], name: row[6],
-            detail: row[7], windowID: overlaidWindowID(workspaceID: row[1], runtimeTargetID: row[4].isEmpty ? nil : row[4]),
-            trackingID: resolvedTrackingID)
+            detail: row[7], trackingID: resolvedTrackingID)
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
             terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10], claimedLauncherID: row[11].isEmpty ? nil : row[11],
@@ -204,7 +201,7 @@ extension SQLiteStore {
             window: WindowRecord(
                 id: targetID, workspaceID: record.workspaceID, app: TerminalHost.spaces.appName,
                 name: preservesExistingMetadata ? (existingWindow?.name ?? record.label ?? "Coding Agent CLI") : (record.label ?? "Coding Agent CLI"),
-                detail: preservesExistingMetadata ? existingWindow?.detail : nil, targetURL: nil, windowID: terminalTarget.windowID,
+                detail: preservesExistingMetadata ? existingWindow?.detail : nil, targetURL: nil, windowID: nil,
                 terminalTrackingID: terminalTarget.trackingID, terminalNativeID: terminalTarget.trackingID, role: "terminal",
                 orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
                 lastSeenAt: now))

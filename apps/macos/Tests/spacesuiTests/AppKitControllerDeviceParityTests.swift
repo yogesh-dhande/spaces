@@ -1,4 +1,3 @@
-import Foundation
 import Testing
 import spacesclientcore
 import spacesdeviceapi
@@ -41,78 +40,6 @@ import workspacecore
         #expect(AppKitController.SidebarDeviceLoadState.offline("daemon down").isOffline)
         #expect(!AppKitController.SidebarDeviceLoadState.loaded.isOffline)
         #expect(!AppKitController.SidebarDeviceLoadState.loading.isOffline)
-    }
-
-    @Test func remoteOverviewSubscriptionsRequireLoadedCompatibleOverview() {
-        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
-
-        let compatible = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, overview: overview, compatibility: .compatible)
-        #expect(AppKitController.remoteOverviewSubscriptionIsEligible(section: compatible))
-        #expect(AppKitController.remoteOverviewSubscriptionIsDesired(section: compatible, isReconnectCandidate: false))
-
-        let noInlineStatus = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, overview: overview)
-        #expect(AppKitController.remoteOverviewSubscriptionIsEligible(section: noInlineStatus))
-        #expect(AppKitController.remoteOverviewSubscriptionIsDesired(section: noInlineStatus, isReconnectCandidate: false))
-
-        let incompatible = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, compatibility: .daemonTooOld)
-        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: incompatible))
-        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: incompatible, isReconnectCandidate: false))
-
-        let incompatibleWithOverview = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil, overview: overview,
-            compatibility: .clientTooOld)
-        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: incompatibleWithOverview))
-        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: incompatibleWithOverview, isReconnectCandidate: true))
-
-        let loading = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loading, device: nil, overview: overview, compatibility: .compatible
-        )
-        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: loading))
-        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: loading, isReconnectCandidate: true))
-
-        let offlineRetryCandidate = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .offline("The connection to this device closed."), device: nil)
-        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: offlineRetryCandidate, isReconnectCandidate: false))
-        #expect(AppKitController.remoteOverviewSubscriptionIsDesired(section: offlineRetryCandidate, isReconnectCandidate: true))
-
-        let local = AppKitController.DeviceSection(
-            deviceID: "local", deviceName: "This Mac", isLocal: true, loadState: .loaded, device: nil, overview: overview, compatibility: .compatible)
-        #expect(!AppKitController.remoteOverviewSubscriptionIsEligible(section: local))
-        #expect(!AppKitController.remoteOverviewSubscriptionIsDesired(section: local, isReconnectCandidate: true))
-    }
-
-    @Test func remoteOverviewStreamDisconnectUsesScheduledReconnectBackoff() {
-        #expect(!AppKitController.shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: true))
-        #expect(AppKitController.shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: false))
-    }
-
-    @Test func coldTerminalOverviewLookupRunsOffMainThread() async {
-        let recorder = ThreadRecorder()
-        let device = SpacesPairedDeviceRecord(
-            id: "local", name: "Mac", platform: "macos", host: "127.0.0.1", port: 19000, certificateFingerprint: "fingerprint",
-            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:00Z")
-        let clientApp = SpacesDeviceClientApp(
-            installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
-        let summary = SpacesDeviceTerminalSessionSummary(
-            id: "session-cold", title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: nil, workspaceTitle: nil, projectID: nil, projectName: nil,
-            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
-
-        let match = await AppKitController.resolveSessionSummaryMatchOffMain(
-            sessionID: "session-cold", device: device, clientApp: clientApp,
-            resolveOverview: { device, _ in
-                recorder.record(Thread.isMainThread)
-                return SpacesDeviceOverviewResolution(
-                    overview: SpacesDeviceOverview(device: device, overview: SpacesDeviceOverviewPayload(workspaces: [], sessions: [summary])),
-                    daemonStatus: nil, compatibility: nil)
-            })
-
-        #expect(match == AppKitController.TerminalSessionSummaryMatch(device: device, summary: summary))
-        #expect(recorder.values == [false])
     }
 
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
@@ -160,7 +87,7 @@ import workspacecore
                 SpacesDeviceProjectSummary(
                     id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main",
                     config: SpacesDeviceProjectConfig(
-                        setupScript: "make setup", stopScript: "make stop", ports: [SpacesDevicePortDefinition(id: "port-web", name: "WEB")],
+                        setupScript: "make setup", stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
                         agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]))
@@ -173,7 +100,7 @@ import workspacecore
                     assignedPorts: [SpacesDeviceAssignedPort(name: "WEB", port: 3000)],
                     setupState: SpacesDeviceWorkspaceSetupState(status: .succeeded),
                     config: SpacesDeviceWorkspaceConfig(
-                        stopScript: "make stop", ports: [SpacesDevicePortDefinition(id: "port-web", name: "WEB")],
+                        stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                         processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                         browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
                         resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")],
@@ -281,8 +208,8 @@ import workspacecore
         let runningProcesses = [
             RunningProcessRecord(
                 id: "running-web", workspaceID: "workspace-1", templateID: "process-web", templateName: "web", command: "npm run dev",
-                terminalApp: "Spaces", windowID: nil, terminalTrackingID: "session-web", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
-                startedAt: nil, exitedAt: nil)
+                terminalApp: "Spaces", terminalTrackingID: "session-web", pid: 123, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil,
+                exitedAt: nil)
         ]
 
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(
@@ -445,8 +372,8 @@ import workspacecore
             request
                 == AppKitController.DeviceTerminalOpenRequest(
                     workspaceID: "workspace-1", sessionID: "session-starting", title: "shell-1", workingDirectory: "/device/project-feature",
-                    kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
-                    createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
+                    kind: .shell, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
+                    updatedAt: "2026-06-22T12:00:01Z"))
     }
 
     @Test func deviceShortcutResolvesStartingTerminalRowWithSessionMetadata() {
@@ -471,8 +398,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-shell", title: "shell-1",
-                        workingDirectory: "/device/project-feature", kind: .shell, shell: "/bin/zsh", command: nil, initialState: .starting,
-                        servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
+                        workingDirectory: "/device/project-feature", kind: .shell, initialState: .starting, servicePID: 321, childPID: nil,
+                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceShortcutResolvesStartingProcessWithSessionMetadata() {
@@ -501,8 +428,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-process", title: "web", workingDirectory: "/device/project-feature",
-                        kind: .process, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
-                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
+                        kind: .process, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
+                        updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceShortcutResolvesStartingAgentWithSessionMetadata() {
@@ -528,8 +455,8 @@ import workspacecore
                 == .openTerminal(
                     AppKitController.DeviceTerminalOpenRequest(
                         workspaceID: "workspace-1", sessionID: "session-starting-agent", title: "Codex", workingDirectory: "/device/project-feature",
-                        kind: .agent, shell: "/bin/zsh", command: nil, initialState: .starting, servicePID: 321, childPID: nil,
-                        createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z")))
+                        kind: .agent, initialState: .starting, servicePID: 321, childPID: nil, createdAt: "2026-06-22T12:00:00Z",
+                        updatedAt: "2026-06-22T12:00:01Z")))
     }
 
     @Test func deviceTerminalControlRequestTranslatesRendererControlPayload() throws {
@@ -546,100 +473,79 @@ import workspacecore
         #expect(request.resizeSerial == 3)
     }
 
-    @Test func attachControlRefreshesSessionStateWhenResponseOmitsIt() throws {
-        // The Device API does not echo session state for attach/detach controls, so the
-        // control helper must fetch the post-control state and apply the new ownership
-        // immediately instead of waiting for the live subscription to redeliver it.
-        let refreshedSnapshot = attachmentSnapshot(ownerID: "mac-window")
-        let refreshedState = sessionStatePayload(attachmentSnapshot: refreshedSnapshot)
-        let recorder = ControlRequestRecorder(stateResponseSnapshot: refreshedState)
-        let applied = AppliedStateBox()
+    @Test func remoteBrowserRoutePlanMapsLoopbackServicePortToCaddyURL() throws {
+        let plan = try #require(
+            BrowserSSHForwardManager.routePlan(
+                targetURL: "http://localhost:32001/docs/?tab=api#readme",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
 
-        let response = try AppKitController.sendDeviceTerminalControl(
-            sessionID: "session-1",
-            request: TerminalControlRequest(
-                command: "attach",
-                client: TerminalClient(
-                    id: "mac-window", kind: .localWindow, identity: .init(label: "mac-window"), connectedAt: "2026-06-22T12:00:00Z"),
-                attachmentMode: .owner), requestSender: recorder.send, refreshStateAfterControl: true, applyState: { applied.store($0) })
-
-        #expect(response.ok)
-        #expect(recorder.issuedStateFetch)
-        #expect(applied.payload?.attachmentSnapshot == refreshedSnapshot)
+        #expect(plan.serviceName == "web")
+        #expect(plan.remotePort == 32001)
+        #expect(plan.routeHost == "web.feature-123.localhost")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/docs/?tab=api#readme")
     }
 
-    @Test func sendControlDoesNotFetchStateWhenRefreshNotRequested() throws {
-        // Input controls (send/key) carry no ownership change, so the helper must not
-        // pay for a follow-up state fetch and must leave the cached state untouched.
-        let recorder = ControlRequestRecorder(stateResponseSnapshot: nil)
-        let applied = AppliedStateBox()
+    @Test func remoteBrowserRoutePlanKeepsConfiguredCaddyServiceURL() throws {
+        let plan = try #require(
+            BrowserSSHForwardManager.routePlan(
+                targetURL: "http://web.feature-123.localhost:8088/admin/",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
 
-        let response = try AppKitController.sendDeviceTerminalControl(
-            sessionID: "session-1", request: TerminalControlRequest(command: "send", text: "ls", clientID: "mac-window", appendNewline: true),
-            requestSender: recorder.send, refreshStateAfterControl: false, applyState: { applied.store($0) })
-
-        #expect(response.ok)
-        #expect(!recorder.issuedStateFetch)
-        #expect(applied.payload == nil)
+        #expect(plan.serviceName == "web")
+        #expect(plan.remotePort == 32001)
+        #expect(plan.routeHost == "web.feature-123.localhost")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
     }
 
-    private func sessionStatePayload(attachmentSnapshot: TerminalSessionAttachmentSnapshot) -> GhosttyRemoteSessionStatePayload {
-        GhosttyRemoteSessionStatePayload(
-            sessionID: "session-1", reason: "attachment_state", emittedAt: "2026-06-22T12:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
-            screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: attachmentSnapshot, title: "alpha", workingDirectory: "/tmp/alpha",
-            outputByteCount: nil)
+    @Test func remoteBrowserRoutePlanUsesLocalCaddyRouterPort() throws {
+        let plan = try #require(
+            BrowserSSHForwardManager.routePlan(
+                targetURL: "http://web.feature-123.localhost:9000/admin/",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")],
+                localRouterPort: 8088))
+
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
     }
 
-    private func attachmentSnapshot(ownerID: String) -> TerminalSessionAttachmentSnapshot {
-        let client = TerminalClient(id: ownerID, kind: .localWindow, identity: .init(label: ownerID), connectedAt: "2026-06-22T12:00:00Z")
-        return TerminalSessionAttachmentSnapshot(
-            clients: [client],
-            attachments: [TerminalAttachment(sessionID: "session-1", clientID: ownerID, mode: .owner, attachedAt: "2026-06-22T12:00:00Z")])
+    @Test func remoteBrowserRoutePlanLeavesExternalURLsUnchanged() {
+        let plan = BrowserSSHForwardManager.routePlan(
+            targetURL: "https://example.com/docs",
+            assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")])
+
+        #expect(plan == nil)
     }
 
-    /// Records whether the helper issued the follow-up `.state` fetch and replies to it
-    /// with a fixed snapshot, so a test can assert the post-control refresh behavior.
-    private final class ThreadRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var recordedValues: [Bool] = []
+    @Test func remoteBrowserSSHArgumentsUsePairedDeviceSSHMetadata() throws {
+        let device = SpacesPairedDeviceRecord(
+            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
 
-        var values: [Bool] {
-            lock.lock()
-            defer { lock.unlock() }
-            return recordedValues
-        }
+        let args = try BrowserSSHForwardManager.sshArguments(device: device, localPort: 41001, remotePort: 32001)
 
-        func record(_ value: Bool) {
-            lock.lock()
-            recordedValues.append(value)
-            lock.unlock()
-        }
+        #expect(
+            args == [
+                "-N", "-L", "127.0.0.1:41001:127.0.0.1:32001", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o",
+                "StrictHostKeyChecking=yes", "-p", "2200", "dev@build.example",
+            ])
     }
 
-    private final class ControlRequestRecorder: @unchecked Sendable {
-        private let stateResponseSnapshot: GhosttyRemoteSessionStatePayload?
-        private(set) var issuedStateFetch = false
+    @Test func remoteBrowserSSHArgumentsUseOneProcessForMultipleForwardBindings() throws {
+        let device = SpacesPairedDeviceRecord(
+            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
 
-        init(stateResponseSnapshot: GhosttyRemoteSessionStatePayload?) { self.stateResponseSnapshot = stateResponseSnapshot }
+        let args = try BrowserSSHForwardManager.sshArguments(
+            device: device,
+            bindings: [
+                BrowserSSHForwardManager.SSHForwardBinding(localPort: 41001, remotePort: 32001),
+                BrowserSSHForwardManager.SSHForwardBinding(localPort: 41002, remotePort: 32002),
+            ])
 
-        var send: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse {
-            { [self] request in
-                switch request.command {
-                case .control:
-                    return TerminalServiceResponse(
-                        ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
-                case .state:
-                    issuedStateFetch = true
-                    return TerminalServiceResponse(ok: true, message: "", sessionState: stateResponseSnapshot)
-                default: return TerminalServiceResponse(ok: false, message: "unexpected command")
-                }
-            }
-        }
-    }
-
-    private final class AppliedStateBox: @unchecked Sendable {
-        private(set) var payload: GhosttyRemoteSessionStatePayload?
-        func store(_ payload: GhosttyRemoteSessionStatePayload) { self.payload = payload }
+        #expect(
+            args == [
+                "-N", "-L", "127.0.0.1:41001:127.0.0.1:32001", "-L", "127.0.0.1:41002:127.0.0.1:32002", "-o", "BatchMode=yes", "-o",
+                "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-p", "2200", "dev@build.example",
+            ])
     }
 
     private func startingSessionSummary(id: String, title: String, rowKind: SpacesDeviceTerminalSessionRowKind) -> SpacesDeviceTerminalSessionSummary

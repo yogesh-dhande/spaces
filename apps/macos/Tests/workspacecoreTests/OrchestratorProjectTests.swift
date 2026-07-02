@@ -178,14 +178,14 @@ extension OrchestratorTests {
         }
 
         XCTAssertEqual(project.stopScript, "echo yaml-stop")
-        XCTAssertEqual(project.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(project.ports.map(\.name), ["api"])
         XCTAssertEqual(project.processes.first?.name, "api")
         XCTAssertEqual(project.browserSessions.first?.url, "http://localhost:3000")
         XCTAssertEqual(project.agentLaunchers.first?.command, "codex")
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo yaml-stop")
-        XCTAssertEqual(settings?.ports.map(\.name) ?? [], ["API_PORT"])
+        XCTAssertEqual(settings?.ports.map(\.name) ?? [], ["api"])
         XCTAssertEqual(settings?.processes.first?.name, "api")
     }
 
@@ -281,7 +281,7 @@ extension OrchestratorTests {
             }
         }
 
-        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path) { config in config.ports = [PortDefinition(name: "API_PORT")] }) {
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path) { config in config.ports = [ServiceDefinition(name: "api")] }) {
             error in XCTAssertTrue(error.localizedDescription.contains("Unsupported spaces.yaml version 999"))
         }
 
@@ -303,8 +303,8 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
 
-        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path) { config in config.ports = [PortDefinition(name: "   ")] }) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Port name is required"))
+        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path) { config in config.ports = [ServiceDefinition(name: "   ")] }) {
+            error in XCTAssertTrue(error.localizedDescription.contains("service name"))
         }
 
         let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "invalid-reviewed-git-import")
@@ -558,17 +558,17 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
-        XCTAssertThrowsError(try orchestrator.addProject(dir: projectDir.path) { project in project.ports = [PortDefinition(name: "   ")] }) {
-            error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.")
+        XCTAssertThrowsError(try orchestrator.addProject(dir: projectDir.path) { project in project.ports = [ServiceDefinition(name: "   ")] }) {
+            error in XCTAssertTrue(error.localizedDescription.contains("service name"))
         }
 
         XCTAssertNil(try store.project(dir: projectDir.path))
         XCTAssertTrue(try store.projects().isEmpty)
 
-        let project = try orchestrator.addProject(dir: projectDir.path) { project in project.ports = [PortDefinition(name: "API_PORT")] }
+        let project = try orchestrator.addProject(dir: projectDir.path) { project in project.ports = [ServiceDefinition(name: "api")] }
 
         let stored = try XCTUnwrap(store.project(id: project.id))
-        XCTAssertEqual(stored.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(stored.ports.map(\.name), ["api"])
         XCTAssertEqual(try store.workspaces(projectID: project.id).count, 1)
     }
 

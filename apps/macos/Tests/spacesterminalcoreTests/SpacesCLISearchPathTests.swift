@@ -6,14 +6,12 @@ final class SpacesCLISearchPathTests: XCTestCase {
     private var binDirectory: URL!
 
     override func setUpWithError() throws {
-        binDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("spaces-cli-search-path-tests-\(UUID().uuidString)/bin", isDirectory: true)
+        binDirectory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+            "spaces-cli-search-path-tests-\(UUID().uuidString)/bin", isDirectory: true)
         try FileManager.default.createDirectory(at: binDirectory, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
-        try FileManager.default.removeItem(at: binDirectory.deletingLastPathComponent())
-    }
+    override func tearDownWithError() throws { try FileManager.default.removeItem(at: binDirectory.deletingLastPathComponent()) }
 
     private func installExecutable(named name: String) throws -> String {
         let path = binDirectory.appendingPathComponent(name).path

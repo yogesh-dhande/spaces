@@ -5,7 +5,7 @@ public final class PortAllocator {
 
     public init(store: SQLiteStore) { self.store = store }
 
-    public func syncPorts(workspaceID: String, definitions: [PortDefinition], range: PortRange) throws -> [Int] {
+    public func syncPorts(workspaceID: String, definitions: [ServiceDefinition], range: PortRange) throws -> [Int] {
         let count = definitions.count
         guard count > 0 else {
             try releasePorts(workspaceID: workspaceID)
@@ -52,14 +52,14 @@ public final class PortAllocator {
         }
 
         try store.setWorkspacePorts(workspaceID: workspaceID, ports: resolved, names: definitions.map(\.name), definitionIDs: definitions.map(\.id))
-        PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: resolved)
+        syncReservationState(workspaceID: workspaceID, ports: resolved)
         return resolved
     }
 
-    public func allocatePorts(workspaceID: String, definitions: [PortDefinition], range: PortRange) throws -> [Int] {
+    public func allocatePorts(workspaceID: String, definitions: [ServiceDefinition], range: PortRange) throws -> [Int] {
         let count = definitions.count
         guard count > 0 else {
-            try store.setWorkspacePorts(workspaceID: workspaceID, ports: [], names: [])
+            try releasePorts(workspaceID: workspaceID)
             return []
         }
         let inUse = try allReservedPorts()
@@ -74,7 +74,7 @@ public final class PortAllocator {
         }
         let names = definitions.map(\.name)
         try store.setWorkspacePorts(workspaceID: workspaceID, ports: allocated, names: names, definitionIDs: definitions.map(\.id))
-        PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: allocated)
+        syncReservationState(workspaceID: workspaceID, ports: allocated)
         return allocated
     }
 
@@ -85,8 +85,26 @@ public final class PortAllocator {
 
     public func reserveExistingPorts(workspaceID: String) throws {
         let ports = try store.workspacePorts(workspaceID: workspaceID)
-        guard !ports.isEmpty else { return }
+        syncReservationState(workspaceID: workspaceID, ports: ports)
+    }
+
+    /// Keeps placeholder reservation sockets aligned with the workspace lifecycle.
+    ///
+    /// Stopped workspaces hold their assigned service ports so unrelated processes do not claim them
+    /// before the next launch. Running workspaces never hold placeholder sockets: Spaces cannot know
+    /// which configured or ad-hoc process will bind which port, and re-reserving a briefly-free port can
+    /// make the intended server fail with EADDRINUSE.
+    private func syncReservationState(workspaceID: String, ports: [Int]) {
+        guard !ports.isEmpty, !isWorkspaceRunning(workspaceID) else {
+            PortReserver.shared.releasePorts(workspaceID: workspaceID)
+            return
+        }
         PortReserver.shared.reservePorts(workspaceID: workspaceID, ports: ports)
+    }
+
+    private func isWorkspaceRunning(_ workspaceID: String) -> Bool {
+        guard let workspace = try? store.workspace(id: workspaceID) else { return false }
+        return workspace.isRunning
     }
 
     private func allReservedPorts(excludingWorkspaceID: String? = nil) throws -> Set<Int> {

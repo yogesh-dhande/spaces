@@ -1,6 +1,6 @@
 import Foundation
 
-public struct PortDefinition: Codable, Sendable, Equatable {
+public struct ServiceDefinition: Codable, Sendable, Equatable {
     public var id: String
     public var name: String
 
@@ -26,5 +26,5 @@ public struct PortDefinition: Codable, Sendable, Equatable {
         try container.encode(name, forKey: .name)
     }
 
-    public static func == (lhs: PortDefinition, rhs: PortDefinition) -> Bool { lhs.name == rhs.name }
+    public static func == (lhs: ServiceDefinition, rhs: ServiceDefinition) -> Bool { lhs.name == rhs.name }
 }

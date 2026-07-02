@@ -11,6 +11,7 @@ from pathlib import Path
 
 PROCESS_NAME = "parity-process"
 AGENT_NAME = "parity-agent"
+REMOTE_WEB_SESSION_NAME = "remote-web"
 
 
 def parse_args() -> argparse.Namespace:
@@ -577,6 +578,15 @@ def run(args: argparse.Namespace) -> dict:
     wait_for_agent_row(args, app, workspace_id, "notStarted")
 
     overview_final = current_overview(args, app)
+    final_workspace = find_workspace(overview_final, workspace_id) or {}
+    remote_web_port = next(
+        (port for port in final_workspace.get("assignedPorts") or [] if port.get("name") == "web"),
+        {},
+    )
+    remote_web_session = next(
+        (session for session in ((final_workspace.get("config") or {}).get("resolvedBrowserSessions") or []) if session.get("name") == REMOTE_WEB_SESSION_NAME),
+        {},
+    )
     summary = {
         "label": args.label,
         "projectDir": project_dir,
@@ -588,6 +598,9 @@ def run(args: argparse.Namespace) -> dict:
         "processID": process_id,
         "agentID": agent_id,
         "agentSessionID": agent_session_id,
+        "remoteWebServicePort": remote_web_port.get("port"),
+        "remoteWebServiceURL": remote_web_port.get("url"),
+        "remoteWebBrowserURL": remote_web_session.get("url"),
         "finalProjectCount": len(overview_final.get("projects") or []),
     }
     if args.result_json:

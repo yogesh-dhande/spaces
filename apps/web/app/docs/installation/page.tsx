@@ -58,39 +58,15 @@ export default function InstallationDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Dependencies</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaces relies on a few external tools. Install them before launching.
+          Spaces relies on Google Chrome for browser sessions. Install it before launching.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>
-            • <strong>yabai</strong> — used to focus workspace windows.
-            <div className="mt-1 space-y-2">
-              <pre className="rounded-lg bg-background-soft p-3 text-xs leading-6">brew install asmvik/formulae/yabai</pre>
-              <a
-                href="https://github.com/asmvik/yabai"
-                className="text-accent hover:underline"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Open yabai project
-              </a>
-            </div>
-          </li>
           <li>• <strong>Google Chrome</strong> — required for browser sessions. Download from <a href="https://www.google.com/chrome/" className="text-accent hover:underline" target="_blank" rel="noopener noreferrer">google.com/chrome</a> or install with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">brew install --cask google-chrome</code>.</li>
+          <li>• <strong>Automation permission</strong> — Spaces controls Google Chrome to focus browser sessions, which macOS gates under Privacy &amp; Security ▸ Automation. On first launch Spaces shows a setup screen to grant it; you can also enable it later from System Settings.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces includes its own terminal. On first launch, it walks you through anything that is missing in a guided setup flow.
+          Spaces includes its own terminal, so workspaces do not depend on any external terminal app.
         </p>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">macOS Permissions</h2>
-        <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaces and yabai need Accessibility permission to focus windows. Spaces&apos;s setup flow will open the right System Settings pane on first launch, but you can also grant it manually:
-        </p>
-        <ol className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>1. Open <strong>System Settings → Privacy &amp; Security → Accessibility</strong>.</li>
-          <li>2. Enable <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces</code> and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">yabai</code>.</li>
-        </ol>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

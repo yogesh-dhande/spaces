@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 4 ]; then
-  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <spacesd-path> <bundle-output-path>" >&2
+if [ $# -lt 4 ] || [ $# -gt 5 ]; then
+  echo "Usage: $0 <Spaces-app-path> <spaces-cli-path> <spacesd-path> <bundle-output-path> [caddy-path]" >&2
   exit 1
 fi
 
@@ -11,6 +11,8 @@ SPACES_CLI="$2"
 SPACESD="$3"
 BUNDLE_OUTPUT="$4"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DEFAULT_CADDY_BIN="$REPO_ROOT/apps/macos/.local/caddy/caddy"
+CADDY_BIN="${5:-$DEFAULT_CADDY_BIN}"
 SPARKLE_FRAMEWORK="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 GHOSTTYVT_LIB_DIR="${SPACES_GHOSTTY_VT_LIB_DIR:-$REPO_ROOT/apps/macos/.local/ghosttyvt/lib}"
 
@@ -26,6 +28,15 @@ fi
 
 if [[ ! -f "$SPACESD" ]]; then
   echo "Error: spacesd daemon binary not found at $SPACESD" >&2
+  exit 1
+fi
+
+if [[ $# -eq 4 ]]; then
+  "$REPO_ROOT/apps/macos/scripts/setup_caddy.sh"
+fi
+
+if [[ ! -f "$CADDY_BIN" ]]; then
+  echo "Error: caddy binary not found at $CADDY_BIN" >&2
   exit 1
 fi
 
@@ -117,5 +128,8 @@ cp "$SPACES_CLI" "$BUNDLE_OUTPUT/Contents/Resources/spaces"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spaces"
 cp "$SPACESD" "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
+require_universal_macos_binary "$CADDY_BIN" "caddy router binary"
+cp "$CADDY_BIN" "$BUNDLE_OUTPUT/Contents/Resources/caddy"
+chmod +x "$BUNDLE_OUTPUT/Contents/Resources/caddy"
 cp -R "$SPARKLE_FRAMEWORK" "$BUNDLE_OUTPUT/Contents/Frameworks/"
 copy_or_build_universal_ghostty_vt_dylibs "$BUNDLE_OUTPUT/Contents/Frameworks"

@@ -41,8 +41,8 @@ import Testing
         #expect(
             !AppKitController.preparedGitProjectResultMatchesActiveRequest(
                 isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
-                currentPreparationID: UUID(), completionPreparationID: preparationID))
+                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local", currentPreparationID: UUID(),
+                completionPreparationID: preparationID))
     }
 
     @Test func localProjectPreviewResultRequiresActiveLocalSource() {
@@ -79,8 +79,12 @@ import Testing
     }
 
     @Test func preparedGitProjectDiscardKeyUsesTrimmedRepoURLAndDevice() {
-        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "  https://example.com/repo.git\n", deviceID: "local") == "local\nhttps://example.com/repo.git")
-        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "local") != AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "remote"))
+        #expect(
+            AppKitController.preparedGitProjectDiscardKey(repoURL: "  https://example.com/repo.git\n", deviceID: "local")
+                == "local\nhttps://example.com/repo.git")
+        #expect(
+            AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "local")
+                != AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "remote"))
         #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "   ", deviceID: "local") == nil)
         #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: nil, deviceID: "local") == nil)
     }

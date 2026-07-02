@@ -154,10 +154,10 @@ import workspacecore
     @Test func workspaceProcessStatusByNameReflectsRuntimeState() {
         let statuses = AppKitController.workspaceProcessStatusByName([
             RunningProcessRecord(
-                id: "running", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "Spaces", windowID: 101,
+                id: "running", workspaceID: "workspace", templateName: "web", command: "npm run dev", terminalApp: "Spaces",
                 terminalTrackingID: "session-web", pid: 1, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil),
             RunningProcessRecord(
-                id: "exited", workspaceID: "workspace", templateName: "worker", command: "npm run worker", terminalApp: "Spaces", windowID: 102,
+                id: "exited", workspaceID: "workspace", templateName: "worker", command: "npm run worker", terminalApp: "Spaces",
                 terminalTrackingID: "session-worker", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil),
         ])
 

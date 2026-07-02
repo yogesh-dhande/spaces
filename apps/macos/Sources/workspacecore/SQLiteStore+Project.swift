@@ -5,7 +5,7 @@ import systembridge
 
 extension SQLiteStore {
     public func upsert(project: ProjectRecord) throws {
-        let normalizedPortDefinitions = try validatedPortDefinitions(project.ports)
+        let normalizedServiceDefinitions = try validatedServiceDefinitions(project.ports)
         try withImmediateTransaction {
             try execute(
                 sql: """
@@ -23,10 +23,10 @@ extension SQLiteStore {
                     project.id, project.name, project.dir, project.isGitRepo ? "1" : "0", project.defaultBranch ?? "", project.setupScript ?? "",
                     project.stopScript ?? "",
                 ])
-            try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [project.id])
-            for (index, definition) in normalizedPortDefinitions.enumerated() {
+            try execute(sql: "DELETE FROM project_services WHERE project_id = ?", bindings: [project.id])
+            for (index, definition) in normalizedServiceDefinitions.enumerated() {
                 try execute(
-                    sql: "INSERT INTO project_port_definitions(id, project_id, name, order_index) VALUES (?, ?, ?, ?)",
+                    sql: "INSERT INTO project_services(id, project_id, name, order_index) VALUES (?, ?, ?, ?)",
                     bindings: [definition.id, project.id, definition.name, String(index)])
             }
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [project.id])
@@ -103,11 +103,11 @@ extension SQLiteStore {
             try execute(
                 sql: "DELETE FROM workspace_agent_launchers WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM running_processes WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
-            try execute(sql: "DELETE FROM workspace_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(
-                sql: "DELETE FROM workspace_port_definitions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+                sql: "DELETE FROM workspace_service_ports WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
+            try execute(sql: "DELETE FROM workspace_services WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
             try execute(sql: "DELETE FROM workspaces WHERE project_id = ?", bindings: [id])
-            try execute(sql: "DELETE FROM project_port_definitions WHERE project_id = ?", bindings: [id])
+            try execute(sql: "DELETE FROM project_services WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_processes WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_browser_sessions WHERE project_id = ?", bindings: [id])
             try execute(sql: "DELETE FROM project_agent_launchers WHERE project_id = ?", bindings: [id])
@@ -119,8 +119,8 @@ extension SQLiteStore {
     func decodeProjectWithTemplates(row: [String]) throws -> ProjectRecord? {
         guard row.count >= 7 else { return nil }
         let id = row[0]
-        let portRows = try queryRows(sql: "SELECT id, name FROM project_port_definitions WHERE project_id = ? ORDER BY order_index", bindings: [id])
-        let ports = portRows.map { row in PortDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
+        let portRows = try queryRows(sql: "SELECT id, name FROM project_services WHERE project_id = ? ORDER BY order_index", bindings: [id])
+        let ports = portRows.map { row in ServiceDefinition(id: row[0].isEmpty ? UUID().uuidString : row[0], name: row[1]) }
         let processes = try queryRows(
             sql: "SELECT id, name, command, on_exit FROM project_processes WHERE project_id = ? ORDER BY order_index", bindings: [id]
         ).map { row in

@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 7
+    public static let currentVersion = 9
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -76,6 +76,34 @@ public enum DatabaseSchema {
                     ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_window_id;
                     ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_target_url;
                     """)
+        },
+        // Runtime-target events recorded a desktop window id alongside each event. Desktop window
+        // tracking is gone, so the column is never written; drop it to match the runtime model.
+        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "Drop runtime-target event window IDs", requiresBackup: true) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE runtime_target_events DROP COLUMN window_id;")
+        },
+        DatabaseMigrationStep(fromVersion: 8, toVersion: 9, description: "Rename port tables and columns to service names", requiresBackup: true) {
+            database in
+            // Non-destructive rename of the per-workspace/project port tables to service-oriented
+            // names. Guarded by existence checks so it is a no-op on databases that already carry the
+            // service-named schema, while preserving all rows on databases created before the rename.
+            if try tableExists(database: database, table: "project_port_definitions") {
+                try executeBatch(database: database, sql: "ALTER TABLE project_port_definitions RENAME TO project_services;")
+            }
+            if try tableExists(database: database, table: "workspace_port_definitions") {
+                try executeBatch(database: database, sql: "ALTER TABLE workspace_port_definitions RENAME TO workspace_services;")
+            }
+            if try tableExists(database: database, table: "workspace_ports") {
+                try executeBatch(
+                    database: database,
+                    sql: """
+                        ALTER TABLE workspace_ports RENAME TO workspace_service_ports;
+                        ALTER TABLE workspace_service_ports RENAME COLUMN port_index TO service_index;
+                        ALTER TABLE workspace_service_ports RENAME COLUMN port_number TO port;
+                        ALTER TABLE workspace_service_ports RENAME COLUMN port_name TO service_name;
+                        ALTER TABLE workspace_service_ports RENAME COLUMN definition_id TO service_id;
+                        """)
+            }
         },
     ]
 
@@ -218,7 +246,7 @@ public enum DatabaseSchema {
               stop_script TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS project_port_definitions (
+            CREATE TABLE IF NOT EXISTS project_services (
               id TEXT NOT NULL,
               project_id TEXT NOT NULL,
               name TEXT NOT NULL CHECK (length(trim(name, ' \n\r\t')) > 0),
@@ -277,17 +305,17 @@ public enum DatabaseSchema {
             ON workspaces(project_id, branch)
             WHERE length(branch) > 0 AND is_archived = 0;
 
-            CREATE TABLE IF NOT EXISTS workspace_ports (
+            CREATE TABLE IF NOT EXISTS workspace_service_ports (
               workspace_id TEXT NOT NULL,
-              port_index INTEGER NOT NULL,
-              port_number INTEGER NOT NULL,
-              port_name TEXT NOT NULL CHECK (length(trim(port_name, ' \n\r\t')) > 0),
-              definition_id TEXT NOT NULL DEFAULT '',
-              PRIMARY KEY (workspace_id, port_index),
+              service_index INTEGER NOT NULL,
+              port INTEGER NOT NULL,
+              service_name TEXT NOT NULL CHECK (length(trim(service_name, ' \n\r\t')) > 0),
+              service_id TEXT NOT NULL DEFAULT '',
+              PRIMARY KEY (workspace_id, service_index),
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS workspace_port_definitions (
+            CREATE TABLE IF NOT EXISTS workspace_services (
               id TEXT NOT NULL,
               workspace_id TEXT NOT NULL,
               name TEXT NOT NULL CHECK (length(trim(name, ' \n\r\t')) > 0),
@@ -410,7 +438,6 @@ public enum DatabaseSchema {
               event_type TEXT NOT NULL,
               source TEXT NOT NULL,
               message TEXT,
-              window_id INTEGER,
               created_at TEXT NOT NULL,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
             );
@@ -479,5 +506,17 @@ public enum DatabaseSchema {
             if let errorMessage { sqlite3_free(errorMessage) }
             throw SpacesDatabaseError.migrationFailed(message: message)
         }
+    }
+
+    /// Whether a table exists, for migrations that must run conditionally. The table name is always a
+    /// hardcoded constant here, so interpolating it into the query carries no injection risk.
+    private static func tableExists(database: OpaquePointer, table: String) throws -> Bool {
+        var statement: OpaquePointer?
+        let sql = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '\(table)' LIMIT 1"
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw SpacesDatabaseError.migrationFailed(message: String(cString: sqlite3_errmsg(database)))
+        }
+        defer { sqlite3_finalize(statement) }
+        return sqlite3_step(statement) == SQLITE_ROW
     }
 }

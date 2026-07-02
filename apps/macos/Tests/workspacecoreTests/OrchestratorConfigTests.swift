@@ -16,7 +16,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: root.path)
 
         try orchestrator.updateProjectConfig(projectID: project.id) { project in
-            project.ports = [PortDefinition(name: "FRONTEND_PORT")]
+            project.ports = [ServiceDefinition(name: "frontend")]
             project.processes = [ProcessTemplate(name: "web", command: "PORT=${TYPO_PORT:-3000} npm run dev | tee log.txt")]
         }
 
@@ -32,7 +32,7 @@ extension OrchestratorTests {
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.ports = [PortDefinition(name: "FRONTEND_PORT")]
+            settings.ports = [ServiceDefinition(name: "frontend")]
             settings.processes = [ProcessTemplate(name: "web", command: "PORT=$TYPO_PORT npm run dev")]
         }
 
@@ -122,10 +122,7 @@ extension OrchestratorTests {
         let paths = try TerminalSessionPaths.forSession(id: reservation.sessionID)
 
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .starting)
-        XCTAssertThrowsError(
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation) }
-            })
+        XCTAssertThrowsError(try orchestrator.finishReservedWorkspaceTerminalLaunch(reservation))
 
         let failedState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
         XCTAssertEqual(failedState.state, .failed)
@@ -168,23 +165,26 @@ extension OrchestratorTests {
 
     // Tests that opening a terminal for a not-running workspace marks it as running so the UI shows Restart instead of Launch.
     func testRefreshWorkspaceWindowsPreservesGeneratedAdHocTerminalName() throws {
-        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        let (orchestrator, store, _, workspace, root) = try makeOrchestratorWithWorkspace()
+        let dbPath = root.appendingPathComponent("spaces-test.db").path
+        let sessionID = "session-1"
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell-1", windowID: 101, terminalTrackingID: "session-1",
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell-1", windowID: nil, terminalTrackingID: sessionID,
                 role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(
-                name: "YABAI_WINDOWS_JSON",
-                value:
-                    #"[{"id":101,"pid":11,"app":"Spaces","title":"zsh","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]"#
-            ) { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
+        try withSpacesProfileEnvironment(dbPath: dbPath) {
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running, updatedAt: "now",
+                    title: "shell-1", workingDirectory: workspace.dir))
+            try markBuiltInSessionLive(sessionID: sessionID)
+            _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
         }
 
         let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(terminalWindow.title, "shell-1")
-        XCTAssertEqual(terminalWindow.detail, "zsh")
     }
 
     func testOpenWorkspaceTerminalUsesBuiltInSpacesHostByDefault() throws {
@@ -209,11 +209,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
-            }
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
 
         let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
@@ -260,11 +256,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
-            }
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.openWorkspaceTerminal(workspaceID: workspace.id) }
 
         let sessionID = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" })?.terminalTrackingID)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
@@ -284,10 +276,10 @@ extension OrchestratorTests {
         XCTAssertEqual(names, ["Frontend", "API"])
     }
 
-    func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWithoutYabaiWindowIDWhileSessionIsLive() throws {
+    func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWithoutDesktopWindowIDWhileSessionIsLive() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -319,9 +311,7 @@ extension OrchestratorTests {
                     id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
                     connectedAt: "now"), mode: .owner, paths: paths, attachedAt: "now")
 
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-            }
+            _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
         }
 
         let windows = try orchestrator.windows(workspaceID: workspace.id)
@@ -332,7 +322,7 @@ extension OrchestratorTests {
     func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowUntilHostDetachesStaleRemoteAttachment() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -364,9 +354,7 @@ extension OrchestratorTests {
                     id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", hostName: "phone", deviceName: "Remote Client"),
                     connectedAt: "2000-01-01T00:00:00Z"), mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
 
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-            }
+            _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
         }
 
         let windows = try orchestrator.windows(workspaceID: workspace.id)
@@ -377,7 +365,7 @@ extension OrchestratorTests {
     func testRefreshWorkspaceWindowsPrunesAdHocBuiltInTerminalWindowAfterOwnerCloses() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
-        let store = try SQLiteStore(path: dbPath.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath.path)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -411,9 +399,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: timestamp)
             try TerminalSessionPersistence.detachClient(id: ownerClient.id, paths: paths, detachedAt: timestamp)
 
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-            }
+            _ = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
         }
 
         XCTAssertTrue(try orchestrator.windows(workspaceID: workspace.id).isEmpty)
@@ -429,7 +415,7 @@ extension OrchestratorTests {
         let chromeOpenLog = root.appendingPathComponent("chrome-open.log")
         try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "Frontend", url: "http://localhost:3001")])
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
             try withEnv(name: "MOCK_CHROME_OPEN_LOG_FILE", value: chromeOpenLog.path) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
         }
 
@@ -453,13 +439,10 @@ extension OrchestratorTests {
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "stale", windowID: 909, role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
 
-        // Mocked dependency: live yabai window inventory.
         // Why: verify refresh prunes missing/stale tracked windows without implicitly changing lifecycle state.
         // Remaining risk: rapid concurrent open/close events can still race with a single refresh snapshot.
         var didMutate = false
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-        }
+        didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
 
         XCTAssertTrue(didMutate)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
@@ -475,9 +458,7 @@ extension OrchestratorTests {
 
         // Workspace is not running and has no tracked windows — nothing to prune or update.
         var didMutate = true
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-        }
+        didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
 
         XCTAssertFalse(didMutate)
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
@@ -492,9 +473,7 @@ extension OrchestratorTests {
                 windowID: 909, role: "browser", orderIndex: 0, lastSeenAt: "now"))
 
         var didMutate = true
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id) }
-        }
+        didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
 
         XCTAssertFalse(didMutate)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).filter { $0.role == "browser" }.count, 1)
@@ -505,13 +484,11 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, windowID: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-                settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
-            }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
         }
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
@@ -552,13 +529,10 @@ extension OrchestratorTests {
                 id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "Spaces", title: "archived-stale", windowID: 912, role: "terminal",
                 orderIndex: 0, lastSeenAt: "now"))
 
-        // Mocked dependency: live yabai window inventory.
         // Why: confirm bulk refresh reconciles active workspaces only and leaves archived workspace rows unchanged.
         // Remaining risk: archived rows are intentionally left untouched until explicit archive/cleanup paths run.
         var result: WorkspaceOrchestrator.RefreshResult?
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { result = try orchestrator.refreshAllWorkspaceWindows() }
-        }
+        result = try orchestrator.refreshAllWorkspaceWindows()
 
         let refreshResult = try XCTUnwrap(result)
         XCTAssertTrue(refreshResult.didMutateDB)
@@ -578,15 +552,12 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: nil, windowID: nil,
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: nil, terminalTarget: nil,
                 pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Mocked dependency: `yabai` query path used during process/window reconciliation.
         // Why: isolate store-state transition coverage from real window manager availability.
         // Remaining risk: reconciliation against rapidly changing real windows remains untested here.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
-        }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { _ in }
 
         let updated = try store.workspace(id: workspace.id)
         XCTAssertEqual(updated?.isRunning, false)
@@ -712,21 +683,21 @@ extension OrchestratorTests {
 
         let updatedProject = try orchestrator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { config in
             config.stopScript = "echo reviewed-stop"
-            config.ports = [PortDefinition(name: "API_PORT")]
+            config.ports = [ServiceDefinition(name: "api")]
             config.processes = [ProcessTemplate(name: "api", command: "npm run api")]
         }
 
         XCTAssertEqual(updatedProject.stopScript, "echo reviewed-stop")
         let settings = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: workspace.id))
         XCTAssertEqual(settings.stopScript, "echo reviewed-stop")
-        XCTAssertEqual(settings.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(settings.ports.map(\.name), ["api"])
         XCTAssertEqual(settings.processes.first?.name, "api")
     }
 
     func testStopAdHocBuiltInTerminalSessionUsesLiveSessionDirectoryWithoutTrackedWindow() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
@@ -756,7 +727,7 @@ extension OrchestratorTests {
     func testStopAdHocBuiltInTerminalSessionRequiresLaunchMetadataWorkspaceMatch() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
@@ -793,25 +764,22 @@ extension OrchestratorTests {
     // Tests workspace settings and accessors reflect store state by arranging representative inputs and asserting the expected result.
     func testWorkspaceSettingsAndAccessorsReflectStoreState() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
-        let api = PortDefinition(id: "port-api", name: "API_PORT")
-        let web = PortDefinition(id: "port-web", name: "WEB_PORT")
-        try store.setWorkspacePortDefinitions(workspaceID: workspace.id, definitions: [api, web])
+        let api = ServiceDefinition(id: "port-api", name: "api")
+        let web = ServiceDefinition(id: "port-web", name: "web")
+        try store.setWorkspaceServiceDefinitions(workspaceID: workspace.id, definitions: [api, web])
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [4100, 4101], names: [api.name, web.name], definitionIDs: [api.id, web.id])
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, windowID: nil, pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "job", command: "echo job", terminalApp: nil, terminalTarget: nil,
+                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
-        // Mocked dependency: `yabai` queries used by settings reconciliation.
         // Why: keep this test focused on persisted settings/accessor behavior.
         // Remaining risk: browser-session behavior with real Chrome is intentionally excluded in this unit.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-                settings.stopScript = "echo workspace-stop"
-                settings.ports = [PortDefinition(name: "API_PORT"), PortDefinition(name: "WEB_PORT")]
-                settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
-                settings.browserSessions = []
-            }
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.stopScript = "echo workspace-stop"
+            settings.ports = [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")]
+            settings.processes = [ProcessTemplate(name: "job", command: "echo job")]
+            settings.browserSessions = []
         }
 
         let settings = try orchestrator.workspaceSettings(workspaceID: workspace.id)
@@ -834,7 +802,7 @@ extension OrchestratorTests {
         try orchestrator.updateProjectConfig(projectID: project.id) { p in
             p.setupScript = "echo setup"
             p.stopScript = "echo stop"
-            p.ports = [PortDefinition(name: "API_PORT")]
+            p.ports = [ServiceDefinition(name: "api")]
             p.processes = [ProcessTemplate(name: "api", command: "npm start")]
         }
 
@@ -863,13 +831,9 @@ extension OrchestratorTests {
                 lastSeenAt: "now"))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
-        // Mocked dependency: yabai window list (empty means the stale window gets pruned).
         // Why: verify refreshAllWorkspaceWindows iterates workspaces and returns correct counts.
-        // Remaining risk: real yabai interactions not covered.
         var result: WorkspaceOrchestrator.RefreshResult!
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { result = try orchestrator.refreshAllWorkspaceWindows() }
-        }
+        result = try orchestrator.refreshAllWorkspaceWindows()
 
         XCTAssertTrue(result.didMutateDB)
         XCTAssertEqual(result.trackedWindowCounts[workspace.id], 0)
@@ -964,8 +928,8 @@ extension OrchestratorTests {
         let workspaces = try store.workspaces(projectID: project.id, includeArchived: false)
         let defaultWS = try XCTUnwrap(workspaces.first(where: \.isDefault))
         let archived = WorkspaceRecord(
-            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch,
-            isDefault: true, isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
+            id: defaultWS.id, projectID: project.id, dir: defaultWS.dir, dirname: defaultWS.dirname, branch: defaultWS.branch, isDefault: true,
+            isArchived: true, isRunning: defaultWS.isRunning, lastLaunchedAt: defaultWS.lastLaunchedAt)
         try store.upsert(workspace: archived)
         XCTAssertTrue(try XCTUnwrap(store.workspace(id: defaultWS.id)).isArchived)
 
@@ -991,8 +955,8 @@ extension OrchestratorTests {
         // Insert a default workspace directly without going through seedWorkspaceSettings.
         let workspaceID = UUID().uuidString
         let workspaceRecord = WorkspaceRecord(
-            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true,
-            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: workspaceID, projectID: normalizedDir, dir: normalizedDir, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+            isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 
@@ -1062,8 +1026,9 @@ extension OrchestratorTests {
             baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
-        try store.setWorkspaceBrowserSessions(workspaceID: workspace.id, sessions: [BrowserSession(name: "App", url: "http://localhost:$PORT")])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])
+        try store.setWorkspaceBrowserSessions(
+            workspaceID: workspace.id, sessions: [BrowserSession(name: "App", url: "http://localhost:$SPACES_PORT_PORT")])
 
         let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
         XCTAssertEqual(resolved.map(\.url), ["http://localhost:3000"])
@@ -1077,11 +1042,12 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
             sessions: [
-                BrowserSession(name: "First", url: "http://localhost:$PORT"), BrowserSession(name: "Duplicate", url: "http://localhost:$PORT"),
+                BrowserSession(name: "First", url: "http://localhost:$SPACES_PORT_PORT"),
+                BrowserSession(name: "Duplicate", url: "http://localhost:$SPACES_PORT_PORT"),
             ])
 
         let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
@@ -1114,11 +1080,12 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
             sessions: [
-                BrowserSession(name: "App", url: "http://localhost:$PORT"), BrowserSession(name: "Admin", url: "http://localhost:$PORT/admin"),
+                BrowserSession(name: "App", url: "http://localhost:$SPACES_PORT_PORT"),
+                BrowserSession(name: "Admin", url: "http://localhost:$SPACES_PORT_PORT/admin"),
             ])
 
         let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)

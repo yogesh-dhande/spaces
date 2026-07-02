@@ -36,72 +36,20 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertNil(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .viewer))
     }
 
-    func testDesktopWindowIDRoundTripIsScopedByDeviceWorkspaceAndRuntimeTarget() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 101)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b", windowID: 202)
-        // Same runtime-target id but a different workspace must not collide.
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-a", windowID: 303)
-
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 101)
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b"), 202)
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-a"), 303)
-        XCTAssertNil(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "missing"))
-
-        XCTAssertEqual(try database.desktopWindowIDs(deviceID: "local", workspaceID: "ws-1"), ["rt-a": 101, "rt-b": 202])
-    }
-
-    func testDesktopWindowIDReverseLookupResolvesOwningRuntimeTargets() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 9999)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-b", windowID: 9999)
-
-        let matches = try database.desktopWindowIDMatches(deviceID: "local", windowID: 9999)
-        XCTAssertEqual(Set(matches.map(\.workspaceID)), ["ws-1", "ws-2"])
-        XCTAssertEqual(Set(matches.map(\.runtimeTargetID)), ["rt-a", "rt-b"])
-        XCTAssertTrue(try database.desktopWindowIDMatches(deviceID: "local", windowID: 0).isEmpty)
-    }
-
-    func testSetDesktopWindowIDUpdatesExistingRow() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 1)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 2)
-
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 2)
-        XCTAssertEqual(try database.desktopWindowIDs(deviceID: "local", workspaceID: "ws-1").count, 1)
-    }
-
-    func testClearDesktopWindowIDRemovesOnlyTheMatchingRow() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 1)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b", windowID: 2)
-
-        try database.clearDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a")
-
-        XCTAssertNil(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"))
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b"), 2)
-    }
-
-    func testDesktopWindowIDsSurviveMigrationFromVersionTwo() throws {
+    func testProjectCollapseStateSurvivesMigrationFromVersionTwo() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("spaces-client.db").path
 
-        // Open at the previous schema version (without the desktop_window_ids table), then reopen
-        // at the current version to exercise the v2 -> v3 migration path.
+        // Open at an older schema version, then reopen at the current version to exercise the
+        // forward migration path and confirm existing client data is preserved.
         let legacy = try SpacesClientDatabase(
             path: path, currentVersion: 2, migrationSteps: SpacesClientDatabase.defaultMigrationSteps.filter { $0.toVersion <= 2 })
         try legacy.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
 
         let migrated = try SpacesClientDatabase(path: path)
         XCTAssertTrue(try migrated.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
-        try migrated.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 7)
-        XCTAssertEqual(try migrated.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 7)
     }
 
     func testDefaultPathUsesEnvironmentOverride() throws {
@@ -325,6 +273,23 @@ final class SpacesClientDatabaseTests: XCTestCase {
             let backupBytes = try Data(contentsOf: backupURLs[0])
             XCTAssertNil(String(data: backupBytes, encoding: .utf8)?.range(of: "SECRET-TOKEN"))
         }
+    }
+
+    func testBrowserSessionWindowIDsListAllAndClearAllScopedToWorkspace() throws {
+        let database = try makeTemporaryClientDatabase()
+        let deviceID = "device-local"
+        try database.setBrowserSessionWindowID(deviceID: deviceID, workspaceID: "ws-1", targetURL: "http://localhost:3000", windowID: 11)
+        try database.setBrowserSessionWindowID(deviceID: deviceID, workspaceID: "ws-1", targetURL: "http://localhost:4000", windowID: 22)
+        try database.setBrowserSessionWindowID(deviceID: deviceID, workspaceID: "ws-2", targetURL: "http://localhost:3000", windowID: 33)
+
+        let workspaceOneWindows = try database.browserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1")
+        XCTAssertEqual(Set(workspaceOneWindows.map(\.windowID)), [11, 22])
+        XCTAssertEqual(Set(workspaceOneWindows.map(\.targetURL)), ["http://localhost:3000", "http://localhost:4000"])
+
+        // Stopping a workspace clears all of its tracked browser windows, and only that workspace's.
+        try database.clearBrowserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1")
+        XCTAssertTrue(try database.browserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1").isEmpty)
+        XCTAssertEqual(try database.browserSessionWindowID(deviceID: deviceID, workspaceID: "ws-2", targetURL: "http://localhost:3000"), 33)
     }
 
     private func device(id: String) -> SpacesPairedDeviceRecord {

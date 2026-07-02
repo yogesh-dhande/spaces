@@ -11,9 +11,9 @@ public enum SpacesCLISearchPath {
     /// or nil when no adjustment is needed (no sibling `spaces` executable, or the directory
     /// already leads PATH). Prepending the daemon's own directory guarantees the resolved
     /// CLI version matches the running daemon.
-    public static func pathPrependingSiblingCLIDirectory(
-        executablePath: String?, currentPATH: String?, fileManager: FileManager = .default
-    ) -> String? {
+    public static func pathPrependingSiblingCLIDirectory(executablePath: String?, currentPATH: String?, fileManager: FileManager = .default)
+        -> String?
+    {
         guard let executablePath, !executablePath.isEmpty else { return nil }
         let binDirectory = URL(fileURLWithPath: executablePath).deletingLastPathComponent().path
         let cliPath = URL(fileURLWithPath: binDirectory).appendingPathComponent(cliExecutableName).path

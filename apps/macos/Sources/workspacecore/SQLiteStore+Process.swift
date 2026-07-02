@@ -79,11 +79,8 @@ extension SQLiteStore {
         let terminalSessionID = row[10].isEmpty ? nil : row[10]
         let terminalApp = row[6].isEmpty && terminalSessionID != nil ? TerminalHost.spaces.appName : row[6]
         let resolvedTrackingID = row[9].isEmpty ? row[10] : row[9]
-        // The captured desktop window belongs to the linked runtime target (row[5]); a process
-        // detached from its target has none, so its window ID resolves to nil.
         let terminalTarget = decodeTerminalTarget(
-            runtimeTargetID: row[5], app: terminalApp, name: row[7], detail: row[8],
-            windowID: overlaidWindowID(workspaceID: row[1], runtimeTargetID: row[5].isEmpty ? nil : row[5]), trackingID: resolvedTrackingID)
+            runtimeTargetID: row[5], app: terminalApp, name: row[7], detail: row[8], trackingID: resolvedTrackingID)
         return RunningProcessRecord(
             id: row[0], workspaceID: row[1], templateID: row[2].isEmpty ? nil : row[2], templateName: row[3], command: row[4],
             runtimeTargetID: row[5].isEmpty ? nil : row[5], terminalApp: terminalApp.isEmpty ? nil : terminalApp, terminalTarget: terminalTarget,
@@ -105,7 +102,7 @@ extension SQLiteStore {
         try upsert(
             window: WindowRecord(
                 id: targetID, workspaceID: process.workspaceID, app: process.terminalApp ?? TerminalHost.spaces.appName, name: process.templateName,
-                detail: process.command, targetURL: nil, windowID: terminalTarget.windowID, terminalTrackingID: terminalTarget.trackingID,
+                detail: process.command, targetURL: nil, windowID: nil, terminalTrackingID: terminalTarget.trackingID,
                 terminalNativeID: terminalTarget.trackingID, role: "terminal",
                 orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 100),
                 lastSeenAt: now))
