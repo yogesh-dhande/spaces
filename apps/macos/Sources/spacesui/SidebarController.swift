@@ -843,7 +843,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 project.isGitRepo
                 ? host.selectedProjectID == project.id && host.selectedWorkspaceID == nil
                 : host.selectedProjectID == project.id && host.selectedWorkspaceID != nil
-            return projectRowCell(project: project, isSelected: isSelected, isExpanded: outlineView.isItemExpanded(ref))
+            return projectRowCell(project: project, isSelected: isSelected)
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: host.selectedWorkspaceID == workspace.id)
         case .emptyProject(let project): return emptyProjectRowCell(project: project)
@@ -925,7 +925,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return cell
     }
 
-    private func projectRowCell(project: ProjectSummary, isSelected: Bool, isExpanded: Bool) -> NSTableCellView {
+    private func projectRowCell(project: ProjectSummary, isSelected: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-project-\(project.id)")
 
@@ -987,19 +987,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         contentRow.addArrangedSubview(leadingStack)
         contentRow.addArrangedSubview(NSView())
         contentRow.addArrangedSubview(accessoryStack)
-        // Only git projects expand into a workspace list, so only they show a chevron.
-        if project.isGitRepo {
-            let chevron = NSImageView()
-            chevron.translatesAutoresizingMaskIntoConstraints = false
-            chevron.imageScaling = .scaleNone
-            chevron.image = NSImage(systemSymbolName: isExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-            chevron.contentTintColor = .tertiaryLabelColor
-            chevron.setContentHuggingPriority(.required, for: .horizontal)
-            chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
-            NSLayoutConstraint.activate([chevron.widthAnchor.constraint(equalToConstant: 14), chevron.heightAnchor.constraint(equalToConstant: 14)])
-            contentRow.addArrangedSubview(chevron)
-        }
 
         rowBackground.addSubview(contentRow)
         cell.addSubview(rowBackground)

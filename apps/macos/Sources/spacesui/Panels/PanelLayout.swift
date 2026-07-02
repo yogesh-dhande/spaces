@@ -28,6 +28,10 @@ struct PanelTab: Codable, Sendable, Equatable, Identifiable {
     /// User-set tab name; nil derives the title from the tab's first pane. Optional in
     /// the persisted JSON, so layouts saved before renames existed decode unchanged.
     var title: String?
+    /// The pane that most recently held focus while this tab was selected, so
+    /// reselecting the tab restores focus where the user left it. Optional in the
+    /// persisted JSON for the same compatibility reason as `title`.
+    var lastFocusedPaneID: String?
     var root: PaneNode
 }
 

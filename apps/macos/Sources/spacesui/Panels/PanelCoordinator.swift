@@ -233,14 +233,6 @@ import spacesdevicecore
         for tab in layout(for: scope).tabs { closeTab(scope: scope, tabID: tab.id) }
     }
 
-    /// The panel-window ⌘W behavior: close the selected tab; closing the last tab
-    /// closes the window through the empty-layout dismissal funnel.
-    func closeSelectedTab(panelWindowID: String) {
-        let scope = PanelScope.globalWindow(panelWindowID: panelWindowID)
-        guard let tabID = layout(for: scope).selectedTabID else { return }
-        closeTab(scope: scope, tabID: tabID)
-    }
-
     /// Reopens a persisted global panel window at startup: adopts the (already pruned)
     /// layout, materializes content controllers for its sessions, and shows the shell
     /// at its saved frame without stealing focus.
@@ -472,14 +464,16 @@ import spacesdevicecore
         guard let paneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: paneID, in: layout),
             let sessionID = pane.content.terminalSessionID
         else { return nil }
-        return (paneID, contentControllers[sessionID]?.displayTitle ?? "Terminal")
+        return (paneID, contentTitle(forSessionID: sessionID))
     }
 
-    /// Closes the focused pane of a workspace's panel (the footer's close control).
-    func closeFocusedPane(deviceID: String, workspaceID: String) {
-        let scope = PanelScope.workspace(deviceID: deviceID, workspaceID: workspaceID)
-        guard let paneID = layout(for: scope).focusedPaneID else { return }
+    /// Closes a panel's focused pane (the ⌘W behavior — the last pane of a tab takes
+    /// the tab with it, and a global window's last tab closes the window).
+    @discardableResult func closeFocusedPane(scope: PanelScope) -> Bool {
+        let layout = layout(for: scope)
+        guard let paneID = layout.focusedPaneID, PanelLayoutEngine.pane(withID: paneID, in: layout) != nil else { return false }
         closePane(scope: scope, paneID: paneID)
+        return true
     }
 
     /// A tab is titled after its user-chosen name when set, else its first pane's
@@ -488,7 +482,15 @@ import spacesdevicecore
         guard let tab = layout.tabs.first(where: { $0.id == tabID }) else { return "Terminal" }
         if let custom = tab.title { return custom }
         guard let first = PanelLayoutEngine.panes(in: tab).first, let sessionID = first.content.terminalSessionID else { return "Terminal" }
-        return contentControllers[sessionID]?.displayTitle ?? "Terminal"
+        return contentTitle(forSessionID: sessionID)
+    }
+
+    /// A pane's display title: the runtime target's name (what the sidebar row shows —
+    /// e.g. "codex", "npm:dev") when the session backs one, else the terminal's own
+    /// title.
+    private func contentTitle(forSessionID sessionID: String) -> String {
+        guard let content = contentControllers[sessionID] else { return "Terminal" }
+        return host.runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle
     }
 
     // MARK: - Rendering / persistence

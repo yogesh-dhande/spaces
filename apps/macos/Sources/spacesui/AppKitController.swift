@@ -163,7 +163,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The right panel's footer strip: workspace details for the selected workspace.
     private weak var workspaceDetailFooterRow: NSStackView?
     private weak var workspaceFooterPaneLabel: NSTextField?
-    private weak var workspaceFooterPaneCloseButton: NSButton?
     private var workspaceFooterWorkspaceID: String?
     private var workspaceNotesPopover: NSPopover?
     private weak var workspaceNotesEditorTextView: NSTextView?
@@ -3167,21 +3166,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let alertsRow = sidebar.makeAlertsSidebarRow()
         alertsRow.translatesAutoresizingMaskIntoConstraints = false
 
-        container.addSubview(topBarRow)
+        // The app identity row (logo, name, devices/settings/reload) is the sidebar's
+        // footer; the content above starts below the traffic lights (the titlebar is
+        // hidden with a full-size content view).
+        let footerSeparator = NSBox()
+        footerSeparator.boxType = .separator
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+
         container.addSubview(alertsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
+        container.addSubview(footerSeparator)
+        container.addSubview(topBarRow)
 
         NSLayoutConstraint.activate([
-            // The titlebar is hidden with a full-size content view, so the top bar
-            // sits in the traffic lights' vertical band and clears them on the left.
-            topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 78),
-            topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            topBarRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
-
             alertsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            alertsRow.topAnchor.constraint(equalTo: topBarRow.bottomAnchor, constant: 8),
+            alertsRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 34),
 
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
@@ -3189,7 +3190,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
-            scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: footerSeparator.topAnchor),
+
+            footerSeparator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            footerSeparator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            topBarRow.topAnchor.constraint(equalTo: footerSeparator.bottomAnchor, constant: 2),
+            topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            topBarRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
         ])
 
         return container
@@ -4878,8 +4886,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             footer.addArrangedSubview(warningIcon)
         }
 
+        // Git workspaces are named after their branch, so a branch label matching the
+        // name would just duplicate it.
         let branch = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !branch.isEmpty {
+        if !branch.isEmpty, branch != workspace.displayName {
             let branchIcon = NSImageView()
             branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")?
                 .withSymbolConfiguration(.init(pointSize: 9, weight: .regular))
@@ -4906,21 +4916,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         dirLabel.setAccessibilityIdentifier("workspace-detail-dir")
         footer.addArrangedSubview(dirLabel)
 
-        // The focused pane's identity (panes carry no header of their own): title plus
-        // a close-pane control, kept in sync by the panel coordinator.
+        // The focused pane's identity (panes carry no header of their own), kept in
+        // sync by the panel coordinator. ⌘W closes it.
         let paneLabel = NSTextField(labelWithString: "")
         paneLabel.font = .systemFont(ofSize: 11, weight: .medium)
         paneLabel.textColor = .secondaryLabelColor
         paneLabel.lineBreakMode = .byTruncatingTail
         paneLabel.setAccessibilityIdentifier("workspace-detail-focused-pane")
-        let paneCloseButton = footerActionButton(symbol: "xmark", tooltip: "Close pane", action: #selector(closeFocusedPaneFromFooter(_:)))
-        paneCloseButton.setAccessibilityIdentifier("workspace-detail-pane-close")
         workspaceFooterPaneLabel = paneLabel
-        workspaceFooterPaneCloseButton = paneCloseButton
         workspaceFooterWorkspaceID = workspace.id
         footer.addArrangedSubview(paneLabel)
-        footer.addArrangedSubview(paneCloseButton)
-        footer.setCustomSpacing(3, after: paneLabel)
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
@@ -4976,21 +4981,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Syncs the footer's focused-pane identity (title + close control) with the
-    /// workspace panel; called by the panel coordinator on layout and title changes.
+    /// Syncs the footer's focused-pane title with the workspace panel; called by the
+    /// panel coordinator on layout and title changes.
     func refreshWorkspaceFooterFocusedPane(workspaceID: String) {
-        guard workspaceFooterWorkspaceID == workspaceID, let paneLabel = workspaceFooterPaneLabel,
-            let closeButton = workspaceFooterPaneCloseButton
-        else { return }
+        guard workspaceFooterWorkspaceID == workspaceID, let paneLabel = workspaceFooterPaneLabel else { return }
         let info = panelCoordinator.focusedPaneInfo(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
         paneLabel.stringValue = info?.title ?? ""
         paneLabel.isHidden = info == nil
-        closeButton.isHidden = info == nil
-    }
-
-    @objc private func closeFocusedPaneFromFooter(_ sender: NSButton) {
-        guard let workspaceID = workspaceFooterWorkspaceID else { return }
-        panelCoordinator.closeFocusedPane(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
     }
 
     /// Opens the notes editor in a popover anchored to the footer's notes button.
@@ -7785,7 +7782,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if self.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
-            if self.handlePanelWindowCloseTabShortcut(event: event) { return nil }
+            if self.handleClosePaneShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if self.handleSidebarArrowNavigation(event: event) { return nil }
@@ -7876,22 +7873,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return eventModifiers.contains(.command) ? .runAppShortcuts : .passEventToTerminal
     }
 
-    /// ⌘W in a global panel window closes the selected tab (the last tab closes the
-    /// window); everywhere else ⌘W keeps its default behavior.
-    private func handlePanelWindowCloseTabShortcut(event: NSEvent) -> Bool {
+    /// ⌘W closes the active panel's focused pane — the last pane of a tab takes the
+    /// tab with it, and a global panel window's last tab closes the window. In the
+    /// main window it targets the selected workspace's panel; with no pane to close,
+    /// ⌘W keeps its default behavior.
+    private func handleClosePaneShortcut(event: NSEvent) -> Bool {
         guard
-            Self.isPanelWindowCloseTabShortcut(
+            Self.isClosePaneShortcut(
                 charactersIgnoringModifiers: event.charactersIgnoringModifiers,
-                eventModifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask)),
-            let panelWindowID = panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow)
+                eventModifiers: event.modifierFlags.intersection(.deviceIndependentFlagsMask))
         else { return false }
-        panelCoordinator.closeSelectedTab(panelWindowID: panelWindowID)
-        return true
+        if let panelWindowID = panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) {
+            return panelCoordinator.closeFocusedPane(scope: .globalWindow(panelWindowID: panelWindowID))
+        }
+        guard NSApp.keyWindow === window, let workspaceID = selectedWorkspaceID else { return false }
+        return panelCoordinator.closeFocusedPane(scope: .workspace(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID))
     }
 
     /// Plain ⌘W — no other chord modifiers, so terminal/app chords like ⌘⇧W or ⌥⌘W
     /// stay untouched.
-    nonisolated static func isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: String?, eventModifiers: NSEvent.ModifierFlags) -> Bool {
+    nonisolated static func isClosePaneShortcut(charactersIgnoringModifiers: String?, eventModifiers: NSEvent.ModifierFlags) -> Bool {
         guard charactersIgnoringModifiers?.lowercased() == "w" else { return false }
         return eventModifiers.intersection([.command, .option, .control, .shift]) == .command
     }

@@ -63,7 +63,7 @@ enum PanelLayoutEngine {
     /// Appends a tab holding a single pane, selecting and focusing it.
     static func appendTab(tabID: String, pane: Pane, to layout: PanelLayout) -> PanelLayout {
         var layout = layout
-        layout.tabs.append(PanelTab(id: tabID, title: nil, root: .leaf(pane)))
+        layout.tabs.append(PanelTab(id: tabID, title: nil, lastFocusedPaneID: nil, root: .leaf(pane)))
         layout.selectedTabID = tabID
         layout.focusedPaneID = pane.id
         return normalized(layout)
@@ -178,11 +178,17 @@ enum PanelLayoutEngine {
         guard let tab = layout.tabs.first(where: { $0.id == tabID }) else { return layout }
         var layout = layout
         layout.selectedTabID = tabID
-        // Keep the focused pane when it lives in this tab; otherwise focus its first pane.
-        if !(layout.focusedPaneID.map { id in panes(in: tab).contains { $0.id == id } } ?? false) {
-            layout.focusedPaneID = panes(in: tab).first?.id
+        let tabPaneIDs = panes(in: tab).map(\.id)
+        // Keep the focused pane when it lives in this tab; otherwise restore the pane
+        // that most recently held focus here, falling back to the first pane.
+        if !(layout.focusedPaneID.map { tabPaneIDs.contains($0) } ?? false) {
+            if let remembered = tab.lastFocusedPaneID, tabPaneIDs.contains(remembered) {
+                layout.focusedPaneID = remembered
+            } else {
+                layout.focusedPaneID = tabPaneIDs.first
+            }
         }
-        return layout
+        return rememberingFocusedPane(layout)
     }
 
     static func focusPane(paneID: String, in layout: PanelLayout) -> PanelLayout {
@@ -190,6 +196,16 @@ enum PanelLayoutEngine {
         var layout = layout
         layout.selectedTabID = location.tabID
         layout.focusedPaneID = paneID
+        return rememberingFocusedPane(layout)
+    }
+
+    /// Writes the focused pane back onto its tab's focus memory, so reselecting the
+    /// tab later lands on the same pane.
+    private static func rememberingFocusedPane(_ layout: PanelLayout) -> PanelLayout {
+        guard let focusedPaneID = layout.focusedPaneID, let location = location(ofPaneID: focusedPaneID, in: layout) else { return layout }
+        var layout = layout
+        guard let index = layout.tabs.firstIndex(where: { $0.id == location.tabID }) else { return layout }
+        layout.tabs[index].lastFocusedPaneID = focusedPaneID
         return layout
     }
 
@@ -217,6 +233,6 @@ enum PanelLayoutEngine {
         if layout.focusedPaneID == nil || !selectedPanes.contains(where: { $0.id == layout.focusedPaneID }) {
             layout.focusedPaneID = selectedPanes.first?.id
         }
-        return layout
+        return rememberingFocusedPane(layout)
     }
 }
