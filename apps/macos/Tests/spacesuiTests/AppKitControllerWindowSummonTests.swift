@@ -54,8 +54,8 @@ import workspacecore
         let template = ProcessTemplate(id: "template-frontend", name: "frontend", command: "npm run dev")
         let process = RunningProcessRecord(
             id: "runtime-frontend", workspaceID: "workspace-1", templateID: template.id, templateName: "old-name", command: "old command",
-            terminalApp: "Spaces", windowID: nil, terminalTrackingID: "session-frontend", terminalNativeID: "session-frontend", pid: nil,
-            status: .exited, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: "2026-06-05T00:00:00Z")
+            terminalApp: "Spaces", terminalTrackingID: "session-frontend", terminalNativeID: "session-frontend", pid: nil, status: .exited,
+            logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: "2026-06-05T00:00:00Z")
 
         let descriptor = AppKitController.terminalRuntimeControlDescriptor(
             sessionID: "session-frontend", workspaceID: "workspace-1", deviceID: "device-a", settings: WorkspaceSettings(processes: [template]),

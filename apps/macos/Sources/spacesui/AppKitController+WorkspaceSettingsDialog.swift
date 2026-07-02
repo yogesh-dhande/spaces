@@ -76,6 +76,7 @@ extension AppKitController {
 
         let portsSection = PortsSection(
             ports: config.ports, collapsedDisplayPorts: detail.assignedPorts.map { Optional.some($0.port) },
+            collapsedDisplayURLs: detail.assignedPorts.map { $0.url.isEmpty ? nil : $0.url },
             subtitle: "Per-workspace named ports, exposed as env vars.")
         portsSection.onCommit = { updated in commit { $0.ports = updated } }
 

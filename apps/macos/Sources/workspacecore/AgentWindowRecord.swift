@@ -35,15 +35,11 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, runtimeTargetID: String? = nil, terminalTrackingID: String?,
-        terminalNativeID: String? = nil, codexThreadID: String?, windowID: Int?, yabaiWindowID: Int? = nil, status: AgentWindowStatus,
-        createdAt: String, updatedAt: String
+        terminalNativeID: String? = nil, codexThreadID: String?, status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
-        let resolvedWindowID = yabaiWindowID ?? windowID
         let resolvedTrackingID = terminalTrackingID ?? terminalNativeID
         let terminalTarget: TerminalTargetRecord? =
-            if resolvedWindowID != nil || resolvedTrackingID != nil {
-                TerminalTargetRecord(runtimeTargetID: runtimeTargetID, windowID: resolvedWindowID, trackingID: resolvedTrackingID)
-            } else { nil }
+            if resolvedTrackingID != nil { TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: resolvedTrackingID) } else { nil }
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: runtimeTargetID, terminalTarget: terminalTarget,
             sessionKey: codexThreadID, status: status, createdAt: createdAt, updatedAt: updatedAt)
@@ -51,18 +47,14 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String? = nil,
-        codexThreadID: String?, windowID: Int?, yabaiWindowID: Int? = nil, status: AgentWindowStatus, createdAt: String, updatedAt: String
+        codexThreadID: String?, status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: nil, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, windowID: windowID, yabaiWindowID: yabaiWindowID, status: status,
-            createdAt: createdAt, updatedAt: updatedAt)
+            terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, status: status, createdAt: createdAt, updatedAt: updatedAt)
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }
     public var terminalNativeID: String? { terminalTarget?.trackingID }
     public var codexThreadID: String? { sessionKey }
-    public var windowID: Int? { terminalTarget?.windowID }
-    /// Yabai window ID of the captured workspace window hosting this agent session.
-    public var yabaiWindowID: Int? { terminalTarget?.windowID }
 }

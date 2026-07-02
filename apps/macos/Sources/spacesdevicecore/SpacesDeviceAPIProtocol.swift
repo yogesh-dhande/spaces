@@ -66,7 +66,7 @@ public struct SpacesDeviceClientApp: Codable, Sendable, Equatable {
     }
 }
 
-public struct SpacesDevicePortDefinition: Codable, Sendable, Equatable, Identifiable {
+public struct SpacesDeviceServiceDefinition: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let name: String
 
@@ -116,14 +116,14 @@ public struct SpacesDeviceAgentLauncher: Codable, Sendable, Equatable, Identifia
 
 public struct SpacesDeviceWorkspaceConfig: Codable, Sendable, Equatable {
     public let stopScript: String?
-    public let ports: [SpacesDevicePortDefinition]
+    public let ports: [SpacesDeviceServiceDefinition]
     public let processes: [SpacesDeviceProcessTemplate]
     public let browserSessions: [SpacesDeviceBrowserSession]
     public let resolvedBrowserSessions: [SpacesDeviceBrowserSession]
     public let agentLaunchers: [SpacesDeviceAgentLauncher]
 
     public init(
-        stopScript: String? = nil, ports: [SpacesDevicePortDefinition] = [], processes: [SpacesDeviceProcessTemplate] = [],
+        stopScript: String? = nil, ports: [SpacesDeviceServiceDefinition] = [], processes: [SpacesDeviceProcessTemplate] = [],
         browserSessions: [SpacesDeviceBrowserSession] = [], resolvedBrowserSessions: [SpacesDeviceBrowserSession] = [],
         agentLaunchers: [SpacesDeviceAgentLauncher] = []
     ) {
@@ -147,7 +147,7 @@ public struct SpacesDeviceWorkspaceConfig: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         stopScript = try container.decodeIfPresent(String.self, forKey: .stopScript)
-        ports = try container.decodeIfPresent([SpacesDevicePortDefinition].self, forKey: .ports) ?? []
+        ports = try container.decodeIfPresent([SpacesDeviceServiceDefinition].self, forKey: .ports) ?? []
         processes = try container.decodeIfPresent([SpacesDeviceProcessTemplate].self, forKey: .processes) ?? []
         browserSessions = try container.decodeIfPresent([SpacesDeviceBrowserSession].self, forKey: .browserSessions) ?? []
         resolvedBrowserSessions = try container.decodeIfPresent([SpacesDeviceBrowserSession].self, forKey: .resolvedBrowserSessions) ?? []
@@ -158,13 +158,13 @@ public struct SpacesDeviceWorkspaceConfig: Codable, Sendable, Equatable {
 public struct SpacesDeviceProjectConfig: Codable, Sendable, Equatable {
     public let setupScript: String?
     public let stopScript: String?
-    public let ports: [SpacesDevicePortDefinition]
+    public let ports: [SpacesDeviceServiceDefinition]
     public let processes: [SpacesDeviceProcessTemplate]
     public let browserSessions: [SpacesDeviceBrowserSession]
     public let agentLaunchers: [SpacesDeviceAgentLauncher]
 
     public init(
-        setupScript: String? = nil, stopScript: String? = nil, ports: [SpacesDevicePortDefinition] = [],
+        setupScript: String? = nil, stopScript: String? = nil, ports: [SpacesDeviceServiceDefinition] = [],
         processes: [SpacesDeviceProcessTemplate] = [], browserSessions: [SpacesDeviceBrowserSession] = [],
         agentLaunchers: [SpacesDeviceAgentLauncher] = []
     ) {
@@ -189,7 +189,7 @@ public struct SpacesDeviceProjectConfig: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         setupScript = try container.decodeIfPresent(String.self, forKey: .setupScript)
         stopScript = try container.decodeIfPresent(String.self, forKey: .stopScript)
-        ports = try container.decodeIfPresent([SpacesDevicePortDefinition].self, forKey: .ports) ?? []
+        ports = try container.decodeIfPresent([SpacesDeviceServiceDefinition].self, forKey: .ports) ?? []
         processes = try container.decodeIfPresent([SpacesDeviceProcessTemplate].self, forKey: .processes) ?? []
         browserSessions = try container.decodeIfPresent([SpacesDeviceBrowserSession].self, forKey: .browserSessions) ?? []
         agentLaunchers = try container.decodeIfPresent([SpacesDeviceAgentLauncher].self, forKey: .agentLaunchers) ?? []
@@ -199,10 +199,27 @@ public struct SpacesDeviceProjectConfig: Codable, Sendable, Equatable {
 public struct SpacesDeviceAssignedPort: Codable, Sendable, Equatable {
     public let name: String
     public let port: Int
+    /// Derived service URL (`http://<service>.<workspace-slug>.localhost:<routerPort>`), computed by
+    /// the daemon which owns the workspace slug and router port. Empty if not provided.
+    public let url: String
 
-    public init(name: String, port: Int) {
+    public init(name: String, port: Int, url: String = "") {
         self.name = name
         self.port = port
+        self.url = url
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case port
+        case url
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        port = try container.decode(Int.self, forKey: .port)
+        url = try container.decodeIfPresent(String.self, forKey: .url) ?? ""
     }
 }
 

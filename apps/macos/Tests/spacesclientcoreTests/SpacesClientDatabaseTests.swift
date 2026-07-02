@@ -130,8 +130,8 @@ final class SpacesClientDatabaseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("spaces-client.db").path
 
-        // Open at the previous schema version (without the panel tables), then reopen at
-        // the current version to exercise the v4 -> v5 migration path.
+        // Open at a pre-panel schema version, then reopen at the current version to exercise
+        // the v4 -> v6 migration path (through the reserved no-op v5 step).
         let legacy = try SpacesClientDatabase(
             path: path, currentVersion: 4, migrationSteps: SpacesClientDatabase.defaultMigrationSteps.filter { $0.toVersion <= 4 })
         try legacy.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
@@ -348,9 +348,7 @@ final class SpacesClientDatabaseTests: XCTestCase {
             let failingStep = SpacesClientMigrationStep(
                 fromVersion: SpacesClientDatabase.currentVersion, toVersion: SpacesClientDatabase.currentVersion + 1,
                 description: "Intentional failure"
-            ) { _ in
-                throw NSError(domain: "SpacesClientDatabaseTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "boom"])
-            }
+            ) { _ in throw NSError(domain: "SpacesClientDatabaseTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "boom"]) }
             XCTAssertThrowsError(
                 try SpacesClientDatabase(
                     path: databaseURL.path, currentVersion: SpacesClientDatabase.currentVersion + 1, migrationSteps: [failingStep]))
@@ -363,6 +361,23 @@ final class SpacesClientDatabaseTests: XCTestCase {
             let backupBytes = try Data(contentsOf: backupURLs[0])
             XCTAssertNil(String(data: backupBytes, encoding: .utf8)?.range(of: "SECRET-TOKEN"))
         }
+    }
+
+    func testBrowserSessionWindowIDsListAllAndClearAllScopedToWorkspace() throws {
+        let database = try makeTemporaryClientDatabase()
+        let deviceID = "device-local"
+        try database.setBrowserSessionWindowID(deviceID: deviceID, workspaceID: "ws-1", targetURL: "http://localhost:3000", windowID: 11)
+        try database.setBrowserSessionWindowID(deviceID: deviceID, workspaceID: "ws-1", targetURL: "http://localhost:4000", windowID: 22)
+        try database.setBrowserSessionWindowID(deviceID: deviceID, workspaceID: "ws-2", targetURL: "http://localhost:3000", windowID: 33)
+
+        let workspaceOneWindows = try database.browserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1")
+        XCTAssertEqual(Set(workspaceOneWindows.map(\.windowID)), [11, 22])
+        XCTAssertEqual(Set(workspaceOneWindows.map(\.targetURL)), ["http://localhost:3000", "http://localhost:4000"])
+
+        // Stopping a workspace clears all of its tracked browser windows, and only that workspace's.
+        try database.clearBrowserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1")
+        XCTAssertTrue(try database.browserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1").isEmpty)
+        XCTAssertEqual(try database.browserSessionWindowID(deviceID: deviceID, workspaceID: "ws-2", targetURL: "http://localhost:3000"), 33)
     }
 
     private func device(id: String) -> SpacesPairedDeviceRecord {

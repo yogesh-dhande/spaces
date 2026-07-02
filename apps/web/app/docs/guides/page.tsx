@@ -36,7 +36,7 @@ export default function GuidesDocsPage() {
           </li>
           <li className="flex gap-3">
             <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-            <span>Why named ports, process commands, browser sessions, and setup scripts are configured a specific way.</span>
+            <span>Why named services, process commands, browser sessions, and setup scripts are configured a specific way.</span>
           </li>
           <li className="flex gap-3">
             <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />

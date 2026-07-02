@@ -141,6 +141,19 @@ public struct SpacesProfile: Sendable, Equatable {
         return slug.isEmpty ? "detached-head" : slug
     }
 
+    /// DNS-safe per-workspace host slug used as the middle label in `<service>.<slug>.localhost`.
+    /// Combines a human-readable workspace label with a short stable hash of the workspace id so two
+    /// workspaces with the same label get distinct hosts. Git workspaces use the branch label; non-git
+    /// workspaces use the project label. Derived deterministically from label + id (never persisted).
+    public static func workspaceHostSlug(branch: String?, projectName: String, isGitRepo: Bool, workspaceID: String) -> String {
+        let suffix = shortStableHash(workspaceID)
+        let maxBaseLength = max(1, DNSLabel.maxLength - suffix.count - 1)
+        let trimmedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = trimmedBranch.flatMap { $0.isEmpty ? nil : $0 }.map(slugifyBranchName) ?? (isGitRepo ? slugifyBranchName("") : projectName)
+        let base = DNSLabel.sanitize(label, maxLength: maxBaseLength)
+        return "\(base)-\(suffix)"
+    }
+
     public static func shortStableHash(_ value: String) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in value.utf8 {

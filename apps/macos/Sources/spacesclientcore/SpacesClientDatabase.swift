@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 5
+    public static let currentVersion = 6
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -321,6 +321,22 @@ public final class SpacesClientDatabase {
             bindings: [deviceID, workspaceID, targetURL])
     }
 
+    /// Every dedicated Chrome window tracked for a workspace's browser sessions, so the GUI can
+    /// close them all when the workspace stops.
+    public func browserSessionWindowIDs(deviceID: String, workspaceID: String) throws -> [(targetURL: String, windowID: Int)] {
+        try queryRows(
+            sql: "SELECT target_url, window_id FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?",
+            bindings: [deviceID, workspaceID]
+        ).compactMap { row in
+            guard row.count >= 2, let windowID = Int(row[1]) else { return nil }
+            return (row[0], windowID)
+        }
+    }
+
+    public func clearBrowserSessionWindowIDs(deviceID: String, workspaceID: String) throws {
+        try execute(sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
+    }
+
     // MARK: - Panel layouts
 
     public func writeWorkspacePanelLayout(deviceID: String, workspaceID: String, layoutJSON: String) throws {
@@ -336,8 +352,7 @@ public final class SpacesClientDatabase {
 
     public func workspacePanelLayout(deviceID: String, workspaceID: String) throws -> String? {
         try queryRow(
-            sql: "SELECT layout_json FROM workspace_panel_layouts WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])?
-            .first
+            sql: "SELECT layout_json FROM workspace_panel_layouts WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])?.first
     }
 
     public func deleteWorkspacePanelLayout(deviceID: String, workspaceID: String) throws {
@@ -787,8 +802,8 @@ public final class SpacesClientDatabase {
         },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
             try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
-        },
-        SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Add panel layouts") { database in
+        }, SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Reserve merged client schema version") { _ in },
+        SpacesClientMigrationStep(fromVersion: 5, toVersion: 6, description: "Add panel layouts") { database in
             try executeClientBatch(database: database, sql: panelLayoutsSchemaSQL)
         },
     ]

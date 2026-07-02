@@ -81,8 +81,8 @@ import workspacecore
             focusRequest: .agentWindow(
                 .init(
                     id: "agent-1", workspaceID: "workspace-a", provider: .spaces, label: "Claude", terminalTrackingID: nil, codexThreadID: nil,
-                    windowID: nil, yabaiWindowID: nil, status: .waiting, createdAt: "2026-04-30T00:00:00Z", updatedAt: "2026-04-30T00:00:00Z")),
-            alertsAttentionID: "attention-2", workspaceTitle: "Workspace A", status: .agent(.waiting))
+                    status: .waiting, createdAt: "2026-04-30T00:00:00Z", updatedAt: "2026-04-30T00:00:00Z")), alertsAttentionID: "attention-2",
+            workspaceTitle: "Workspace A", status: .agent(.waiting))
         let workspaceItem = makeItem(
             id: "workspace-a::0", source: .workspaceTarget, workspaceID: "workspace-a", kind: .process, label: "Frontend", detail: "bun dev",
             focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-1"), workspaceTitle: "Workspace A",

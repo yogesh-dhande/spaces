@@ -1,6 +1,5 @@
 import XCTest
 import spacesterminalcore
-import systembridge
 
 @testable import workspacecore
 
@@ -9,44 +8,20 @@ private final class AgentHookTerminalCloseCapture: @unchecked Sendable { var ses
 private final class AgentHookTerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
 final class AgentHookTests: XCTestCase {
-    override func invokeTest() {
-        do { try withMockCommands(["yabai": Self.yabaiMockScript]) { super.invokeTest() } } catch {
-            XCTFail("Failed to install mock commands: \(error)")
-        }
-    }
-
     func testRegisterAgentWindowCreatesDedicatedWindowRecord() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session")
 
         let record = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
-            yabaiWindowID: 101, status: .idle)
+            status: .idle)
 
         XCTAssertEqual(record.provider, .spaces)
         XCTAssertEqual(record.label, "Codex CLI")
         XCTAssertEqual(record.terminalTrackingID, "workspace-session")
-        XCTAssertEqual(record.windowID, 101)
-        XCTAssertEqual(record.yabaiWindowID, 101)
         XCTAssertEqual(record.status, .idle)
-    }
-
-    func testRegisterAgentWindowUpdatesExistingWindowRecord() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let (_, workspace) = try makeProjectAndWorkspace(store: store)
-
-        let first = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", yabaiWindowID: 101, status: .idle)
-        let second = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session-2", yabaiWindowID: 101,
-            status: .spinning)
-
-        XCTAssertEqual(first.id, second.id)
-        XCTAssertEqual(second.label, "Codex CLI")
-        XCTAssertEqual(second.terminalTrackingID, "workspace-session-2")
-        XCTAssertEqual(second.status, .spinning)
     }
 
     func testRegisterAgentWindowKeepsSeparateDedicatedWindowsDistinct() throws {
@@ -55,25 +30,29 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-1", yabaiWindowID: 101, status: .idle)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-1", status: .idle)
         let second = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-2", yabaiWindowID: 202, status: .spinning)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-2", status: .spinning)
 
         XCTAssertNotEqual(first.id, second.id)
-        XCTAssertEqual(Set(try store.agentWindows(workspaceID: workspace.id).compactMap(\.yabaiWindowID)), Set([101, 202]))
+        XCTAssertEqual(
+            Set(try store.agentWindows(workspaceID: workspace.id).compactMap(\.terminalTrackingID)),
+            Set(["workspace-session-1", "workspace-session-2"]))
     }
 
     func testRegisterAgentWindowAutoRenamesDuplicateAdHocAgentLabels() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-1")
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-2")
 
         let first = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session-1",
-            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
+            codexThreadID: "thread-1", status: .idle)
         let second = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session-2",
-            codexThreadID: "thread-2", yabaiWindowID: 202, status: .idle)
+            codexThreadID: "thread-2", status: .idle)
 
         XCTAssertEqual(first.label, "Claude Code CLI")
         XCTAssertEqual(second.label, "Claude Code CLI-2")
@@ -87,13 +66,15 @@ final class AgentHookTests: XCTestCase {
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
         }
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-1")
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-2")
 
         let adHoc = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "workspace-session-1", codexThreadID: "thread-1",
-            yabaiWindowID: 101, status: .idle)
+            status: .idle)
         let configured = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "workspace-session-2", codexThreadID: "thread-2",
-            yabaiWindowID: 202, status: .idle, claimedLauncherName: "Codex")
+            status: .idle, claimedLauncherName: "Codex")
 
         XCTAssertEqual(adHoc.label, "Codex-2")
         XCTAssertEqual(configured.label, "Codex")
@@ -105,6 +86,8 @@ final class AgentHookTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "configured-session")
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "ad-hoc-session")
         let configured = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "configured-session",
             terminalNativeID: "configured-session", status: .idle, claimedLauncherName: "Codex")
@@ -125,21 +108,21 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 2)
     }
 
-    func testUpdateAgentWindowStatusMatchesExistingWindowID() throws {
+    func testUpdateAgentWindowStatusMatchesExistingSession() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
-            yabaiWindowID: 101, status: .idle)
+            status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-1", yabaiWindowID: 101,
-            label: "Codex CLI", status: .done)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-1", label: "Codex CLI",
+            status: .done)
 
         XCTAssertEqual(updated.status, .done)
-        XCTAssertEqual(updated.yabaiWindowID, 101)
+        XCTAssertEqual(updated.terminalTrackingID, "workspace-session")
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
@@ -150,10 +133,10 @@ final class AgentHookTests: XCTestCase {
 
         let existing = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session",
-            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
+            codexThreadID: "thread-1", status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-1", yabaiWindowID: 101,
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
             label: "Claude Code CLI", status: .spinning)
 
         XCTAssertEqual(updated.id, existing.id)
@@ -162,57 +145,17 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
     }
 
-    func testUpdateAgentWindowStatusPrefersTerminalSessionMatchOverWindowID() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let (_, workspace) = try makeProjectAndWorkspace(store: store)
-
-        let existing = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "workspace-session",
-            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
-
-        let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-1", yabaiWindowID: 202,
-            label: "Claude Code CLI", status: .waiting)
-
-        XCTAssertEqual(updated.id, existing.id)
-        XCTAssertEqual(updated.yabaiWindowID, 202)
-        XCTAssertEqual(updated.status, .waiting)
-        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
-    }
-
-    func testUpdateAgentWindowStatusIgnoresYabaiWindowIDForBuiltInSpacesSessionIdentity() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-        let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        let sessionID = UUID().uuidString
-
-        let existing = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: sessionID, terminalNativeID: sessionID,
-            codexThreadID: "thread-1", yabaiWindowID: 101, status: .idle)
-
-        let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, codexThreadID: "thread-1", yabaiWindowID: 202,
-            label: "Claude Code CLI", status: .waiting)
-
-        XCTAssertEqual(updated.id, existing.id)
-        XCTAssertNil(updated.yabaiWindowID)
-        XCTAssertEqual(updated.status, .waiting)
-        XCTAssertFalse(try store.windows(workspaceID: workspace.id).contains { $0.windowID == 101 || $0.windowID == 202 })
-    }
-
     func testUpdateAgentWindowStatusFallsBackToCodexThreadMatch() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-xyz", yabaiWindowID: 101,
-            status: .idle)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-xyz", status: .idle)
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-xyz", yabaiWindowID: nil,
-            label: "Codex CLI", status: .spinning)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session", codexThreadID: "thread-xyz", label: "Codex CLI",
+            status: .spinning)
 
         XCTAssertEqual(updated.id, try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first).id)
         XCTAssertEqual(updated.label, "Codex CLI")
@@ -225,16 +168,15 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let (_, workspace2) = try makeProjectAndWorkspace(store: store, projectName: "proj2", workspaceName: "ws2")
 
+        try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-1", status: .idle)
         try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-1", yabaiWindowID: 101, status: .idle)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-2", status: .spinning)
         try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "workspace-session-2", yabaiWindowID: 202, status: .spinning)
-        try orchestrator.registerAgentWindow(
-            workspaceID: workspace2.id, provider: .spaces, terminalTrackingID: "workspace-session-3", yabaiWindowID: 303, status: .waiting)
+            workspaceID: workspace2.id, provider: .spaces, terminalTrackingID: "workspace-session-3", status: .waiting)
 
         let records = try orchestrator.agentWindows(workspaceID: workspace.id)
         XCTAssertEqual(records.count, 2)
-        XCTAssertEqual(Set(records.compactMap(\.yabaiWindowID)), Set([101, 202]))
+        XCTAssertEqual(Set(records.compactMap(\.terminalTrackingID)), Set(["workspace-session-1", "workspace-session-2"]))
     }
 
     func testRegisterAgentWindowPreservesSpacesProvider() throws {
@@ -244,7 +186,7 @@ final class AgentHookTests: XCTestCase {
 
         let record = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "spaces-terminal-1", codexThreadID: "thread-1",
-            yabaiWindowID: 303, status: .waiting)
+            status: .waiting)
 
         XCTAssertEqual(record.provider, .spaces)
         XCTAssertEqual(try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first).provider, .spaces)
@@ -257,12 +199,12 @@ final class AgentHookTests: XCTestCase {
 
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
-            yabaiWindowID: 101, status: .idle)
+            status: .idle)
 
         let windows = try store.windows(workspaceID: workspace.id)
         XCTAssertEqual(windows.count, 1)
         XCTAssertEqual(windows.first?.role, "terminal")
-        XCTAssertEqual(windows.first?.windowID, 101)
+        XCTAssertNil(windows.first?.windowID)
         XCTAssertEqual(windows.first?.terminalTrackingID, "workspace-session")
     }
 
@@ -273,9 +215,9 @@ final class AgentHookTests: XCTestCase {
 
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "workspace-session", codexThreadID: "thread-1",
-            yabaiWindowID: 202, status: .done)
+            status: .done)
 
-        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: "workspace-session", yabaiWindowID: 202)
+        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: "workspace-session")
 
         XCTAssertNil(result)
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
@@ -299,19 +241,15 @@ final class AgentHookTests: XCTestCase {
 
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, terminalNativeID: sessionID,
-            codexThreadID: "thread-1", yabaiWindowID: 101, status: .done)
+            codexThreadID: "thread-1", status: .done)
 
-        let result = try withSpacesProfileEnvironment(dbPath: dbPath) {
-            try orchestrator.handleAgentExit(agent, terminalNativeID: sessionID, yabaiWindowID: 202)
-        }
+        let result = try withSpacesProfileEnvironment(dbPath: dbPath) { try orchestrator.handleAgentExit(agent, terminalNativeID: sessionID) }
 
         let record = try XCTUnwrap(result)
         XCTAssertEqual(record.status, .idle)
         XCTAssertEqual(record.terminalTrackingID, sessionID)
-        XCTAssertNil(record.yabaiWindowID)
         let storedAgent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
         XCTAssertEqual(storedAgent.terminalTrackingID, sessionID)
-        XCTAssertNil(storedAgent.yabaiWindowID)
         let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
         XCTAssertEqual(trackedWindow.terminalTrackingID, sessionID)
         XCTAssertNil(trackedWindow.windowID)
@@ -332,19 +270,16 @@ final class AgentHookTests: XCTestCase {
 
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Configured Agent", terminalTrackingID: "configured-session",
-            terminalNativeID: "configured-session", codexThreadID: "thread-1", yabaiWindowID: 202, status: .idle,
-            claimedLauncherName: "Configured Agent")
+            terminalNativeID: "configured-session", codexThreadID: "thread-1", status: .idle, claimedLauncherName: "Configured Agent")
 
-        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: "configured-session", yabaiWindowID: 303)
+        let result = try orchestrator.handleAgentExit(agent, terminalNativeID: "configured-session")
 
         let record = try XCTUnwrap(result)
         XCTAssertEqual(record.status, .done)
         XCTAssertEqual(record.terminalTrackingID, "configured-session")
-        XCTAssertNil(record.yabaiWindowID)
         XCTAssertEqual(record.claimedLauncherName, "Configured Agent")
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
-        XCTAssertNil(try store.agentWindows(workspaceID: workspace.id).first?.yabaiWindowID)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
         XCTAssertNil(try store.windows(workspaceID: workspace.id).first?.windowID)
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
@@ -387,7 +322,7 @@ final class AgentHookTests: XCTestCase {
 
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "spaces-terminal-202",
-            codexThreadID: "thread-1", yabaiWindowID: 202, status: .idle)
+            codexThreadID: "thread-1", status: .idle)
 
         let didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
 
@@ -402,11 +337,11 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(
             workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])
+        try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "configured-session")
 
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Configured Agent", terminalTrackingID: "configured-session",
-            terminalNativeID: "configured-session", codexThreadID: "thread-1", yabaiWindowID: 202, status: .idle,
-            claimedLauncherName: "Configured Agent")
+            terminalNativeID: "configured-session", codexThreadID: "thread-1", status: .idle, claimedLauncherName: "Configured Agent")
 
         let didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
 
@@ -466,44 +401,4 @@ final class AgentHookTests: XCTestCase {
         defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
         try run()
     }
-
-    private static let yabaiMockScript = """
-        #!/bin/bash
-        args="$*"
-
-        if [[ "$args" == *"query --displays"* ]]; then
-          echo '[{"index":1}]'
-          exit 0
-        fi
-
-        if [[ "$args" == *"query --spaces"* ]]; then
-          echo '[{"index":1,"display":1}]'
-          exit 0
-        fi
-
-        if [[ "$args" == *"query --windows --window"* ]]; then
-          if [[ -n "${YABAI_FOCUSED_JSON:-}" ]]; then
-            echo "$YABAI_FOCUSED_JSON"
-          else
-            echo '{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}'
-          fi
-          exit 0
-        fi
-
-        if [[ "$args" == *"query --windows"* ]]; then
-          if [[ -n "${YABAI_WINDOWS_JSON:-}" ]]; then
-            echo "$YABAI_WINDOWS_JSON"
-          else
-            echo '[{"id":101,"pid":11,"app":"Spaces","title":"shell","space":1,"display":1,"is-sticky":false,"is-hidden":false,"is-visible":true,"is-native-fullscreen":false}]'
-          fi
-          exit 0
-        fi
-
-        if [[ "$args" == *"window --focus"* || "$args" == *"window --minimize"* || "$args" == *"window --close"* ]]; then
-          exit 0
-        fi
-
-        echo 'unhandled yabai mock invocation' >&2
-        exit 1
-        """
 }

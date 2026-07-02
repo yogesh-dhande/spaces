@@ -1,28 +1,6 @@
 # Troubleshooting (Dev)
 
-This document is for development-time diagnostics, especially around yabai and window focus.
-
-## Yabai Basics
-
-List displays:
-```bash
-yabai -m query --displays
-```
-
-List spaces:
-```bash
-yabai -m query --spaces
-```
-
-List all windows:
-```bash
-yabai -m query --windows
-```
-
-Show the focused window:
-```bash
-yabai -m query --windows --window
-```
+This document is for development-time diagnostics around workspace runtime and window focus.
 
 ## spaces Diagnostics
 
@@ -36,6 +14,10 @@ Force a clean runtime restart:
 ```bash
 spaces workspace restart --workspace <workspace-id>
 ```
+
+## Browser Sessions
+
+- **Browser sessions don't open or focus Chrome** — Spaces controls Google Chrome through Apple Events, which macOS gates under the Automation permission. Enable Spaces for Google Chrome under System Settings ▸ Privacy & Security ▸ Automation. The first-run setup screen also links there directly.
 
 ## Runtime Logs
 

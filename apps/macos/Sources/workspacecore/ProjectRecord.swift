@@ -8,14 +8,15 @@ public struct ProjectRecord: Codable, Sendable {
     public let defaultBranch: String?
     public var setupScript: String?
     public var stopScript: String?
-    public var ports: [PortDefinition]
+    public var ports: [ServiceDefinition]
     public var processes: [ProcessTemplate]
     public var browserSessions: [BrowserSession]
     public var agentLaunchers: [AgentLauncher]
 
     public init(
         id: String, name: String, dir: String, isGitRepo: Bool, defaultBranch: String?, setupScript: String? = nil, stopScript: String? = nil,
-        ports: [PortDefinition] = [], processes: [ProcessTemplate] = [], browserSessions: [BrowserSession] = [], agentLaunchers: [AgentLauncher] = []
+        ports: [ServiceDefinition] = [], processes: [ProcessTemplate] = [], browserSessions: [BrowserSession] = [],
+        agentLaunchers: [AgentLauncher] = []
     ) {
         self.id = id
         self.name = name

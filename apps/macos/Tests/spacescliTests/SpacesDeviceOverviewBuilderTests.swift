@@ -111,11 +111,11 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         let runningSession = makeSessionCatalogEntry(
             sessionID: "session-api", title: "api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
-            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces", windowID: nil,
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
             terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: nil)
         let exitedProcess = RunningProcessRecord(
-            id: "process-worker", workspaceID: workspace.id, templateName: "worker", command: "npm run worker", terminalApp: "Spaces", windowID: nil,
+            id: "process-worker", workspaceID: workspace.id, templateName: "worker", command: "npm run worker", terminalApp: "Spaces",
             terminalTrackingID: "session-worker", terminalNativeID: "session-worker", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: "later")
 
@@ -164,7 +164,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     func testBuildIncludesProjectAndWorkspaceConfigForClientParity() {
         let project = ProjectRecord(
             id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main", setupScript: "make setup",
-            stopScript: "make stop-project", ports: [PortDefinition(id: "project-web-port", name: "WEB")],
+            stopScript: "make stop-project", ports: [ServiceDefinition(id: "project-web-port", name: "WEB")],
             processes: [ProcessTemplate(id: "project-web-process", name: "web", command: "npm run dev", kind: "server", onExit: .restart)],
             browserSessions: [BrowserSession(name: "web", url: "http://localhost:$WEB")],
             agentLaunchers: [AgentLauncher(id: "project-codex-agent", name: "Codex", command: "codex")])
@@ -172,7 +172,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: "feature", branch: "feature", baseBranch: "main",
             isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil, notes: "Use this payload for local and remote detail views.")
         let settings = WorkspaceSettings(
-            stopScript: "make stop-workspace", ports: [PortDefinition(id: "workspace-api-port", name: "API")],
+            stopScript: "make stop-workspace", ports: [ServiceDefinition(id: "workspace-api-port", name: "API")],
             processes: [ProcessTemplate(id: "workspace-api-process", name: "api", command: "npm run api", onExit: .none)],
             browserSessions: [BrowserSession(name: "api", url: "http://localhost:$API")],
             agentLaunchers: [AgentLauncher(id: "workspace-review-agent", name: "Review", command: "codex --review")])
@@ -271,8 +271,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-api", title: "old-api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
             id: "process-api", workspaceID: workspace.id, templateID: "template-api", templateName: "old-api", command: "npm run dev",
-            terminalApp: "Spaces", windowID: nil, terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running,
-            logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            terminalApp: "Spaces", terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil,
+            lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         let processWindow = WindowRecord(
             id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", windowID: nil, terminalTrackingID: "session-api",
             terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
@@ -304,10 +304,10 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-codex", title: "Codex", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
             id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-codex", codexThreadID: nil,
-            windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+            status: .spinning, createdAt: "now", updatedAt: "now")
         let adHocAgent = AgentWindowRecord(
             id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "missing-session",
-            codexThreadID: nil, windowID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+            codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
@@ -336,7 +336,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-codex", title: "Old Codex", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
             id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Old Codex", terminalTrackingID: "session-codex",
-            codexThreadID: nil, windowID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+            codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
         let claimedAgent = AgentWindowRecord(
             id: configuredAgent.id, workspaceID: configuredAgent.workspaceID, provider: configuredAgent.provider, label: configuredAgent.label,
             runtimeTargetID: configuredAgent.runtimeTargetID, terminalTarget: configuredAgent.terminalTarget, sessionKey: configuredAgent.sessionKey,
@@ -369,7 +369,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         let processSession = makeSessionCatalogEntry(
             sessionID: "session-api", title: "api", workingDirectory: workspace.dir, attachmentSnapshot: .init())
         let process = RunningProcessRecord(
-            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces", windowID: nil,
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
             terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: nil)
         let terminalWindow = WindowRecord(
@@ -399,8 +399,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             isRunning: true, lastLaunchedAt: nil)
         // The runtime title mimics a Ghostty set_title update that arrived after the manual rename.
         let session = makeSessionCatalogEntry(
-            sessionID: "session-renamed", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id,
-            attachmentSnapshot: .init(), userTitle: "build watcher", runtimeTitle: "vim main.swift")
+            sessionID: "session-renamed", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+            userTitle: "build watcher", runtimeTitle: "vim main.swift")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project], workspaces: [.init(project: project, workspace: workspace)], sessions: [session])

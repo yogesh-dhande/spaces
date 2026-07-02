@@ -10,17 +10,13 @@ public enum MissingTrackedWindowKind: Sendable, Equatable {
 public struct MissingTrackedWindowContext: Sendable {
     public let kind: MissingTrackedWindowKind
     public let workspaceID: String
-    public let windowID: Int?
     public let targetURL: String?
     public let processID: String?
     public let title: String
 
-    public init(
-        kind: MissingTrackedWindowKind, workspaceID: String, windowID: Int? = nil, targetURL: String? = nil, processID: String? = nil, title: String
-    ) {
+    public init(kind: MissingTrackedWindowKind, workspaceID: String, targetURL: String? = nil, processID: String? = nil, title: String) {
         self.kind = kind
         self.workspaceID = workspaceID
-        self.windowID = windowID
         self.targetURL = targetURL
         self.processID = processID
         self.title = title
@@ -35,7 +31,6 @@ public enum WorkspaceError: LocalizedError {
     case invalidWorkspace(path: String)
     case gitCommandFailed(message: String)
     case invalidArgument(message: String)
-    case yabaiUnavailable(message: String)
     case dependencyMissing(message: String)
     case configError(message: String)
     case databaseMigrationFailed(message: String)
@@ -50,7 +45,6 @@ public enum WorkspaceError: LocalizedError {
         case .invalidWorkspace(let path): return "Workspace path does not exist: \(path)"
         case .gitCommandFailed(let message): return "Git command failed: \(message)"
         case .invalidArgument(let message): return "Invalid argument: \(message)"
-        case .yabaiUnavailable(let message): return "yabai not available: \(message)"
         case .dependencyMissing(let message): return "Missing dependency: \(message)"
         case .configError(let message): return "Configuration error: \(message)"
         case .databaseMigrationFailed(let message): return message

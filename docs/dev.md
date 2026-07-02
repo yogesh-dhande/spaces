@@ -18,9 +18,7 @@ Build, test, and release workflows for the Spaces monorepo. For product overview
 
 ## Requirements
 - macOS 14+
-- `yabai`
 - Google Chrome
-- Accessibility permission (handled via the in-app setup flow on first launch)
 
 ## macOS App and CLI
 
@@ -78,6 +76,14 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 - `apps/macos/.local/ghosttyvt/lib`
 
 Artifact validation requires the platform dynamic `libghostty-vt` runtime library (`libghostty-vt.dylib` on macOS, `libghostty-vt.so` on Linux). A static `libghostty-vt.a` alone is not a complete install because terminal transcript rendering loads the dynamic library at runtime.
+
+The service router also needs a bundled Caddy binary. For branch-local setup, run:
+
+```bash
+apps/macos/scripts/setup_caddy.sh
+```
+
+That fetches a pinned universal Caddy binary into `apps/macos/.local/caddy/caddy`, mirroring `setup_ghostty.sh`. Standard app packaging invokes the same setup script before bundling Caddy into the app at `Contents/Resources/caddy`; DMG installs also place Caddy beside the installed daemon at `/usr/local/bin/spaces-caddy` so launchd-started `spacesd` can run the local reverse proxy for workspace services without replacing a user-managed `caddy` executable.
 
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
 By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version, and records a clean source build. When the worktree-local artifacts do not match, default setup next checks a shared, content-addressed cache and restores from it with a local copy before falling back to a download. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When the downloaded release artifact validates except for a different Xcode build, default setup leaves the download uninstalled and builds locally from the pinned submodule. The `--download-only` mode used by CI and publishing workflows is download-only and fails on an Xcode build mismatch.
@@ -156,8 +162,6 @@ apps/macos/Tests/e2e.sh mobile
 ```
 
 The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
-
-With `SPACES_E2E_RUN_REMOTE=1`, the lane also drives the `takeover` and `two-session` scenarios against a remote daemon. Those remote UI scenarios run against the daemon the demo actually pairs the simulators with — the demo's own remote daemon reached over the SSH forward — so the demo creates a remote project/workspace on it and publishes the remote target (host, port, transport key, per-device auth token, and workspace) in the demo `pairing.json`; the harness reads that section rather than reusing the separate remote Device API parity flow's daemon, which uses an isolated data dir and is torn down before the UI scenarios run. The remote Device API parity flow remains independent coverage for the `remote-device-api` target.
 
 The E2E helpers source the worktree `.env` (gitignored, at the repo root) via `scripts/spaces-e2e-env.sh` when it exists. Local-only scenarios run without `.env`; remote-host lanes require it. A working remote test host is configured in the primary checkout's `.env`; a fresh worktree has none, so copy it in to run remote lanes from that worktree:
 
@@ -512,6 +516,8 @@ Before the suite launches its isolated app instance, it waits for desktop-global
 
 The macOS E2E suite seeds the shared Beacon, Scout, and Prism fixture repositories and runs the app-level launch, focus, cycling, workspace, and agent-status assertions against the current profile's same-machine daemon.
 
+With `SPACES_E2E_RUN_REMOTE=1`, the suite also prepares a paired remote Linux daemon from the repo-root `.env`, seeds the Mac client with that device, starts a remote named service, focuses its browser session, and verifies the service through the Mac Caddy router backed by the SSH local forward. The remote lane reads the harness profile's Mac client identity through `spacese2e mac-client-installation-id` so pairing uses the same identity as the app.
+
 For a focused app smoke pass:
 
 ```bash
@@ -524,7 +530,7 @@ For the combined smoke lane:
 apps/macos/Tests/e2e.sh all
 ```
 
-This suite is manual by design. It drives the real app, `spaces`, `yabai`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.
+This suite is manual by design. It drives the real app, `spaces`, Chrome, and the built-in Spaces terminal in an interactive macOS session instead of XCTest.
 
 Primary coverage:
 - adding and archiving a workspace
@@ -535,6 +541,7 @@ Primary coverage:
 - workspace-detail numbered focus shortcuts
 - forward/back workspace window cycling
 - multi-workspace focus and cycling isolation
+- remote browser-session routing through SSH local forwarding and the Mac Caddy router
 
 The suite emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows covered by the standalone focus-profiling workflow. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary path for focus profiling during development. The `app window-cycle` scenario runs the existing window-cycle profile path; set `REAL_SYSTEM_PROFILE_WARMUPS=5 REAL_SYSTEM_PROFILE_REPETITIONS=30` to collect steady-state cycle samples after warmup without changing the normal full-suite pass.
 

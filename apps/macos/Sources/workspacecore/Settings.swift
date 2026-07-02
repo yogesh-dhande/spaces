@@ -4,6 +4,7 @@ public enum SettingsKey {
     public static let appEditor = "app_editor"
     public static let appPortRangeStart = "app_port_range_start"
     public static let appPortRangeEnd = "app_port_range_end"
+    public static let appRouterPort = "app_router_port"
     public static let guiHotkey = "gui_hotkey"
     public static let defaultGUIHotkey = "cmd+alt+="
     public static let guiCommandPaletteHotkey = "gui_command_palette_hotkey"
@@ -32,22 +33,4 @@ public enum SettingsKey {
     public static let defaultGUIWindowShortcut = "cmd+1"
     public static let alertsDismissedAttentionItems = "alerts_dismissed_attention_items"
     public static let activeWorkspaceID = "active_workspace_id"
-    public static let windowFocusPulseColor = "window_focus_pulse_color"
-    /// Default window focus pulse overlay color (8-bit RGB).
-    public static let defaultWindowFocusPulseColor = "72,98,110"
-    public static let windowFocusPulseEnabled = "window_focus_pulse_enabled"
-    public static let defaultWindowFocusPulseEnabled = true
-
-    public static func windowFocusPulseColor(from rawValue: String?) -> (r: Int, g: Int, b: Int) {
-        let raw = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? defaultWindowFocusPulseColor
-        let parts = raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        guard parts.count == 3 else {
-            let defaultParts = defaultWindowFocusPulseColor.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-            guard defaultParts.count == 3 else { return (r: 0, g: 0, b: 0) }
-            return (r: defaultParts[0], g: defaultParts[1], b: defaultParts[2])
-        }
-        return (r: parts[0], g: parts[1], b: parts[2])
-    }
 }
-
-extension String { fileprivate var nilIfEmpty: String? { isEmpty ? nil : self } }

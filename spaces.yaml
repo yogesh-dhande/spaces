@@ -4,18 +4,19 @@ setup_script: |
   git submodule update --init --recursive
   export SPACES_GHOSTTY_CACHE_DIR="$SPACES_PROJECT_DIR/apps/macos/.local/ghostty-cache"
   apps/macos/scripts/setup_ghostty.sh
+  apps/macos/scripts/setup_caddy.sh
   (cd apps/web && npm i)
 stop_script: ''
-ports:
-- name: PORT
+services:
+- web
 processes:
 - name: npm:dev
-  command: cd apps/web && npm run dev
+  command: cd apps/web && PORT=$SPACES_WEB_PORT npm run dev
   on_exit: none
   execution_mode: direct
 browser_sessions:
 - name: web
-  url: http://localhost:$PORT
+  url: $SPACES_WEB_URL
 agent_launchers:
 - name: codex
   command: codex --yolo

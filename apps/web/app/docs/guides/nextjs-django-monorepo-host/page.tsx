@@ -24,20 +24,20 @@ export default function NextjsDjangoMonorepoHostGuidePage() {
         <h2 className="text-2xl font-semibold tracking-tight">Use Case</h2>
         <p className={prose}>
           One repo with <code>/frontend</code> and <code>/backend</code>.
-          You want each workspace to spin up both services with isolated ports and predictable URLs.
+          You want each workspace to spin up both services with isolated ports and predictable URLs per service.
         </p>
       </article>
 
       <article className={card}>
         <h2 className="text-2xl font-semibold tracking-tight">Project Settings Explained</h2>
 
-        <h3 className="mt-4 text-sm font-semibold text-foreground">Port Definitions</h3>
+        <h3 className="mt-4 text-sm font-semibold text-foreground">Services</h3>
         <pre className={code}>
-          <code>{`FRONTEND_PORT
-API_PORT`}</code>
+          <code>{`frontend
+api`}</code>
         </pre>
         <p className={prose}>
-          Separate reserved ports keep frontend/backend stable per workspace and prevent collisions across branches.
+          Separate services keep frontend/backend stable per workspace and prevent collisions across branches.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Setup Script</h3>
@@ -56,14 +56,14 @@ cp .env.example .env`}</code>
         </p>
         <pre className={code}>
           <code>{`# frontend process
-cd frontend && API_URL=http://localhost:$API_PORT PORT=$FRONTEND_PORT npm run dev`}</code>
+cd frontend && API_URL=$SPACES_API_URL PORT=$SPACES_FRONTEND_PORT npm run dev`}</code>
         </pre>
         <pre className={code}>
           <code>{`# backend process
-cd backend && python manage.py runserver 0.0.0.0:$API_PORT`}</code>
+cd backend && python manage.py runserver 0.0.0.0:$SPACES_API_PORT`}</code>
         </pre>
         <p className={prose}>
-          Frontend points to the workspace backend port. Both processes stay in one workspace context with shared named-port env vars.
+          Frontend points to the workspace backend service. Both processes stay in one workspace context with shared per-service env vars.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>
@@ -72,11 +72,11 @@ cd backend && python manage.py runserver 0.0.0.0:$API_PORT`}</code>
         </p>
         <pre className={code}>
           <code>{`# frontend browser session
-http://localhost:$FRONTEND_PORT`}</code>
+$SPACES_FRONTEND_URL`}</code>
         </pre>
         <pre className={code}>
           <code>{`# backend browser session
-http://localhost:$API_PORT/admin`}</code>
+$SPACES_API_URL/admin`}</code>
         </pre>
 
       </article>

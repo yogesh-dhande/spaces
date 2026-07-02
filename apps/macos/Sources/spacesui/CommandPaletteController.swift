@@ -21,13 +21,10 @@ final class CommandPalettePanel: NSPanel {
 /// Owns the Command Palette's state and behavior. `AppKitController` holds a single
 /// instance and delegates palette interactions to it. The controller reaches back
 /// into the host for shared window/hotkey/orchestration services via `host`.
-@MainActor
-final class CommandPaletteController {
+@MainActor final class CommandPaletteController {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
-    }
+    init(host: AppKitController) { self.host = host }
 
     var commandPalettePanel: NSPanel?
     var commandPaletteSearchField: NSSearchField?
@@ -216,8 +213,11 @@ final class CommandPaletteController {
     func toggleCommandPaletteFromHotkey() {
         let perfContext = host.captureHotkeyPerfContext()
         host.logHotkeyDebug("toggle_palette begin \(host.hotkeyWindowStateSummary())")
-        guard host.setupManager == nil else {
-            host.logHotkeyDebug("toggle_palette reroute_setup_manager")
+        // The Chrome Automation permission screen blocks the main UI; the command palette must not
+        // surface workspace actions behind it, so the palette hotkey only shows/hides the window
+        // until the gate completes.
+        guard host.chromeAutomationSetupController == nil else {
+            host.logHotkeyDebug("toggle_palette reroute_permission_setup")
             host.toggleWindowFromHotkey()
             return
         }
@@ -258,7 +258,8 @@ final class CommandPaletteController {
         panel.center()
         let revealStartedAt = Date()
         host.revealTargetedHotkeyWindow(panel)
-        host.logPerfMetric("toggle_palette_reveal_target", target: "palette", elapsedMS: host.windowShortcutElapsedMS(since: revealStartedAt), success: true)
+        host.logPerfMetric(
+            "toggle_palette_reveal_target", target: "palette", elapsedMS: host.windowShortcutElapsedMS(since: revealStartedAt), success: true)
         commandPaletteSearchField?.stringValue = ""
         commandPaletteSelectedIndex = 0
         if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
@@ -271,7 +272,8 @@ final class CommandPaletteController {
         } else if commandPaletteNeedsReload, commandPaletteLoadTask == nil {
             reloadCommandPaletteItems()
         }
-        pendingCommandPalettePresentation = AppKitController.PendingCommandPalettePresentation(perfContext: perfContext, mainWindowWasVisible: mainWindowWasVisible)
+        pendingCommandPalettePresentation = AppKitController.PendingCommandPalettePresentation(
+            perfContext: perfContext, mainWindowWasVisible: mainWindowWasVisible)
         completePendingCommandPalettePresentationIfNeeded()
         Task { @MainActor [weak self] in
             await Task.yield()
@@ -283,7 +285,8 @@ final class CommandPaletteController {
         guard let panel = commandPalettePanel else { return }
         guard !isDismissingCommandPalette else { return }
         isDismissingCommandPalette = true
-        host.logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(host.hotkeyWindowStateSummary())")
+        host.logHotkeyDebug(
+            "dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(host.hotkeyWindowStateSummary())")
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
         commandPaletteContextWorkspaceID = nil

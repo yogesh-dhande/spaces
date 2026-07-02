@@ -106,7 +106,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
         let project = SpacesDeviceProjectSummary(
             id: "project-1", name: "Project", dir: "/device/project", isGitRepo: true, defaultBranch: "main",
             config: SpacesDeviceProjectConfig(
-                setupScript: "make setup", stopScript: "make stop", ports: [SpacesDevicePortDefinition(id: "port-web", name: "WEB")],
+                setupScript: "make setup", stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                 processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                 browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
                 agentLaunchers: [SpacesDeviceAgentLauncher(id: "agent-codex", name: "Codex", command: "codex")]))
@@ -165,7 +165,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             setupState: SpacesDeviceWorkspaceSetupState(
                 status: .failed, errorMessage: "setup failed", startedAt: "2026-06-18T00:00:00Z", finishedAt: "2026-06-18T00:00:05Z"),
             config: SpacesDeviceWorkspaceConfig(
-                stopScript: "make stop", ports: [SpacesDevicePortDefinition(id: "port-web", name: "WEB")],
+                stopScript: "make stop", ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "WEB")],
                 processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "web", command: "npm run dev", onExit: "restart")],
                 browserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:$WEB")],
                 resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "web", url: "http://localhost:3000")],

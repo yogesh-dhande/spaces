@@ -24,20 +24,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 }
 
-private enum RemoteOverviewDisconnectReason {
-    case error(any Error)
-    case streamClosed
-
-    init(_ error: (any Error)?) { if let error { self = .error(error) } else { self = .streamClosed } }
-
-    var loadError: any Error {
-        switch self {
-        case .error(let error): return error
-        case .streamClosed: return RemoteOverviewDisconnectError.streamClosed
-        }
-    }
-}
-
 /// Owns the left-hand project/workspace/device outline tree (an `NSOutlineView`) and
 /// its state, plus the sidebar's data load/merge pipeline and the Alerts row chrome.
 /// `AppKitController` holds a single instance and delegates sidebar interactions to it.
@@ -65,6 +51,13 @@ private enum RemoteOverviewDisconnectReason {
         case markOffline
     }
 
+    nonisolated static func remoteOverviewDisconnectAction(hasStoredSubscription: Bool, isOpeningSubscription: Bool) -> RemoteOverviewDisconnectAction
+    {
+        if hasStoredSubscription { return .markOffline }
+        if isOpeningSubscription { return .recordStartupDisconnect }
+        return .ignoreIntentionalRemoval
+    }
+
     private var outlineItemRefCache: [String: OutlineItemRef] = [:]
     /// Memoized filtered+sorted visible workspaces per project. `visibleWorkspaces`
     /// is on the NSOutlineView data-source hot path (queried per row); caching keeps
@@ -89,22 +82,14 @@ private enum RemoteOverviewDisconnectReason {
     /// Devices with a subscription open in flight, so rapid refreshes don't start
     /// duplicate connections.
     private var remoteOverviewSubscribing: Set<String> = []
-    /// Disconnects observed while `subscribeOverview` is still returning. These
-    /// are real stream drops, not intentional removals, so the opener consumes
-    /// them before deciding whether to retain the returned client.
-    private var remoteOverviewStartupDisconnects: [String: RemoteOverviewDisconnectReason] = [:]
-    /// Offline devices that should keep opening the overview stream: either the initial pull failed or
-    /// an established stream dropped. The stream sends the current overview immediately on connect, so it
-    /// is the recovery path for these offline/nil-overview sections.
-    private var remoteOverviewReconnectCandidates: Set<String> = []
     private var remoteOverviewSubscriptionsEnabled = false
     private var sidebarReloadTask: Task<Void, Never>?
     private var pendingSidebarReloadRequest = false
     private var pendingSidebarReloadFailureMessage: String?
     private var pendingSidebarReloadForceRemoteRefresh = false
-    /// Set when an overview-affecting signal arrives while the user is mid-edit;
+    /// Set when a database-change signal arrives while the user is mid-edit;
     /// flushed at idle points so a deferred change is not lost.
-    private var pendingSidebarSignalReload = false
+    private var pendingDatabaseReload = false
 
     // Alerts sidebar row
     private var alertsRowView: NSView?
@@ -148,7 +133,7 @@ private enum RemoteOverviewDisconnectReason {
     /// Cancels in-flight reload state. Called from the host's background-service
     /// teardown and termination paths.
     func stopSidebarTasks() {
-        pendingSidebarSignalReload = false
+        pendingDatabaseReload = false
         sidebarReloadTask?.cancel()
         sidebarReloadTask = nil
         pendingSidebarReloadRequest = false
@@ -158,25 +143,23 @@ private enum RemoteOverviewDisconnectReason {
 
     func cancelSidebarReloadTask() { sidebarReloadTask?.cancel() }
 
-    /// Reloads sidebar metadata after the owning daemon reports overview-affecting
-    /// state changed. Database-backed writes arrive through `databaseDidChange`;
-    /// terminal title/exit/runtime metadata arrives through `TerminalOverviewSignal`.
-    /// Driven by the writer, so there is no polling and no file-watch feedback loop
-    /// from the app's own reads.
+    /// Reloads sidebar metadata after a database write, signaled by whichever
+    /// process committed it (`IPCNotification.databaseDidChange`). Catches external
+    /// CLI/daemon edits (for example title changes) that no other event-driven
+    /// reload would observe. Driven by the writer, so there is no polling and no
+    /// file-watch feedback loop from the app's own reads.
     func handleDatabaseDidChange() {
         guard host.canReloadAfterBackgroundWorkspaceRefresh() else {
-            pendingSidebarSignalReload = true
+            pendingDatabaseReload = true
             return
         }
         requestSidebarReload()
     }
 
-    func handleLocalTerminalOverviewDidChange() { handleDatabaseDidChange() }
-
-    /// Flushes a signal-driven reload deferred while the user was mid-edit.
-    func flushPendingSidebarSignalReloadIfNeeded() {
-        guard pendingSidebarSignalReload, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
-        pendingSidebarSignalReload = false
+    /// Flushes a database-driven reload deferred while the user was mid-edit.
+    func flushPendingDatabaseReloadIfNeeded() {
+        guard pendingDatabaseReload, host.canReloadAfterBackgroundWorkspaceRefresh() else { return }
+        pendingDatabaseReload = false
         requestSidebarReload()
     }
 
@@ -248,7 +231,7 @@ private enum RemoteOverviewDisconnectReason {
     func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false) {
         host.logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
-        pendingSidebarSignalReload = false
+        pendingDatabaseReload = false
         host.commandPalette.invalidateCommandPaletteCache()
         host.configCache = snapshot.config
         host.loadShortcutSpecs()
@@ -284,6 +267,8 @@ private enum RemoteOverviewDisconnectReason {
         // If the local block was showing and the daemon is now compatible, drop the obsolete block
         // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
         host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
+        tearDownBrowserSessionsForLocallyStoppedWorkspaces(
+            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID)
         rebuildFlatSidebarData()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
@@ -313,6 +298,34 @@ private enum RemoteOverviewDisconnectReason {
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
         if host.showingAlerts { host.showAlertsDetail() }
         loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh)
+    }
+
+    /// Closes browser-session tabs for local-device workspaces that the daemon now reports as no
+    /// longer running, comparing the previous local-section runtime state against the just-fetched
+    /// snapshot. This reload is the only channel through which the GUI learns about stop/archive
+    /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
+    /// diff those externally-stopped workspaces would leave their dedicated Chrome tabs and the
+    /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/archive handlers
+    /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
+    /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
+    private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
+        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus]
+    ) {
+        guard let previous else { return }
+        for workspaceID in Self.workspaceIDsTransitionedToNotRunning(previous: previous, current: current) {
+            host.closeLocalBrowserSessionWindows(workspaceID: workspaceID)
+        }
+    }
+
+    /// Workspace ids that were running in `previous` but are no longer running in `current` — either
+    /// reported stopped or absent entirely (deleted/archived out of the runtime map). Pure so the
+    /// transition contract can be unit-tested without Chrome or the client store.
+    nonisolated static func workspaceIDsTransitionedToNotRunning(
+        previous: [String: WorkspaceRuntimeStatus], current: [String: WorkspaceRuntimeStatus]
+    ) -> [String] {
+        previous.compactMap { workspaceID, previousStatus in
+            previousStatus.lifecycleState == .running && current[workspaceID]?.lifecycleState != .running ? workspaceID : nil
+        }
     }
 
     /// Adds a section for every paired remote device and fetches each one's overview
@@ -396,48 +409,26 @@ private enum RemoteOverviewDisconnectReason {
         let clients = remoteOverviewSubscriptions
         remoteOverviewSubscriptions.removeAll()
         remoteOverviewSubscribing.removeAll()
-        remoteOverviewStartupDisconnects.removeAll()
-        remoteOverviewReconnectCandidates.removeAll()
         for client in clients.values { client.stop() }
     }
 
-    /// Reconciles open subscriptions to credentialed paired remotes whose latest compatibility-aware pull
-    /// produced a usable overview, plus offline devices retrying after a failed pull or dropped stream.
+    /// Reconciles open subscriptions to the set of credentialed paired remotes:
+    /// drops gone devices and opens one per newly present device.
     func refreshRemoteOverviewSubscriptions() {
         guard remoteOverviewSubscriptionsEnabled else { return }
         let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(deviceID: $0.id) }
-        let pairedIDs = Set(remotes.map(\.id))
-        remoteOverviewReconnectCandidates.formIntersection(pairedIDs)
-        let desiredIDs = Set(
-            remotes.compactMap { record -> String? in
-                guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }),
-                    AppKitController.remoteOverviewSubscriptionIsDesired(
-                        section: section, isReconnectCandidate: remoteOverviewReconnectCandidates.contains(record.id))
-                else { return nil }
-                return record.id
-            })
+        let desiredIDs = Set(remotes.map(\.id))
         for (id, client) in remoteOverviewSubscriptions where !desiredIDs.contains(id) {
             // Remove before stopping so the disconnect callback treats it as intentional.
             remoteOverviewSubscriptions[id] = nil
             client.stop()
+            host.stopRemoteBrowserForwards(deviceID: id)
         }
-        for id in remoteOverviewSubscribing where !desiredIDs.contains(id) { remoteOverviewStartupDisconnects[id] = nil }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-        for record in remotes
-        where desiredIDs.contains(record.id) && remoteOverviewSubscriptions[record.id] == nil && !remoteOverviewSubscribing.contains(record.id) {
-            remoteOverviewStartupDisconnects[record.id] = nil
+        for record in remotes where remoteOverviewSubscriptions[record.id] == nil && !remoteOverviewSubscribing.contains(record.id) {
             remoteOverviewSubscribing.insert(record.id)
             openRemoteOverviewSubscription(record: record, clientApp: clientApp)
         }
-    }
-
-    private func remoteOverviewSubscriptionIsDesired(deviceID: String) -> Bool {
-        guard remoteOverviewSubscriptionsEnabled, host.macPairedDevices().contains(where: { $0.id == deviceID }),
-            AppKitController.pairedDeviceHasRequiredCredentials(deviceID: deviceID),
-            let section = host.deviceSections.first(where: { $0.deviceID == deviceID })
-        else { return false }
-        return AppKitController.remoteOverviewSubscriptionIsDesired(
-            section: section, isReconnectCandidate: remoteOverviewReconnectCandidates.contains(deviceID))
     }
 
     private func openRemoteOverviewSubscription(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp) {
@@ -468,7 +459,6 @@ private enum RemoteOverviewDisconnectReason {
                 client?.stop()
                 return
             }
-            let startupDisconnect = self.remoteOverviewStartupDisconnects.removeValue(forKey: deviceID)
             self.remoteOverviewSubscribing.remove(deviceID)
             guard let client else {
                 // The connect attempt failed (remote offline at launch or still
@@ -476,17 +466,10 @@ private enum RemoteOverviewDisconnectReason {
                 // fall back on, schedule the same delayed retry the disconnect path
                 // uses so the remote section recovers on its own rather than staying
                 // stale until an unrelated sidebar reload.
-                guard self.remoteOverviewSubscriptionIsDesired(deviceID: deviceID) else { return }
                 self.scheduleRemoteOverviewReconnect()
                 return
             }
-            if let startupDisconnect {
-                client.stop()
-                guard self.remoteOverviewSubscriptionIsDesired(deviceID: deviceID) else { return }
-                self.applyRemoteOverviewDisconnect(deviceID: deviceID, reason: startupDisconnect)
-                return
-            }
-            guard self.remoteOverviewSubscriptionIsDesired(deviceID: deviceID) else {
+            guard self.remoteOverviewSubscriptionsEnabled, self.host.macPairedDevices().contains(where: { $0.id == deviceID }) else {
                 client.stop()
                 return
             }
@@ -495,37 +478,16 @@ private enum RemoteOverviewDisconnectReason {
     }
 
     private func handleRemoteOverviewDisconnected(deviceID: String, error: (any Error)?) {
-        switch Self.remoteOverviewDisconnectAction(
-            hasStoredSubscription: remoteOverviewSubscriptions[deviceID] != nil, isOpeningSubscription: remoteOverviewSubscribing.contains(deviceID))
-        {
-        case .ignoreIntentionalRemoval: return
-        case .recordStartupDisconnect:
-            remoteOverviewStartupDisconnects[deviceID] = RemoteOverviewDisconnectReason(error)
-            return
-        case .markOffline:
-            remoteOverviewSubscriptions[deviceID] = nil
-            applyRemoteOverviewDisconnect(deviceID: deviceID, reason: RemoteOverviewDisconnectReason(error))
-        }
-    }
-
-    nonisolated static func remoteOverviewDisconnectAction(hasStoredSubscription: Bool, isOpeningSubscription: Bool) -> RemoteOverviewDisconnectAction
-    {
-        if hasStoredSubscription { return .markOffline }
-        if isOpeningSubscription { return .recordStartupDisconnect }
-        return .ignoreIntentionalRemoval
-    }
-
-    private func applyRemoteOverviewDisconnect(deviceID: String, reason: RemoteOverviewDisconnectReason) {
+        // Ignore disconnects for subscriptions we intentionally removed.
+        guard remoteOverviewSubscriptions[deviceID] != nil else { return }
+        remoteOverviewSubscriptions[deviceID] = nil
         guard remoteOverviewSubscriptionsEnabled else { return }
         // An established stream dropping means the remote daemon or network went away. With no
         // periodic remote refresh to fall back on, transition the section to offline now — the same
         // way a failed pull does — so the sidebar shows the offline caption instead of stale
         // projects/alerts, then schedule the delayed reconnect. A graceful stream close carries no
         // error, so fall back to a descriptive reason for the offline tooltip.
-        remoteOverviewReconnectCandidates.insert(deviceID)
-        applyRemoteDeviceSection(
-            deviceID: deviceID, result: .failure(reason.loadError),
-            refreshSubscriptionsAfterApply: AppKitController.shouldRefreshRemoteOverviewSubscriptionsAfterFailure(isStreamDisconnect: true))
+        applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
         scheduleRemoteOverviewReconnect()
     }
 
@@ -541,7 +503,7 @@ private enum RemoteOverviewDisconnectReason {
         }
     }
 
-    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>, refreshSubscriptionsAfterApply: Bool = true) {
+    func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>) {
         guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else { return }
         // A background refresh re-fetches each remote; only touch the outline when
         // the device's overview or load state actually changed, so unchanged polls
@@ -553,7 +515,6 @@ private enum RemoteOverviewDisconnectReason {
         var selectionInvalidatedByOffline = false
         switch result {
         case .success(let load):
-            remoteOverviewReconnectCandidates.remove(deviceID)
             // Compatibility/status can change while the overview stays identical (e.g. after a restart
             // updates a remote daemon), so the unchanged-check must include them or the badge/block
             // would keep showing the stale verdict until an unrelated overview change.
@@ -588,12 +549,11 @@ private enum RemoteOverviewDisconnectReason {
                     host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
                 }
                 updateAlertsSidebarBadge()
-                refreshRemoteOverviewSubscriptions()
+                host.stopRemoteBrowserForwards(deviceID: deviceID)
                 return
             }
             if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
                 updateAlertsSidebarBadge()
-                refreshRemoteOverviewSubscriptions()
                 return
             }
             let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
@@ -605,8 +565,8 @@ private enum RemoteOverviewDisconnectReason {
             host.deviceSections[index].overview = overview.overview
             host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded
+            host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
         case .failure(let error):
-            remoteOverviewReconnectCandidates.insert(deviceID)
             if case .offline = host.deviceSections[index].loadState { return }
             // Capture (before the rebuild drops this device's rows from the merged data) whether the
             // current selection belongs to this device, so the offline transition can reconcile a now-
@@ -631,6 +591,7 @@ private enum RemoteOverviewDisconnectReason {
             host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(error.localizedDescription)
             host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
+            host.stopRemoteBrowserForwards(deviceID: deviceID)
         }
         rebuildFlatSidebarData()
         host.outlineView.reloadData()
@@ -644,7 +605,6 @@ private enum RemoteOverviewDisconnectReason {
         //      pre-rebuild groups and would keep showing (and routing clicks to) the now-removed device's
         //      alerts until the user navigates away.
         if selectionInvalidatedByOffline || host.showingAlerts { host.showAlertsDetail() }
-        if refreshSubscriptionsAfterApply { refreshRemoteOverviewSubscriptions() }
     }
 
     /// Recomputes the flat, id-keyed sidebar dictionaries as the union of every
@@ -1198,8 +1158,8 @@ private enum RemoteOverviewDisconnectReason {
         row.translatesAutoresizingMaskIntoConstraints = false
 
         let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+        icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?.withSymbolConfiguration(
+            .init(pointSize: 10, weight: .medium))
         icon.contentTintColor = runtimeTargetSymbolColor(item: item)
         icon.toolTip = item.runState.map { $0 == .running ? "Running" : ($0 == .exited ? "Exited" : "Not started") }
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -1226,8 +1186,8 @@ private enum RemoteOverviewDisconnectReason {
             let isPendingLaunchAction = item.kind == .missingConfiguredProcess || item.kind == .agentLauncher
             let titleLabel = NSTextField(labelWithString: item.title)
             titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            titleLabel.textColor = isPendingLaunchAction ? sidebarMetadataTextColor(isSelected: false) : sidebarPrimaryTextColor(
-                isSelected: false, isArchived: false)
+            titleLabel.textColor =
+                isPendingLaunchAction ? sidebarMetadataTextColor(isSelected: false) : sidebarPrimaryTextColor(isSelected: false, isArchived: false)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1242,8 +1202,8 @@ private enum RemoteOverviewDisconnectReason {
         cell.addSubview(row)
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 22),
-            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
-            row.topAnchor.constraint(equalTo: cell.topAnchor), row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10), row.topAnchor.constraint(equalTo: cell.topAnchor),
+            row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
         ])
         return cell
     }
@@ -1323,8 +1283,8 @@ private enum RemoteOverviewDisconnectReason {
 
     private func reloadRuntimeTargetRow(workspaceID: String, key: String) {
         for row in 0..<host.outlineView.numberOfRows {
-            guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef,
-                case .runtimeTarget(_, let workspace, let item) = ref.item, workspace.id == workspaceID, item.key == key
+            guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef, case .runtimeTarget(_, let workspace, let item) = ref.item,
+                workspace.id == workspaceID, item.key == key
             else { continue }
             host.outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
             return
@@ -1502,8 +1462,8 @@ private enum RemoteOverviewDisconnectReason {
         // rows, so the outgoing and incoming workspaces' target lists reload too.
         for workspaceID in [previousWorkspaceID, currentWorkspaceID].compactMap({ $0 }) where previousWorkspaceID != currentWorkspaceID {
             for row in 0..<host.outlineView.numberOfRows {
-                guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef,
-                    case .runtimeTarget(_, let workspace, _) = ref.item, workspace.id == workspaceID
+                guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef, case .runtimeTarget(_, let workspace, _) = ref.item,
+                    workspace.id == workspaceID
                 else { continue }
                 rowsToReload.insert(row)
             }

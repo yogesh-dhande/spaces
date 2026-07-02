@@ -14,8 +14,8 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: root.path)
 
         XCTAssertThrowsError(
-            try orchestrator.updateProjectConfig(projectID: project.id) { project in project.ports = [PortDefinition(name: " \n\t ")] }
-        ) { error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.") }
+            try orchestrator.updateProjectConfig(projectID: project.id) { project in project.ports = [ServiceDefinition(name: " \n\t ")] }
+        ) { error in XCTAssertTrue(error.localizedDescription.contains("service name")) }
     }
 
     func testUpdateWorkspaceSettingsAcceptsSyntheticPortFallbackVariableAtSaveTime() throws {
@@ -26,7 +26,7 @@ extension OrchestratorTests {
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
-            settings.ports = [PortDefinition(name: "API_PORT")]
+            settings.ports = [ServiceDefinition(name: "api")]
             settings.processes = [ProcessTemplate(name: "web", command: "PORT=$PORT0 npm run dev")]
         }
 
@@ -42,8 +42,22 @@ extension OrchestratorTests {
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
         XCTAssertThrowsError(
-            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in settings.ports = [PortDefinition(name: "  ")] }
-        ) { error in XCTAssertEqual(error.localizedDescription, "Invalid argument: Port name is required.") }
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in settings.ports = [ServiceDefinition(name: "  ")] }
+        ) { error in XCTAssertTrue(error.localizedDescription.contains("service name")) }
+    }
+
+    func testUpdateWorkspaceSettingsRejectsDuplicateServiceNames() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = try orchestrator.addProject(dir: root.path)
+        let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
+
+        XCTAssertThrowsError(
+            try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+                settings.ports = [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")]
+            }
+        ) { error in XCTAssertTrue(error.localizedDescription.contains("Duplicate service name")) }
     }
 
     func testRollbackFailedImportedProjectCreationPreservesSiblingWorkspaceDirectoriesWithSameSanitizedName() throws {
@@ -147,9 +161,7 @@ extension OrchestratorTests {
 
         // No tracked windows and workspace is not running — refresh should report no DB mutation.
         var result: WorkspaceOrchestrator.RefreshResult?
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { result = try orchestrator.refreshAllWorkspaceWindows() }
-        }
+        result = try orchestrator.refreshAllWorkspaceWindows()
 
         let refreshResult = try XCTUnwrap(result)
         XCTAssertFalse(refreshResult.didMutateDB)
@@ -221,7 +233,7 @@ extension OrchestratorTests {
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.ports = [PortDefinition(id: "existing-port", name: "API_PORT")]
+            config.ports = [ServiceDefinition(id: "existing-port", name: "api")]
             config.processes = [ProcessTemplate(id: "existing-process", name: "api", command: "npm run api")]
         }
         try orchestrator.updateWorkspaceSettings(workspaceID: defaultWorkspace.id) { settings in
@@ -249,17 +261,17 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path) { config in
             config.stopScript = "echo saved-stop"
-            config.ports = [PortDefinition(id: "saved-port", name: "SAVED_PORT")]
+            config.ports = [ServiceDefinition(id: "saved-port", name: "saved")]
         }
-        let document = SpacesYAMLDocument(stopScript: "echo imported-stop", ports: [SpacesYAMLDocument.Port(name: "API_PORT")])
+        let document = SpacesYAMLDocument(stopScript: "echo imported-stop", services: ["api"])
 
         let preview = try orchestrator.previewProjectConfig(projectID: project.id) { config in document.applying(to: &config) }
 
         XCTAssertEqual(preview.stopScript, "echo imported-stop")
-        XCTAssertEqual(preview.ports.map(\.name), ["API_PORT"])
+        XCTAssertEqual(preview.ports.map(\.name), ["api"])
         let savedProject = try XCTUnwrap(try store.project(id: project.id))
         XCTAssertEqual(savedProject.stopScript, "echo saved-stop")
-        XCTAssertEqual(savedProject.ports.map(\.name), ["SAVED_PORT"])
+        XCTAssertEqual(savedProject.ports.map(\.name), ["saved"])
     }
 
     func testUpdateProjectConfigWithWorkspaceSyncKeepsInsertedPortsAlignedWithAssignments() throws {
@@ -268,22 +280,22 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
-        let api = PortDefinition(id: "port-api", name: "API_PORT")
+        let api = ServiceDefinition(id: "port-api", name: "api")
         let project = try orchestrator.addProject(dir: projectDir.path) { config in config.ports = [api] }
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         defer { PortReserver.shared.releasePorts(workspaceID: workspace.id) }
         let previousAPIAssignment = try XCTUnwrap(try store.workspacePortsAssigned(workspaceID: workspace.id).first)
 
         let updatedProject = try orchestrator.updateProjectConfig(projectID: project.id, updateAllWorkspaces: true) { config in
-            config.ports = [PortDefinition(name: "WEB_PORT"), PortDefinition(name: "API_PORT")]
+            config.ports = [ServiceDefinition(name: "web"), ServiceDefinition(name: "api")]
         }
 
-        XCTAssertEqual(updatedProject.ports.map(\.name), ["WEB_PORT", "API_PORT"])
+        XCTAssertEqual(updatedProject.ports.map(\.name), ["web", "api"])
         XCTAssertEqual(updatedProject.ports.last?.id, api.id)
         let assignments = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        XCTAssertEqual(assignments.map(\.name), ["WEB_PORT", "API_PORT"])
-        let webAssignment = try XCTUnwrap(assignments.first { $0.name == "WEB_PORT" })
-        let apiAssignment = try XCTUnwrap(assignments.first { $0.name == "API_PORT" })
+        XCTAssertEqual(assignments.map(\.name), ["web", "api"])
+        let webAssignment = try XCTUnwrap(assignments.first { $0.name == "web" })
+        let apiAssignment = try XCTUnwrap(assignments.first { $0.name == "api" })
         XCTAssertNotEqual(webAssignment.port, previousAPIAssignment.port)
         XCTAssertEqual(apiAssignment.port, previousAPIAssignment.port)
         XCTAssertEqual(apiAssignment.definitionID, api.id)
@@ -307,7 +319,7 @@ extension OrchestratorTests {
         let activeSettings = try orchestrator.workspaceSettings(workspaceID: activeWorkspace.id)
         let archivedSettings = try orchestrator.workspaceSettings(workspaceID: archivedWorkspace.id)
         XCTAssertEqual(activeSettings?.stopScript, "echo synced-stop")
-        XCTAssertEqual(activeSettings?.ports.map(\.name) ?? [], ["API_PORT"])
+        XCTAssertEqual(activeSettings?.ports.map(\.name) ?? [], ["api"])
         XCTAssertEqual(activeSettings?.processes.first?.name, "api")
         XCTAssertEqual(archivedSettings?.stopScript, "echo synced-stop")
         XCTAssertEqual(archivedSettings?.browserSessions.first?.name, "app")
@@ -322,7 +334,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path) { config in
             config.stopScript = "echo old-stop"
-            config.ports = [PortDefinition(id: "old-port", name: "OLD_PORT")]
+            config.ports = [ServiceDefinition(id: "old-port", name: "oldport")]
             config.processes = [ProcessTemplate(id: "old-process", name: "old", command: "npm run old")]
             config.browserSessions = [BrowserSession(name: "old-app", url: "http://localhost:4000")]
             config.agentLaunchers = [AgentLauncher(name: "Old Codex", command: "old-codex")]
@@ -337,6 +349,8 @@ extension OrchestratorTests {
         let conflictSettingsBefore = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
         let defaultPortsBefore = try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id)
         let conflictPortsBefore = try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id)
+        try store.updateWorkspaceRunning(id: defaultWorkspace.id, isRunning: true, launchedAt: "2026-07-01T00:00:00Z")
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(defaultWorkspace.id))
         _ = try orchestrator.registerAgentWindow(workspaceID: conflictWorkspace.id, provider: .spaces, label: "api")
         try spacesYAMLFixture(stopScript: "echo imported-stop").write(
             to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
@@ -347,7 +361,7 @@ extension OrchestratorTests {
 
         let restoredProject = try XCTUnwrap(try store.project(id: project.id))
         XCTAssertEqual(restoredProject.stopScript, "echo old-stop")
-        XCTAssertEqual(restoredProject.ports.map(\.name), ["OLD_PORT"])
+        XCTAssertEqual(restoredProject.ports.map(\.name), ["oldport"])
         XCTAssertEqual(restoredProject.processes.first?.command, "npm run old")
 
         let defaultSettingsAfter = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id))
@@ -358,6 +372,10 @@ extension OrchestratorTests {
         XCTAssertEqual(defaultSettingsAfter.agentLaunchers.map(\.command), defaultSettingsBefore.agentLaunchers.map(\.command))
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.name }, defaultPortsBefore.map { $0.name })
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.port }, defaultPortsBefore.map { $0.port })
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: defaultWorkspace.id)).isRunning)
+        XCTAssertFalse(
+            PortReserver.shared.reservedWorkspaceIDs().contains(defaultWorkspace.id),
+            "Rollback must not restore placeholder reservations for a running workspace.")
 
         let conflictSettingsAfter = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
         XCTAssertEqual(conflictSettingsAfter.stopScript, conflictSettingsBefore.stopScript)
@@ -425,16 +443,16 @@ extension OrchestratorTests {
         XCTAssertTrue(scopedKeys.isEmpty, "Expected no scoped cross-project keys, found: \(scopedKeys)")
     }
 
-    // Tests build workspace env includes named ports by arranging representative inputs and asserting the expected result.
-    func testBuildWorkspaceEnvIncludesNamedPorts() throws {
+    // Tests build workspace env includes service ports by arranging representative inputs and asserting the expected result.
+    func testBuildWorkspaceEnvIncludesServicePorts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
-        let ports: [(port: Int, name: String)] = [(port: 3000, name: "FRONTEND_PORT"), (port: 8080, name: "API_PORT")]
+        let ports: [(port: Int, name: String)] = [(port: 3000, name: "frontend"), (port: 8080, name: "api")]
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: ports)
-        XCTAssertEqual(env["FRONTEND_PORT"], "3000")
-        XCTAssertEqual(env["API_PORT"], "8080")
+        XCTAssertEqual(env["SPACES_FRONTEND_PORT"], "3000")
+        XCTAssertEqual(env["SPACES_API_PORT"], "8080")
         XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], "/tmp/project/ws")
         XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/tmp/project")
     }
@@ -450,18 +468,51 @@ extension OrchestratorTests {
         XCTAssertNil(env["PATH"])
     }
 
-    func testBuildWorkspaceEnvSkipsUnnamedPortsAndDoesNotSynthesizeFallbackKeys() throws {
+    func testBuildWorkspaceEnvEmitsServicePortAndWorkspaceIdentityVars() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
-        let ports: [(port: Int, name: String)] = [(port: 3000, name: " "), (port: 8080, name: "API_PORT")]
+        let ports: [(port: Int, name: String)] = [(port: 3000, name: " "), (port: 8080, name: "admin-ui")]
 
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: ports)
 
+        // Unnamed ports are skipped and the bare service name is never injected; the env var is
+        // SPACES_<SERVICE>_PORT (uppercased, hyphens to underscores).
+        XCTAssertNil(env["admin-ui"])
         XCTAssertNil(env["PORT0"])
-        XCTAssertNil(env["PORT1"])
-        XCTAssertEqual(env["API_PORT"], "8080")
+        XCTAssertEqual(env["SPACES_ADMIN_UI_PORT"], "8080")
+        // Workspace identity and the derived per-service host/URL are present and consistent.
+        let slug = try XCTUnwrap(env["SPACES_WORKSPACE_SLUG"])
+        XCTAssertFalse(slug.isEmpty)
+        XCTAssertEqual(env["SPACES_ADMIN_UI_HOST"], "admin-ui.\(slug).localhost")
+        XCTAssertEqual(env["SPACES_ADMIN_UI_URL"], "http://admin-ui.\(slug).localhost:\(AppConfig.defaultRouterPort)")
+    }
+
+    func testBuildWorkspaceEnvKeepsBrowserFacingServiceURLForRemoteManifest() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/local/project")
+        let workspace = makeWorkspaceRecord(id: "workspace-remote", projectID: project.id, dir: "/local/project/ws", branch: "feature/web")
+        let slug = SpacesProfile.workspaceHostSlug(
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+        let manifest = WorkspaceRuntimeManifest(
+            workspaceID: workspace.id, projectID: project.id, deviceID: "linux-device", location: .remote, localPath: workspace.runtimePath,
+            remotePath: "/srv/project/ws", branch: workspace.branch, baseBranch: workspace.baseBranch,
+            namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)],
+            processEnvironment: [
+                "SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug, "SPACES_WEB_PORT": "3000",
+                "SPACES_WEB_HOST": "web.\(slug).localhost",
+            ], allowedFileRoots: ["/srv/project/ws"])
+
+        let env = orchestrator.buildWorkspaceEnv(
+            project: project, workspace: workspace, namedPorts: [(port: 3000, name: "web")], runtimeManifest: manifest)
+
+        XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], "/srv/project/ws")
+        XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/srv/project/ws")
+        XCTAssertEqual(env["SPACES_WEB_PORT"], "3000")
+        XCTAssertEqual(env["SPACES_WEB_URL"], "http://web.\(slug).localhost:\(AppConfig.defaultRouterPort)")
+        XCTAssertEqual(env["SPACES_WEB_HOST"], "web.\(slug).localhost")
     }
 
     // MARK: - resolveEnvVars
@@ -469,7 +520,7 @@ extension OrchestratorTests {
     // Tests applyEnvVars substitutes a single named variable.
     func testApplyEnvVarsSubstitutesSingleVar() {
         let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
-        let result = orchestrator.applyEnvVars("PORT=$FRONTEND_PORT npm run dev", env: ["FRONTEND_PORT": "20002"])
+        let result = orchestrator.applyEnvVars("PORT=$SPACES_FRONTEND_PORT npm run dev", env: ["SPACES_FRONTEND_PORT": "20002"])
         XCTAssertEqual(result, "PORT=20002 npm run dev")
     }
 
@@ -477,26 +528,28 @@ extension OrchestratorTests {
     func testApplyEnvVarsSubstitutesMultipleVars() {
         let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars(
-            "PORT=$FRONTEND_PORT BACKEND=$BACKEND_PORT node server.js", env: ["FRONTEND_PORT": "3000", "BACKEND_PORT": "4000"])
+            "PORT=$SPACES_FRONTEND_PORT BACKEND=$SPACES_BACKEND_PORT node server.js",
+            env: ["SPACES_FRONTEND_PORT": "3000", "SPACES_BACKEND_PORT": "4000"])
         XCTAssertEqual(result, "PORT=3000 BACKEND=4000 node server.js")
     }
 
     // Tests applyEnvVars leaves unknown variables unchanged.
     func testApplyEnvVarsLeavesUnknownVarsUnchanged() {
         let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
-        let result = orchestrator.applyEnvVars("PORT=$UNKNOWN npm start", env: ["FRONTEND_PORT": "3000"])
+        let result = orchestrator.applyEnvVars("PORT=$UNKNOWN npm start", env: ["SPACES_FRONTEND_PORT": "3000"])
         XCTAssertEqual(result, "PORT=$UNKNOWN npm start")
     }
 
     // Tests applyEnvVars returns command unchanged when env is empty.
     func testApplyEnvVarsEmptyEnvReturnsCommandUnchanged() {
         let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
-        let result = orchestrator.applyEnvVars("PORT=$FRONTEND_PORT npm run dev", env: [:])
-        XCTAssertEqual(result, "PORT=$FRONTEND_PORT npm run dev")
+        let result = orchestrator.applyEnvVars("PORT=$SPACES_FRONTEND_PORT npm run dev", env: [:])
+        XCTAssertEqual(result, "PORT=$SPACES_FRONTEND_PORT npm run dev")
     }
 
-    // Tests resolveEnvVars replaces named port variable with allocated port number.
-    func testResolveEnvVarsReplacesNamedPortVar() throws {
+    // Tests resolveEnvVars replaces the service port variable with the allocated port number, and
+    // does not substitute the bare service name.
+    func testResolveEnvVarsReplacesServicePortVar() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
@@ -504,14 +557,14 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/workspaces/myapp/dev")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20002], names: ["FRONTEND_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [20002], names: ["frontend"])
 
-        let resolved = try orchestrator.resolveEnvVars(in: "PORT=$FRONTEND_PORT npm run dev", workspaceID: workspace.id)
-        XCTAssertEqual(resolved, "PORT=20002 npm run dev")
+        let resolved = try orchestrator.resolveEnvVars(in: "PORT=$SPACES_FRONTEND_PORT host=$frontend", workspaceID: workspace.id)
+        XCTAssertEqual(resolved, "PORT=20002 host=$frontend")
     }
 
-    // Tests resolveEnvVars resolves multiple named ports.
-    func testResolveEnvVarsResolvesMultipleNamedPorts() throws {
+    // Tests resolveEnvVars resolves multiple service ports.
+    func testResolveEnvVarsResolvesMultipleServicePorts() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
 
@@ -519,9 +572,10 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/workspaces/myapp/dev")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["FRONTEND_PORT", "BACKEND_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["frontend", "backend"])
 
-        let resolved = try orchestrator.resolveEnvVars(in: "FRONTEND=$FRONTEND_PORT BACKEND=$BACKEND_PORT node app.js", workspaceID: workspace.id)
+        let resolved = try orchestrator.resolveEnvVars(
+            in: "FRONTEND=$SPACES_FRONTEND_PORT BACKEND=$SPACES_BACKEND_PORT node app.js", workspaceID: workspace.id)
         XCTAssertEqual(resolved, "FRONTEND=3000 BACKEND=4000 node app.js")
     }
 
@@ -576,13 +630,13 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/myapp")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["FRONTEND", "BACKEND"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["frontend", "backend"])
 
         let named = try orchestrator.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(named.count, 2)
-        XCTAssertEqual(named[0].name, "FRONTEND")
+        XCTAssertEqual(named[0].name, "frontend")
         XCTAssertEqual(named[0].port, 3000)
-        XCTAssertEqual(named[1].name, "BACKEND")
+        XCTAssertEqual(named[1].name, "backend")
         XCTAssertEqual(named[1].port, 4000)
     }
 
@@ -617,11 +671,12 @@ extension OrchestratorTests {
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
         try store.upsert(workspace: workspace)
-        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["PORT", "API_PORT"])
+        try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000, 4000], names: ["frontend", "api"])
         try store.setWorkspaceBrowserSessions(
             workspaceID: workspace.id,
             sessions: [
-                BrowserSession(name: "Frontend", url: "http://localhost:$PORT"), BrowserSession(name: "API", url: "http://localhost:$API_PORT/v1"),
+                BrowserSession(name: "Frontend", url: "http://localhost:$SPACES_FRONTEND_PORT"),
+                BrowserSession(name: "API", url: "http://localhost:$SPACES_API_PORT/v1"),
             ])
 
         let resolved = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)

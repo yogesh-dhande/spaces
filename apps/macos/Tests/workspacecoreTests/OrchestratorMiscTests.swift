@@ -152,9 +152,7 @@ extension OrchestratorTests {
             XCTAssertTrue(log.contains("setup stdout"))
             XCTAssertTrue(log.contains("setup stderr"))
 
-            XCTAssertThrowsError(
-                try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
-            ) { error in
+            XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id)) { error in
                 XCTAssertTrue(error.localizedDescription.contains("Workspace setup failed"))
                 XCTAssertTrue(error.localizedDescription.contains("exit code 7"))
             }
@@ -413,11 +411,7 @@ extension OrchestratorTests {
             settings.processes = [ProcessTemplate(name: "api", command: "npm run api")]
         }
 
-        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-                try withEnv(name: "YABAI_WINDOWS_JSON", value: "[]") { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
-            }
-        }
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
@@ -434,36 +428,16 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let openLog = root.appendingPathComponent("launch-open.log")
 
-        let windowsJSON =
-            "[{\"id\":101,\"pid\":11,\"app\":\"Spaces\",\"title\":\"shell\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false},{\"id\":202,\"pid\":22,\"app\":\"Google Chrome\",\"title\":\"docs\",\"space\":1,\"display\":1,\"is-sticky\":false,\"is-hidden\":false,\"is-visible\":true,\"is-native-fullscreen\":false}]"
-
-        // Mocked dependencies: `yabai`, `osascript`, and `open`.
+        // Mocked dependencies: `osascript` and `open`.
         // Why: verify launch behavior keeps editor unopened/untracked.
         // Remaining risk: real launch timing may still differ under heavy desktop churn.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock, "open": Self.openMockScript]) {
-            try withEnv(name: "YABAI_WINDOWS_JSON", value: windowsJSON) {
-                try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
-            }
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock, "open": Self.openMockScript]) {
+            try withEnv(name: "OPEN_LOG_FILE", value: openLog.path) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
         }
 
         let editorWindows = try orchestrator.windows(workspaceID: workspace.id).filter { $0.role == "editor" }
         XCTAssertEqual(editorWindows.count, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: openLog.path))
-    }
-
-    // Tests list space options sorts by display then space by arranging representative inputs and asserting the expected result.
-    func testListSpaceOptionsSortsByDisplayThenSpace() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        // Mocked dependency: `yabai --spaces` payload ordering.
-        // Why: guarantee sort assertions independently of host window-manager state.
-        // Remaining risk: unexpected production fields or space metadata edge cases are not covered.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) {
-            let options = try orchestrator.listSpaceOptions()
-            let values = options.map { "\($0.displayIndex):\($0.spaceIndex)" }
-            XCTAssertEqual(values, ["1:1", "1:2", "2:3"])
-        }
     }
 
     func testDiscardPreparedGitProjectPreservesCloneWhenRegisteredBeforeCleanup() throws {
@@ -528,8 +502,8 @@ extension OrchestratorTests {
         let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
         defer { try? orchestrator.discardPreparedGitProject(prepared) }
 
-        XCTAssertThrowsError(try orchestrator.addPreparedGitProject(prepared) { config in config.ports = [PortDefinition(name: "   ")] }) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Port name is required"))
+        XCTAssertThrowsError(try orchestrator.addPreparedGitProject(prepared) { config in config.ports = [ServiceDefinition(name: "   ")] }) {
+            error in XCTAssertTrue(error.localizedDescription.contains("service name"))
         }
 
         XCTAssertTrue(try store.projects().isEmpty)
@@ -546,7 +520,7 @@ extension OrchestratorTests {
 
     // Tests stop workspace closes tracked browser tabs without closing chrome window by arranging representative inputs and asserting the expected result.
 
-    // Tests stop workspace closes the shared Spaces window without yabai-closing it by arranging representative inputs and asserting the expected result.
+    // Tests stop workspace closes the shared Spaces window without force-closing the desktop window by arranging representative inputs and asserting the expected result.
 
     // Tests stop workspace closes all live detected browser session tabs by arranging representative inputs and asserting the expected result.
 
@@ -555,8 +529,8 @@ extension OrchestratorTests {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", windowID: 701,
-                pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
         XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id))
     }
@@ -576,7 +550,15 @@ extension OrchestratorTests {
         let setupThread = WorkspaceSetupThread(orchestrator: orchestrator, workspaceID: workspace.id)
         setupThread.start()
 
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript]) { try orchestrator.launchWorkspace(workspaceID: workspace.id) }
+        // Wait until the background setup has registered as in-flight before launching, so the
+        // launch path deterministically observes a pending run to wait on rather than racing ahead
+        // of the setup thread.
+        let inFlightDeadline = Date().addingTimeInterval(5)
+        while try orchestrator.workspaceSetupState(workspaceID: workspace.id).status != .running, Date() < inFlightDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        try orchestrator.launchWorkspace(workspaceID: workspace.id)
 
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .succeeded)
@@ -599,7 +581,7 @@ extension OrchestratorTests {
 
         // Mocked dependencies are present only to satisfy adapter calls; launch should fail before launching anything.
         // Remaining risk: launch behavior when partially archived/misaligned runtime state exists is covered elsewhere.
-        try withMockCommands(["yabai": Self.orchestratorYabaiMockScript, "osascript": Self.orchestratorOsaScriptMock]) {
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) {
             XCTAssertThrowsError(try orchestrator.launchWorkspace(workspaceID: workspace.id))
         }
     }

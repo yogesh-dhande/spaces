@@ -85,19 +85,36 @@ func makeProjectRecord(id: String = UUID().uuidString, dir: String) -> ProjectRe
         browserSessions: [])
 }
 
-func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String) -> WorkspaceRecord {
+func makeWorkspaceRecord(id: String = UUID().uuidString, projectID: String, dir: String, branch: String? = nil) -> WorkspaceRecord {
     WorkspaceRecord(
-        id: id, projectID: projectID, dir: dir, dirname: nil, branch: nil, isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        id: id, projectID: projectID, dir: dir, dirname: nil, branch: branch, isDefault: false, isArchived: false, isRunning: false,
+        lastLaunchedAt: nil)
 }
 
-final class MockTerminalFocusPulseController: TerminalFocusPulseControlling, @unchecked Sendable {
-    var pulseCallCount = 0
-    var pulsedWindowIDs: [Int] = []
-    var pulseColors: [(r: Int, g: Int, b: Int)] = []
+/// Seeds the tracked terminal-session window that a live Spaces terminal session creates before any
+/// agent hook fires. In the session-based model the agent correlates to this existing window (matched
+/// by session id) instead of minting its own dedicated row, so the agent label is not auto-suffixed
+/// against a window it just created for itself.
+func seedTerminalSessionWindow(store: SQLiteStore, workspaceID: String, sessionID: String) throws {
+    try store.upsert(
+        window: WindowRecord(
+            id: UUID().uuidString, workspaceID: workspaceID, app: TerminalHost.spaces.appName, name: sessionID, detail: nil, targetURL: nil,
+            windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+}
 
-    func pulse(windowID: Int, color: (r: Int, g: Int, b: Int), yabai _: YabaiAdapter) {
-        pulseCallCount += 1
-        pulsedWindowIDs.append(windowID)
-        pulseColors.append(color)
-    }
+/// Marks a built-in terminal session as live for window-reconciliation purposes. Window liveness is
+/// session-based: a control socket must be present, an active owner attachment must exist, and the
+/// service PID must be alive. Tests that exercise `refreshWorkspaceWindows` must establish those session
+/// artifacts for the window to survive reconciliation. The session's runtime state (with a live
+/// `servicePID`) must already be written by the caller.
+func markBuiltInSessionLive(sessionID: String, attachedAt: String = "2026-06-06T00:00:00Z") throws {
+    let paths = try TerminalSessionPaths.forSession(id: sessionID)
+    try paths.ensureDirectories()
+    _ = FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+    let client = TerminalClient(
+        id: "owner-\(sessionID)", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+        connectedAt: attachedAt)
+    let attachment = TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: attachedAt)
+    try TerminalSessionPersistence.writeAttachmentSnapshot(
+        TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]), paths: paths)
 }
