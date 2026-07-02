@@ -71,6 +71,14 @@ private enum RemoteOverviewDisconnectReason {
     /// it from re-filtering and re-sorting on every query, and it is invalidated
     /// whenever the host's `workspacesByProject` changes.
     private var visibleWorkspacesCache: [String: [WorkspaceSummary]] = [:]
+    /// Memoized per-workspace runtime-target rows, on the same data-source hot path
+    /// and invalidated together with `visibleWorkspacesCache` (every overview change
+    /// reassigns the host's `workspacesByProject`, which invalidates both).
+    private var runtimeTargetItemsCache: [String: [SidebarRuntimeTargetItem]] = [:]
+    /// The runtime target currently being renamed inline, if any. The row cell swaps
+    /// its title for an editor while this matches (same pattern as the device rename).
+    private var renamingRuntimeTarget: (workspaceID: String, item: SidebarRuntimeTargetItem)?
+    weak var renamingRuntimeTargetField: NSTextField?
     /// Per-remote-device timestamp of the last overview fetch, so polls driven by
     /// local events don't re-request every remote's overview on every cycle.
     private var remoteOverviewFetchInstants: [String: ContinuousClock.Instant] = [:]
@@ -105,7 +113,10 @@ private enum RemoteOverviewDisconnectReason {
 
     private static let placeholderProject = ProjectSummary(id: "", name: "", dir: "", isGitRepo: false, defaultBranch: nil)
 
-    func invalidateVisibleWorkspacesCache() { visibleWorkspacesCache.removeAll(keepingCapacity: true) }
+    func invalidateVisibleWorkspacesCache() {
+        visibleWorkspacesCache.removeAll(keepingCapacity: true)
+        runtimeTargetItemsCache.removeAll(keepingCapacity: true)
+    }
 
     /// Wires the host's outline view to this controller as its delegate/data source
     /// and installs the row mouse-down and arrow-navigation callbacks.
@@ -119,8 +130,16 @@ private enum RemoteOverviewDisconnectReason {
                 self.toggleProjectExpanded(projectID: project.id)
                 return true
             }
+            if case .runtimeTarget(_, let workspace, let item) = ref.item {
+                // While this row's inline rename editor is up, let clicks reach the editor.
+                if let renaming = self.renamingRuntimeTarget, renaming.workspaceID == workspace.id, renaming.item.key == item.key { return false }
+                if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
+                self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
+                return true
+            }
             return false
         }
+        outlineView.onRowMenu = { [weak self] row in self?.menuForRow(row) }
         outlineView.onArrowNavigation = { [weak self] direction in self?.navigateSidebarSelection(direction: direction) ?? false }
         outlineView.delegate = self
         outlineView.dataSource = self
@@ -164,6 +183,7 @@ private enum RemoteOverviewDisconnectReason {
     func canPreserveDetailPaneAfterSidebarReload() -> Bool {
         if host.activeAddWorkspaceFormTag != nil || host.activeAddProjectFormTag != nil { return true }
         if host.projectSettingsProjectID != nil { return true }
+        if host.workspaceSettingsWorkspaceID != nil { return true }
         if host.showingAlerts || host.showingSettings { return true }
         if let selectedWorkspaceID = host.selectedWorkspaceID { return findWorkspace(id: selectedWorkspaceID) != nil }
         if let selectedProjectID = host.selectedProjectID { return host.projects.contains(where: { $0.id == selectedProjectID }) }
@@ -757,21 +777,47 @@ private enum RemoteOverviewDisconnectReason {
         return outlineItemRef(for: .project(project))
     }
 
+    /// The runtime-target rows shown under a workspace, memoized per workspace id.
+    func runtimeTargetItems(workspaceID: String) -> [SidebarRuntimeTargetItem] {
+        if let cached = runtimeTargetItemsCache[workspaceID] { return cached }
+        let items = host.sidebarRuntimeTargetItems(workspaceID: workspaceID)
+        runtimeTargetItemsCache[workspaceID] = items
+        return items
+    }
+
+    /// A non-git project row stands in for its single workspace, so its outline
+    /// children are that workspace's runtime targets.
+    private func nonGitProjectTargetWorkspace(_ project: ProjectSummary) -> WorkspaceSummary? {
+        guard !project.isGitRepo else { return nil }
+        return visibleWorkspaces(projectID: project.id).first
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return showsDeviceHeaders ? host.deviceSections.count : deviceProjects(deviceID: singleDeviceID).count }
         if case .device(let deviceID) = (item as? OutlineItemRef)?.item { return deviceProjects(deviceID: deviceID).count }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
-            // Non-git projects own exactly one workspace (the project directory) and
-            // render as a single flat row, so they expose no expandable children.
-            guard project.isGitRepo else { return 0 }
+            // Non-git projects own exactly one workspace (the project directory) and render
+            // as a single flat row; their children are that workspace's runtime targets.
+            guard project.isGitRepo else {
+                guard let workspace = nonGitProjectTargetWorkspace(project) else { return 0 }
+                return runtimeTargetItems(workspaceID: workspace.id).count
+            }
             return max(visibleWorkspaces(projectID: project.id).count, 1)
         }
+        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return runtimeTargetItems(workspaceID: workspace.id).count }
         return 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         if case .device = (item as? OutlineItemRef)?.item { return true }
-        if case .project(let project) = (item as? OutlineItemRef)?.item { return project.isGitRepo }
+        if case .project(let project) = (item as? OutlineItemRef)?.item {
+            guard project.isGitRepo else {
+                guard let workspace = nonGitProjectTargetWorkspace(project) else { return false }
+                return !runtimeTargetItems(workspaceID: workspace.id).isEmpty
+            }
+            return true
+        }
+        if case .workspace(_, let workspace) = (item as? OutlineItemRef)?.item { return !runtimeTargetItems(workspaceID: workspace.id).isEmpty }
         return false
     }
 
@@ -779,7 +825,7 @@ private enum RemoteOverviewDisconnectReason {
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         switch (item as? OutlineItemRef)?.item {
-        case .device, .emptyProject: return false
+        case .device, .emptyProject, .runtimeTarget: return false
         default: return true
         }
     }
@@ -792,6 +838,10 @@ private enum RemoteOverviewDisconnectReason {
             return outlineItemRef(for: .project(project))
         }
         if case .project(let project) = (item as? OutlineItemRef)?.item {
+            if let workspace = nonGitProjectTargetWorkspace(project) {
+                let items = runtimeTargetItems(workspaceID: workspace.id)
+                if index >= 0 && index < items.count { return outlineItemRef(for: .runtimeTarget(project, workspace, items[index])) }
+            }
             let visible = visibleWorkspaces(projectID: project.id)
             guard !visible.isEmpty else { return outlineItemRef(for: .emptyProject(project)) }
             let workspace =
@@ -799,6 +849,10 @@ private enum RemoteOverviewDisconnectReason {
                 ?? WorkspaceSummary(
                     id: "", branch: nil, baseBranch: nil, dir: "", isRunning: false, isArchived: false, isHidden: false, isDefault: false)
             return outlineItemRef(for: .workspace(project, workspace))
+        }
+        if case .workspace(let project, let workspace) = (item as? OutlineItemRef)?.item {
+            let items = runtimeTargetItems(workspaceID: workspace.id)
+            if index >= 0 && index < items.count { return outlineItemRef(for: .runtimeTarget(project, workspace, items[index])) }
         }
         return outlineItemRef(for: .project(host.projects.first ?? Self.placeholderProject))
     }
@@ -829,6 +883,7 @@ private enum RemoteOverviewDisconnectReason {
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: host.selectedWorkspaceID == workspace.id)
         case .emptyProject(let project): return emptyProjectRowCell(project: project)
+        case .runtimeTarget(_, let workspace, let item): return runtimeTargetRowCell(workspace: workspace, item: item)
         }
     }
 
@@ -1084,7 +1139,17 @@ private enum RemoteOverviewDisconnectReason {
             warningIcon.heightAnchor.constraint(equalToConstant: 11).isActive = true
             titleRow.addArrangedSubview(warningIcon)
         }
+        let gearSpacer = NSView()
+        gearSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        titleRow.addArrangedSubview(gearSpacer)
+        let settingsButton = host.sidebarRowIconButton(
+            symbol: "gearshape", tooltip: "Workspace settings for \(workspace.displayName)",
+            action: #selector(AppKitController.showWorkspaceSettings(_:)))
+        settingsButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+        settingsButton.setAccessibilityIdentifier("sidebar-workspace-settings-\(workspace.id)")
+        titleRow.addArrangedSubview(settingsButton)
         contentStack.addArrangedSubview(titleRow)
+        titleRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
 
         cardView.addSubview(contentStack)
         cell.addSubview(cardView)
@@ -1101,6 +1166,169 @@ private enum RemoteOverviewDisconnectReason {
         ])
 
         return cell
+    }
+
+    /// The SF Symbol conveying a runtime target's kind in the sidebar list, matching the
+    /// icons the settings sections use (terminal for process-backed rows, globe for
+    /// browser sessions, sparkles for coding agents).
+    private static func runtimeTargetSymbol(kind: AppKitController.WorkspaceRunShortcutTarget.Kind) -> String {
+        switch kind {
+        case .browser: return "globe"
+        case .process, .window, .missingConfiguredProcess: return "terminal"
+        case .agent, .agentLauncher: return "sparkles"
+        }
+    }
+
+    private func runtimeTargetSymbolColor(item: SidebarRuntimeTargetItem) -> NSColor {
+        switch item.runState {
+        case .running: return sidebarRunningIndicatorColor()
+        case .exited: return sidebarFailedIndicatorColor()
+        case .notStarted, nil: return sidebarMetadataTextColor(isSelected: false)
+        }
+    }
+
+    private func runtimeTargetRowCell(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.setAccessibilityIdentifier("sidebar-target-\(workspace.id)-\(item.key)")
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+        icon.contentTintColor = runtimeTargetSymbolColor(item: item)
+        icon.toolTip = item.runState.map { $0 == .running ? "Running" : ($0 == .exited ? "Exited" : "Not started") }
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 12).isActive = true
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        row.addArrangedSubview(icon)
+
+        if let renaming = renamingRuntimeTarget, renaming.workspaceID == workspace.id, renaming.item.key == item.key {
+            let editor = NSTextField(string: item.title)
+            editor.font = .systemFont(ofSize: 11, weight: .regular)
+            editor.delegate = host
+            editor.toolTip = "Press Return to save, Esc to cancel."
+            editor.setAccessibilityIdentifier("sidebar-target-rename-input")
+            editor.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            renamingRuntimeTargetField = editor
+            Task { @MainActor [weak editor] in
+                guard let editor else { return }
+                editor.window?.makeFirstResponder(editor)
+                editor.selectText(nil)
+            }
+            row.addArrangedSubview(editor)
+        } else {
+            let isPendingLaunchAction = item.kind == .missingConfiguredProcess || item.kind == .agentLauncher
+            let titleLabel = NSTextField(labelWithString: item.title)
+            titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+            titleLabel.textColor = isPendingLaunchAction ? sidebarMetadataTextColor(isSelected: false) : sidebarPrimaryTextColor(
+                isSelected: false, isArchived: false)
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            row.addArrangedSubview(titleLabel)
+        }
+
+        row.addArrangedSubview(NSView())
+        if host.selectedWorkspaceID == workspace.id, let index = item.shortcutIndex {
+            row.addArrangedSubview(RowPrimitives.shortcutChip(host.windowShortcutBadgeText(index: index)))
+        }
+
+        cell.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 22),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            row.topAnchor.constraint(equalTo: cell.topAnchor), row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+        ])
+        return cell
+    }
+
+    /// Context payload carried on runtime-target menu items so the action selectors can
+    /// recover the clicked target without re-deriving it from the outline row.
+    private final class RuntimeTargetMenuContext: NSObject {
+        let workspaceID: String
+        let item: SidebarRuntimeTargetItem
+        init(workspaceID: String, item: SidebarRuntimeTargetItem) {
+            self.workspaceID = workspaceID
+            self.item = item
+        }
+    }
+
+    func menuForRow(_ row: Int) -> NSMenu? {
+        guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef, case .runtimeTarget(_, let workspace, let item) = ref.item else {
+            return nil
+        }
+        let context = RuntimeTargetMenuContext(workspaceID: workspace.id, item: item)
+        let menu = NSMenu()
+        func addItem(_ title: String, symbol: String, action: Selector?) {
+            let menuItem = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            menuItem.target = action == nil ? nil : self
+            menuItem.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            menuItem.representedObject = context
+            menu.addItem(menuItem)
+        }
+        if item.canRun { addItem("Start", symbol: "play", action: #selector(startRuntimeTargetMenuItem(_:))) }
+        if item.canStop { addItem("Stop", symbol: "stop", action: #selector(stopRuntimeTargetMenuItem(_:))) }
+        if item.canRestart { addItem("Restart", symbol: "arrow.clockwise", action: #selector(restartRuntimeTargetMenuItem(_:))) }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        addItem("Rename", symbol: "pencil", action: #selector(renameRuntimeTargetMenuItem(_:)))
+        if item.kind != .browser {
+            // Enabled once globally-scoped panel windows land; kept visible so the
+            // action is discoverable.
+            addItem("Open in New Window", symbol: "macwindow.badge.plus", action: nil)
+        }
+        return menu
+    }
+
+    @objc private func startRuntimeTargetMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        host.startSidebarRuntimeTarget(workspaceID: context.workspaceID, item: context.item)
+    }
+
+    @objc private func stopRuntimeTargetMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        host.stopSidebarRuntimeTarget(workspaceID: context.workspaceID, item: context.item)
+    }
+
+    @objc private func restartRuntimeTargetMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        host.restartSidebarRuntimeTarget(workspaceID: context.workspaceID, item: context.item)
+    }
+
+    @objc private func renameRuntimeTargetMenuItem(_ sender: NSMenuItem) {
+        guard let context = sender.representedObject as? RuntimeTargetMenuContext else { return }
+        renamingRuntimeTarget = (context.workspaceID, context.item)
+        reloadRuntimeTargetRow(workspaceID: context.workspaceID, key: context.item.key)
+    }
+
+    func cancelRuntimeTargetRename() {
+        guard let renaming = renamingRuntimeTarget else { return }
+        renamingRuntimeTarget = nil
+        renamingRuntimeTargetField = nil
+        reloadRuntimeTargetRow(workspaceID: renaming.workspaceID, key: renaming.item.key)
+    }
+
+    func commitRuntimeTargetRename(newTitle: String) {
+        guard let renaming = renamingRuntimeTarget else { return }
+        renamingRuntimeTarget = nil
+        renamingRuntimeTargetField = nil
+        reloadRuntimeTargetRow(workspaceID: renaming.workspaceID, key: renaming.item.key)
+        host.commitSidebarRuntimeTargetRename(workspaceID: renaming.workspaceID, item: renaming.item, newTitle: newTitle)
+    }
+
+    private func reloadRuntimeTargetRow(workspaceID: String, key: String) {
+        for row in 0..<host.outlineView.numberOfRows {
+            guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef,
+                case .runtimeTarget(_, let workspace, let item) = ref.item, workspace.id == workspaceID, item.key == key
+            else { continue }
+            host.outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+            return
+        }
     }
 
     private func sidebarMetadataRow(
@@ -1157,6 +1385,7 @@ private enum RemoteOverviewDisconnectReason {
             return host.selectedProjectID == project.id && isSelected ? 32 : 30
         case .workspace: return 32
         case .emptyProject: return 28
+        case .runtimeTarget: return 22
         }
     }
 
@@ -1242,7 +1471,7 @@ private enum RemoteOverviewDisconnectReason {
         let previousWorkspaceID = host.selectedWorkspaceID
         host.lastSelectedRow = row
         switch item {
-        case .device, .emptyProject: return
+        case .device, .emptyProject, .runtimeTarget: return
         case .project(let project):
             guard let workspace = visibleWorkspaces(projectID: project.id).first else { return }
             host.selectedProjectID = project.id
@@ -1269,6 +1498,16 @@ private enum RemoteOverviewDisconnectReason {
         if let currentProjectID, let currentRow = rowIndex(forProjectID: currentProjectID) { rowsToReload.insert(currentRow) }
         if let previousWorkspaceID, let previousRow = rowIndex(forWorkspaceID: previousWorkspaceID) { rowsToReload.insert(previousRow) }
         if let currentWorkspaceID, let currentRow = rowIndex(forWorkspaceID: currentWorkspaceID) { rowsToReload.insert(currentRow) }
+        // The ⌘-number shortcut chips only render on the selected workspace's target
+        // rows, so the outgoing and incoming workspaces' target lists reload too.
+        for workspaceID in [previousWorkspaceID, currentWorkspaceID].compactMap({ $0 }) where previousWorkspaceID != currentWorkspaceID {
+            for row in 0..<host.outlineView.numberOfRows {
+                guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef,
+                    case .runtimeTarget(_, let workspace, _) = ref.item, workspace.id == workspaceID
+                else { continue }
+                rowsToReload.insert(row)
+            }
+        }
         guard !rowsToReload.isEmpty else { return }
         host.outlineView.reloadData(forRowIndexes: rowsToReload, columnIndexes: IndexSet(integer: 0))
     }
@@ -1313,7 +1552,7 @@ private enum RemoteOverviewDisconnectReason {
             host.showError(error)
             return
         }
-        if isCollapsed { host.outlineView.collapseItem(item) } else { host.outlineView.expandItem(item) }
+        if isCollapsed { host.outlineView.collapseItem(item) } else { host.outlineView.expandItem(item, expandChildren: true) }
         if isCollapsed, let selectedWorkspaceID = host.selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID),
             project.id == projectID
         {
@@ -1337,9 +1576,11 @@ private enum RemoteOverviewDisconnectReason {
                 host.outlineView.expandItem(item)
             }
         }
+        // Expanding children keeps every visible workspace's runtime-target list open;
+        // the target rows have no disclosure affordance of their own.
         for project in host.projects {
             guard let row = rowIndex(forProjectID: project.id), let item = host.outlineView.item(atRow: row) else { continue }
-            if project.isCollapsed { host.outlineView.collapseItem(item) } else { host.outlineView.expandItem(item) }
+            if project.isCollapsed { host.outlineView.collapseItem(item) } else { host.outlineView.expandItem(item, expandChildren: true) }
         }
     }
 

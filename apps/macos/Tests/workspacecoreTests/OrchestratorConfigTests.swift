@@ -790,6 +790,79 @@ extension OrchestratorTests {
         XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
     }
 
+    func testRenameAdHocBuiltInTerminalSessionPersistsUserTitleOverRuntimeTitleUpdates() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let otherWorkspace = makeWorkspaceRecord(projectID: project.id, dir: root.appendingPathComponent("other", isDirectory: true).path)
+        try store.upsert(workspace: otherWorkspace)
+        let sessionID = "ad-hoc-rename-session"
+        try store.upsert(
+            window: WindowRecord(
+                id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "shell-1", workingDirectory: workspace.dir,
+                shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .shell)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: "now", title: "vim main.swift", workingDirectory: workspace.dir), paths: paths)
+
+            XCTAssertThrowsError(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "  ")) {
+                error in XCTAssertTrue(error.localizedDescription.contains("title"))
+            }
+            XCTAssertFalse(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: otherWorkspace.id, sessionID: sessionID, title: "x"))
+            XCTAssertTrue(
+                try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "  build watcher  "))
+
+            let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == "terminal-window" })
+            XCTAssertEqual(window.name, "build watcher")
+            XCTAssertEqual(try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).userTitle, "build watcher")
+
+            // Neither a later Ghostty set_title-driven runtime rewrite nor a relaunch-style
+            // launch-configuration rewrite may clobber the manual rename.
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: "later", title: "nvim other.swift", workingDirectory: workspace.dir), paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let entry = try XCTUnwrap(try TerminalSessionCatalog.listLiveSessions().first { $0.sessionID == sessionID })
+            XCTAssertEqual(entry.effectiveTitle, "build watcher")
+        }
+    }
+
+    func testRenameAdHocBuiltInTerminalSessionRefusesConfiguredProcessSessions() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "process-owned-session"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "api", workingDirectory: workspace.dir,
+                    shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .process), paths: paths)
+
+            XCTAssertFalse(try orchestrator.renameAdHocBuiltInTerminalSession(workspaceID: workspace.id, sessionID: sessionID, title: "renamed"))
+        }
+    }
+
     // Tests workspace settings and accessors reflect store state by arranging representative inputs and asserting the expected result.
     func testWorkspaceSettingsAndAccessorsReflectStoreState() throws {
         let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()

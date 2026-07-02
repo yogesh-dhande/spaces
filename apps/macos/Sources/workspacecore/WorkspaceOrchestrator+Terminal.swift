@@ -67,6 +67,44 @@ extension WorkspaceOrchestrator {
         return true
     }
 
+    /// Renames an ad-hoc built-in terminal session: persists the user title on the daemon's
+    /// terminal-session record and updates the `name` of the session's runtime-target rows so
+    /// both the workspace terminal row and the session summary reflect the rename. Returns
+    /// false when no ad-hoc session in the workspace matches.
+    @discardableResult public func renameAdHocBuiltInTerminalSession(workspaceID: String, sessionID: String, title: String) throws -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw WorkspaceError.invalidArgument(message: "Terminal session title must not be empty.") }
+        // The lifecycle lock keeps the rename from re-upserting a window row that a concurrent
+        // stop just deleted.
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            guard let sessionID = normalizedTerminalSessionID(sessionID), let workspace = try store.workspace(id: workspaceID) else { return false }
+            let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+            guard !builtInTerminalSessionHasConfiguredOwner(ownership) else { return false }
+            if let terminalWindowWorkspaceID = ownership.terminalWindowWorkspaceID {
+                guard terminalWindowWorkspaceID == workspaceID else { return false }
+            } else if let launchWorkspaceID = ownership.launchWorkspaceID {
+                guard launchWorkspaceID == workspaceID else { return false }
+            } else {
+                guard terminalSession(sessionID: sessionID, belongsTo: workspace) else { return false }
+            }
+            let matchingWindows = try store.windows(workspaceID: workspaceID).filter {
+                $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+            }
+            for window in matchingWindows {
+                try store.upsert(
+                    window: WindowRecord(
+                        id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
+                        targetURL: window.targetURL, windowID: window.windowID, terminalTrackingID: window.terminalTrackingID,
+                        terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+            }
+            if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try TerminalSessionPersistence.writeUserTitle(title, sessionID: sessionID, paths: paths)
+            }
+            return true
+        }
+    }
+
     @discardableResult func deleteAgentRows(forBuiltInTerminalSession sessionID: String, workspaceID: String) throws -> Int {
         let matchingAgents = try store.agentWindows(workspaceID: workspaceID).filter { builtInTerminalSessionID(for: $0) == sessionID }
         for agent in matchingAgents { try store.deleteAgentWindow(id: agent.id) }

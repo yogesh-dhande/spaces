@@ -11,7 +11,8 @@ public enum SpacesWireProtocol {
     // 2: SpacesDeviceTerminalSessionSummary carries the session shell/command (shell is a
     //    required decode field) and TerminalClient carries leaseRefreshedAt. A protocol-1
     //    daemon's overview omits these, so client and daemon must match exactly.
-    public static let version = 2
+    // 3: renameTerminalSession Device API command; a protocol-2 daemon cannot decode it.
+    public static let version = 3
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

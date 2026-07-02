@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -77,6 +77,11 @@ public enum DatabaseSchema {
                     ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_target_url;
                     """)
         },
+        // Manual terminal-session rename: stored separately from the launch-time title so
+        // Ghostty set_title-driven runtime title updates never clobber a user's rename.
+        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "Add terminal session user title", requiresBackup: false) { database in
+            try executeBatch(database: database, sql: "ALTER TABLE terminal_sessions ADD COLUMN user_title TEXT;")
+        },
     ]
 
     static let terminalRemoteSessionStateSQL = """
@@ -121,6 +126,7 @@ public enum DatabaseSchema {
               workspace_id TEXT,
               kind TEXT NOT NULL DEFAULT 'shell',
               title TEXT NOT NULL,
+              user_title TEXT,
               working_directory TEXT NOT NULL,
               shell TEXT NOT NULL,
               command TEXT,

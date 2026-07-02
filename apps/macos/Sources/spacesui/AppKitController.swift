@@ -240,6 +240,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
     var projectSettingsProjectID: String?
+    var workspaceSettingsWindow: NSWindow?
+    var workspaceSettingsWorkspaceID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
     private lazy var updaterController: SPUStandardUpdaterController? = {
         guard Self.isRunningFromAppBundle else { return nil }
@@ -680,7 +682,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The workspace's focusable targets plus the context needed to name and resolve them,
     /// using the same ordering and (all configured) browser sessions as the numbered
     /// shortcuts so by-name focus, the names dump, and Cmd-N stay consistent.
-    private func focusableWindowContext(workspaceID: String) -> (
+    func focusableWindowContext(workspaceID: String) -> (
         detail: SpacesDeviceWorkspaceDetailViewModel, overview: SpacesDeviceOverviewPayload, browserSessions: [BrowserSession],
         targets: [WorkspaceRunShortcutTarget]
     )? {
@@ -692,7 +694,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The display name for a focusable target, matching the names the numbered-shortcut
     /// list surfaces (browser session name, process/terminal title, agent label).
-    nonisolated private static func focusableWindowName(
+    nonisolated static func focusableWindowName(
         for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession]
     ) -> String? {
         switch target.kind {
@@ -892,7 +894,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Stable per-target identity used to remember the cursor and preserve cycle order.
-    nonisolated private static func cycleCursorKey(for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel) -> String {
+    nonisolated static func cycleCursorKey(for target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel) -> String {
         switch target.kind {
         case .browser: return "browser:\(target.targetURL ?? "")"
         case .process: return "process:\(target.processID ?? "")"
@@ -2705,7 +2707,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceProcessTemplate(id: process.id, name: process.name, command: process.command, kind: process.kind, onExit: process.onExit.rawValue)
     }
 
-    nonisolated private static func localBrowserSession(from session: SpacesDeviceBrowserSession) -> BrowserSession {
+    nonisolated static func localBrowserSession(from session: SpacesDeviceBrowserSession) -> BrowserSession {
         BrowserSession(name: session.name, url: session.url)
     }
 
@@ -2721,7 +2723,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         SpacesDeviceAgentLauncher(id: launcher.id, name: launcher.name, command: launcher.command)
     }
 
-    nonisolated private static func localWorkspaceSettings(from config: SpacesDeviceWorkspaceConfig) -> WorkspaceSettings {
+    nonisolated static func localWorkspaceSettings(from config: SpacesDeviceWorkspaceConfig) -> WorkspaceSettings {
         WorkspaceSettings(
             stopScript: config.stopScript, ports: config.ports.map(localPortDefinition(from:)),
             processes: config.processes.map(localProcessTemplate(from:)), browserSessions: config.browserSessions.map(localBrowserSession(from:)),
@@ -3894,7 +3896,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
-    private func deviceForDaemonStateMutation() -> SpacesPairedDeviceRecord? {
+    func deviceForDaemonStateMutation() -> SpacesPairedDeviceRecord? {
         if let deviceID = selectedRowDeviceID(), let device = deviceRecord(forDeviceID: deviceID) { return device }
         return localPairedDevice
     }
@@ -3914,7 +3916,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// row's device. Clicking a row button or invoking a context menu does not
     /// change the outline selection, so these actions must resolve their target
     /// from the workspace ID they carry, not the selection.
-    private func deviceForWorkspaceMutation(workspaceID: String) -> SpacesPairedDeviceRecord? {
+    func deviceForWorkspaceMutation(workspaceID: String) -> SpacesPairedDeviceRecord? {
         deviceForMutation(deviceID: deviceID(forWorkspaceID: workspaceID))
     }
 
@@ -3947,7 +3949,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
-    private func deviceWorkspaceSummary(workspaceID: String) -> SpacesDeviceWorkspaceSummary? {
+    func deviceWorkspaceSummary(workspaceID: String) -> SpacesDeviceWorkspaceSummary? {
         for section in deviceSections { if let workspace = section.overview?.workspaces.first(where: { $0.id == workspaceID }) { return workspace } }
         return nil
     }
@@ -4008,7 +4010,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func updateDeviceWorkspaceConfig(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
+    func updateDeviceWorkspaceConfig(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
         guard let device = deviceForDaemonStateMutation() else { throw Self.deviceNotLoadedError() }
         guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else {
             throw WorkspaceError.invalidArgument(message: "Workspace not found on the selected device.")
@@ -4332,6 +4334,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let projectSettingsProjectID { ProjectFieldCache.shared.cache[projectSettingsProjectID.hashValue] = nil }
             projectSettingsProjectID = nil
             projectHasUnsavedChanges = false
+            return
+        }
+        if closingWindow === workspaceSettingsWindow {
+            workspaceSettingsWorkspaceID = nil
             return
         }
         guard closingWindow === settings.settingsWindow else { return }
@@ -4961,7 +4967,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return editor
     }
 
-    private func presentFormWindow(existing: NSWindow?, header: NSView, hosting stack: NSStackView) -> NSWindow {
+    func presentFormWindow(existing: NSWindow?, header: NSView, hosting stack: NSStackView) -> NSWindow {
         let root = NSView()
         root.wantsLayer = true
         root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
@@ -5383,49 +5389,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             headerAndActionsRow.addArrangedSubview(warningLabel)
         }
 
-        let sectionConfig = Self.localWorkspaceSettings(from: deviceWorkspace.config)
-        let trackedWindows: [WindowRecord] = Self.deviceTerminalWindows(from: deviceWorkspace.terminalRows)
-        let runningProcesses = Self.runningProcesses(from: deviceWorkspace.processRows)
-        let agentWindows = Self.agentWindows(from: deviceWorkspace.codingAgentRows)
-        let browserSessions = deviceWorkspace.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:))
-        let configuredProcesses = sectionConfig.processes
-        let configuredAgentLaunchers = sectionConfig.agentLaunchers
-        let processEntries = Self.orderedWorkspaceRunProcessEntries(
-            configuredProcesses: configuredProcesses, windows: trackedWindows, processes: runningProcesses, agentWindows: agentWindows)
-        let processesByID = Dictionary(uniqueKeysWithValues: runningProcesses.map { ($0.id, $0) })
-        let shortcutTargets = Self.orderedWorkspaceRunShortcutTargets(
-            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-        let shortcutIndices = Self.workspaceDetailShortcutIndices(
-            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-        let processStatusByName = Self.workspaceProcessStatusByName(runningProcesses)
-        let processesSection = workspaceProcessesSection(
-            workspace: workspace, config: sectionConfig, runningProcesses: runningProcesses, trackedWindows: trackedWindows,
-            processEntries: processEntries, shortcutTargets: shortcutTargets, shortcutIndicesByName: shortcutIndices.processesByName,
-            statusByName: processStatusByName)
-        let agentLaunchersSection = workspaceAgentLaunchersSection(
-            workspace: workspace, config: sectionConfig, shortcutIndicesByIdentity: shortcutIndices.codingAgentsByIdentity,
-            agentWindows: agentWindows, trackedWindows: trackedWindows)
-        let browserSessionsSection = workspaceBrowserSessionsSection(
-            workspace: workspace, config: sectionConfig, resolvedSessions: browserSessions, shortcutIndicesByURL: shortcutIndices.browserSessionsByURL
-        )
-        let portsSection = workspacePortsSection(workspace: workspace, config: sectionConfig, assignedPorts: deviceWorkspace.assignedPorts)
-        let stopScriptSection = workspaceStopScriptSection(workspace: workspace, config: sectionConfig)
-
         stack.addArrangedSubview(headerAndActionsRow)
         if let inlineBranchRow { stack.addArrangedSubview(inlineBranchRow) }
         stack.addArrangedSubview(inlineNotesRow)
-        for section in Self.orderedWorkspaceDetailSections(
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            portsSection: portsSection, stopScriptSection: stopScriptSection)
-        {
-            stack.addArrangedSubview(section)
-            constrainFormFieldToFillWidth(section, in: stack)
-            stack.setCustomSpacing(10, after: section)
-        }
-        if let agentLaunchersSection { stack.setCustomSpacing(20, after: agentLaunchersSection) }
-        if let portsSection { stack.setCustomSpacing(20, after: portsSection) }
         stack.setCustomSpacing(20, after: headerAndActionsRow)
         if let inlineBranchRow {
             stack.setCustomSpacing(8, after: headerAndActionsRow)
@@ -5712,143 +5678,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func workspaceProcessesSection(
-        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil,
-        runningProcesses providedRunningProcesses: [RunningProcessRecord]? = nil, trackedWindows: [WindowRecord],
-        processEntries: [WorkspaceRunProcessEntry], shortcutTargets: [WorkspaceRunShortcutTarget], shortcutIndicesByName: [String: Int],
-        statusByName: [String: RowPrimitives.StatusKind]
-    ) -> NSView? {
-        guard let config = providedConfig else { return nil }
-        let runningProcesses = providedRunningProcesses ?? []
-        let runningProcessIDByName = Dictionary(uniqueKeysWithValues: runningProcesses.map { (Self.processRuntimeKey(name: $0.templateName), $0.id) })
-        let section = ProcessesSection(processes: config.processes)
-        section.validateProcess = { process in try Self.validateProcessTemplate(process) }
-        section.presentValidationError = { [weak self] error in self?.showError(error) }
-        section.onCommit = { [weak self] updated in
-            guard let self else { return }
-            do {
-                if deviceForDaemonStateMutation() != nil {
-                    try updateDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.processes = updated }
-                } else {
-                    showDeviceNotLoadedError()
-                    return
-                }
-                reloadData()
-            } catch {
-                reloadData()
-                showError(error)
-            }
-        }
-        section.onRunProcess = { [weak self] process in
-            guard let self else { return }
-            let key = Self.processTemplateKey(for: process)
-            do {
-                if let device = deviceForDaemonStateMutation() {
-                    let response = try SpacesDeviceClient.runWorkspaceProcess(
-                        workspaceID: workspace.id, processKey: key, processTemplateID: process.id, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch {
-                reloadData()
-                showError(error)
-            }
-        }
-        section.onStopProcess = { [weak self] process in
-            guard let self else { return }
-            let key = Self.processTemplateKey(for: process)
-            guard let processID = runningProcessIDByName[key] else { return }
-            do {
-                if let device = deviceForDaemonStateMutation() {
-                    let response = try SpacesDeviceClient.stopWorkspaceProcess(
-                        workspaceID: workspace.id, processID: processID, processKey: key, processTemplateID: process.id, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch {
-                reloadData()
-                showError(error)
-            }
-        }
-        section.onRestartProcess = { [weak self] process in
-            guard let self else { return }
-            let key = Self.processTemplateKey(for: process)
-            guard let processID = runningProcessIDByName[key] else { return }
-            do {
-                if let device = deviceForDaemonStateMutation() {
-                    let response = try SpacesDeviceClient.restartWorkspaceProcess(
-                        workspaceID: workspace.id, processID: processID, processKey: key, processTemplateID: process.id, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch {
-                reloadData()
-                showError(error)
-            }
-        }
-        var nameToIndex: [String: Int] = [:]
-        var shortcutMap: [String: String] = [:]
-        for process in config.processes {
-            guard let name = process.name, !name.isEmpty else { continue }
-            guard let index = shortcutIndicesByName[name] else { continue }
-            shortcutMap[name] = windowShortcutBadgeText(index: index)
-            nameToIndex[name] = index
-        }
-        // onFocus must be set before shortcutsByName so that the refreshRows
-        // triggered by shortcutsByName's didSet sees onFocus already populated.
-        section.onFocus = { [weak self] process in
-            guard let self, let name = process.name, let index = nameToIndex[name] else { return }
-            Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: Date()) }
-        }
-        let windowShortcutByListIndex: [Int: Int] = Dictionary(
-            uniqueKeysWithValues: shortcutTargets.enumerated().compactMap { offset, target in
-                guard target.kind == .window, let windowListIndex = target.windowListIndex else { return nil }
-                return (windowListIndex, offset + 1)
-            })
-        section.supplementalRows = processEntries.compactMap { entry in
-            guard entry.kind == .window, let windowListIndex = entry.windowListIndex, trackedWindows.indices.contains(windowListIndex) else {
-                return nil
-            }
-            let window = trackedWindows[windowListIndex]
-            guard window.role == "terminal" else { return nil }
-            let fallback = Self.terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
-            let shortcut = windowShortcutByListIndex[windowListIndex].map(windowShortcutBadgeText(index:))
-            return ProcessesSection.SupplementalRuntimeRow(
-                id: window.id, label: fallback.label, detail: fallback.detail, shortcut: shortcut, status: .running,
-                onFocus: { [weak self] in
-                    guard let self else { return }
-                    Task { @MainActor [weak self] in
-                        await self?.runWindowShortcut(index: windowShortcutByListIndex[windowListIndex] ?? 0, startedAt: Date())
-                    }
-                })
-        }
-        section.statusByName = statusByName
-        section.shortcutsByName = shortcutMap
-        return section.view
-    }
-
-    private func confirmRunningWorkspaceProcessCommandChanges(processNames: [String]) -> Bool {
-        let alert = NSAlert()
-        let names = processNames.joined(separator: ", ")
-        alert.messageText = processNames.count == 1 ? "Restart running process?" : "Restart running processes?"
-        alert.informativeText =
-            "Changing the command for \(names) requires an immediate restart. Choose Restart to apply the new command now, or Cancel Changes to keep the existing configuration."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: processNames.count == 1 ? "Restart Process" : "Restart Processes")
-        alert.addButton(withTitle: "Cancel Changes")
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
-    static func orderedWorkspaceDetailSections(
-        processesSection: NSView?, browserSessionsSection: NSView?, agentLaunchersSection: NSView?, portsSection: NSView?, stopScriptSection: NSView?
-    ) -> [NSView] { [browserSessionsSection, processesSection, agentLaunchersSection, portsSection, stopScriptSection].compactMap { $0 } }
-
     static func makeInlineEditorSlot(label: NSView, editor: NSView) -> NSView {
         let slot = NSView()
         slot.translatesAutoresizingMaskIntoConstraints = false
@@ -5894,143 +5723,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    private func workspaceAgentLaunchersSection(
-        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil, shortcutIndicesByIdentity: [String: Int],
-        agentWindows: [AgentWindowRecord], trackedWindows: [WindowRecord]
-    ) -> NSView? {
-        guard let config = providedConfig else { return nil }
-        let section = AgentLaunchersSection(launchers: config.agentLaunchers)
-        section.runtimeAgentWindows = agentWindows
-        section.runtimeWindowTitleByAgentWindowID = Self.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: trackedWindows)
-        section.onCommit = { [weak self] updated in
-            guard let self else { return }
-            do {
-                if deviceForDaemonStateMutation() != nil {
-                    try updateDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.agentLaunchers = updated }
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch { showError(error) }
-        }
-        section.onRunLauncher = { [weak self] launcher in
-            guard let self else { return }
-            do {
-                if let device = deviceForDaemonStateMutation() {
-                    let response = try SpacesDeviceClient.runCodingAgent(
-                        workspaceID: workspace.id, agentName: launcher.name, agentLauncherID: launcher.id, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch {
-                reloadData()
-                showError(error)
-            }
-        }
-        section.onStopAgentWindow = { [weak self] agentWindow in
-            guard let self else { return }
-            do {
-                if let device = deviceForDaemonStateMutation() {
-                    let response = try SpacesDeviceClient.stopCodingAgent(
-                        workspaceID: workspace.id, agentID: agentWindow.id, agentName: agentWindow.claimedLauncherName ?? agentWindow.label,
-                        agentLauncherID: agentWindow.claimedLauncherID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch {
-                reloadData()
-                showError(error)
-            }
-        }
-        section.onRestartAgentWindow = { [weak self] agentWindow in
-            guard let self else { return }
-            do {
-                if let device = deviceForDaemonStateMutation() {
-                    let response = try SpacesDeviceClient.restartCodingAgent(
-                        workspaceID: workspace.id, agentID: agentWindow.id, agentName: agentWindow.claimedLauncherName ?? agentWindow.label,
-                        agentLauncherID: agentWindow.claimedLauncherID, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch {
-                reloadData()
-                showError(error)
-            }
-        }
-        var identityToIndex: [String: Int] = [:]
-        var shortcutMap: [String: String] = [:]
-        for entry in Self.resolvedCodingAgentRunEntries(configuredAgentLaunchers: config.agentLaunchers, agentWindows: agentWindows) {
-            let identity: String
-            if let agentWindow = entry.agentWindow {
-                identity = Self.codingAgentShortcutIdentity(agentWindowID: agentWindow.id)
-            } else if let launcherName = entry.launcherName, !launcherName.isEmpty {
-                identity = Self.codingAgentShortcutIdentity(launcherName: launcherName)
-            } else {
-                continue
-            }
-            guard let index = shortcutIndicesByIdentity[identity] else { continue }
-            shortcutMap[identity] = windowShortcutBadgeText(index: index)
-            identityToIndex[identity] = index
-        }
-        section.onFocusLauncher = { [weak self] launcher in
-            let identity = Self.codingAgentShortcutIdentity(launcherName: launcher.name)
-            guard let self, let index = identityToIndex[identity] else { return }
-            Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: Date()) }
-        }
-        section.onFocusAgentWindow = { [weak self] agentWindow in
-            let identity = Self.codingAgentShortcutIdentity(agentWindowID: agentWindow.id)
-            guard let self, let index = identityToIndex[identity] else { return }
-            Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: Date()) }
-        }
-        section.shortcutsByIdentity = shortcutMap
-        return section.view
-    }
-
-    private func workspaceBrowserSessionsSection(
-        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil,
-        resolvedSessions providedResolvedSessions: [BrowserSession]? = nil, shortcutIndicesByURL: [String: Int]
-    ) -> NSView? {
-        guard let config = providedConfig else { return nil }
-        let resolvedSessions = providedResolvedSessions ?? []
-        let displayURLs = Self.browserSessionDisplayURLs(configuredSessions: config.browserSessions, resolvedSessions: resolvedSessions)
-        let section = BrowserSessionsSection(sessions: config.browserSessions, collapsedDisplayURLs: displayURLs)
-        section.onCommit = { [weak self] updated in
-            guard let self else { return }
-            do {
-                if deviceForDaemonStateMutation() != nil {
-                    try updateDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.browserSessions = updated }
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch { showError(error) }
-        }
-        var urlToIndex: [String: Int] = [:]
-        var shortcutMap: [String: String] = [:]
-        var resolvedSessionCursor = 0
-        for session in config.browserSessions {
-            guard let url = session.url, !url.isEmpty else { continue }
-            guard
-                let matchedURL = Self.matchedBrowserSessionShortcutURL(
-                    configuredSession: session, rawURL: url, resolvedSessions: resolvedSessions, resolvedSessionCursor: &resolvedSessionCursor,
-                    shortcutIndicesByURL: shortcutIndicesByURL)
-            else { continue }
-            guard let index = shortcutIndicesByURL[matchedURL] else { continue }
-            shortcutMap[url] = windowShortcutBadgeText(index: index)
-            urlToIndex[url] = index
-        }
-        section.onFocus = { [weak self] session in
-            guard let self, let url = session.url, let index = urlToIndex[url] else { return }
-            Task { @MainActor [weak self] in await self?.runWindowShortcut(index: index, startedAt: Date()) }
-        }
-        section.shortcutsByURL = shortcutMap
-        return section.view
-    }
-
     static func browserSessionDisplayURLs(configuredSessions: [BrowserSession], resolvedSessions: [BrowserSession]) -> [String?] {
         var resolvedSessionCursor = 0
         return configuredSessions.map { session in
@@ -6073,44 +5765,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return candidateURL
         }
         return nil
-    }
-
-    private func workspacePortsSection(
-        workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil,
-        assignedPorts providedAssignedPorts: [SpacesDeviceAssignedPort]? = nil
-    ) -> NSView? {
-        guard let config = providedConfig else { return nil }
-        let reservedPorts = providedAssignedPorts?.map(\.port) ?? []
-        let section = PortsSection(ports: config.ports, collapsedDisplayPorts: reservedPorts.map(Optional.some))
-        section.onCommit = { [weak self] updated in
-            guard let self else { return }
-            do {
-                if deviceForDaemonStateMutation() != nil {
-                    try updateDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.ports = updated }
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch { showError(error) }
-        }
-        return section.view
-    }
-
-    private func workspaceStopScriptSection(workspace: WorkspaceSummary, config providedConfig: WorkspaceSettings? = nil) -> NSView? {
-        guard let config = providedConfig else { return nil }
-        let section = ScriptSection(
-            title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
-            value: config.stopScript ?? "")
-        section.onCommit = { [weak self] value in
-            guard let self else { return }
-            do {
-                if deviceForDaemonStateMutation() != nil {
-                    try updateDeviceWorkspaceConfig(workspaceID: workspace.id) { $0.stopScript = value.isEmpty ? nil : value }
-                } else {
-                    showDeviceNotLoadedError()
-                }
-            } catch { showError(error) }
-        }
-        return section.view
     }
 
     private func clearInlineWorkspaceFieldRefs() {
@@ -8192,6 +7846,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             return false
         }
+        if textField === sidebar.renamingRuntimeTargetField {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                sidebar.commitRuntimeTargetRename(newTitle: textField.stringValue)
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                sidebar.cancelRuntimeTargetRename()
+                return true
+            }
+            return false
+        }
         guard let tag = inlineWorkspaceFieldTagByObjectID[ObjectIdentifier(textField)] else { return false }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             saveInlineWorkspaceMetadata(tag: tag)
@@ -9394,7 +9059,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// three behave identically. Only two leaves depend on where the workspace's daemon
     /// runs: browser tab focus (local) vs URL open (remote), and native vs mirror
     /// terminal windows.
-    @discardableResult private func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution, requestID: String? = nil) async
+    @discardableResult func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution, requestID: String? = nil) async
         -> ExternalWindowAction?
     {
         switch resolution {

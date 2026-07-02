@@ -457,6 +457,15 @@ public enum SpacesDeviceClient {
             profile: profile)
     }
 
+    public static func renameTerminalSession(
+        workspaceID: String, sessionID: String, title: String, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .renameTerminalSession(.init(workspaceID: workspaceID, sessionID: sessionID, title: title))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
     public static func runWorkspaceProcess(
         workspaceID: String, processKey: String, processTemplateID: String?, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -603,8 +612,8 @@ public enum SpacesDeviceClient {
             .restartCodingAgent:
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
-            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .state, .terminalControl, .resolveTerminalLink,
-            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:
+            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
+            .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:
             defaultRequestTimeoutSeconds
         }
     }

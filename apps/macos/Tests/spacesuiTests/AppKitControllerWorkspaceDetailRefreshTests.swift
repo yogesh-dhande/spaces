@@ -105,25 +105,6 @@ import workspacecore
         #expect(displayURLs == ["http://localhost:3000"])
     }
 
-    @MainActor @Test func workspaceDetailSectionsKeepBrowserSessionsAheadOfCodingAgents() {
-        let processes = NSView()
-        let browserSessions = NSView()
-        let agentLaunchers = NSView()
-        let ports = NSView()
-        let stopScript = NSView()
-
-        let sections = AppKitController.orderedWorkspaceDetailSections(
-            processesSection: processes, browserSessionsSection: browserSessions, agentLaunchersSection: agentLaunchers, portsSection: ports,
-            stopScriptSection: stopScript)
-
-        #expect(sections.count == 5)
-        #expect(sections[0] === browserSessions)
-        #expect(sections[1] === processes)
-        #expect(sections[2] === agentLaunchers)
-        #expect(sections[3] === ports)
-        #expect(sections[4] === stopScript)
-    }
-
     @MainActor @Test func inlineEditorSlotKeepsEditorExpandedToAvailableWidth() {
         let label = NSTextField(labelWithString: "default")
         let editor = NSTextField(string: "default")
