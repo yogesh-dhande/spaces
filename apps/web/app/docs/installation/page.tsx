@@ -47,7 +47,7 @@ export default function InstallationDocsPage() {
             3. Double-click <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Install Spaces</code> in the DMG.
           </li>
           <li>
-            4. The installer copies <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code>, installs the required <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> CLI and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spacesd</code> daemon, and sets up the per-user background service (LaunchAgent) that keeps your terminal sessions alive.
+            4. The installer copies <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">Spaces.app</code>, links the required <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> CLI and <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spacesd</code> daemon helpers to the app bundle, and sets up the per-user background service (LaunchAgent) that keeps your terminal sessions alive.
           </li>
           <li>
             5. Eject the DMG.
@@ -99,7 +99,8 @@ open -a Spaces`}
 {`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.usespaces.spacesd.plist
 rm -f ~/Library/LaunchAgents/dev.usespaces.spacesd.plist
 rm -rf /Applications/Spaces.app
-rm -f /usr/local/bin/spaces /usr/local/bin/spacesd
+rm -f /usr/local/bin/spaces /usr/local/bin/spacesd /usr/local/bin/spaces-caddy
+rm -f ~/.spaces/bin/spaces ~/.spaces/bin/spacesd
 rm -rf ~/.spaces ~/spaces`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">

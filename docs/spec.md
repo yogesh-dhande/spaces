@@ -357,7 +357,8 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The app should check for updates periodically and allow manual update checks.
 - Update discovery and installation should use one stable Sparkle appcast feed.
 - Manual downloads may still be published separately, but the in-app updater should not depend on GitHub release APIs.
-- The manual-download DMG should present a single guided installer entry point that installs `Spaces.app`, the required `spaces` CLI, the spacesd daemon, `~/.spaces/bin` helper links, and the per-user LaunchAgent used by built-in terminal commands and remote Mac pairing.
+- The manual-download DMG should present a single guided installer entry point that installs `Spaces.app`, links `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and `/usr/local/bin/spaces-caddy` to the app bundle resources, creates `~/.spaces/bin/spaces` and `~/.spaces/bin/spacesd` helper links to the same resources, and writes the per-user LaunchAgent used by built-in terminal commands and remote Mac pairing.
+- When launched from `/Applications/Spaces.app`, the app should keep Spaces-owned helper links and the LaunchAgent plist aligned with the installed app bundle without restarting `spacesd` automatically.
 - `spaces --version` should report the current version.
 
 ### Daemon Compatibility and Restart

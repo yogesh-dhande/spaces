@@ -114,8 +114,37 @@ public enum SpacesDevicePairingClient {
     private static let curlPath = "/usr/bin/curl"
     private static let remoteArtifactManifestBaseURL = "https://github.com/yogesh-dhande/spaces/releases/download"
     private static let remotePairCommand = "~/.spaces/bin/spaces pair --json"
-    private static let remoteInstallProbeCommand =
-        #"os="$(uname -s 2>/dev/null || true)"; arch="$(uname -m 2>/dev/null || true)"; printf 'os=%s\narch=%s\n' "$os" "$arch"; if [ "$os" = "Linux" ]; then linux_id="$(awk -F= '$1=="ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"; linux_version_id="$(awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"; printf 'linux_id=%s\nlinux_version_id=%s\n' "$linux_id" "$linux_version_id"; fi; if [ "$os" = "Darwin" ]; then plist="$HOME/Library/LaunchAgents/dev.usespaces.spacesd.plist"; if [ -d /Applications/Spaces.app ]; then app=1; else app=0; fi; if [ -x /usr/local/bin/spaces ]; then cli=1; else cli=0; fi; if [ -x /usr/local/bin/spacesd ]; then daemon=1; else daemon=0; fi; if [ -x "$HOME/.spaces/bin/spaces" ]; then helper=1; else helper=0; fi; if [ -f "$plist" ] && grep -q '/usr/local/bin/spacesd' "$plist"; then launch_agent=1; else launch_agent=0; fi; printf 'spaces_app=%s\nusr_local_spaces=%s\nusr_local_spacesd=%s\nhome_spaces_cli=%s\nlaunch_agent=%s\n' "$app" "$cli" "$daemon" "$helper" "$launch_agent"; fi"#
+    private static let remoteInstallProbeCommand = #"""
+        os="$(uname -s 2>/dev/null || true)"
+        arch="$(uname -m 2>/dev/null || true)"
+        printf 'os=%s\narch=%s\n' "$os" "$arch"
+        if [ "$os" = "Linux" ]; then
+          linux_id="$(awk -F= '$1=="ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
+          linux_version_id="$(awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null || true)"
+          printf 'linux_id=%s\nlinux_version_id=%s\n' "$linux_id" "$linux_version_id"
+        fi
+        if [ "$os" = "Darwin" ]; then
+          app="/Applications/Spaces.app"
+          resources="$app/Contents/Resources"
+          cli_target="$resources/spaces"
+          daemon_target="$resources/spacesd"
+          caddy_target="$resources/caddy"
+          home_cli="$HOME/.spaces/bin/spaces"
+          home_daemon="$HOME/.spaces/bin/spacesd"
+          plist="$HOME/Library/LaunchAgents/dev.usespaces.spacesd.plist"
+          link_points_to() {
+            [ -L "$1" ] && [ "$(readlink "$1" 2>/dev/null || true)" = "$2" ] && [ -x "$1" ]
+          }
+          if [ -d "$app" ] && [ -x "$cli_target" ] && [ -x "$daemon_target" ] && [ -x "$caddy_target" ]; then spaces_app=1; else spaces_app=0; fi
+          if link_points_to /usr/local/bin/spaces "$cli_target"; then usr_local_spaces=1; else usr_local_spaces=0; fi
+          if link_points_to /usr/local/bin/spacesd "$daemon_target"; then usr_local_spacesd=1; else usr_local_spacesd=0; fi
+          if link_points_to /usr/local/bin/spaces-caddy "$caddy_target"; then usr_local_spaces_caddy=1; else usr_local_spaces_caddy=0; fi
+          if link_points_to "$home_cli" "$cli_target"; then home_spaces_cli=1; else home_spaces_cli=0; fi
+          if link_points_to "$home_daemon" "$daemon_target"; then home_spacesd=1; else home_spacesd=0; fi
+          if [ -f "$plist" ] && grep -Fq "<string>$home_daemon</string>" "$plist"; then launch_agent=1; else launch_agent=0; fi
+          printf 'spaces_app=%s\nusr_local_spaces=%s\nusr_local_spacesd=%s\nusr_local_spaces_caddy=%s\nhome_spaces_cli=%s\nhome_spacesd=%s\nlaunch_agent=%s\n' "$spaces_app" "$usr_local_spaces" "$usr_local_spacesd" "$usr_local_spaces_caddy" "$home_spaces_cli" "$home_spacesd" "$launch_agent"
+        fi
+        """#
 
     public static func pairRemoteDevice(_ request: SpacesRemoteDevicePairingRequest) throws -> SpacesRemoteDevicePairingResult {
         #if canImport(Network)
@@ -280,7 +309,9 @@ public enum SpacesDevicePairingClient {
         if !probe.spacesAppInstalled { missing.append("/Applications/Spaces.app") }
         if !probe.systemCLIExecutable { missing.append("/usr/local/bin/spaces") }
         if !probe.systemDaemonExecutable { missing.append("/usr/local/bin/spacesd") }
+        if !probe.systemCaddyExecutable { missing.append("/usr/local/bin/spaces-caddy") }
         if !probe.canonicalCLIExecutable { missing.append("~/.spaces/bin/spaces") }
+        if !probe.canonicalDaemonExecutable { missing.append("~/.spaces/bin/spacesd") }
         if !probe.launchAgentInstalled { missing.append("~/Library/LaunchAgents/dev.usespaces.spacesd.plist") }
         guard missing.isEmpty else {
             throw SpacesRemoteDevicePairingError.remoteMacDMGInstallRequired(
@@ -307,7 +338,8 @@ public enum SpacesDevicePairingClient {
             operatingSystem: operatingSystem, architecture: normalized(pairs["arch"]), linuxID: normalized(pairs["linux_id"]),
             linuxVersionID: normalized(pairs["linux_version_id"]), spacesAppInstalled: pairs["spaces_app"] == "1",
             systemCLIExecutable: pairs["usr_local_spaces"] == "1", systemDaemonExecutable: pairs["usr_local_spacesd"] == "1",
-            canonicalCLIExecutable: pairs["home_spaces_cli"] == "1", launchAgentInstalled: pairs["launch_agent"] == "1")
+            systemCaddyExecutable: pairs["usr_local_spaces_caddy"] == "1", canonicalCLIExecutable: pairs["home_spaces_cli"] == "1",
+            canonicalDaemonExecutable: pairs["home_spacesd"] == "1", launchAgentInstalled: pairs["launch_agent"] == "1")
     }
 
     private static func normalizedSSHHost(_ value: String) throws -> String {
@@ -903,7 +935,9 @@ struct RemoteInstallProbe: Equatable, Sendable {
     let spacesAppInstalled: Bool
     let systemCLIExecutable: Bool
     let systemDaemonExecutable: Bool
+    var systemCaddyExecutable: Bool = false
     let canonicalCLIExecutable: Bool
+    var canonicalDaemonExecutable: Bool = false
     let launchAgentInstalled: Bool
 }
 

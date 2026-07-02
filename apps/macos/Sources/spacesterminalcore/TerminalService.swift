@@ -309,15 +309,20 @@ import Foundation
             throws -> URL
         {
             let currentExecutablePath = environment["_"] ?? Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
-            let currentExecutableDirectory = URL(fileURLWithPath: currentExecutablePath).deletingLastPathComponent()
+            let currentExecutableURL = URL(fileURLWithPath: currentExecutablePath)
+            let currentExecutableDirectory = currentExecutableURL.deletingLastPathComponent()
+            let resolvedCurrentExecutableDirectory = currentExecutableURL.resolvingSymlinksInPath().deletingLastPathComponent()
             let currentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
             let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
                 "Resources", isDirectory: true)
             let candidates = [
                 environment["SPACESD_EXECUTABLE"],
                 currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
+                resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
                 Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
                 bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
+                SpacesBinaryLayout.userHelperLinkURL(for: .spacesd)?.path,
+                SpacesBinaryLayout.systemLinkURL(for: .spacesd).path,
                 currentDirectory.appendingPathComponent("apps/macos/.build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
                 currentDirectory.appendingPathComponent("apps/macos/.build/release/spacesd", isDirectory: false).path(percentEncoded: false),
                 currentDirectory.appendingPathComponent(".build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
