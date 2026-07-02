@@ -472,6 +472,81 @@ import workspacecore
         #expect(request.resizeSerial == 3)
     }
 
+    @Test func remoteBrowserRoutePlanMapsLoopbackServicePortToCaddyURL() throws {
+        let plan = try #require(
+            BrowserSSHForwardManager.routePlan(
+                targetURL: "http://localhost:32001/docs/?tab=api#readme",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
+
+        #expect(plan.serviceName == "web")
+        #expect(plan.remotePort == 32001)
+        #expect(plan.routeHost == "web.feature-123.localhost")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/docs/?tab=api#readme")
+    }
+
+    @Test func remoteBrowserRoutePlanKeepsConfiguredCaddyServiceURL() throws {
+        let plan = try #require(
+            BrowserSSHForwardManager.routePlan(
+                targetURL: "http://web.feature-123.localhost:8088/admin/",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
+
+        #expect(plan.serviceName == "web")
+        #expect(plan.remotePort == 32001)
+        #expect(plan.routeHost == "web.feature-123.localhost")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
+    }
+
+    @Test func remoteBrowserRoutePlanUsesLocalCaddyRouterPort() throws {
+        let plan = try #require(
+            BrowserSSHForwardManager.routePlan(
+                targetURL: "http://web.feature-123.localhost:9000/admin/",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")],
+                localRouterPort: 8088))
+
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
+    }
+
+    @Test func remoteBrowserRoutePlanLeavesExternalURLsUnchanged() {
+        let plan = BrowserSSHForwardManager.routePlan(
+            targetURL: "https://example.com/docs",
+            assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")])
+
+        #expect(plan == nil)
+    }
+
+    @Test func remoteBrowserSSHArgumentsUsePairedDeviceSSHMetadata() throws {
+        let device = SpacesPairedDeviceRecord(
+            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
+
+        let args = try BrowserSSHForwardManager.sshArguments(device: device, localPort: 41001, remotePort: 32001)
+
+        #expect(
+            args == [
+                "-N", "-L", "127.0.0.1:41001:127.0.0.1:32001", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o",
+                "StrictHostKeyChecking=yes", "-p", "2200", "dev@build.example",
+            ])
+    }
+
+    @Test func remoteBrowserSSHArgumentsUseOneProcessForMultipleForwardBindings() throws {
+        let device = SpacesPairedDeviceRecord(
+            id: "remote", name: "Build Host", platform: "linux", host: "10.0.0.4", port: 7443, certificateFingerprint: "fingerprint",
+            sshHost: "build.example", sshUser: "dev", sshPort: 2200, createdAt: "2026-06-17T00:00:00Z", updatedAt: "2026-06-17T00:00:00Z")
+
+        let args = try BrowserSSHForwardManager.sshArguments(
+            device: device,
+            bindings: [
+                BrowserSSHForwardManager.SSHForwardBinding(localPort: 41001, remotePort: 32001),
+                BrowserSSHForwardManager.SSHForwardBinding(localPort: 41002, remotePort: 32002),
+            ])
+
+        #expect(
+            args == [
+                "-N", "-L", "127.0.0.1:41001:127.0.0.1:32001", "-L", "127.0.0.1:41002:127.0.0.1:32002", "-o", "BatchMode=yes", "-o",
+                "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-p", "2200", "dev@build.example",
+            ])
+    }
+
     private func startingSessionSummary(id: String, title: String, rowKind: SpacesDeviceTerminalSessionRowKind) -> SpacesDeviceTerminalSessionSummary
     {
         SpacesDeviceTerminalSessionSummary(

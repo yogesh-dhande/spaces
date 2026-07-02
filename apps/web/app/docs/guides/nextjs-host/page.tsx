@@ -67,7 +67,7 @@ cp .env.example .env`}</code>
           <code>{`$SPACES_FRONTEND_URL`}</code>
         </pre>
         <p className={prose}>
-          Browser session URLs should use named services so each workspace opens its own app tab reliably. <code>$SPACES_FRONTEND_URL</code> resolves to <code>http://frontend.$SPACES_WORKSPACE_HOST:8088</code>, routed by the bundled Caddy proxy. Chrome treats <code>*.localhost</code> as a secure context, so this works over plain HTTP without certificates.
+          Browser session URLs should use named services so each workspace opens its own app tab reliably. <code>$SPACES_FRONTEND_URL</code> resolves to <code>http://frontend.&lt;slug&gt;.localhost:8088</code>, routed by the bundled Caddy proxy. Chrome treats <code>*.localhost</code> as a secure context, so this works over plain HTTP without certificates.
         </p>
 
       </article>

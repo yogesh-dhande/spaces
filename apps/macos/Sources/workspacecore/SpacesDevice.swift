@@ -191,11 +191,11 @@ public enum SpacesDevicePlanner {
     ) -> WorkspaceRuntimeManifest {
         let workingPath = workspace.runtimePath
         let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
-        var environment = [
-            "SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug,
-            "SPACES_WORKSPACE_HOST": "\(slug).localhost",
-        ]
-        for mapping in namedPorts { environment[ServiceName.portEnvVar(for: mapping.name)] = String(mapping.port) }
+        var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug]
+        for mapping in namedPorts {
+            environment[ServiceName.portEnvVar(for: mapping.name)] = String(mapping.port)
+            environment[ServiceName.hostEnvVar(for: mapping.name)] = "\(mapping.name).\(slug).localhost"
+        }
 
         return WorkspaceRuntimeManifest(
             workspaceID: workspace.id, projectID: project.id, deviceID: SpacesDeviceRecord.localDeviceID, location: .local,

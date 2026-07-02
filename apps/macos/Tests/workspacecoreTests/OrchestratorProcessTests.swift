@@ -7,6 +7,92 @@ import systembridge
 
 extension OrchestratorTests {
 
+    // Running a single configured process (the ⌘-number "run process" shortcut → runConfiguredProcess)
+    // on a stopped workspace must release the placeholder port reservation, just as full-workspace launch
+    // does. Otherwise PortReserver keeps the assigned port and the launched server dies with EADDRINUSE.
+    func testRunConfiguredProcessReleasesPortReservationSoServerCanBind() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [ServiceDefinition(name: "web")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
+        }
+        // The workspace is stopped, so saving settings reserved its assigned port via PortReserver.
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+
+        try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web")
+
+        XCTAssertFalse(
+            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+            "Running a configured process must release the reservation so the server can bind its port.")
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
+    // If a single-process launch fails after its placeholder reservation was released, the reservation
+    // must be restored — otherwise the stopped workspace leaves its pinned port unheld and another
+    // process could grab it before the next launch. Mirrors the full-workspace launch restore path.
+    func testRunConfiguredProcessRestoresPortReservationWhenLaunchFails() throws {
+        struct TerminalLaunchFailure: Error {}
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionLauncher: { _ in throw TerminalLaunchFailure() })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [ServiceDefinition(name: "web")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
+        }
+        // Saving settings for a stopped workspace reserves its assigned port via PortReserver.
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+
+        XCTAssertThrowsError(try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web"))
+
+        XCTAssertFalse(
+            try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning, "A failed single-process launch must leave the workspace stopped.")
+        XCTAssertTrue(
+            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+            "A failed single-process launch must restore the placeholder port reservation it released.")
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
+    // If a workspace is already running because of an ad-hoc terminal, a failed configured-process
+    // launch must not restore placeholder reservations. Running workspaces intentionally leave service
+    // ports unreserved; users resolve conflicts manually if another process claims one.
+    func testRunConfiguredProcessDoesNotRestorePortReservationWhenAlreadyRunningLaunchFails() throws {
+        struct TerminalLaunchFailure: Error {}
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalSessionLauncher: { _ in throw TerminalLaunchFailure() })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
+            settings.ports = [ServiceDefinition(name: "web")]
+            settings.processes = [ProcessTemplate(name: "web", command: "PORT=$SPACES_WEB_PORT npm run dev")]
+        }
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-07-01T00:00:00Z")
+
+        XCTAssertThrowsError(try orchestrator.runConfiguredProcess(workspaceID: workspace.id, processKey: "web"))
+
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+        XCTAssertFalse(
+            PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id),
+            "A failed launch from an already-running workspace must leave service ports unreserved.")
+
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
+    }
+
     func testValidateProcessTemplateAcceptsShellVariableSyntax() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
@@ -683,14 +769,15 @@ extension OrchestratorTests {
         let namedPorts = try store.workspacePortsNamed(workspaceID: workspace.id)
         XCTAssertEqual(namedPorts.map(\.port), [24000, 20000])
         XCTAssertEqual(namedPorts.map(\.name), ["api", "web"])
-        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
+        // A settings sync persists port assignments but must not re-bind the reservation sockets while
+        // the workspace runs: its server processes already own those ports, and re-grabbing one would
+        // race the real server for it (EADDRINUSE).
+        XCTAssertFalse(PortReserver.shared.reservedWorkspaceIDs().contains(workspace.id))
 
         let runtimeStatus = try orchestrator.workspaceRuntimeStatus(workspaceID: workspace.id)
         XCTAssertEqual(runtimeStatus.missingConfiguredProcessCount, 1)
         XCTAssertEqual(runtimeStatus.runtimeHealth, .healthy)
         XCTAssertNil(runtimeStatus.warningSummary)
-
-        PortReserver.shared.releasePorts(workspaceID: workspace.id)
     }
 
     func testUpdateRunningWorkspaceProcessesRelabelsRunningProcessAndUpdatesOnExit() throws {

@@ -20,7 +20,8 @@ export default function BrowserSessionsDocsPage() {
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Each session has a URL and an optional name.</li>
-          <li>• URLs can reference a service&apos;s assigned port or its Caddy URL, for example <code>http://localhost:$SPACES_WEB_PORT</code> or <code>http://web.$SPACES_WORKSPACE_HOST:8088</code>. Chrome treats <code>*.localhost</code> as a secure loopback context, so these hosts resolve without extra setup.</li>
+          <li>• URLs can reference a service&apos;s assigned port or its Caddy URL, for example <code>http://localhost:$SPACES_WEB_PORT</code> or <code>$SPACES_WEB_URL</code>. Chrome treats <code>*.localhost</code> as a secure loopback context, so these hosts resolve without extra setup.</li>
+          <li>• For remote Linux workspaces, service browser sessions use the same Caddy URL on the Mac while Spaces forwards the daemon-local service port over SSH.</li>
           <li>• Attach as many as you need to a workspace.</li>
         </ul>
       </article>

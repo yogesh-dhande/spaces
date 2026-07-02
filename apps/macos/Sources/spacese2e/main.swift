@@ -32,10 +32,10 @@ struct SpacesE2ECommand: ParsableCommand {
             TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self,
             PlanWorkspaceRuntimeCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
-            ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self,
-            MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self, TerminalServiceTLSRequestCommand.self,
-            TerminalServiceTLSSessionCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self,
-            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
+            ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
+            TerminalServiceTLSRequestCommand.self, TerminalServiceTLSSessionCommand.self, RenderUpdateTextCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -450,6 +450,13 @@ private struct ProfileShowCommand: ParsableCommand {
         if let worktreeRoot = payload.worktreeRoot { print("worktree-root\t\(worktreeRoot)") }
         if let branch = payload.branchName { print("branch\t\(branch)") }
     }
+}
+
+private struct MacClientInstallationIDCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mac-client-installation-id", abstract: "Show this profile's macOS Device API client installation id.")
+
+    func run() throws { print(SpacesDevicePairingClient.localMacClientInstallationID()) }
 }
 
 private struct ProfileSocketPathsCommand: ParsableCommand {

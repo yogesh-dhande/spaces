@@ -516,6 +516,8 @@ Before the suite launches its isolated app instance, it waits for desktop-global
 
 The macOS E2E suite seeds the shared Beacon, Scout, and Prism fixture repositories and runs the app-level launch, focus, cycling, workspace, and agent-status assertions against the current profile's same-machine daemon.
 
+With `SPACES_E2E_RUN_REMOTE=1`, the suite also prepares a paired remote Linux daemon from the repo-root `.env`, seeds the Mac client with that device, starts a remote named service, focuses its browser session, and verifies the service through the Mac Caddy router backed by the SSH local forward. The remote lane reads the harness profile's Mac client identity through `spacese2e mac-client-installation-id` so pairing uses the same identity as the app.
+
 For a focused app smoke pass:
 
 ```bash
@@ -539,6 +541,7 @@ Primary coverage:
 - workspace-detail numbered focus shortcuts
 - forward/back workspace window cycling
 - multi-workspace focus and cycling isolation
+- remote browser-session routing through SSH local forwarding and the Mac Caddy router
 
 The suite emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows covered by the standalone focus-profiling workflow. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary path for focus profiling during development. The `app window-cycle` scenario runs the existing window-cycle profile path; set `REAL_SYSTEM_PROFILE_WARMUPS=5 REAL_SYSTEM_PROFILE_REPETITIONS=30` to collect steady-state cycle samples after warmup without changing the normal full-suite pass.
 

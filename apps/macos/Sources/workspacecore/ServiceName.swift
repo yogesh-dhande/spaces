@@ -39,6 +39,11 @@ public enum ServiceName {
     /// The URL environment variable injected for a service, e.g. `admin-ui` → `SPACES_ADMIN_UI_URL`.
     public static func urlEnvVar(for name: String) -> String { "SPACES_\(envToken(name))_URL" }
 
+    /// The host environment variable injected for a service, e.g. `admin-ui` → `SPACES_ADMIN_UI_HOST`.
+    /// Holds the bare routed hostname `<service>.<slug>.localhost` (no scheme, no port) so app servers
+    /// can allowlist it for framework host checks without parsing it out of `SPACES_<SERVICE>_URL`.
+    public static func hostEnvVar(for name: String) -> String { "SPACES_\(envToken(name))_HOST" }
+
     private static func envToken(_ name: String) -> String {
         name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().replacingOccurrences(of: "-", with: "_")
     }

@@ -20,6 +20,9 @@ import Foundation
         /// in the generated config (admin.listen) so it matches the address used for reloads.
         public static func adminSocketPath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy-admin.sock") }
 
+        /// Client-owned route registry read by the local macOS daemon when reconciling Caddy.
+        public static func routeRegistryPath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy-routes.json") }
+
         /// Ensures Caddy is running with the given config. If it is already running, the config is
         /// reloaded gracefully; otherwise it is started fresh. Returns true when a new process was
         /// launched.

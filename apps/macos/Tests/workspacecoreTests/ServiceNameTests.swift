@@ -29,6 +29,8 @@ final class ServiceNameTests: XCTestCase {
 
     func testURLEnvVarUppercasesAndReplacesHyphens() { XCTAssertEqual(ServiceName.urlEnvVar(for: "admin-ui"), "SPACES_ADMIN_UI_URL") }
 
+    func testHostEnvVarUppercasesAndReplacesHyphens() { XCTAssertEqual(ServiceName.hostEnvVar(for: "admin-ui"), "SPACES_ADMIN_UI_HOST") }
+
     func testIsValidLabel() {
         XCTAssertTrue(ServiceName.isValidLabel("web"))
         XCTAssertTrue(ServiceName.isValidLabel(" web "))

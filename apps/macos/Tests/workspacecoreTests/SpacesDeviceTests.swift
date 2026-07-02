@@ -70,5 +70,7 @@ final class SpacesDeviceTests: XCTestCase {
         XCTAssertEqual(manifest.deviceID, SpacesDeviceRecord.localDeviceID)
         XCTAssertEqual(manifest.localPath, workspace.runtimePath)
         XCTAssertEqual(manifest.processEnvironment["SPACES_WEB_PORT"], "3000")
+        let slug = try XCTUnwrap(manifest.processEnvironment["SPACES_WORKSPACE_SLUG"])
+        XCTAssertEqual(manifest.processEnvironment["SPACES_WEB_HOST"], "web.\(slug).localhost")
     }
 }

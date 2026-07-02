@@ -389,6 +389,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // Remove before stopping so the disconnect callback treats it as intentional.
             remoteOverviewSubscriptions[id] = nil
             client.stop()
+            host.stopRemoteBrowserForwards(deviceID: id)
         }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         for record in remotes where remoteOverviewSubscriptions[record.id] == nil && !remoteOverviewSubscribing.contains(record.id) {
@@ -515,6 +516,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     host.showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
                 }
                 updateAlertsSidebarBadge()
+                host.stopRemoteBrowserForwards(deviceID: deviceID)
                 return
             }
             if wasLoaded, statusUnchanged, host.deviceSections[index].overview == overview.overview {
@@ -530,14 +532,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].overview = overview.overview
             host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded
+            host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
         case .failure(let error):
             if case .offline = host.deviceSections[index].loadState { return }
             // Capture (before the rebuild drops this device's rows from the merged data) whether the
             // current selection belongs to this device, so the offline transition can reconcile a now-
             // stale detail pane.
             selectionInvalidatedByOffline = AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: host.selectedWorkspaceID, selectedProjectID: host.selectedProjectID,
-                section: host.deviceSections[index])
+                selectedWorkspaceID: host.selectedWorkspaceID, selectedProjectID: host.selectedProjectID, section: host.deviceSections[index])
             // Drop the offline device's cached rows and overview. The merged sidebar data already excludes
             // non-loaded sections, but the section's `overview` is still searched directly by id-based
             // lookups (e.g. `clientWorkspaceID(forTerminalSession:)`); leaving it populated lets an offline
@@ -556,6 +558,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(error.localizedDescription)
             host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
+            host.stopRemoteBrowserForwards(deviceID: deviceID)
         }
         rebuildFlatSidebarData()
         host.outlineView.reloadData()

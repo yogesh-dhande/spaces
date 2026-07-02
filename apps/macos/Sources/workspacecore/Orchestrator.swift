@@ -859,12 +859,12 @@ public final class WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        let shouldReleaseReservedPortsForLaunch = !(config?.processes.isEmpty ?? true)
+        let shouldReleaseReservedPortsForLaunch = !assignedPorts.isEmpty
         if shouldReleaseReservedPortsForLaunch {
-            // Workspace port assignments remain pinned in the store until archive, but
-            // the placeholder reservation sockets must step aside while a real process
-            // binds the port during launch.
-            PortReserver.shared.releasePorts(workspaceID: workspace.id)
+            // Workspace port assignments remain pinned in the store until archive, but placeholder
+            // reservation sockets exist only while the workspace is stopped. Once any runtime starts,
+            // users resolve conflicts manually if another process claims an assigned port.
+            releaseReservedPortsForRuntimeStart(workspaceID: workspace.id)
         }
         var shouldRestoreReservedPorts = shouldReleaseReservedPortsForLaunch
         defer { if shouldRestoreReservedPorts { try? PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) } }
@@ -903,7 +903,7 @@ public final class WorkspaceOrchestrator {
             try store.upsert(window: stored)
         }
 
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: nowISO8601())
+        try markWorkspaceRunning(workspace, launchedAt: nowISO8601())
         shouldRestoreReservedPorts = false
     }
 
@@ -962,8 +962,7 @@ public final class WorkspaceOrchestrator {
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         try store.deleteAgentWindows(workspaceID: workspace.id)
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
-        try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id)
+        try markWorkspaceStopped(workspace)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
 
@@ -1273,10 +1272,7 @@ public final class WorkspaceOrchestrator {
             shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: .shell)
 
         let session = try builtInTerminalSessionLauncher(launchConfiguration)
-        if !workspace.isRunning {
-            let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
-            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
-        }
+        try markWorkspaceRunningIfNeeded(workspace)
         return session
     }
 
@@ -1316,10 +1312,7 @@ public final class WorkspaceOrchestrator {
             window: WindowRecord(
                 id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil, windowID: nil,
                 terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
-        if !workspace.isRunning {
-            let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
-            try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
-        }
+        try markWorkspaceRunningIfNeeded(workspace)
         return WorkspaceTerminalLaunchReservation(
             sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
             title: generatedTitle, launchConfiguration: launchConfiguration, createdAt: createdAt, orderIndex: nextOrder)
@@ -1388,8 +1381,8 @@ public final class WorkspaceOrchestrator {
     }
 
     private func markWorkspaceRunningIfNeeded(workspaceID: String, launchedAtFallback: String) throws {
-        guard let workspace = try store.workspace(id: workspaceID), !workspace.isRunning else { return }
-        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: workspace.lastLaunchedAt ?? launchedAtFallback)
+        guard let workspace = try store.workspace(id: workspaceID) else { return }
+        try markWorkspaceRunningIfNeeded(workspace, launchedAtFallback: launchedAtFallback)
     }
 
     private func reservedWorkspaceTerminalWindowExists(_ reservation: WorkspaceTerminalLaunchReservation) throws -> Bool {
@@ -1759,8 +1752,10 @@ public final class WorkspaceOrchestrator {
         try store.setWorkspacePorts(
             workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port }, names: snapshot.assignedPorts.map { $0.name },
             definitionIDs: snapshot.assignedPorts.map { $0.definitionID })
-        if !snapshot.workspace.isArchived, !snapshot.assignedPorts.isEmpty {
-            PortReserver.shared.reservePorts(workspaceID: snapshot.workspace.id, ports: snapshot.assignedPorts.map { $0.port })
+        if snapshot.workspace.isArchived {
+            PortReserver.shared.releasePorts(workspaceID: snapshot.workspace.id)
+        } else {
+            try PortAllocator(store: store).reserveExistingPorts(workspaceID: snapshot.workspace.id)
         }
     }
 
@@ -2340,10 +2335,17 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord) throws {
-        guard !workspace.isRunning else { return }
-        let launchedAt = workspace.lastLaunchedAt ?? nowISO8601()
+    func markWorkspaceRunning(_ workspace: WorkspaceRecord, launchedAt: String) throws {
+        PortReserver.shared.releasePorts(workspaceID: workspace.id)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: launchedAt)
+    }
+
+    func markWorkspaceRunningIfNeeded(_ workspace: WorkspaceRecord, launchedAtFallback: String? = nil) throws {
+        guard !workspace.isRunning else {
+            PortReserver.shared.releasePorts(workspaceID: workspace.id)
+            return
+        }
+        try markWorkspaceRunning(workspace, launchedAt: workspace.lastLaunchedAt ?? launchedAtFallback ?? nowISO8601())
     }
 
     func markWorkspaceRunningIfNeeded(workspaceID: String) throws {
@@ -2353,7 +2355,12 @@ public final class WorkspaceOrchestrator {
 
     func clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: String) throws {
         guard try !hasTrackedRuntimeIndicators(workspaceID: workspaceID), let workspace = try store.workspace(id: workspaceID) else { return }
+        try markWorkspaceStopped(workspace)
+    }
+
+    func markWorkspaceStopped(_ workspace: WorkspaceRecord) throws {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: false, launchedAt: workspace.lastLaunchedAt)
+        if !workspace.isArchived { try PortAllocator(store: store).reserveExistingPorts(workspaceID: workspace.id) }
     }
 
     func safeFilename(_ raw: String) -> String {

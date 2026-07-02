@@ -28,7 +28,9 @@
             do {
                 let store = try SQLiteStore(path: databasePath)
                 let orchestrator = WorkspaceOrchestrator(store: store)
-                let routes = try orchestrator.caddyRouteTable()
+                let routes = CaddyRouteRegistry.mergedRoutes(
+                    localRoutes: try orchestrator.caddyRouteTable(),
+                    registryRoutes: try CaddyRouteRegistry.routes(path: try CaddyService.routeRegistryPath()))
                 let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
                 let adminSocketPath = try CaddyService.adminSocketPath()
                 let configJSON = CaddyConfigBuilder.makeJSON(routes: routes, listenPort: routerPort, adminSocketPath: adminSocketPath)
@@ -36,8 +38,6 @@
             } catch { onError("\(error)") }
         }
 
-        func stop() {
-            CaddyService.stop()
-        }
+        func stop() { CaddyService.stop() }
     }
 #endif

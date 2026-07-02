@@ -123,6 +123,7 @@ KNOWN_SPACES_NOISY_SESSION_ID=""
 REMOTE_DEVICE_RESULT_JSON=""
 REMOTE_DEVICE_PROJECT_ID=""
 REMOTE_DEVICE_WORKSPACE_ID=""
+REMOTE_DEVICE_WEB_BROWSER_URL=""
 
 mkdir -p "$TMP_HOME" "$TMP_RUNTIME_DIR" "$(dirname "$TMP_CLIENT_DB")" "$TMP_CLIENT_SECRET_DIR"
 : >"$EVENT_LOG"
@@ -373,6 +374,7 @@ terminate_process_group_for_recovery() {
 
 build_binaries() {
   log_step "building macOS binaries"
+  "$MACOS_DIR/scripts/setup_caddy.sh" >/dev/null
   if [[ "${SPACES_E2E_SKIP_MACOS_BUILD:-0}" == "1" ]]; then
     require_file "$SPACES_APP"
     require_file "$SPACES_CLI"
@@ -911,18 +913,10 @@ PY
 }
 
 mac_client_installation_id() {
-  python3 - "$TMP_ROOT" <<'PY'
-import sys
-
-profile_root = sys.argv[1]
-if profile_root.startswith("/private/var/"):
-    profile_root = profile_root.removeprefix("/private")
-value = 14695981039346656037
-for byte in profile_root.encode("utf-8"):
-    value ^= byte
-    value = (value * 1099511628211) & 0xFFFFFFFFFFFFFFFF
-print(f"macos-{value:x}")
-PY
+  mkdir -p "$(dirname "$TMP_DB")"
+  : >>"$TMP_DB"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    "$SPACES_E2E_CLI" mac-client-installation-id
 }
 
 seed_remote_device_for_macos() {
@@ -1019,8 +1013,135 @@ for prefix, value in (
 PY
   REMOTE_DEVICE_PROJECT_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "projectID")"
   REMOTE_DEVICE_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "workspaceID")"
+  REMOTE_DEVICE_WEB_BROWSER_URL="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteWebBrowserURL")"
   [[ -n "$REMOTE_DEVICE_PROJECT_ID" ]] || fail "remote Device API result missing projectID"
   [[ -n "$REMOTE_DEVICE_WORKSPACE_ID" ]] || fail "remote Device API result missing workspaceID"
+  [[ -n "$REMOTE_DEVICE_WEB_BROWSER_URL" ]] || fail "remote Device API result missing remoteWebBrowserURL"
+}
+
+remote_device_request() {
+  local command_json="$1"
+  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "Remote Device API request requires result JSON."
+  local request_json
+  request_json="$(
+    python3 - "$REMOTE_DEVICE_RESULT_JSON" "$command_json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1]))
+command = json.loads(sys.argv[2])
+print(json.dumps({
+    "authToken": payload["macAuthToken"],
+    "clientApp": {
+        "installationID": payload["macClientInstallationID"],
+        "bundleID": "dev.usespaces.spaces",
+        "platform": "macos",
+        "deviceName": "Spaces macOS E2E",
+        "appVersion": "1.0",
+    },
+    "command": command,
+}, separators=(",", ":")))
+PY
+  )"
+  "$SPACES_E2E_CLI" mobile-request \
+    --host "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonHost")" \
+    --port "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonPort")" \
+    --transport-key "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "transportKey")" \
+    --request-json "$request_json"
+}
+
+remote_device_request_ok() {
+  local command_json="$1"
+  local response
+  response="$(remote_device_request "$command_json")" || fail "Remote Device API request failed: $command_json"
+  python3 - "$response" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+if payload.get("ok") is not True:
+    raise SystemExit(payload.get("message") or json.dumps(payload))
+PY
+}
+
+remote_device_run_workspace_process() {
+  local process_name="$1"
+  local command_json
+  command_json="$(
+    python3 - "$REMOTE_DEVICE_WORKSPACE_ID" "$process_name" <<'PY'
+import json
+import sys
+
+workspace_id, process_name = sys.argv[1:3]
+print(json.dumps({"runWorkspaceProcess": {"workspaceID": workspace_id, "processKey": process_name, "processTemplateID": None}}, separators=(",", ":")))
+PY
+  )"
+  remote_device_request_ok "$command_json"
+}
+
+remote_device_ssh() {
+  [[ -n "${SPACES_E2E_REMOTE_SSH_HOST:-}" ]] || fail "Remote Device API SSH host is required."
+  local -a args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes)
+  if [[ -n "${SPACES_E2E_REMOTE_SSH_PORT:-}" ]]; then
+    args+=(-p "$SPACES_E2E_REMOTE_SSH_PORT")
+  fi
+  local destination="$SPACES_E2E_REMOTE_SSH_HOST"
+  if [[ -n "${SPACES_E2E_REMOTE_SSH_USER:-}" ]]; then
+    destination="$SPACES_E2E_REMOTE_SSH_USER@$destination"
+  fi
+  ssh "${args[@]}" "$destination" "$@"
+}
+
+remote_device_wait_service_port_state() {
+  local expected_state="$1"
+  local port
+  port="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteWebServicePort")"
+  [[ -n "$port" ]] || fail "remote Device API result missing remoteWebServicePort"
+  remote_device_ssh "python3 - $(shell_quote "$port") $(shell_quote "$expected_state")" <<'PY'
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+expected_state = sys.argv[2]
+deadline = time.time() + 30
+last_state = None
+
+def is_open() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+def is_bindable() -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+while time.time() < deadline:
+    open_now = is_open()
+    bindable_now = is_bindable()
+    if open_now:
+        last_state = "open"
+    elif bindable_now:
+        last_state = "bindable"
+    else:
+        last_state = "closed"
+    if expected_state == last_state or (expected_state == "closed" and last_state == "bindable"):
+        raise SystemExit(0)
+    time.sleep(0.25)
+
+raise SystemExit(f"remote service port {port} did not become {expected_state}; last state was {last_state}")
+PY
 }
 
 configure_local_e2e_targets() {
@@ -1037,10 +1158,11 @@ run_remote_device_e2e() {
   local remote_log="$TMP_ROOT/remote-device-e2e.log"
   local mac_installation_id
   mac_installation_id="$(mac_client_installation_id)"
+  printf '[remote-device] mac client installation id %s\n' "$mac_installation_id" >>"$remote_stdout"
   SPACES_E2E="$SPACES_E2E_CLI" \
     SPACES_E2E_REMOTE_DEVICE_RESULT_JSON="$remote_result" \
     SPACES_E2E_REMOTE_MAC_CLIENT_INSTALLATION_ID="$mac_installation_id" \
-    "$REMOTE_DEVICE_E2E_SCRIPT" >"$remote_stdout" 2>"$remote_log" \
+    "$REMOTE_DEVICE_E2E_SCRIPT" >>"$remote_stdout" 2>"$remote_log" \
     || fail "Remote paired-device E2E failed. See $remote_log"
   [[ -s "$remote_result" ]] || fail "Remote paired-device E2E did not write result JSON: $remote_result. See $remote_log"
   REMOTE_DEVICE_RESULT_JSON="$remote_result"
@@ -1161,6 +1283,13 @@ run_remote_device_ui_parity() {
   wait_for_ui_identifier "workspace-detail-launch-restart" "remote workspace lifecycle action"
   wait_for_ui_identifier "workspace-detail-stop" "remote workspace stop action"
   wait_for_ui_identifier "workspace-detail-overflow" "remote workspace overflow action"
+  wait_for_ui_identifier "browser-session-row-remote-web" "remote browser session row"
+  remote_device_wait_service_port_state "bindable"
+  remote_device_run_workspace_process "remote-web-server"
+  remote_device_wait_service_port_state "open"
+  ui_click_identifier "browser-session-row-remote-web"
+  wait_for_http_body_contains "$REMOTE_DEVICE_WEB_BROWSER_URL" "remote device api sentinel"
+  wait_for_condition "chrome_front_url" "$REMOTE_DEVICE_WEB_BROWSER_URL"
   pass_case
 }
 
@@ -1558,7 +1687,13 @@ end elementMatchesIdentifier
 
 on clickMatchingIdentifier(targetElement, targetID)
   if my elementMatchesIdentifier(targetElement, targetID) then
-    tell application "System Events" to click targetElement
+    tell application "System Events"
+      try
+        perform action "AXPress" of targetElement
+      on error
+        click targetElement
+      end try
+    end tell
     return true
   end if
   tell application "System Events"

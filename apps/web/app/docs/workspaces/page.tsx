@@ -58,14 +58,15 @@ export default function WorkspacesDocsPage() {
           Name the services your project uses with unique lowercase DNS labels (for example <code>web</code>, <code>api</code>) and Spaces gives each workspace its own port per service plus a stable URL <code>http://&lt;service&gt;.&lt;workspace&gt;.localhost:8088</code> routed through a bundled Caddy proxy. Two workspaces can run the same project at the same time without fighting over a port.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Each service is exposed as <code>SPACES_&lt;SERVICE&gt;_PORT</code> and <code>SPACES_&lt;SERVICE&gt;_URL</code> to every workspace process, plus the setup and stop scripts.</li>
-          <li>• Spaces reserves the port number while the workspace exists, so nothing else on your Mac can grab it.</li>
-          <li>• Ports are released when the workspace is archived.</li>
+          <li>• Each service is exposed as <code>SPACES_&lt;SERVICE&gt;_PORT</code>, <code>SPACES_&lt;SERVICE&gt;_HOST</code>, and <code>SPACES_&lt;SERVICE&gt;_URL</code> to every workspace process, plus the setup and stop scripts.</li>
+          <li>• Remote Linux workspace services keep their daemon-local port, and the Mac app forwards that port over SSH when a browser session targets the service URL.</li>
+          <li>• Spaces keeps each port assignment pinned to the workspace until archive.</li>
+          <li>• Stopped workspaces hold placeholder reservations for assigned ports; running workspaces release those placeholders so processes can bind normally.</li>
         </ul>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: bugfix/login-timeout
-SPACES_WORKSPACE_HOST=login-fix-a3f9c2d1847b.localhost
 SPACES_WEB_PORT=20001
+SPACES_WEB_URL=http://web.login-fix-a3f9c2d1847b.localhost:8088
 SPACES_API_PORT=20002`}</code>
         </pre>
       </article>
@@ -76,8 +77,7 @@ SPACES_API_PORT=20002`}</code>
           Every workspace process, setup script, and stop script runs with:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• Per-service variables (for example <code>SPACES_WEB_PORT=20001</code>, <code>SPACES_API_PORT=20002</code>, and the matching <code>SPACES_WEB_URL</code>, <code>SPACES_API_URL</code>).</li>
-          <li>• <code>SPACES_WORKSPACE_HOST</code> &mdash; the <code>&lt;slug&gt;.localhost</code> host that Caddy routes for this workspace.</li>
+          <li>• Per-service variables (for example <code>SPACES_WEB_PORT=20001</code>, <code>SPACES_API_PORT=20002</code>, and the matching <code>SPACES_WEB_HOST</code>/<code>SPACES_WEB_URL</code>, <code>SPACES_API_HOST</code>/<code>SPACES_API_URL</code>). Reference a service&apos;s <code>SPACES_&lt;SERVICE&gt;_URL</code> directly rather than composing a URL by hand.</li>
           <li>• <code>SPACES_PROJECT_DIR</code> &mdash; the project directory.</li>
           <li>• <code>SPACES_WORKSPACE_DIR</code> &mdash; this workspace&apos;s directory.</li>
         </ul>

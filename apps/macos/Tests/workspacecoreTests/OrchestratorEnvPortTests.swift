@@ -349,6 +349,8 @@ extension OrchestratorTests {
         let conflictSettingsBefore = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
         let defaultPortsBefore = try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id)
         let conflictPortsBefore = try store.workspacePortsAssigned(workspaceID: conflictWorkspace.id)
+        try store.updateWorkspaceRunning(id: defaultWorkspace.id, isRunning: true, launchedAt: "2026-07-01T00:00:00Z")
+        XCTAssertTrue(PortReserver.shared.reservedWorkspaceIDs().contains(defaultWorkspace.id))
         _ = try orchestrator.registerAgentWindow(workspaceID: conflictWorkspace.id, provider: .spaces, label: "api")
         try spacesYAMLFixture(stopScript: "echo imported-stop").write(
             to: try orchestrator.spacesYAMLConfigURL(projectID: project.id), atomically: true, encoding: .utf8)
@@ -370,6 +372,10 @@ extension OrchestratorTests {
         XCTAssertEqual(defaultSettingsAfter.agentLaunchers.map(\.command), defaultSettingsBefore.agentLaunchers.map(\.command))
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.name }, defaultPortsBefore.map { $0.name })
         XCTAssertEqual(try store.workspacePortsAssigned(workspaceID: defaultWorkspace.id).map { $0.port }, defaultPortsBefore.map { $0.port })
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: defaultWorkspace.id)).isRunning)
+        XCTAssertFalse(
+            PortReserver.shared.reservedWorkspaceIDs().contains(defaultWorkspace.id),
+            "Rollback must not restore placeholder reservations for a running workspace.")
 
         let conflictSettingsAfter = try XCTUnwrap(try orchestrator.workspaceSettings(workspaceID: conflictWorkspace.id))
         XCTAssertEqual(conflictSettingsAfter.stopScript, conflictSettingsBefore.stopScript)
@@ -476,10 +482,10 @@ extension OrchestratorTests {
         XCTAssertNil(env["admin-ui"])
         XCTAssertNil(env["PORT0"])
         XCTAssertEqual(env["SPACES_ADMIN_UI_PORT"], "8080")
-        // Workspace identity and the derived per-service URL are present and consistent.
+        // Workspace identity and the derived per-service host/URL are present and consistent.
         let slug = try XCTUnwrap(env["SPACES_WORKSPACE_SLUG"])
         XCTAssertFalse(slug.isEmpty)
-        XCTAssertEqual(env["SPACES_WORKSPACE_HOST"], "\(slug).localhost")
+        XCTAssertEqual(env["SPACES_ADMIN_UI_HOST"], "admin-ui.\(slug).localhost")
         XCTAssertEqual(env["SPACES_ADMIN_UI_URL"], "http://admin-ui.\(slug).localhost:\(AppConfig.defaultRouterPort)")
     }
 
@@ -494,13 +500,9 @@ extension OrchestratorTests {
             remotePath: "/srv/project/ws", branch: workspace.branch, baseBranch: workspace.baseBranch,
             namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)],
             processEnvironment: [
-                "SPACES_WORKSPACE_ID": workspace.id,
-                "SPACES_PROJECT_ID": project.id,
-                "SPACES_WORKSPACE_SLUG": slug,
-                "SPACES_WORKSPACE_HOST": "\(slug).localhost",
-                "SPACES_WEB_PORT": "3000",
-            ],
-            allowedFileRoots: ["/srv/project/ws"])
+                "SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug, "SPACES_WEB_PORT": "3000",
+                "SPACES_WEB_HOST": "web.\(slug).localhost",
+            ], allowedFileRoots: ["/srv/project/ws"])
 
         let env = orchestrator.buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: [(port: 3000, name: "web")], runtimeManifest: manifest)
@@ -509,6 +511,7 @@ extension OrchestratorTests {
         XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/srv/project/ws")
         XCTAssertEqual(env["SPACES_WEB_PORT"], "3000")
         XCTAssertEqual(env["SPACES_WEB_URL"], "http://web.\(slug).localhost:\(AppConfig.defaultRouterPort)")
+        XCTAssertEqual(env["SPACES_WEB_HOST"], "web.\(slug).localhost")
     }
 
     // MARK: - resolveEnvVars

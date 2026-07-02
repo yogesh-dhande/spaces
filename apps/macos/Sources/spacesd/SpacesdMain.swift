@@ -95,6 +95,7 @@ import workspacecore
     private var databaseChangeObserver: NSObjectProtocol?
     #if os(macOS)
         private var databaseDistributedChangeObserver: NSObjectProtocol?
+        private var caddyRouteRegistryDistributedChangeObserver: NSObjectProtocol?
         private var processExitMonitor: ProcessExitMonitorService?
         private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
         private var caddyRouterService: CaddyRouterService?
@@ -169,6 +170,9 @@ import workspacecore
             databaseDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
                 forName: IPCNotification.databaseDidChange, object: try? IPCNotification.currentObject(), queue: nil
             ) { [weak self] _ in Task { @MainActor in self?.handleDatabaseDidChangeForDeviceRuntime() } }
+            caddyRouteRegistryDistributedChangeObserver = DistributedNotificationCenter.default().addObserver(
+                forName: IPCNotification.caddyRouteRegistryDidChange, object: try? IPCNotification.currentObject(), queue: nil
+            ) { [weak self] _ in Task { @MainActor in self?.caddyRouterService?.reconcile() } }
         #endif
     }
 
@@ -216,6 +220,10 @@ import workspacecore
             if let databaseDistributedChangeObserver {
                 DistributedNotificationCenter.default().removeObserver(databaseDistributedChangeObserver)
                 self.databaseDistributedChangeObserver = nil
+            }
+            if let caddyRouteRegistryDistributedChangeObserver {
+                DistributedNotificationCenter.default().removeObserver(caddyRouteRegistryDistributedChangeObserver)
+                self.caddyRouteRegistryDistributedChangeObserver = nil
             }
         #endif
         worktreeDiscoveryService?.stop()

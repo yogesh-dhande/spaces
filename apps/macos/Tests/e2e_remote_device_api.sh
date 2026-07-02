@@ -261,6 +261,10 @@ print(f"CERTIFICATE_FINGERPRINT={shlex.quote(payload['certificateFingerprint'])}
 PY
   )"
   eval "$parsed"
+  [[ -n "$PAIRING_CODE" ]] || fail "remote pairing JSON missing pairingCode"
+  [[ -n "$PAIRING_NONCE" ]] || fail "remote pairing JSON missing pairingNonce"
+  [[ -n "$TRANSPORT_KEY" ]] || fail "remote pairing JSON missing transportKey"
+  [[ -n "$CERTIFICATE_FINGERPRINT" ]] || fail "remote pairing JSON missing certificateFingerprint"
 }
 
 device_request() {
@@ -357,11 +361,20 @@ project_root.mkdir(parents=True, exist_ok=True)
 (project_root / "README.txt").write_text("remote device api sentinel\n")
 (project_root / "spaces.yaml").write_text(
     """version: 1
+services:
+  - web
 processes:
+  - name: remote-web-server
+    command: >-
+      python3 -c "import http.server, os; ReuseServer = type('ReuseServer', (http.server.ThreadingHTTPServer,), {'allow_reuse_address': True, 'allow_reuse_port': True}); http.server.test(HandlerClass=http.server.SimpleHTTPRequestHandler, ServerClass=ReuseServer, port=int(os.environ['SPACES_WEB_PORT']), bind='127.0.0.1')"
+    on_exit: none
   - name: parity-process
     command: >-
       python3 -c "import time; print('device-api-process-ready', flush=True); time.sleep(120)"
     on_exit: none
+browser_sessions:
+  - name: remote-web
+    url: $SPACES_WEB_URL/README.txt
 agent_launchers:
   - name: parity-agent
     command: >-
@@ -395,7 +408,7 @@ PY
 }
 
 remote_device_parity() {
-  local project_dir parity_json parity_stdout parity_log project_id default_workspace_id workspace_id session_id
+  local project_dir parity_json parity_stdout parity_log project_id default_workspace_id workspace_id session_id remote_web_service_port remote_web_service_url remote_web_browser_url
   project_dir="$(create_remote_fixture_project)"
   parity_json="$TMP_ROOT/remote-device-api-parity.json"
   parity_stdout="$TMP_ROOT/remote-device-api-parity.stdout"
@@ -418,8 +431,11 @@ remote_device_parity() {
   default_workspace_id="$(json_file_field "$parity_json" "defaultWorkspaceID")"
   workspace_id="$(json_file_field "$parity_json" "workspaceID")"
   session_id="$(json_file_field "$parity_json" "terminalSessionID")"
+  remote_web_service_port="$(json_file_field "$parity_json" "remoteWebServicePort")"
+  remote_web_service_url="$(json_file_field "$parity_json" "remoteWebServiceURL")"
+  remote_web_browser_url="$(json_file_field "$parity_json" "remoteWebBrowserURL")"
   verify_remote_ssh_forward "$project_dir"
-  write_result_json "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id"
+  write_result_json "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url"
 }
 
 allocate_local_port() {
@@ -488,6 +504,9 @@ write_result_json() {
   local default_workspace_id="$3"
   local workspace_id="$4"
   local session_id="$5"
+  local remote_web_service_port="$6"
+  local remote_web_service_url="$7"
+  local remote_web_browser_url="$8"
   local device_id
   device_id="$(
     python3 - "$CERTIFICATE_FINGERPRINT" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" <<'PY'
@@ -500,7 +519,7 @@ print("device-" + slug[:48])
 PY
   )"
   mkdir -p "$(dirname "$RESULT_JSON")"
-  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$device_id" "$AUTH_TOKEN" "$TRANSPORT_KEY" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")" <<'PY'
+  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$device_id" "$AUTH_TOKEN" "$TRANSPORT_KEY" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url" <<'PY'
 import json
 import sys
 (
@@ -519,6 +538,9 @@ import sys
     mac_client_installation_id,
     mac_auth_token,
     remote_performance_log_path,
+    remote_web_service_port,
+    remote_web_service_url,
+    remote_web_browser_url,
 ) = sys.argv[1:]
 payload = {
     "deviceID": device_id,
@@ -536,6 +558,9 @@ payload = {
     "defaultWorkspaceID": default_workspace_id,
     "workspaceID": workspace_id,
     "terminalSessionID": session_id,
+    "remoteWebServicePort": int(remote_web_service_port),
+    "remoteWebServiceURL": remote_web_service_url,
+    "remoteWebBrowserURL": remote_web_browser_url,
 }
 with open(path, "w") as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)

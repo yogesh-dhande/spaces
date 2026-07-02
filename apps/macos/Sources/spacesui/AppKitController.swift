@@ -276,6 +276,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
     private var didStartBackgroundServices = false
+    private let browserSSHForwardManager = BrowserSSHForwardManager()
+    private var remoteBrowserForwardRevisions: [String: Int] = [:]
     var chromeAutomationSetupController: ChromeAutomationSetupController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
@@ -509,6 +511,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NSLog("spaces: prepared add-project cleanup failed during termination: \(String(describing: error))")
         }
         deferredHotkeySelectionRefreshTask?.cancel()
+        browserSSHForwardManager.stopAll()
         sidebar.cancelSidebarReloadTask()
         teardownInlineWorkspaceOutsideClickMonitor()
         teardownGlobalHotkey()
@@ -2790,8 +2793,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// A device-agnostic window-focus target resolved from the overview. The dispatcher
     /// focuses the client's window for the target; only two leaves vary by where the
-    /// workspace's daemon runs — browser tab focus (local) vs URL open (remote), and
-    /// native vs mirror terminal-window open — both keyed off the carried `workspaceID`.
+    /// workspace's daemon runs: browser URLs may need remote-service routing, and terminal
+    /// windows use native sessions locally vs Device API mirrors remotely.
     enum DeviceWindowShortcutResolution: Sendable, Equatable {
         case openURL(workspaceID: String, targetURL: String)
         case openTerminal(DeviceTerminalOpenRequest)
@@ -3558,6 +3561,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         didStartBackgroundServices = false
     }
 
+    func reconcileRemoteBrowserForwards(device: SpacesPairedDeviceRecord, overview: SpacesDeviceOverviewPayload) {
+        guard device.id != localDeviceID else { return }
+        let manager = browserSSHForwardManager
+        let revision = nextRemoteBrowserForwardRevision(deviceID: device.id)
+        Task.detached(priority: .utility) { manager.reconcile(device: device, overview: overview, revision: revision) }
+    }
+
+    func stopRemoteBrowserForwards(deviceID: String) {
+        guard deviceID != localDeviceID else { return }
+        let manager = browserSSHForwardManager
+        let revision = nextRemoteBrowserForwardRevision(deviceID: deviceID)
+        Task.detached(priority: .utility) { manager.stop(deviceID: deviceID, revision: revision) }
+    }
+
+    private func nextRemoteBrowserForwardRevision(deviceID: String) -> Int {
+        let next = (remoteBrowserForwardRevisions[deviceID] ?? 0) + 1
+        remoteBrowserForwardRevisions[deviceID] = next
+        return next
+    }
+
     nonisolated static func scheduleAfterNextRunLoopTurn(_ action: @escaping @MainActor () -> Void) {
         RunLoop.main.perform { Task { @MainActor in action() } }
     }
@@ -3751,6 +3774,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 localDeviceOverview = overview
                 deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
             }
+        }
+        if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
+            reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
         rebuildFlatSidebarData()
         if let preferredWorkspaceID, findWorkspace(id: preferredWorkspaceID) != nil {
@@ -9038,7 +9064,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// that specific window by id; only when it is gone does the app open a fresh dedicated
     /// window. Scoping to the tracked window id means focus never lands on an unrelated window
     /// that merely has the same URL open. `NSWorkspace.open` is a last resort when Chrome
-    /// cannot be scripted. Used for local sessions; remote sessions only open the URL.
+    /// cannot be scripted. Remote service sessions use this after their URL has been routed through
+    /// the Mac Caddy router.
     private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
         let focused = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
@@ -9139,8 +9166,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// action, or nil when nothing was focused (the executor surfaces its own errors).
     /// Shared by the numbered-shortcut, command-palette, and cycle focus paths so all
     /// three behave identically. Only two leaves depend on where the workspace's daemon
-    /// runs: browser tab focus (local) vs URL open (remote), and native vs mirror
-    /// terminal windows.
+    /// runs: browser URLs may need remote-service routing before local Chrome focus, and
+    /// terminal windows use native sessions locally vs Device API mirrors remotely.
     @discardableResult private func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution, requestID: String? = nil) async
         -> ExternalWindowAction?
     {
@@ -9151,7 +9178,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
-                NSWorkspace.shared.open(url)
+                guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
+                    showDeviceNotLoadedError()
+                    return nil
+                }
+                guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else {
+                    showError(WorkspaceError.invalidArgument(message: "Workspace not found on the selected device."))
+                    return nil
+                }
+                // Opening a missing workspace SSH forward and reconciling the Caddy route blocks (spawns
+                // `ssh`, polls local ports and router config up to the timeout), so run it off the main
+                // actor to keep the focus keypress from freezing the UI. The manager is `Sendable` and
+                // serializes its own state, so the detached task can safely own the reconciliation.
+                let manager = browserSSHForwardManager
+                let routeResult: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
+                    do { return .success(try manager.routedURL(targetURL: targetURL, workspace: workspace, device: device)) } catch {
+                        return .failure(error)
+                    }
+                }.value
+                switch routeResult {
+                case .success(let routedURL):
+                    await focusLocalChromeTab(workspaceID: workspaceID, targetURL: routedURL.absoluteString, fallbackURL: routedURL)
+                case .failure(let error):
+                    showError(error)
+                    return nil
+                }
             } else {
                 await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, fallbackURL: url)
             }

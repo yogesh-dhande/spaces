@@ -71,7 +71,7 @@ npm run dev | tee .logs/frontend.log`}</code>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`SPACES_WEB_PORT, SPACES_API_PORT, ...   # assigned port per service
 SPACES_WEB_URL, SPACES_API_URL, ...     # Caddy URL per service
-SPACES_WORKSPACE_HOST                   # <slug>.localhost for this workspace
+SPACES_WEB_HOST, SPACES_API_HOST, ...   # Caddy hostname per service (no scheme or port)
 SPACES_PROJECT_DIR                      # project directory
 SPACES_WORKSPACE_DIR                    # this workspace's directory`}</code>
         </pre>

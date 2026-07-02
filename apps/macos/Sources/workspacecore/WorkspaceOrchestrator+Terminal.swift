@@ -123,8 +123,8 @@ extension WorkspaceOrchestrator {
 
     func interactiveShellCommand(cwd _: String) -> String { "exec \(shellSingleQuoted(terminalLoginShellPath())) -l" }
 
-    func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true)
-        -> [String: String]
+    func terminalLaunchEnvironment(base: [String: String], includeInheritedPath: Bool = true, includeProfileEnvironment: Bool = true) -> [String:
+        String]
     {
         var env = base
         if includeInheritedPath, let path = Shell.currentProcessEnvironment()["PATH"], !path.isEmpty { env["PATH"] = path }
@@ -198,7 +198,12 @@ extension WorkspaceOrchestrator {
         let runtimeEnv = terminalLaunchEnvironment(
             base: env, includeInheritedPath: includeInheritedPath, includeProfileEnvironment: includeProfileEnvironment)
         let resolvedShellPath = shellPath ?? terminalLoginShellPath()
-        return commandPrefixedWithShellEnvironment("exec \(shellQuoted(resolvedShellPath)) -l -c \(shellQuoted(command))", env: runtimeEnv)
+        // Run managed processes through an interactive login shell (`-l -i -c`), matching the ad-hoc
+        // terminal experience. `-l` alone sources only the profile files; the version-manager shims
+        // developers rely on (nvm, asdf, volta) live in `~/.bashrc`/`~/.zshrc`, which is guarded to
+        // interactive shells. Without `-i`, a command like `nvm use 24 && npm run dev` fails with
+        // `nvm: command not found` even though the same command works when typed into a terminal.
+        return commandPrefixedWithShellEnvironment("exec \(shellQuoted(resolvedShellPath)) -l -i -c \(shellQuoted(command))", env: runtimeEnv)
     }
 
     func logTerminalPerfMetric(_ metric: String, target: String, detail: String = "", elapsedMS: Int, success: Bool) {
@@ -215,18 +220,12 @@ extension WorkspaceOrchestrator {
         guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
         guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
         if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
-            return builtInSessionIsStillLive(sessionID: sessionID)
-                || builtInSessionLaunchIsPending(sessionID: sessionID)
+            return builtInSessionIsStillLive(sessionID: sessionID) || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
         if builtInSessionBelongsToConfiguredAgent(sessionID: sessionID, workspaceID: window.workspaceID) {
-            return builtInSessionIsStillLive(sessionID: sessionID)
-                || builtInSessionLaunchIsPending(sessionID: sessionID)
+            return builtInSessionIsStillLive(sessionID: sessionID) || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
-        if builtInSessionIsStillLive(sessionID: sessionID)
-            && builtInSessionHasActiveAttachments(sessionID: sessionID)
-        {
-            return true
-        }
+        if builtInSessionIsStillLive(sessionID: sessionID) && builtInSessionHasActiveAttachments(sessionID: sessionID) { return true }
         return builtInSessionLaunchIsPendingBeforeOwnerAttachment(sessionID: sessionID)
     }
 
@@ -345,9 +344,7 @@ extension WorkspaceOrchestrator {
         return normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
     }
 
-    func terminalSessionID(for window: WindowRecord) -> String? {
-        normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID)
-    }
+    func terminalSessionID(for window: WindowRecord) -> String? { normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) }
 
     func normalizedTerminalSessionID(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
