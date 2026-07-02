@@ -3,12 +3,10 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
-extension TerminalSessionWindowController {
+extension TerminalSessionPaneViewController {
     func buildUI() {
-        guard let window else { return }
-        let contentView = NSView()
+        let contentView = view
         contentView.translatesAutoresizingMaskIntoConstraints = false
-        window.contentView = contentView
 
         titleLabel.stringValue = sessionID
         titleLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
@@ -296,7 +294,7 @@ extension TerminalSessionWindowController {
 
     func updateHeaderLayoutVisibility() {
         // Session metadata remains available through debug accessors, but regular
-        // terminal windows do not show a detail header.
+        // terminal panes do not show a detail header.
         if isViewerTakeoverShellActive {
             headerStackView.isHidden = true
             bodyStackView.isHidden = true
@@ -431,7 +429,7 @@ extension TerminalSessionWindowController {
         }
     }
 
-    func currentWindowTitle(fallback: String, isOwner: Bool) -> String {
+    func currentDisplayTitle(fallback: String, isOwner: Bool) -> String {
         guard backend == .ghosttyEmbedded else { return fallback }
         let baseTitle = ghosttySessionInfoProvider?.effectiveTitle ?? lastObservedRuntimeState?.title ?? fallback
         return baseTitle

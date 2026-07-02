@@ -231,6 +231,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceSetupDetailRefreshWorkspaceID: String?
     private weak var workspaceSetupLogTextView: NSTextView?
     lazy var commandPalette = CommandPaletteController(host: self)
+    lazy var panelCoordinator: PanelCoordinator = {
+        let coordinator = PanelCoordinator(host: self)
+        coordinator.onLayoutChanged = { [weak self] scope, layout in self?.persistPanelLayout(scope: scope, layout: layout) }
+        return coordinator
+    }()
     lazy var alerts = AlertsController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
     lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
@@ -1424,6 +1429,127 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return openTerminalSessionWindow(
             sessionID: request.sessionID, mode: .owner, requestID: requestID, seedDevice: device, seedLaunchConfiguration: launchConfiguration,
             seedInitialRuntimeState: initialRuntimeState) != nil
+    }
+
+    /// Builds the live terminal content controller for a pane: the same Device API
+    /// state model and control closures `openTerminalSessionWindow` wires into a
+    /// window, but hosted by the window-independent pane view controller. Returns nil
+    /// (surfacing the error) when the session's paths or state model cannot be built.
+    func makeTerminalPaneContent(request: DeviceTerminalOpenRequest) -> TerminalPaneContentController? {
+        let sessionID = request.sessionID
+        do {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            let device = deviceForWorkspaceMutation(workspaceID: request.workspaceID)
+            let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
+                shell: request.shell ?? summary?.shell ?? "/bin/bash", command: request.command ?? summary?.command,
+                createdAt: request.createdAt ?? ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID, kind: request.kind)
+            let initialRuntimeState = request.initialState.map {
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
+                    updatedAt: request.updatedAt ?? launchConfiguration.createdAt, title: request.title, workingDirectory: request.workingDirectory)
+            }
+            let stateModel = try makeTerminalSessionStateModel(
+                sessionID: sessionID, seedDevice: device, seedLaunchConfiguration: launchConfiguration,
+                seedInitialRuntimeState: initialRuntimeState, resolvedSummaryMatch: nil)
+            let requestSender = stateModel.terminalServiceRequestSender
+            let applyControlState = stateModel.controlStateApplier
+            let agentSignalHandler: RemoteGhosttyAgentSignalHandler = { [weak self] events in
+                guard let self else { return [String]() }
+                return self.applyRemoteAgentSignals(events)
+            }
+            let remoteClientStore = RemoteTerminalWindowClientStore()
+            let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
+                remoteClientStore.set(client.id)
+                let response = try Self.sendDeviceTerminalControl(
+                    sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                    requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
+                guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+            }
+            let detachClientAction: @Sendable (String) throws -> Void = { clientID in
+                if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
+                let response = try Self.sendDeviceTerminalControl(
+                    sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender,
+                    refreshStateAfterControl: true, applyState: applyControlState)
+                guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+            }
+            let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse = { text, appendNewline in
+                guard let clientID = remoteClientStore.current() else {
+                    return TerminalControlResponse(ok: false, message: "Terminal pane is not attached.")
+                }
+                return try Self.sendDeviceTerminalControl(
+                    sessionID: sessionID,
+                    request: TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline),
+                    requestSender: requestSender, applyState: applyControlState)
+            }
+            let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse = { key in
+                guard let clientID = remoteClientStore.current() else {
+                    return TerminalControlResponse(ok: false, message: "Terminal pane is not attached.")
+                }
+                return try Self.sendDeviceTerminalControl(
+                    sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID),
+                    requestSender: requestSender, applyState: applyControlState)
+            }
+            let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
+                try Self.sendDeviceTerminalControl(
+                    sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
+                    refreshStateAfterControl: true, applyState: applyControlState)
+            }
+            let pane = TerminalSessionPaneViewController(
+                sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
+                sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction,
+                attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                runtimeControlsProvider: { [weak self] sessionID in
+                    self?.terminalRuntimeControls(forSessionID: sessionID, cause: "controller_refresh")
+                },
+                sessionHostProvider: { launchConfiguration, paths in
+                    Self.terminalSessionHost(
+                        launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
+                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
+                })
+            return TerminalPaneContentController(
+                descriptor: .terminalSession(deviceID: deviceID(forWorkspaceID: request.workspaceID), sessionID: sessionID),
+                workspaceID: request.workspaceID, sessionID: sessionID, sessionKind: request.kind, pane: pane)
+        } catch {
+            showError(error)
+            return nil
+        }
+    }
+
+    /// Starts a fresh ad hoc terminal session on the workspace's owning daemon and
+    /// resolves the pane open request for it (split fill and new-tab paths).
+    func createTerminalSessionForPane(workspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
+        guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
+            showDeviceNotLoadedError()
+            completion(nil)
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else {
+                completion(nil)
+                return
+            }
+            let result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.openWorkspaceTerminal(
+                    workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            }
+            switch result {
+            case .success(let response):
+                self.applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                guard let sessionID = response.sessionID,
+                    let request = Self.deviceTerminalOpenRequest(
+                        workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? self.overview(forWorkspaceID: workspaceID))
+                else {
+                    completion(nil)
+                    return
+                }
+                completion(request)
+            case .failure(let error):
+                self.showError(error)
+                completion(nil)
+            }
+        }
     }
 
     nonisolated static func deviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws
@@ -5395,15 +5521,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         stack.setCustomSpacing(20, after: headerAndActionsRow)
         if let inlineBranchRow {
             stack.setCustomSpacing(8, after: headerAndActionsRow)
-            stack.setCustomSpacing(20, after: inlineBranchRow)
             constrainFormFieldToFillWidth(inlineBranchRow, in: stack)
         }
-        stack.setCustomSpacing(20, after: inlineNotesRow)
         constrainFormFieldToFillWidth(inlineNotesRow, in: stack)
         constrainFormFieldToFillWidth(headerRow, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(dirField, in: headerAndActionsRow)
         constrainFormFieldToFillWidth(headerAndActionsRow, in: stack)
-        showScrollableDetailStack(stack)
+
+        // The header strip is fixed at the top; the workspace's panel (tabs of terminal
+        // panes) fills the remaining space. The panel view instance is stable per
+        // workspace, so re-rendering the header on overview ticks re-parents it without
+        // recreating hosted terminal surfaces.
+        let scope = PanelScope.workspace(deviceID: workspaceDeviceID, workspaceID: workspace.id)
+        panelCoordinator.restoreLayoutIfNeeded(scope: scope)
+        let panelView = panelCoordinator.panelView(for: scope)
+        panelView.removeFromSuperview()
+        detailContainer.addSubview(stack)
+        detailContainer.addSubview(panelView)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 20),
+            stack.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor, constant: -20),
+            panelView.topAnchor.constraint(equalTo: stack.bottomAnchor, constant: 12),
+            panelView.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
+            panelView.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
+            panelView.bottomAnchor.constraint(equalTo: detailContainer.bottomAnchor),
+        ])
+        panelCoordinator.restoreSelection(scope: scope)
         detailContainer.layoutSubtreeIfNeeded()
     }
 
@@ -8243,16 +8387,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch result {
                 case .success(let response):
                     applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                    if let sessionID = response.sessionID {
-                        if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
-                            if let request = Self.deviceTerminalOpenRequest(
-                                workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? localDeviceOverview)
-                            {
-                                _ = openDeviceTerminalSession(request, device: device)
-                            }
-                        } else {
-                            _ = await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner)
-                        }
+                    // A fresh ad hoc session opens as a new tab in the workspace's panel.
+                    if let sessionID = response.sessionID,
+                        let request = Self.deviceTerminalOpenRequest(
+                            workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? overview(forWorkspaceID: workspaceID))
+                    {
+                        panelCoordinator.openSessionInNewTab(request)
                     }
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                     logPerfMetric(
@@ -8480,6 +8620,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }
             if Self.shouldBypassLocalShortcutMonitor(for: NSApp.keyWindow) { return event }
+            // A focused terminal pane owns every non-⌘ key (the pane translation
+            // replaces the old terminal window's sendEvent hook); ⌘ chords run the app
+            // shortcuts below and fall through to the pane's command handling at the end.
+            let focusedPaneContent = self.panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder)
+            if let focusedPaneContent {
+                self.panelCoordinator.noteContentFocused(focusedPaneContent)
+                if Self.shortcutMonitorDisposition(eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true)
+                    == .passEventToTerminal
+                {
+                    return focusedPaneContent.handleKeyEvent(event) ? nil : event
+                }
+            }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
             if self.handleNewWorkspaceShortcut(event: event) { return nil }
@@ -8513,6 +8665,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 return nil
             }
+            // App shortcuts didn't claim this ⌘ chord; give the focused pane's terminal
+            // command handling a chance (the old terminal window's performKeyEquivalent).
+            if let focusedPaneContent, focusedPaneContent.handleCommandKeyEquivalent(event) { return nil }
             return event
         }
     }
@@ -8555,6 +8710,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     static func shouldBypassLocalShortcutMonitor(for keyWindow: NSWindow?) -> Bool {
         (keyWindow?.windowController as? TerminalSessionWindowController) != nil
+    }
+
+    enum ShortcutMonitorDisposition: Equatable, Sendable {
+        /// Return the event untouched so the focused terminal pane receives it (plain
+        /// keys, ctrl chords, arrows — anything without ⌘).
+        case passEventToTerminal
+        /// Run the app-shortcut chain; unhandled events still fall through to the
+        /// window, whose key routing forwards them to the focused pane.
+        case runAppShortcuts
+    }
+
+    /// Keyboard routing for the local shortcut monitor once terminals live inside app
+    /// windows as panes: a focused terminal owns every non-⌘ key, while ⌘ chords run
+    /// the app shortcuts first. With no terminal focused, all shortcuts run as before.
+    nonisolated static func shortcutMonitorDisposition(eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool)
+        -> ShortcutMonitorDisposition
+    {
+        guard firstResponderIsTerminalPane else { return .runAppShortcuts }
+        return eventModifiers.contains(.command) ? .runAppShortcuts : .passEventToTerminal
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
@@ -8932,7 +9106,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// The overview for the daemon that owns `workspaceID` (local or remote).
-    private func overview(forWorkspaceID workspaceID: String) -> SpacesDeviceOverviewPayload? {
+    func overview(forWorkspaceID workspaceID: String) -> SpacesDeviceOverviewPayload? {
         deviceSection(id: deviceID(forWorkspaceID: workspaceID))?.overview ?? localDeviceOverview
     }
 
@@ -9076,12 +9250,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
         case .openTerminal(let request):
-            guard let device = deviceForWorkspaceMutation(workspaceID: request.workspaceID) else {
+            guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
                 showDeviceNotLoadedError()
                 return nil
             }
             Self.setClientActiveWorkspaceID(request.workspaceID)
-            guard await focusClientSessionWindow(request, device: device, requestID: requestID) else { return nil }
+            guard panelCoordinator.openOrFocusTerminalPane(request) else { return nil }
+            if let requestID, !requestID.isEmpty {
+                logPerfMetric(
+                    "terminal_window_focus_ipc", target: "session=\(request.sessionID)", elapsedMS: 0, success: true,
+                    detail: "route=pane request_id=\(requestID)")
+            }
             return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
             guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {

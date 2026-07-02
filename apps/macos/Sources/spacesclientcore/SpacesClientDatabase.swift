@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 4
+    public static let currentVersion = 5
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -351,6 +351,77 @@ public final class SpacesClientDatabase {
             bindings: [deviceID, workspaceID, targetURL])
     }
 
+    // MARK: - Panel layouts
+
+    public func writeWorkspacePanelLayout(deviceID: String, workspaceID: String, layoutJSON: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO workspace_panel_layouts(device_id, workspace_id, layout_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(device_id, workspace_id) DO UPDATE SET
+                  layout_json = excluded.layout_json,
+                  updated_at = excluded.updated_at
+                """, bindings: [deviceID, workspaceID, layoutJSON, Self.timestamp()])
+    }
+
+    public func workspacePanelLayout(deviceID: String, workspaceID: String) throws -> String? {
+        try queryRow(
+            sql: "SELECT layout_json FROM workspace_panel_layouts WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])?
+            .first
+    }
+
+    public func deleteWorkspacePanelLayout(deviceID: String, workspaceID: String) throws {
+        try execute(sql: "DELETE FROM workspace_panel_layouts WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
+    }
+
+    public struct PanelWindowRecord: Sendable, Equatable {
+        public let id: String
+        public let layoutJSON: String
+        public let frame: (x: Double, y: Double, width: Double, height: Double)?
+
+        public init(id: String, layoutJSON: String, frame: (x: Double, y: Double, width: Double, height: Double)?) {
+            self.id = id
+            self.layoutJSON = layoutJSON
+            self.frame = frame
+        }
+
+        public static func == (lhs: PanelWindowRecord, rhs: PanelWindowRecord) -> Bool {
+            lhs.id == rhs.id && lhs.layoutJSON == rhs.layoutJSON && lhs.frame?.x == rhs.frame?.x && lhs.frame?.y == rhs.frame?.y
+                && lhs.frame?.width == rhs.frame?.width && lhs.frame?.height == rhs.frame?.height
+        }
+    }
+
+    public func upsertPanelWindow(_ record: PanelWindowRecord) throws {
+        try execute(
+            sql: """
+                INSERT INTO panel_windows(id, layout_json, x, y, width, height, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  layout_json = excluded.layout_json,
+                  x = excluded.x, y = excluded.y, width = excluded.width, height = excluded.height,
+                  updated_at = excluded.updated_at
+                """,
+            bindings: [
+                record.id, record.layoutJSON, record.frame.map { "\($0.x)" } ?? "", record.frame.map { "\($0.y)" } ?? "",
+                record.frame.map { "\($0.width)" } ?? "", record.frame.map { "\($0.height)" } ?? "", Self.timestamp(),
+            ])
+    }
+
+    public func panelWindows() throws -> [PanelWindowRecord] {
+        try queryRows(sql: "SELECT id, layout_json, x, y, width, height FROM panel_windows ORDER BY updated_at, id").compactMap { row in
+            guard row.count >= 6 else { return nil }
+            let frame: (x: Double, y: Double, width: Double, height: Double)?
+            if let x = Double(row[2]), let y = Double(row[3]), let width = Double(row[4]), let height = Double(row[5]) {
+                frame = (x, y, width, height)
+            } else {
+                frame = nil
+            }
+            return PanelWindowRecord(id: row[0], layoutJSON: row[1], frame: frame)
+        }
+    }
+
+    public func deletePanelWindow(id: String) throws { try execute(sql: "DELETE FROM panel_windows WHERE id = ?", bindings: [id]) }
+
     public func backupURLs() throws -> [URL] { try backupManager.existingBackups() }
 
     private func initializeSchema() throws {
@@ -591,12 +662,16 @@ public final class SpacesClientDatabase {
 
             \(browserSessionWindowIDsSchemaSQL)
 
+            \(panelLayoutsSchemaSQL)
+
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
             );
         """
 
     private static let dropSchemaSQL = """
+            DROP TABLE IF EXISTS panel_windows;
+            DROP TABLE IF EXISTS workspace_panel_layouts;
             DROP TABLE IF EXISTS browser_session_window_ids;
             DROP TABLE IF EXISTS desktop_window_ids;
             DROP TABLE IF EXISTS local_window_focus_state;
@@ -707,6 +782,29 @@ public final class SpacesClientDatabase {
             );
         """
 
+    // Panel layouts are client-local UI state: which sessions are open in which
+    // tabs/panes per workspace, plus extra panel windows, as a versioned JSON document
+    // per panel (see `PanelLayout` in spacesui).
+    private static let panelLayoutsSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS workspace_panel_layouts (
+              device_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              layout_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (device_id, workspace_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS panel_windows (
+              id TEXT PRIMARY KEY,
+              layout_json TEXT NOT NULL,
+              x REAL,
+              y REAL,
+              width REAL,
+              height REAL,
+              updated_at TEXT NOT NULL
+            );
+        """
+
     public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
         SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
             try executeClientBatch(database: database, sql: clientStateSchemaSQL)
@@ -716,6 +814,9 @@ public final class SpacesClientDatabase {
         },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
             try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
+        },
+        SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Add panel layouts") { database in
+            try executeClientBatch(database: database, sql: panelLayoutsSchemaSQL)
         },
     ]
 

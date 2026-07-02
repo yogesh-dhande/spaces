@@ -1,0 +1,344 @@
+import AppKit
+import spacesdevicecore
+
+/// Owns every panel's layout, view, and pane-content lifecycle. One instance on
+/// `AppKitController` (the standard unowned-host sub-controller). Invariant: a terminal
+/// session has at most one pane across all panels — opening an already-open session
+/// focuses its pane wherever it lives instead of creating another.
+@MainActor final class PanelCoordinator {
+    unowned let host: AppKitController
+
+    init(host: AppKitController) {
+        self.host = host
+    }
+
+    struct PanePlacement: Equatable {
+        let scope: PanelScope
+        let tabID: String
+        let paneID: String
+    }
+
+    private struct PanelState {
+        var layout = PanelLayout()
+        var view: WorkspacePanelView?
+    }
+
+    private var panels: [PanelScope: PanelState] = [:]
+    /// Live content controllers keyed by terminal session id.
+    private var contentControllers: [String: TerminalPaneContentController] = [:]
+    /// Persistence hook, wired to the client database; called after every layout change.
+    var onLayoutChanged: ((PanelScope, PanelLayout) -> Void)?
+
+    // MARK: - Panel access
+
+    func layout(for scope: PanelScope) -> PanelLayout { panels[scope]?.layout ?? PanelLayout() }
+
+    /// The panel's view, materialized on first request and retained (detached while
+    /// its workspace is unselected) so pane content survives workspace switching.
+    func panelView(for scope: PanelScope) -> WorkspacePanelView {
+        if let view = panels[scope]?.view { return view }
+        let view = WorkspacePanelView(scope: scope)
+        view.onSelectTab = { [weak self] tabID in self?.selectTab(scope: scope, tabID: tabID) }
+        view.onCloseTab = { [weak self] tabID in self?.closeTab(scope: scope, tabID: tabID) }
+        view.onNewTab = { [weak self] in self?.host.openNewTerminalTab(scope: scope) }
+        view.onSplitPane = { [weak self] paneID, direction in self?.beginSplit(scope: scope, paneID: paneID, direction: direction) }
+        view.onClosePane = { [weak self] paneID in self?.closePane(scope: scope, paneID: paneID) }
+        view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
+        view.onSplitWeightsChanged = { [weak self] splitID, weights in self?.updateSplitWeights(scope: scope, splitID: splitID, weights: weights) }
+        view.paneContentProvider = { [weak self] pane in
+            guard let sessionID = pane.content.terminalSessionID else { return nil }
+            return self?.contentControllers[sessionID]
+        }
+        panels[scope, default: PanelState()].view = view
+        render(scope: scope)
+        return view
+    }
+
+    // MARK: - Registry
+
+    /// Where a session's pane lives, if it is open anywhere.
+    func placement(forSessionID sessionID: String) -> PanePlacement? {
+        for (scope, state) in panels {
+            for tab in state.layout.tabs {
+                for pane in PanelLayoutEngine.panes(in: tab) where pane.content.terminalSessionID == sessionID {
+                    return PanePlacement(scope: scope, tabID: tab.id, paneID: pane.id)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Ordered open session ids for a workspace across all panels: its workspace panel
+    /// first (tab order), then panes of that workspace hosted in global panel windows.
+    /// This is the "open targets" source for window cycling.
+    func openTerminalSessionIDs(workspaceID: String) -> [String] {
+        var ordered: [String] = []
+        for (scope, state) in panels.sorted(by: { scopeSortKey($0.key) < scopeSortKey($1.key) }) {
+            switch scope {
+            case .workspace(_, let scopeWorkspaceID):
+                guard scopeWorkspaceID == workspaceID else { continue }
+                ordered.append(contentsOf: PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout))
+            case .globalWindow:
+                for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout)
+                where contentControllers[sessionID]?.workspaceID == workspaceID {
+                    ordered.append(sessionID)
+                }
+            }
+        }
+        return ordered
+    }
+
+    private func scopeSortKey(_ scope: PanelScope) -> String {
+        switch scope {
+        case .workspace(let deviceID, let workspaceID): return "0:\(deviceID):\(workspaceID)"
+        case .globalWindow(let panelWindowID): return "1:\(panelWindowID)"
+        }
+    }
+
+    /// The content controller owning `responder` (keyboard-routing and focus lookups).
+    func contentOwning(responder: NSResponder?) -> TerminalPaneContentController? {
+        guard let responder else { return nil }
+        for controller in contentControllers.values where controller.owns(responder: responder) { return controller }
+        return nil
+    }
+
+    /// The session whose pane currently holds keyboard focus in the key window, if any.
+    func focusedSessionID() -> String? { contentOwning(responder: NSApp.keyWindow?.firstResponder)?.sessionID }
+
+    /// Syncs the layout's focused pane to the content that actually has keyboard focus
+    /// (clicks inside terminal content bypass the pane chrome's mouse handling, so the
+    /// shortcut monitor calls this as typing reveals where focus really is).
+    func noteContentFocused(_ content: TerminalPaneContentController) {
+        guard let placement = placement(forSessionID: content.sessionID) else { return }
+        guard layout(for: placement.scope).focusedPaneID != placement.paneID else { return }
+        focusPane(scope: placement.scope, paneID: placement.paneID, moveKeyboardFocus: false)
+    }
+
+    // MARK: - Open / focus
+
+    /// The unified open-or-focus behavior behind sidebar clicks, the command palette,
+    /// numbered shortcuts, and cycling: focus the session's existing pane wherever it
+    /// lives, else open it as a new tab in its workspace's panel.
+    @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
+        if let placement = placement(forSessionID: request.sessionID) {
+            focus(placement: placement)
+            return true
+        }
+        return openSessionInNewTab(request)
+    }
+
+    /// Opens the session as a new tab — in its workspace's panel by default (the
+    /// cmd+opt+t landing path for a freshly created session), or in an explicit scope
+    /// (a global panel window's "+" button).
+    @discardableResult func openSessionInNewTab(_ request: AppKitController.DeviceTerminalOpenRequest, in scope: PanelScope? = nil) -> Bool {
+        let scope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
+        guard let content = ensureContentController(request: request) else { return false }
+        let pane = Pane(id: UUID().uuidString, content: content.descriptor)
+        mutateLayout(scope: scope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
+        host.showPanelScope(scope)
+        activateFocusedPane(scope: scope)
+        return true
+    }
+
+    /// Adopts a persisted layout for a workspace panel the first time it is shown,
+    /// materializing content controllers for its still-live sessions.
+    func restoreLayoutIfNeeded(scope: PanelScope) {
+        guard panels[scope] == nil, case .workspace(let deviceID, let workspaceID) = scope,
+            let layout = host.restoredWorkspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID), !layout.isEmpty
+        else { return }
+        panels[scope] = PanelState(layout: layout, view: nil)
+        for pane in PanelLayoutEngine.allPanes(in: layout) {
+            guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil,
+                let request = host.paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
+            else { continue }
+            _ = ensureContentController(request: request)
+        }
+    }
+
+    private func focus(placement: PanePlacement) {
+        mutateLayout(scope: placement.scope) { PanelLayoutEngine.focusPane(paneID: placement.paneID, in: $0) }
+        host.showPanelScope(placement.scope)
+        activateFocusedPane(scope: placement.scope)
+    }
+
+    func focusPane(scope: PanelScope, paneID: String, moveKeyboardFocus: Bool) {
+        mutateLayout(scope: scope) { PanelLayoutEngine.focusPane(paneID: paneID, in: $0) }
+        if moveKeyboardFocus { activateFocusedPane(scope: scope) }
+    }
+
+    /// Restores a workspace panel's remembered focus when the sidebar selection lands
+    /// on it (arrow-key workspace switching), without stealing keyboard focus from the
+    /// sidebar.
+    func restoreSelection(scope: PanelScope) {
+        for tab in layout(for: scope).tabs {
+            for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) }
+        }
+        render(scope: scope)
+    }
+
+    private func activateFocusedPane(scope: PanelScope) {
+        let layout = layout(for: scope)
+        guard let focusedPaneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: focusedPaneID, in: layout),
+            let sessionID = pane.content.terminalSessionID, let content = contentControllers[sessionID]
+        else { return }
+        content.activate(focus: true)
+    }
+
+    private func activateContentIfVisible(scope: PanelScope, pane: Pane) {
+        guard let sessionID = pane.content.terminalSessionID, let content = contentControllers[sessionID] else { return }
+        let layout = layout(for: scope)
+        let isInSelectedTab = layout.tabs.first { $0.id == layout.selectedTabID }.map {
+            PanelLayoutEngine.panes(in: $0).contains { $0.id == pane.id }
+        } ?? false
+        if isInSelectedTab { content.activate(focus: false) } else { content.deactivate() }
+    }
+
+    // MARK: - Tabs and panes
+
+    func selectTab(scope: PanelScope, tabID: String) {
+        mutateLayout(scope: scope) { PanelLayoutEngine.selectTab(tabID: tabID, in: $0) }
+        activateFocusedPane(scope: scope)
+    }
+
+    func closeTab(scope: PanelScope, tabID: String) {
+        let closing = layout(for: scope).tabs.first { $0.id == tabID }
+        guard let closing else { return }
+        for pane in PanelLayoutEngine.panes(in: closing) { closeContent(for: pane) }
+        mutateLayout(scope: scope) { layout in
+            var layout = layout
+            layout.tabs.removeAll { $0.id == tabID }
+            return PanelLayoutEngine.normalized(layout)
+        }
+        activateFocusedPane(scope: scope)
+    }
+
+    func closePane(scope: PanelScope, paneID: String) {
+        if let pane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)) { closeContent(for: pane) }
+        mutateLayout(scope: scope) { PanelLayoutEngine.removePane(paneID: paneID, from: $0) }
+        activateFocusedPane(scope: scope)
+    }
+
+    private func closeContent(for pane: Pane) {
+        guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
+        content.close()
+        // Ad hoc shells stop when their pane closes (matching the old window-close
+        // semantics); configured process/agent sessions keep running and stay
+        // recoverable through their sidebar target.
+        if content.sessionKind == .shell { host.stopAdHocTerminalSession(workspaceID: content.workspaceID, sessionID: sessionID) }
+    }
+
+    private func beginSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection) {
+        // "New terminal session" targets the split pane's own workspace (which is the
+        // panel's workspace for a workspace scope, and the source pane's for global).
+        let sourceWorkspaceID: String?
+        if let pane = PanelLayoutEngine.pane(withID: paneID, in: layout(for: scope)), let sessionID = pane.content.terminalSessionID {
+            sourceWorkspaceID = contentControllers[sessionID]?.workspaceID
+        } else {
+            sourceWorkspaceID = nil
+        }
+        let newTerminalWorkspaceID: String
+        switch scope {
+        case .workspace(_, let workspaceID): newTerminalWorkspaceID = sourceWorkspaceID ?? workspaceID
+        case .globalWindow:
+            guard let sourceWorkspaceID else { return }
+            newTerminalWorkspaceID = sourceWorkspaceID
+        }
+        host.presentPaneSplitSessionPicker(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID) { [weak self] request in
+            guard let self, let request else { return }
+            self.fillSplit(scope: scope, paneID: paneID, direction: direction, request: request)
+        }
+    }
+
+    private func fillSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection, request: AppKitController.DeviceTerminalOpenRequest) {
+        // A session already open elsewhere moves into the new split rather than
+        // duplicating (one pane per session).
+        if let existing = placement(forSessionID: request.sessionID) {
+            mutateLayout(scope: existing.scope) { PanelLayoutEngine.removePane(paneID: existing.paneID, from: $0) }
+        }
+        guard let content = ensureContentController(request: request) else { return }
+        let pane = Pane(id: UUID().uuidString, content: content.descriptor)
+        mutateLayout(scope: scope) { layout in
+            PanelLayoutEngine.splitPane(paneID: paneID, direction: direction, newPane: pane, newSplitID: UUID().uuidString, in: layout) ?? layout
+        }
+        activateFocusedPane(scope: scope)
+    }
+
+    private func updateSplitWeights(scope: PanelScope, splitID: String, weights: [Double]) {
+        mutateLayout(scope: scope, rerender: false) { layout in
+            var layout = layout
+            layout.tabs = layout.tabs.map { tab in
+                var tab = tab
+                tab.root = Self.applyingWeights(weights, toSplitID: splitID, in: tab.root)
+                return tab
+            }
+            return layout
+        }
+    }
+
+    private static func applyingWeights(_ weights: [Double], toSplitID splitID: String, in node: PaneNode) -> PaneNode {
+        switch node {
+        case .leaf: return node
+        case .split(var split):
+            if split.id == splitID, split.children.count == weights.count { split.weights = weights }
+            split.children = split.children.map { applyingWeights(weights, toSplitID: splitID, in: $0) }
+            return .split(split)
+        }
+    }
+
+    // MARK: - Content lifecycle
+
+    private func ensureContentController(request: AppKitController.DeviceTerminalOpenRequest) -> TerminalPaneContentController? {
+        if let existing = contentControllers[request.sessionID] { return existing }
+        guard let content = host.makeTerminalPaneContent(request: request) else { return nil }
+        content.onTitleChanged = { [weak self, weak content] title in
+            guard let self, let content, let sessionID = content.descriptor.terminalSessionID,
+                let placement = self.placement(forSessionID: sessionID)
+            else { return }
+            self.panels[placement.scope]?.view?.paneView(forPaneID: placement.paneID)?.updateTitle(title)
+            self.refreshTabTitles(forSessionID: sessionID)
+        }
+        contentControllers[request.sessionID] = content
+        return content
+    }
+
+    private func refreshTabTitles(forSessionID sessionID: String?) {
+        guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
+        view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
+    }
+
+    /// A tab is titled after its first pane's content.
+    private func tabTitle(forTabID tabID: String, in layout: PanelLayout) -> String {
+        guard let tab = layout.tabs.first(where: { $0.id == tabID }), let first = PanelLayoutEngine.panes(in: tab).first,
+            let sessionID = first.content.terminalSessionID
+        else { return "Terminal" }
+        return contentControllers[sessionID]?.displayTitle ?? "Terminal"
+    }
+
+    // MARK: - Rendering / persistence
+
+    private func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope {
+        .workspace(deviceID: host.deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
+    }
+
+    private func mutateLayout(scope: PanelScope, rerender: Bool = true, _ mutation: (PanelLayout) -> PanelLayout) {
+        var state = panels[scope] ?? PanelState()
+        let previousVisibility = state.layout.selectedTabID
+        state.layout = mutation(state.layout)
+        panels[scope] = state
+        if rerender { render(scope: scope) }
+        if previousVisibility != state.layout.selectedTabID {
+            for tab in state.layout.tabs {
+                for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) }
+            }
+        }
+        onLayoutChanged?(scope, state.layout)
+    }
+
+    private func render(scope: PanelScope) {
+        guard let state = panels[scope], let view = state.view else { return }
+        var titles: [String: String] = [:]
+        for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
+        view.apply(
+            layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+    }
+}

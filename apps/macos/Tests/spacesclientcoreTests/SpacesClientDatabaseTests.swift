@@ -104,6 +104,54 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try migrated.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 7)
     }
 
+    func testWorkspacePanelLayoutRoundTripsAndDeletes() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.writeWorkspacePanelLayout(deviceID: "local", workspaceID: "ws-1", layoutJSON: "{\"version\":1}")
+        XCTAssertEqual(try database.workspacePanelLayout(deviceID: "local", workspaceID: "ws-1"), "{\"version\":1}")
+
+        try database.writeWorkspacePanelLayout(deviceID: "local", workspaceID: "ws-1", layoutJSON: "{\"version\":1,\"tabs\":[]}")
+        XCTAssertEqual(try database.workspacePanelLayout(deviceID: "local", workspaceID: "ws-1"), "{\"version\":1,\"tabs\":[]}")
+
+        try database.deleteWorkspacePanelLayout(deviceID: "local", workspaceID: "ws-1")
+        XCTAssertNil(try database.workspacePanelLayout(deviceID: "local", workspaceID: "ws-1"))
+    }
+
+    func testPanelWindowsRoundTripWithAndWithoutFrames() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        try database.upsertPanelWindow(.init(id: "win-1", layoutJSON: "{}", frame: (x: 10, y: 20, width: 800, height: 600)))
+        try database.upsertPanelWindow(.init(id: "win-2", layoutJSON: "{}", frame: nil))
+
+        let windows = try database.panelWindows()
+        XCTAssertEqual(Set(windows.map(\.id)), ["win-1", "win-2"])
+        let framed = try XCTUnwrap(windows.first { $0.id == "win-1" })
+        XCTAssertEqual(framed.frame?.x, 10)
+        XCTAssertEqual(framed.frame?.height, 600)
+        XCTAssertNil(try XCTUnwrap(windows.first { $0.id == "win-2" }).frame)
+
+        try database.deletePanelWindow(id: "win-1")
+        XCTAssertEqual(try database.panelWindows().map(\.id), ["win-2"])
+    }
+
+    func testPanelLayoutsSurviveMigrationFromVersionFour() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("spaces-client.db").path
+
+        // Open at the previous schema version (without the panel tables), then reopen at
+        // the current version to exercise the v4 -> v5 migration path.
+        let legacy = try SpacesClientDatabase(
+            path: path, currentVersion: 4, migrationSteps: SpacesClientDatabase.defaultMigrationSteps.filter { $0.toVersion <= 4 })
+        try legacy.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
+
+        let migrated = try SpacesClientDatabase(path: path)
+        XCTAssertTrue(try migrated.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
+        try migrated.writeWorkspacePanelLayout(deviceID: "local", workspaceID: "ws-1", layoutJSON: "{\"version\":1}")
+        XCTAssertEqual(try migrated.workspacePanelLayout(deviceID: "local", workspaceID: "ws-1"), "{\"version\":1}")
+    }
+
     func testDefaultPathUsesEnvironmentOverride() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

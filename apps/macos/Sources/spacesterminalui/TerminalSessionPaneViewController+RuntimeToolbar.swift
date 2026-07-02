@@ -3,7 +3,7 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
-extension TerminalSessionWindowController {
+extension TerminalSessionPaneViewController {
     public func setRuntimeControls(_ controls: TerminalSessionRuntimeControls?) {
         runtimeControls = controls
         runtimeControlsDirty = false

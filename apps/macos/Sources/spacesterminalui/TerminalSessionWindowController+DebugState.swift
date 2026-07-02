@@ -3,153 +3,89 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
+/// Debug/testing accessors preserved on the window controller so existing callers
+/// and tests keep working through the shell; session-content accessors forward to
+/// the embedded pane, window-level accessors stay implemented here.
 extension TerminalSessionWindowController {
-    public func debugRefreshStateForTesting(skipOwnerAttach: Bool = false) {
-        if skipOwnerAttach { debugForceRefreshSkippingOwnerAttach() } else { debugForceRefresh() }
-    }
+    public func debugRefreshStateForTesting(skipOwnerAttach: Bool = false) { pane.debugRefreshStateForTesting(skipOwnerAttach: skipOwnerAttach) }
 
-    public func debugStateDump() -> TerminalSessionWindowDebugState {
-        let renderedOutput: String
-        let visibleSurfaceOutput = !terminalContainer.isHidden ? ghosttyRendererHost?.debugVisibleSurfaceText() : nil
-        if !terminalContainer.isHidden { ghosttyRendererHost?.prepareRenderStateExport() }
-        let surfaceSnapshot = ghosttyRendererHost?.snapshot() ?? ghosttyRendererHost?.sessionSnapshot()
-        if !terminalContainer.isHidden, let surfaceSnapshot,
-            TerminalRemoteSessionStatePolicy.hasVisibleScreenContent(snapshot: surfaceSnapshot, snapshotText: nil)
-        {
-            renderedOutput = GhosttyTerminalSnapshotGrid.fullPlainText(for: surfaceSnapshot)
-        } else if !terminalContainer.isHidden, let visibleText = visibleSurfaceOutput, !visibleText.isEmpty {
-            renderedOutput = visibleText
-        } else if !terminalContainer.isHidden, let sessionSnapshotText = ghosttyRendererHost?.sessionSnapshotText(), !sessionSnapshotText.isEmpty {
-            renderedOutput = sessionSnapshotText
-        } else {
-            renderedOutput = outputView.string
-        }
-        let searchState = debugTerminalSearchState
-        return .init(
-            renderedOutput: renderedOutput, visibleSurfaceOutput: visibleSurfaceOutput, showsTerminalSurface: !terminalContainer.isHidden,
-            showsTextRenderer: !outputScrollView.isHidden, rendererSummary: rendererLabel.stringValue, summary: summaryLabel.stringValue,
-            state: stateLabel.stringValue, windowTitle: window?.title ?? "", didCloseWindow: didCloseWindow, surfaceColumns: surfaceSnapshot?.columns,
-            surfaceRows: surfaceSnapshot?.rows, windowIsKey: window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName,
-            searchVisible: searchState.isVisible, searchQuery: searchState.query, searchTotal: searchState.total,
-            searchSelected: searchState.selected, attachmentMode: preferredAttachmentMode.rawValue, takeoverPending: takeoverTask != nil,
-            takeoverButtonVisible: !takeoverButton.isHidden, takeoverButtonEnabled: takeoverButton.isEnabled,
-            takeoverMessage: takeoverMessageLabel.stringValue)
-    }
+    public func debugStateDump() -> TerminalSessionWindowDebugState { pane.debugStateDump() }
 
-    var debugRenderedOutput: String { outputView.string }
-    var debugShowsTerminalSurface: Bool { !terminalContainer.isHidden }
-    var debugShowsTextRenderer: Bool { !outputScrollView.isHidden }
-    var debugRendererSummary: String { rendererLabel.stringValue }
-    var debugSummary: String { summaryLabel.stringValue }
-    var debugState: String { stateLabel.stringValue }
+    var debugRenderedOutput: String { pane.debugRenderedOutput }
+    var debugShowsTerminalSurface: Bool { pane.debugShowsTerminalSurface }
+    var debugShowsTextRenderer: Bool { pane.debugShowsTextRenderer }
+    var debugRendererSummary: String { pane.debugRendererSummary }
+    var debugSummary: String { pane.debugSummary }
+    var debugState: String { pane.debugState }
     var debugWindowTitle: String { window?.title ?? "" }
     var debugWindowRepresentedPath: String? { window?.representedURL?.path }
     var debugWindowFrame: NSRect { window?.frame ?? .zero }
     func debugShouldDeferInitialOwnerPresentationInProduction(wasVisible: Bool = false) -> Bool {
-        shouldDeferInitialOwnerPresentation(wasVisible: wasVisible, runningUnderXCTest: false)
+        pane.shouldDeferInitialOwnerPresentation(wasVisible: wasVisible, runningUnderXCTest: false)
     }
-    public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
-    public var didClose: Bool { didCloseWindow }
-    public var terminalSessionID: String { sessionID }
-    var debugDidCloseWindow: Bool { didCloseWindow }
-    func debugForceRefresh() { refreshNow() }
-    func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
-    func debugAttachLocalClientIfNeeded() { attachLocalClientIfNeeded() }
+    public var attachmentMode: TerminalAttachmentMode { pane.attachmentMode }
+    public var didClose: Bool { pane.didCloseWindow }
+    public var terminalSessionID: String { pane.sessionID }
+    var debugDidCloseWindow: Bool { pane.debugDidCloseWindow }
+    func debugForceRefresh() { pane.debugForceRefresh() }
+    func debugForceRefreshSkippingOwnerAttach() { pane.debugForceRefreshSkippingOwnerAttach() }
+    func debugAttachLocalClientIfNeeded() { pane.debugAttachLocalClientIfNeeded() }
     func debugFlushPendingWindowFramePersistence() async { await pendingWindowFramePersistTask?.value }
-    public var clientID: String { client.id }
-    var debugTakeoverPending: Bool { takeoverTask != nil }
-    func debugSetTakeoverTaskStartedAt(_ date: Date?) { takeoverTaskStartedAt = date }
-    var debugShowsInlineControls: Bool { !inputRowStackView.isHidden }
-    var debugShowsTakeoverButton: Bool { !takeoverButton.isHidden }
-    var debugInlineInputEnabled: Bool { inputField.isEnabled }
-    var debugTakeoverEnabled: Bool { takeoverButton.isEnabled }
-    var debugShowsRendererLabel: Bool { !rendererLabel.isHidden }
-    var debugShowsTitleLabel: Bool { !titleLabel.isHidden }
-    var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
-    var debugShowsStateLabel: Bool { !stateLabel.isHidden }
-    var debugShowsHeader: Bool { !headerStackView.isHidden }
-    var debugRuntimeToolbarTitle: String { runtimeToolbarTitleLabel.stringValue }
-    var debugShowsRuntimeToolbarTitle: Bool { !runtimeToolbarTitleLabel.isHidden }
-    var debugShowsRuntimeToolbar: Bool { !runtimeToolbarStackView.isHidden }
-    var debugShowsRuntimeRunButton: Bool { !runtimeToolbarRunButton.isHidden }
-    var debugShowsRuntimeStopButton: Bool { !runtimeToolbarStopButton.isHidden }
-    var debugShowsRuntimeRestartButton: Bool { !runtimeToolbarRestartButton.isHidden }
-    var debugRuntimeToolbarTrailingGap: CGFloat {
-        runtimeToolbarStackView.layoutSubtreeIfNeeded()
-        return runtimeToolbarStackView.bounds.maxX - runtimeToolbarButtonStackView.frame.maxX
-    }
-    func debugRunRuntimeToolbarAction() { runRuntimeFromToolbar() }
-    func debugStopRuntimeToolbarAction() { stopRuntimeFromToolbar() }
-    func debugRestartRuntimeToolbarAction() { restartRuntimeFromToolbar() }
-    var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
-    var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
-    var debugInputStatus: String { inputStatusLabel.stringValue }
-    var debugShowsInputStatus: Bool { !inputStatusLabel.isHidden }
-    func debugSubmitInput() { submitInput() }
-    var debugInputFieldValue: String { inputField.stringValue }
-    func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
-    func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
-    func debugSimulateAttachmentStateDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-    }
-    func debugSimulateSessionMetadataDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": sessionID])
-    }
-    func debugSimulateRuntimeStateDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-    }
-    func debugSimulateOutputDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": sessionID, "byteCount": 1])
-        refreshNow()
-    }
-    func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }
-    var debugSelectedRange: NSRange { outputView.selectedRange() }
-    func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) {
-        guard let documentView = outputScrollView.documentView else { return }
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        let maxOriginY = max(0, documentView.bounds.height - visibleRect.height)
-        let targetOriginY = max(0, maxOriginY - offset)
-        outputScrollView.contentView.scroll(to: NSPoint(x: 0, y: min(targetOriginY, maxOriginY)))
-        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
-    }
-    var debugOutputOffsetFromBottom: CGFloat {
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        return max(0, outputView.bounds.height - visibleRect.maxY)
-    }
-    func debugScrollOutputHorizontally(to offset: CGFloat) {
-        guard let documentView = outputScrollView.documentView else { return }
-        let visibleRect = outputScrollView.contentView.documentVisibleRect
-        let maxOriginX = max(0, documentView.bounds.width - visibleRect.width)
-        outputScrollView.contentView.scroll(to: NSPoint(x: max(0, min(offset, maxOriginX)), y: visibleRect.minY))
-        outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
-    }
-    var debugOutputHorizontalOffset: CGFloat { outputScrollView.contentView.documentVisibleRect.minX }
+    public var clientID: String { pane.clientID }
+    var lastObservedRuntimeState: TerminalSessionRuntimeState? { pane.lastObservedRuntimeState }
+    var debugTakeoverPending: Bool { pane.debugTakeoverPending }
+    func debugSetTakeoverTaskStartedAt(_ date: Date?) { pane.debugSetTakeoverTaskStartedAt(date) }
+    var debugShowsInlineControls: Bool { pane.debugShowsInlineControls }
+    var debugShowsTakeoverButton: Bool { pane.debugShowsTakeoverButton }
+    var debugInlineInputEnabled: Bool { pane.debugInlineInputEnabled }
+    var debugTakeoverEnabled: Bool { pane.debugTakeoverEnabled }
+    var debugShowsRendererLabel: Bool { pane.debugShowsRendererLabel }
+    var debugShowsTitleLabel: Bool { pane.debugShowsTitleLabel }
+    var debugShowsSummaryLabel: Bool { pane.debugShowsSummaryLabel }
+    var debugShowsStateLabel: Bool { pane.debugShowsStateLabel }
+    var debugShowsHeader: Bool { pane.debugShowsHeader }
+    var debugRuntimeToolbarTitle: String { pane.debugRuntimeToolbarTitle }
+    var debugShowsRuntimeToolbarTitle: Bool { pane.debugShowsRuntimeToolbarTitle }
+    var debugShowsRuntimeToolbar: Bool { pane.debugShowsRuntimeToolbar }
+    var debugShowsRuntimeRunButton: Bool { pane.debugShowsRuntimeRunButton }
+    var debugShowsRuntimeStopButton: Bool { pane.debugShowsRuntimeStopButton }
+    var debugShowsRuntimeRestartButton: Bool { pane.debugShowsRuntimeRestartButton }
+    var debugRuntimeToolbarTrailingGap: CGFloat { pane.debugRuntimeToolbarTrailingGap }
+    func debugRunRuntimeToolbarAction() { pane.debugRunRuntimeToolbarAction() }
+    func debugStopRuntimeToolbarAction() { pane.debugStopRuntimeToolbarAction() }
+    func debugRestartRuntimeToolbarAction() { pane.debugRestartRuntimeToolbarAction() }
+    var debugShowsTakeoverMessage: Bool { pane.debugShowsTakeoverMessage }
+    var debugTakeoverMessage: String { pane.debugTakeoverMessage }
+    var debugInputStatus: String { pane.debugInputStatus }
+    var debugShowsInputStatus: Bool { pane.debugShowsInputStatus }
+    func debugSubmitInput() { pane.debugSubmitInput() }
+    var debugInputFieldValue: String { pane.debugInputFieldValue }
+    func debugSimulateApplicationDidBecomeActive() { pane.debugSimulateApplicationDidBecomeActive() }
+    func debugSimulateApplicationDidResignActive() { pane.debugSimulateApplicationDidResignActive() }
+    func debugSimulateAttachmentStateDidChange() { pane.debugSimulateAttachmentStateDidChange() }
+    func debugSimulateSessionMetadataDidChange() { pane.debugSimulateSessionMetadataDidChange() }
+    func debugSimulateRuntimeStateDidChange() { pane.debugSimulateRuntimeStateDidChange() }
+    func debugSimulateOutputDidChange() { pane.debugSimulateOutputDidChange() }
+    func debugSelectRenderedRange(_ range: NSRange) { pane.debugSelectRenderedRange(range) }
+    var debugSelectedRange: NSRange { pane.debugSelectedRange }
+    func debugScrollOutputToOffsetFromBottom(_ offset: CGFloat) { pane.debugScrollOutputToOffsetFromBottom(offset) }
+    var debugOutputOffsetFromBottom: CGFloat { pane.debugOutputOffsetFromBottom }
+    func debugScrollOutputHorizontally(to offset: CGFloat) { pane.debugScrollOutputHorizontally(to: offset) }
+    var debugOutputHorizontalOffset: CGFloat { pane.debugOutputHorizontalOffset }
     var debugContentWidth: CGFloat { window?.contentView?.frame.width ?? 0 }
-    var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
-    var debugBodyWidth: CGFloat { bodyStackView.frame.width }
-    var debugTakeoverContainerWidth: CGFloat { takeoverContainerView.frame.width }
-    var debugFirstResponderTypeName: String? {
-        guard let firstResponder = window?.firstResponder else { return nil }
-        return String(describing: type(of: firstResponder))
-    }
-    var debugFirstResponderTargetsInputField: Bool {
-        guard let fieldEditor = inputField.currentEditor() else { return false }
-        return window?.firstResponder === fieldEditor
-    }
-    var debugFirstResponderTargetsOutputView: Bool { window?.firstResponder === outputView }
+    var debugTerminalContainerWidth: CGFloat { pane.debugTerminalContainerWidth }
+    var debugBodyWidth: CGFloat { pane.debugBodyWidth }
+    var debugTakeoverContainerWidth: CGFloat { pane.debugTakeoverContainerWidth }
+    var debugFirstResponderTypeName: String? { pane.debugFirstResponderTypeName }
+    var debugFirstResponderTargetsInputField: Bool { pane.debugFirstResponderTargetsInputField }
+    var debugFirstResponderTargetsOutputView: Bool { pane.debugFirstResponderTargetsOutputView }
     @discardableResult func debugSendGhosttyScroll(horizontal: CGFloat = 0, vertical: CGFloat) -> Bool {
-        ghosttyRendererHost?.sendScroll(horizontal: horizontal, vertical: vertical) ?? false
+        pane.debugSendGhosttyScroll(horizontal: horizontal, vertical: vertical)
     }
-    var debugGhosttyHasRenderableSurface: Bool { ghosttyRendererHost?.hasRenderableSurface() ?? false }
-    var debugGhosttySurfaceRefreshRequestCount: Int { ghosttyRendererHost?.debugSurfaceRefreshRequestCount ?? 0 }
-    var debugTerminalSearchState: GhosttyTerminalSearchDebugState {
-        ghosttyRendererHost?.debugSearchState ?? .init(isVisible: false, query: "", total: nil, selected: nil)
-    }
-    var debugTerminalSearchVisible: Bool { debugTerminalSearchState.isVisible }
-    var debugTerminalSearchQuery: String { debugTerminalSearchState.query }
-    var debugOutputDisablesSmartSubstitutions: Bool {
-        !outputView.isAutomaticQuoteSubstitutionEnabled && !outputView.isAutomaticDashSubstitutionEnabled
-            && !outputView.isAutomaticTextReplacementEnabled && !outputView.isAutomaticSpellingCorrectionEnabled
-            && !outputView.isContinuousSpellCheckingEnabled && !outputView.isGrammarCheckingEnabled && !outputView.isAutomaticTextCompletionEnabled
-    }
+    var debugGhosttyHasRenderableSurface: Bool { pane.debugGhosttyHasRenderableSurface }
+    var debugGhosttySurfaceRefreshRequestCount: Int { pane.debugGhosttySurfaceRefreshRequestCount }
+    var debugTerminalSearchState: GhosttyTerminalSearchDebugState { pane.debugTerminalSearchState }
+    var debugTerminalSearchVisible: Bool { pane.debugTerminalSearchVisible }
+    var debugTerminalSearchQuery: String { pane.debugTerminalSearchQuery }
+    var debugOutputDisablesSmartSubstitutions: Bool { pane.debugOutputDisablesSmartSubstitutions }
 }
