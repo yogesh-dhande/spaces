@@ -3,6 +3,34 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
+/// Snapshot of a pane's rendered/debug state for the dump IPC and tests. The name and
+/// field set predate the pane hosting model (panes once lived in their own windows);
+/// the shape is a parsed E2E surface, so it stays stable.
+public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
+    public let renderedOutput: String
+    public let visibleSurfaceOutput: String?
+    public let showsTerminalSurface: Bool
+    public let showsTextRenderer: Bool
+    public let rendererSummary: String
+    public let summary: String
+    public let state: String
+    public let windowTitle: String
+    public let didCloseWindow: Bool
+    public let surfaceColumns: Int?
+    public let surfaceRows: Int?
+    public let windowIsKey: Bool
+    public let firstResponderTypeName: String?
+    public let searchVisible: Bool
+    public let searchQuery: String
+    public let searchTotal: Int?
+    public let searchSelected: Int?
+    public let attachmentMode: String
+    public let takeoverPending: Bool
+    public let takeoverButtonVisible: Bool
+    public let takeoverButtonEnabled: Bool
+    public let takeoverMessage: String
+}
+
 extension TerminalSessionPaneViewController {
     public func debugRefreshStateForTesting(skipOwnerAttach: Bool = false) {
         if skipOwnerAttach { debugForceRefreshSkippingOwnerAttach() } else { debugForceRefresh() }

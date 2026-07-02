@@ -26,16 +26,6 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try database.projectCollapseStates(deviceID: "local"), ["project-1": true])
     }
 
-    func testTerminalWindowFrameIsClientLocal() throws {
-        let database = try makeTemporaryClientDatabase()
-        let frame = TerminalSessionWindowFrame(x: 10, y: 20, width: 900, height: 600)
-
-        try database.writeTerminalWindowFrame(frame, rootDirectory: "/tmp/workspace", sessionID: "session-1", mode: .owner)
-
-        XCTAssertEqual(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .owner), frame)
-        XCTAssertNil(try database.terminalWindowFrame(rootDirectory: "/tmp/workspace", mode: .viewer))
-    }
-
     func testDesktopWindowIDRoundTripIsScopedByDeviceWorkspaceAndRuntimeTarget() throws {
         let database = try makeTemporaryClientDatabase()
 

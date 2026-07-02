@@ -3,6 +3,31 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
+@MainActor public struct TerminalSessionRuntimeControls {
+    public let title: String
+    public let canRun: Bool
+    public let canStop: Bool
+    public let canRestart: Bool
+    public let onRun: (@MainActor @Sendable () -> Void)?
+    public let onStop: (@MainActor @Sendable () -> Void)?
+    public let onRestart: (@MainActor @Sendable () -> Void)?
+
+    public init(
+        title: String, canRun: Bool, canStop: Bool, canRestart: Bool, onRun: (@MainActor @Sendable () -> Void)? = nil,
+        onStop: (@MainActor @Sendable () -> Void)? = nil, onRestart: (@MainActor @Sendable () -> Void)? = nil
+    ) {
+        self.title = title
+        self.canRun = canRun
+        self.canStop = canStop
+        self.canRestart = canRestart
+        self.onRun = onRun
+        self.onStop = onStop
+        self.onRestart = onRestart
+    }
+
+    public var hasActions: Bool { canRun || canStop || canRestart }
+}
+
 extension TerminalSessionPaneViewController {
     public func setRuntimeControls(_ controls: TerminalSessionRuntimeControls?) {
         runtimeControls = controls

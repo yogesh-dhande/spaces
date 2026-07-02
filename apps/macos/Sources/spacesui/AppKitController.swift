@@ -52,7 +52,7 @@ extension ProcessInfo: ProcessLifecyclePolicyController {}
 
 @MainActor
 public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitViewDelegate, NSWindowDelegate, NSTextFieldDelegate,
-    NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource
+    NSSearchFieldDelegate, NSComboBoxDelegate, NSTableViewDelegate, NSTableViewDataSource, NSUserInterfaceValidations
 {
     private static let isRunningUnderXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
@@ -310,10 +310,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     var showingAlerts = false
     private var deferredExternalWindowHideTask: Task<Void, Never>?
-    private var terminalSessionWindowControllers: [String: TerminalSessionWindowController] = [:]
-    private var lastFocusedBuiltInTerminalSessionID: String?
     private var keepsTerminalSessionsRunningDuringTermination = false
-    private var appToggleReturnTerminalSessionID: String?
     private var appToggleReturnApplicationProcessID: pid_t?
     private var terminalRuntimeControlDescriptorsBySessionID: [String: TerminalRuntimeControlDescriptor] = [:]
 
@@ -547,6 +544,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         commandPalette.commandPaletteLoadTask?.cancel()
         commandPalette.commandPaletteLoadTask = nil
         commandPalette.commandPalettePanel?.close()
+        // Terminal windows once detached their clients as AppKit closed them during
+        // termination; panes are not closed by AppKit, so detach their clients here.
+        // The sessions themselves are untouched — quit keeps them running unless the
+        // quit dialog already stopped them all.
+        panelCoordinator.closeAllContentForTermination()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
         releaseLaunchLeases()
@@ -647,7 +649,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let self, self.matchesProfileIPCObject(object) else { return }
             let preferredTerminalSessionID =
                 (preferredFocusedBuiltInTerminalSessionID?.isEmpty == false)
-                ? preferredFocusedBuiltInTerminalSessionID : self.activeBuiltInTerminalSessionID()
+                ? preferredFocusedBuiltInTerminalSessionID : self.focusedBuiltInTerminalSessionIDForGlobalNavigation()
             await self.cycleWorkspaceWindow(workspaceID: workspaceID, delta: delta, preferredTerminalSessionID: preferredTerminalSessionID)
         }
     }
@@ -1047,7 +1049,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
-            await self.openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: mode, requestID: requestID)
+            await self.openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
         }
     }
 
@@ -1060,7 +1062,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_close_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: "terminating=\(sessionIsTerminating ? 1 : 0)")
-            self.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
+            self.closeTerminalSessionPane(sessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
         }
     }
 
@@ -1072,7 +1074,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let mode = modeRawValue.flatMap(TerminalAttachmentMode.init(rawValue:))
         Task { @MainActor [weak self, object, sessionID, outputPath, mode] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
-            self.dumpTerminalSessionWindowState(sessionID: sessionID, mode: mode, outputPath: outputPath)
+            self.dumpTerminalSessionPaneState(sessionID: sessionID, mode: mode, outputPath: outputPath)
         }
     }
 
@@ -1085,7 +1087,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_focus_ipc_received", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: requestID.map { "request_id=\($0)" } ?? "")
-            await self.focusTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, requestID: requestID)
+            await self.focusTerminalSessionPane(sessionID: sessionID, requestID: requestID)
         }
     }
 
@@ -1096,36 +1098,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let text = notification.userInfo?[IPCNotification.terminalShortcutTextUserInfoKey] as? String
         Task { @MainActor [weak self, object, sessionID, action, text] in
             guard let self, self.matchesProfileIPCObject(object) else { return }
-            self.performTerminalSessionWindowShortcut(sessionID: sessionID, action: action, text: text)
+            self.performTerminalSessionPaneShortcut(sessionID: sessionID, action: action, text: text)
         }
     }
 
     private func matchesProfileIPCObject(_ object: String?) -> Bool { object == ipcNotificationObject }
 
-    private func dumpTerminalSessionWindowState(sessionID: String, mode: TerminalAttachmentMode?, outputPath: String) {
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
+    private func dumpTerminalSessionPaneState(sessionID: String, mode: TerminalAttachmentMode?, outputPath: String) {
         let requestedMode = mode?.rawValue ?? "any"
-        let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID])
-        if let controller { controller.debugRefreshStateForTesting(skipOwnerAttach: mode == .viewer) }
-        let debugState = controller?.debugStateDump()
+        let content = panelCoordinator.content(forSessionID: sessionID)
+        content?.debugRefreshStateForTesting(skipOwnerAttach: mode == .viewer)
+        let debugState = content?.debugStateDump()
         let payload = TerminalSessionWindowStateDump(
-            sessionID: sessionID, requestedMode: requestedMode, found: controller != nil, windowTitle: debugState?.windowTitle,
+            sessionID: sessionID, requestedMode: requestedMode, found: content != nil, windowTitle: debugState?.windowTitle,
             rendererSummary: debugState?.rendererSummary, renderedOutput: debugState?.renderedOutput,
             visibleSurfaceOutput: debugState?.visibleSurfaceOutput, summary: debugState?.summary, state: debugState?.state,
             showsTerminalSurface: debugState?.showsTerminalSurface, showsTextRenderer: debugState?.showsTextRenderer,
-            didClose: debugState?.didCloseWindow, windowNumber: controller?.window?.windowNumber, surfaceColumns: debugState?.surfaceColumns,
-            surfaceRows: debugState?.surfaceRows, windowIsKey: debugState?.windowIsKey, firstResponderTypeName: debugState?.firstResponderTypeName,
-            searchVisible: debugState?.searchVisible, searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal,
-            searchSelected: debugState?.searchSelected, attachmentMode: debugState?.attachmentMode, takeoverPending: debugState?.takeoverPending,
+            didClose: debugState?.didCloseWindow, windowNumber: content?.contentView.window?.windowNumber,
+            surfaceColumns: debugState?.surfaceColumns, surfaceRows: debugState?.surfaceRows, windowIsKey: debugState?.windowIsKey,
+            firstResponderTypeName: debugState?.firstResponderTypeName, searchVisible: debugState?.searchVisible,
+            searchQuery: debugState?.searchQuery, searchTotal: debugState?.searchTotal, searchSelected: debugState?.searchSelected,
+            attachmentMode: debugState?.attachmentMode, takeoverPending: debugState?.takeoverPending,
             takeoverButtonVisible: debugState?.takeoverButtonVisible, takeoverButtonEnabled: debugState?.takeoverButtonEnabled,
             takeoverMessage: debugState?.takeoverMessage)
         writeTerminalSessionWindowStateDump(payload, to: outputPath)
     }
 
-    private func performTerminalSessionWindowShortcut(sessionID: String, action: String, text: String?) {
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else { return }
-        controller.performShortcutForTesting(action: action, text: text)
+    private func performTerminalSessionPaneShortcut(sessionID: String, action: String, text: String?) {
+        panelCoordinator.content(forSessionID: sessionID)?.performShortcutForTesting(action: action, text: text)
     }
 
     private func writeTerminalSessionWindowStateDump(_ payload: TerminalSessionWindowStateDump, to outputPath: String) {
@@ -1270,165 +1270,53 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
     }
 
-    @discardableResult private func openTerminalSessionWindow(
-        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, seedDevice: SpacesPairedDeviceRecord? = nil,
-        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil,
-        resolvedSummaryMatch: TerminalSessionSummaryMatch? = nil
-    ) -> Int? {
+    /// Resolves a session's pane open request. An open/focus IPC can arrive before the
+    /// sidebar surfaces a just-created session (cold launch, spacese2e-created
+    /// sessions), so when no loaded overview knows the session this falls back to
+    /// `resolveSessionSummaryMatch`'s off-main cold overview fetch.
+    private func resolveTerminalSessionPaneOpenRequest(sessionID: String) async -> DeviceTerminalOpenRequest? {
+        if let workspaceID = clientWorkspaceID(forTerminalSession: sessionID),
+            let request = paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
+        { return request }
+        guard let summary = await resolveSessionSummaryMatch(sessionID: sessionID)?.summary, let workspaceID = summary.workspaceID else {
+            return nil
+        }
+        return DeviceTerminalOpenRequest(
+            workspaceID: workspaceID, sessionID: sessionID, title: summary.title, workingDirectory: summary.workingDirectory,
+            kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell, command: summary.command, initialState: summary.state,
+            servicePID: summary.servicePID, childPID: summary.childPID, createdAt: summary.createdAt, updatedAt: summary.updatedAt)
+    }
+
+    /// Opens (or focuses) a session's pane for the open/focus IPC surfaces. Emits the
+    /// `terminal_window_summon` perf metric the E2E harness parses; panes always attach
+    /// as owner, so the detail reports `mode=owner`.
+    @discardableResult private func openTerminalSessionPane(sessionID: String, requestID: String? = nil) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
-        do {
-            pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-            let controller: TerminalSessionWindowController
-            let reusedExistingWindow: Bool
-            if let existing = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) {
-                controller = existing
-                reusedExistingWindow = true
-            } else {
-                let paths = try TerminalSessionPaths.forSession(id: sessionID)
-                // Every terminal window — local or remote — is backed by the owning
-                // device's Device API through one shared state model. State reads,
-                // the live subscription, and control all flow through it; the mac GUI
-                // never opens the daemon's spaces.db.
-                let stateModel = try makeTerminalSessionStateModel(
-                    sessionID: sessionID, seedDevice: seedDevice, seedLaunchConfiguration: seedLaunchConfiguration,
-                    seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
-                let requestSender = stateModel.terminalServiceRequestSender
-                let applyControlState = stateModel.controlStateApplier
-                let agentSignalHandler: RemoteGhosttyAgentSignalHandler = { [weak self] events in
-                    guard let self else { return [String]() }
-                    return self.applyRemoteAgentSignals(events)
-                }
-                let remoteClientStore = RemoteTerminalWindowClientStore()
-                let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
-                    remoteClientStore.set(client.id)
-                    let response = try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
-                        requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
-                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                }
-                let detachClientAction: @Sendable (String) throws -> Void = { clientID in
-                    if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
-                    let response = try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender,
-                        refreshStateAfterControl: true, applyState: applyControlState)
-                    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-                }
-                let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse = { text, appendNewline in
-                    guard let clientID = remoteClientStore.current() else {
-                        return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
-                    }
-                    return try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID,
-                        request: TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline),
-                        requestSender: requestSender, applyState: applyControlState)
-                }
-                let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse = { key in
-                    guard let clientID = remoteClientStore.current() else {
-                        return TerminalControlResponse(ok: false, message: "Terminal window is not attached.")
-                    }
-                    return try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID),
-                        requestSender: requestSender, applyState: applyControlState)
-                }
-                let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
-                    try Self.sendDeviceTerminalControl(
-                        sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
-                        refreshStateAfterControl: true, applyState: applyControlState)
-                }
-                let created = TerminalSessionWindowController(
-                    sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: mode, performInitialRefresh: false,
-                    sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction,
-                    attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
-                    onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
-                    onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
-                        if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
-                        self?.removeTerminalSessionWindowController(
-                            sessionID: sessionID, clientID: clientID, sessionIsTerminating: sessionIsTerminating)
-                    },
-                    runtimeControlsProvider: { [weak self] sessionID in
-                        self?.terminalRuntimeControls(forSessionID: sessionID, cause: "controller_refresh")
-                    },
-                    loadWindowFrameAction: { [weak self] mode in
-                        guard let self else { return nil }
-                        return try clientDatabase().terminalWindowFrame(rootDirectory: paths.rootDirectory, mode: mode)
-                    },
-                    saveWindowFrameAction: { frame, mode in
-                        try self.clientDatabase().writeTerminalWindowFrame(
-                            frame, rootDirectory: paths.rootDirectory, sessionID: sessionID, mode: mode)
-                    },
-                    sessionHostProvider: { launchConfiguration, paths in
-                        Self.terminalSessionHost(
-                            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
-                            stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
-                    })
-                terminalSessionWindowControllers[sessionID] = created
-                controller = created
-                reusedExistingWindow = false
-            }
-            controller.show(requestID: requestID, route: reusedExistingWindow ? "reuse_existing_window" : "create_window")
-            if mode == .owner { controller.requestOwnershipIfNeeded() }
-            logPerfMetric(
-                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-                detail: "mode=\(mode.rawValue) reused=\(reusedExistingWindow ? 1 : 0)\(requestDetail)")
-            if let requestID, !requestID.isEmpty {
-                logPerfMetric(
-                    "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-                    detail: "route=summoned_owner request_id=\(requestID)")
-            }
-            return controller.window?.windowNumber
-        } catch {
+        let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
+        guard let request = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID), panelCoordinator.openOrFocusTerminalPane(request)
+        else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "mode=\(mode.rawValue)\(requestDetail)")
-            showError(error)
-            return nil
+                detail: "mode=owner route=pane\(requestDetail)")
+            return false
         }
+        logPerfMetric(
+            "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "mode=owner reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
+        return true
     }
 
-    @discardableResult private func openTerminalSessionWindowResolvingMissingSummary(
-        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, seedDevice: SpacesPairedDeviceRecord? = nil,
-        seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil, seedInitialRuntimeState: TerminalSessionRuntimeState? = nil
-    ) async -> Int? {
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        let needsColdSummary =
-            seedLaunchConfiguration == nil && terminalSessionSummaryMatch(sessionID: sessionID) == nil
-            && Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) == nil
-        let resolvedSummaryMatch = needsColdSummary ? await resolveSessionSummaryMatch(sessionID: sessionID) : nil
-        // The terminal state model opens its own pinned-TLS Device API connections directly, so its
-        // credentials are not re-established by the overview refresh path. When the session is local,
-        // re-bootstrap off-main if the local transport key/token went missing (e.g. an earlier
-        // bootstrap failed while the daemon was down) so the window opens instead of dead-ending on
-        // "Missing secure transport key".
-        let owningDevice = seedDevice ?? resolvedSummaryMatch?.device ?? terminalSessionOwningDevice(sessionID: sessionID)
-        if owningDevice?.id == SpacesPairedDeviceRecord.localDeviceID {
-            let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
-            await Task.detached(priority: .userInitiated) { _ = try? SpacesDeviceClient.ensureLocalDeviceCredentials(clientApp: clientApp) }.value
-        }
-        return openTerminalSessionWindow(
-            sessionID: sessionID, mode: mode, requestID: requestID, seedDevice: seedDevice, seedLaunchConfiguration: seedLaunchConfiguration,
-            seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
-    }
-
-    private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) -> Bool {
-        // The seed launch configuration wins over the model's own overview lookup, so it
-        // must carry the session's real shell/command. Prefer the request (resolved from
-        // the source overview), then the loaded summary for a row-built request, and only
-        // fall back to a default shell when neither knows the session yet.
-        let summary = terminalSessionSummaryMatch(sessionID: request.sessionID)?.summary
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
-            shell: request.shell ?? summary?.shell ?? "/bin/bash", command: request.command ?? summary?.command,
-            createdAt: request.createdAt ?? ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID, kind: request.kind)
-        let initialRuntimeState = request.initialState.map {
-            TerminalSessionRuntimeState(
-                sessionID: request.sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
-                updatedAt: request.updatedAt ?? launchConfiguration.createdAt, title: request.title, workingDirectory: request.workingDirectory)
-        }
-        return openTerminalSessionWindow(
-            sessionID: request.sessionID, mode: .owner, requestID: requestID, seedDevice: device, seedLaunchConfiguration: launchConfiguration,
-            seedInitialRuntimeState: initialRuntimeState) != nil
+    /// Focuses a session's pane (opening it when needed) for the focus IPC, emitting the
+    /// `terminal_window_focus_ipc` metric the E2E harness correlates by request id.
+    private func focusTerminalSessionPane(sessionID: String, requestID: String?) async {
+        let startedAt = Date()
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        let focused = await openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
+        logPerfMetric(
+            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: focused,
+            detail: "route=pane\(requestDetail)")
     }
 
     /// Builds the live terminal content controller for a pane: the same Device API
@@ -1510,7 +1398,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 })
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: deviceID(forWorkspaceID: request.workspaceID), sessionID: sessionID),
-                workspaceID: request.workspaceID, sessionID: sessionID, sessionKind: request.kind, pane: pane)
+                workspaceID: request.workspaceID, sessionID: sessionID, pane: pane)
         } catch {
             showError(error)
             return nil
@@ -1611,7 +1499,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Resolves a session's kind from the loaded device overview (not the daemon
     /// database): top-level sessions carry their row kind, and process/agent rows
     /// identify configured sessions. Used to decide whether an ad hoc session stops
-    /// when its window closes.
+    /// once it has no live attachments.
     private func remoteTerminalSessionKind(sessionID: String) -> TerminalSessionKind {
         for overview in deviceSections.compactMap({ $0.overview }) {
             if let session = overview.sessions.first(where: { $0.id == sessionID }) { return Self.terminalSessionKind(rowKind: session.rowKind) }
@@ -1623,94 +1511,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return .shell
     }
 
-    private func pruneClosedTerminalSessionWindowControllers(sessionID: String) {
-        guard let controller = terminalSessionWindowControllers[sessionID] else { return }
-        if controller.didClose { terminalSessionWindowControllers.removeValue(forKey: sessionID) }
-    }
-
-    private func closeTerminalSessionWindows(sessionID: String, sessionIsTerminating: Bool = false) {
+    /// Closes a session's pane for the close IPC and daemon-driven session
+    /// termination, keeping the `terminal_window_close` perf metric the E2E harness
+    /// parses.
+    private func closeTerminalSessionPane(sessionID: String, sessionIsTerminating: Bool = false) {
         let startedAt = Date()
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else {
+        guard panelCoordinator.placement(forSessionID: sessionID) != nil else {
             logPerfMetric(
                 "terminal_window_close", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "route=missing_controller terminating=\(sessionIsTerminating ? 1 : 0)")
+                detail: "route=missing_pane terminating=\(sessionIsTerminating ? 1 : 0)")
             return
         }
         logPerfMetric(
             "terminal_window_close", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail:
-                "route=controller terminating=\(sessionIsTerminating ? 1 : 0) client=\(controller.clientID) window_number=\(controller.window?.windowNumber ?? 0) visible=\((controller.window?.isVisible == true) ? 1 : 0)"
-        )
-        if sessionIsTerminating { controller.closeForSessionTermination() } else { controller.window?.close() }
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-    }
-
-    func focusTerminalSessionWindow(sessionID: String, requestID: String? = nil) {
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        guard let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) else {
-            Task { @MainActor [weak self] in await self?.focusTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, requestID: requestID)
-            }
-            return
-        }
-        let startedAt = Date()
-        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        cancelDeferredExternalWindowHide()
-        logPerfMetric(
-            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: 0, success: true, detail: "stage=start\(requestDetail)")
-        focusTerminalSessionWindowController(
-            resolved.controller, route: resolved.route, sessionID: sessionID, requestID: requestID, startedAt: startedAt)
-    }
-
-    @discardableResult private func focusTerminalSessionWindowController(
-        _ controller: TerminalSessionWindowController, route: String, sessionID: String, requestID: String?, startedAt: Date
-    ) -> Bool {
-        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        logPerfMetric(
-            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "stage=resolved_controller route=\(route)\(requestDetail)")
-        controller.focusWindow(requestID: requestID, route: route)
-        logPerfMetric(
-            "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "route=\(route)\(requestDetail)")
-        return true
-    }
-
-    @discardableResult private func focusTerminalSessionWindowResolvingMissingSummary(sessionID: String, requestID: String? = nil) async -> Bool {
-        let startedAt = Date()
-        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        cancelDeferredExternalWindowHide()
-        logPerfMetric(
-            "terminal_window_focus_ipc_stage", target: "session=\(sessionID)", elapsedMS: 0, success: true, detail: "stage=start\(requestDetail)")
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        let controllerAndRoute: (controller: TerminalSessionWindowController, route: String)?
-        if let resolved = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID) {
-            controllerAndRoute = resolved
-        } else {
-            await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner, requestID: requestID)
-            pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-            controllerAndRoute = Self.focusableTerminalSessionWindowController(terminalSessionWindowControllers[sessionID], sessionID: sessionID).map
-            { ($0.controller, "summoned_owner") }
-        }
-        guard let (controller, route) = controllerAndRoute else {
-            logPerfMetric(
-                "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-                detail: "route=missing\(requestDetail)")
-            return false
-        }
-        return focusTerminalSessionWindowController(controller, route: route, sessionID: sessionID, requestID: requestID, startedAt: startedAt)
-    }
-
-    static func liveTerminalSessionWindowController(_ controller: TerminalSessionWindowController?) -> TerminalSessionWindowController? {
-        guard let controller, !controller.didClose else { return nil }
-        return controller
-    }
-
-    static func focusableTerminalSessionWindowController(_ controller: TerminalSessionWindowController?, sessionID: String) -> (
-        controller: TerminalSessionWindowController, route: String
-    )? {
-        guard let controller = liveTerminalSessionWindowController(controller) else { return nil }
-        return (controller, "existing_window")
+            detail: "route=pane terminating=\(sessionIsTerminating ? 1 : 0)")
+        panelCoordinator.closePane(forSessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
     }
 
     private func terminalRuntimeControls(forSessionID sessionID: String, cause: String = "provider", requestID: String? = nil)
@@ -1810,9 +1625,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func refreshTerminalRuntimeControls(sessionID: String, cause: String, requestID: String? = nil) {
-        pruneClosedTerminalSessionWindowControllers(sessionID: sessionID)
-        guard let controller = Self.liveTerminalSessionWindowController(terminalSessionWindowControllers[sessionID]) else { return }
-        controller.setRuntimeControls(terminalRuntimeControls(forSessionID: sessionID, cause: cause, requestID: requestID))
+        guard let content = panelCoordinator.content(forSessionID: sessionID) else { return }
+        content.setRuntimeControls(terminalRuntimeControls(forSessionID: sessionID, cause: cause, requestID: requestID))
     }
 
     static func terminalRuntimeControlDescriptor(
@@ -2016,7 +1830,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Whether closing a window should stop its ad hoc built-in terminal session.
+    /// Whether an ad hoc built-in terminal session left without a client should stop.
     /// Liveness comes from the device overview's attachment snapshot, not the
     /// daemon database; `hasLiveAttachments` should be `true` when liveness is
     /// unknown so a session is never stopped out from under another client.
@@ -2026,36 +1840,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard !isAppTerminatingAndKeepingSessions else { return false }
         guard !isConfiguredProcessSession else { return false }
         return !hasLiveAttachments
-    }
-
-    private func removeTerminalSessionWindowController(sessionID: String, clientID: String, sessionIsTerminating: Bool) {
-        guard let controller = terminalSessionWindowControllers[sessionID] else {
-            logPerfMetric(
-                "terminal_window_controller_remove", target: "session=\(sessionID)", elapsedMS: 0, success: false,
-                detail: "route=missing_controller client=\(clientID) terminating=\(sessionIsTerminating ? 1 : 0)")
-            return
-        }
-        guard controller.clientID == clientID else {
-            logPerfMetric(
-                "terminal_window_controller_remove", target: "session=\(sessionID)", elapsedMS: 0, success: false,
-                detail: "route=client_mismatch expected=\(controller.clientID) actual=\(clientID) terminating=\(sessionIsTerminating ? 1 : 0)")
-            return
-        }
-        logPerfMetric(
-            "terminal_window_controller_remove", target: "session=\(sessionID)", elapsedMS: 0, success: true,
-            detail: "client=\(clientID) terminating=\(sessionIsTerminating ? 1 : 0)")
-        terminalSessionWindowControllers.removeValue(forKey: sessionID)
-        terminalRuntimeControlDescriptorsBySessionID.removeValue(forKey: sessionID)
-        guard !sessionIsTerminating else { return }
-        stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID)
-    }
-
-    private func stopBuiltInTerminalSessionClosedByUser(sessionID: String) {
-        guard !keepsTerminalSessionsRunningDuringTermination else { return }
-        // Only ad hoc sessions stop on window close; a configured process/agent session
-        // keeps running and just detaches its window.
-        guard remoteTerminalSessionKind(sessionID: sessionID) == .shell else { return }
-        stopAdHocTerminalSession(sessionID: sessionID)
     }
 
     private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String) {
@@ -2194,7 +1978,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func handleTerminalAttachmentStateDidChange(sessionID: String) {
-        guard terminalSessionWindowControllers[sessionID] == nil else { return }
+        // A session with an open pane keeps its own client attached; only sessions
+        // without one are candidates for unattached ad hoc cleanup.
+        guard panelCoordinator.content(forSessionID: sessionID) == nil else { return }
         terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
     }
 
@@ -2364,7 +2150,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func terminateBuiltInTerminalSession(sessionID: String) {
         try? performBuiltInTerminalSessionWorkOnMainThread {
-            (NSApp.delegate as? AppKitController)?.closeTerminalSessionWindows(sessionID: sessionID, sessionIsTerminating: true)
+            (NSApp.delegate as? AppKitController)?.closeTerminalSessionPane(sessionID: sessionID, sessionIsTerminating: true)
             try? TerminalService.terminateSession(id: sessionID)
         }
     }
@@ -2491,31 +2277,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let mainKey = window?.isKeyWindow == true ? 1 : 0
         let paletteVisible = commandPalette.commandPalettePanel?.isVisible == true ? 1 : 0
         let paletteKey = commandPalette.commandPalettePanel?.isKeyWindow == true ? 1 : 0
-        let auxiliaryVisible = hasVisibleAuxiliaryWindowsForHotkeyState() ? 1 : 0
-        let terminalVisible = hasVisibleTerminalSessionWindowsForHotkeyState() ? 1 : 0
+        let auxiliaryVisible = commandPalette.commandPalettePanel?.isVisible == true ? 1 : 0
         return
-            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalette.commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey) auxiliary_visible=\(auxiliaryVisible) terminal_visible=\(terminalVisible)"
+            "app_active=\(NSApp.isActive ? 1 : 0) app_hidden=\(NSApp.isHidden ? 1 : 0) main_visible=\(mainVisible) main_key=\(mainKey) main_mini=\(mainMini) palette_exists=\(commandPalette.commandPalettePanel == nil ? 0 : 1) palette_visible=\(paletteVisible) palette_key=\(paletteKey) auxiliary_visible=\(auxiliaryVisible)"
     }
 
     func rawMainWindowVisibility() -> Bool { window?.isVisible == true && window?.isMiniaturized != true }
-
-    private func hasVisibleTerminalSessionWindowsForHotkeyState() -> Bool {
-        terminalSessionWindowControllers.values.contains { controller in
-            controller.window?.isVisible == true && controller.window?.isMiniaturized != true
-        }
-    }
-
-    private func hasVisibleAuxiliaryWindowsForHotkeyState() -> Bool {
-        if commandPalette.commandPalettePanel?.isVisible == true { return true }
-        return hasVisibleTerminalSessionWindowsForHotkeyState()
-    }
-
-    func focusedTerminalSessionIDForToggle() -> String? {
-        for (sessionID, controller) in terminalSessionWindowControllers {
-            if !controller.didClose && (controller.window?.isKeyWindow == true || controller.window?.isMainWindow == true) { return sessionID }
-        }
-        return nil
-    }
 
     func activateReturnApplication(processIdentifier: pid_t) {
         guard let application = NSRunningApplication(processIdentifier: processIdentifier) else { return }
@@ -3639,23 +3406,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenu.addItem(.separator())
-        let findItem = editMenu.addItem(withTitle: "Find", action: #selector(TerminalSessionWindowController.find(_:)), keyEquivalent: "f")
+        // Find targets the focused terminal pane. The pane view controller is not an
+        // NSResponder, so these dispatch through the delegate's find actions (the app
+        // delegate terminates the menu's responder-chain search), which resolve the
+        // pane owning the key window's first responder.
+        let findItem = editMenu.addItem(withTitle: "Find", action: #selector(AppKitController.findInTerminalPane(_:)), keyEquivalent: "f")
         findItem.tag = NSTextFinder.Action.showFindInterface.rawValue
         let findNextItem = editMenu.addItem(
-            withTitle: "Find Next", action: #selector(TerminalSessionWindowController.findNext(_:)), keyEquivalent: "g")
+            withTitle: "Find Next", action: #selector(AppKitController.findNextInTerminalPane(_:)), keyEquivalent: "g")
         findNextItem.tag = NSTextFinder.Action.nextMatch.rawValue
         let findPreviousItem = editMenu.addItem(
-            withTitle: "Find Previous", action: #selector(TerminalSessionWindowController.findPrevious(_:)), keyEquivalent: "g")
+            withTitle: "Find Previous", action: #selector(AppKitController.findPreviousInTerminalPane(_:)), keyEquivalent: "g")
         findPreviousItem.keyEquivalentModifierMask = [.command, .shift]
         findPreviousItem.tag = NSTextFinder.Action.previousMatch.rawValue
         let useSelectionForFindItem = editMenu.addItem(
-            withTitle: "Use Selection for Find", action: #selector(TerminalSessionWindowController.useSelectionForFind(_:)), keyEquivalent: "e")
+            withTitle: "Use Selection for Find", action: #selector(AppKitController.useSelectionForFindInTerminalPane(_:)), keyEquivalent: "e")
         useSelectionForFindItem.tag = NSTextFinder.Action.setSearchString.rawValue
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
         NSApp.mainMenu = mainMenu
     }
+
+    /// The terminal pane owning the key window's first responder — the target of the
+    /// Edit menu's Find actions.
+    private func focusedTerminalPaneContentForMenuAction() -> TerminalPaneContentController? {
+        panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder)
+    }
+
+    public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(findInTerminalPane(_:)), #selector(findNextInTerminalPane(_:)), #selector(findPreviousInTerminalPane(_:)),
+            #selector(useSelectionForFindInTerminalPane(_:)):
+            return focusedTerminalPaneContentForMenuAction()?.canPerformFindActions == true
+        default: return true
+        }
+    }
+
+    @objc func findInTerminalPane(_ sender: Any?) { focusedTerminalPaneContentForMenuAction()?.find(sender) }
+
+    @objc func findNextInTerminalPane(_ sender: Any?) { focusedTerminalPaneContentForMenuAction()?.findNext(sender) }
+
+    @objc func findPreviousInTerminalPane(_ sender: Any?) { focusedTerminalPaneContentForMenuAction()?.findPrevious(sender) }
+
+    @objc func useSelectionForFindInTerminalPane(_ sender: Any?) { focusedTerminalPaneContentForMenuAction()?.useSelectionForFind(sender) }
 
     /// Creates and shows the NSWindow shell (size, title, center, delegate, makeKeyAndOrderFront) without setting content.
     private func buildShellWindow() {
@@ -8619,7 +8413,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }
-            if Self.shouldBypassLocalShortcutMonitor(for: NSApp.keyWindow) { return event }
             // A focused terminal pane owns every non-⌘ key (the pane translation
             // replaces the old terminal window's sendEvent hook); ⌘ chords run the app
             // shortcuts below and fall through to the pane's command handling at the end.
@@ -8706,10 +8499,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func shouldAttemptDesktopControlRecovery(passiveOwnerPID: Int32?, terminatedApplicationPID: Int32?) -> Bool {
         guard let passiveOwnerPID, let terminatedApplicationPID else { return false }
         return passiveOwnerPID == terminatedApplicationPID
-    }
-
-    static func shouldBypassLocalShortcutMonitor(for keyWindow: NSWindow?) -> Bool {
-        (keyWindow?.windowController as? TerminalSessionWindowController) != nil
     }
 
     enum ShortcutMonitorDisposition: Equatable, Sendable {
@@ -9110,19 +8899,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deviceSection(id: deviceID(forWorkspaceID: workspaceID))?.overview ?? localDeviceOverview
     }
 
-    /// Focuses the client's window for a terminal session. The session-window registry is
-    /// keyed by sessionID and shared by native and mirror windows, so an already-open
-    /// window focuses identically regardless of owning daemon; when none exists yet, a
-    /// local session opens a native window and a remote session opens a Device API mirror.
-    @discardableResult private func focusClientSessionWindow(
-        _ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
-    ) async -> Bool {
-        if isRemoteDeviceID(deviceID(forWorkspaceID: request.workspaceID)) {
-            return openDeviceTerminalSession(request, device: device, requestID: requestID)
-        }
-        return await focusTerminalSessionWindowResolvingMissingSummary(sessionID: request.sessionID, requestID: requestID)
-    }
-
     /// Focuses the local Chrome window for a workspace browser session. A browser session is a
     /// distinct client "window", so the app opens a dedicated Chrome window for it once and
     /// tracks that window's id in client state (`ClientBrowserWindowIDStore`, keyed by the
@@ -9332,10 +9108,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelIsVisible && panelIsFocused
     }
 
-    nonisolated static func shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
-        appIsActive: Bool, mainWindowIsFocused: Bool, commandPaletteIsFocused: Bool
-    ) -> Bool { appIsActive && !mainWindowIsFocused && !commandPaletteIsFocused }
-
     nonisolated static func shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: Bool) -> Bool { appIsActive }
 
     nonisolated static func shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: String?) -> Bool {
@@ -9347,8 +9119,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     nonisolated static func preferredWorkspaceIDForGlobalNavigation(
-        focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?, rememberedTerminalSessionWorkspaceID: String?,
-        activeWorkspaceID: String?
+        focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?, activeWorkspaceID: String?
     ) -> GlobalNavigationWorkspaceResolution {
         if let focusedTerminalSessionWorkspaceID {
             return GlobalNavigationWorkspaceResolution(workspaceID: focusedTerminalSessionWorkspaceID, source: "focused_terminal_session")
@@ -9356,19 +9127,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let focusedWindowWorkspaceID {
             return GlobalNavigationWorkspaceResolution(workspaceID: focusedWindowWorkspaceID, source: "focused_window")
         }
-        if let rememberedTerminalSessionWorkspaceID {
-            return GlobalNavigationWorkspaceResolution(workspaceID: rememberedTerminalSessionWorkspaceID, source: "remembered_terminal_session")
-        }
         if let activeWorkspaceID { return GlobalNavigationWorkspaceResolution(workspaceID: activeWorkspaceID, source: "active_workspace") }
         return GlobalNavigationWorkspaceResolution(workspaceID: nil, source: "none")
     }
 
     nonisolated static func shouldHideMainWindowForToggle(appIsHidden: Bool, mainWindowIsFocused: Bool) -> Bool {
         !appIsHidden && mainWindowIsFocused
-    }
-
-    nonisolated static func shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: String?, auxiliaryTerminalWindowsVisible: Bool) -> Bool {
-        auxiliaryTerminalWindowsVisible && returnTerminalSessionID != nil
     }
 
     nonisolated static func effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: Bool, commandPaletteMainWindowVisibility: Bool?)
@@ -9436,7 +9200,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 detail: "direction=\(direction > 0 ? "next" : "previous") reason=no_workspace request_id=\(requestID)")
             return
         }
-        let preferredFocusedBuiltInTerminalSessionID = activeBuiltInTerminalSessionID()
+        let preferredFocusedBuiltInTerminalSessionID = focusedBuiltInTerminalSessionIDForGlobalNavigation()
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.cycleWorkspaceWindow(
@@ -9525,7 +9289,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         var focusedTerminalSessionWorkspaceID: String?
         var focusedWindowWorkspaceID: String?
-        var rememberedTerminalSessionWorkspaceID: String?
         var activeWorkspaceID: String?
         var terminalWorkspaceMS = 0
         var focusedWindowWorkspaceMS = 0
@@ -9550,17 +9313,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             focusedWindowWorkspaceStatus = focusedWindowWorkspaceID == nil ? "miss" : "hit"
         }
 
-        if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil,
-            let rememberedSessionID = rememberedBuiltInTerminalSessionIDForGlobalNavigation()
-        {
-            let lookupStartedAt = Date()
-            rememberedTerminalSessionWorkspaceID = clientWorkspaceID(forTerminalSession: rememberedSessionID)
-            terminalWorkspaceMS += windowShortcutElapsedMS(since: lookupStartedAt)
-            terminalWorkspaceSource = terminalWorkspaceSource == "skipped" ? "remembered" : "\(terminalWorkspaceSource)+remembered"
-            terminalWorkspaceStatus = rememberedTerminalSessionWorkspaceID == nil ? "miss" : "hit"
-        }
-
-        if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil, rememberedTerminalSessionWorkspaceID == nil {
+        if focusedTerminalSessionWorkspaceID == nil, focusedWindowWorkspaceID == nil {
             let lookupStartedAt = Date()
             activeWorkspaceID = Self.activeWorkspaceIDForGlobalNavigation(appIsActive: NSApp.isActive, activeWorkspaceID: clientActiveWorkspaceID())
             activeWorkspaceMS = windowShortcutElapsedMS(since: lookupStartedAt)
@@ -9569,7 +9322,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let resolution = Self.preferredWorkspaceIDForGlobalNavigation(
             focusedTerminalSessionWorkspaceID: focusedTerminalSessionWorkspaceID, focusedWindowWorkspaceID: focusedWindowWorkspaceID,
-            rememberedTerminalSessionWorkspaceID: rememberedTerminalSessionWorkspaceID, activeWorkspaceID: activeWorkspaceID)
+            activeWorkspaceID: activeWorkspaceID)
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         let detail =
             "selected_source=\(resolution.source) active_terminal_session=\(focusedTerminalSessionID == nil ? "miss" : "hit") active_terminal_session_ms=\(activeTerminalSessionMS) terminal_workspace=\(terminalWorkspaceStatus) terminal_workspace_source=\(terminalWorkspaceSource) terminal_workspace_ms=\(terminalWorkspaceMS) focused_window_workspace=\(focusedWindowWorkspaceStatus) focused_window_workspace_ms=\(focusedWindowWorkspaceMS) active_workspace=\(activeWorkspaceStatus) active_workspace_ms=\(activeWorkspaceMS)\(requestDetail)"
@@ -9579,41 +9332,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return resolution.workspaceID
     }
 
-    private func activeBuiltInTerminalSessionID() -> String? {
-        focusedBuiltInTerminalSessionIDForGlobalNavigation() ?? rememberedBuiltInTerminalSessionIDForGlobalNavigation()
-    }
-
+    /// The focused built-in terminal session for global navigation: the pane holding
+    /// keyboard focus, only while Spaces is active (an inactive app's stale focus must
+    /// not hijack cycling from unrelated apps).
     private func focusedBuiltInTerminalSessionIDForGlobalNavigation() -> String? {
-        if Self.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: NSApp.isActive) {
-            for window in [NSApp.keyWindow, NSApp.mainWindow].compactMap({ $0 }) {
-                if let sessionID = (window.windowController as? TerminalSessionWindowController)?.terminalSessionID { return sessionID }
-            }
-        }
-        return nil
-    }
-
-    private func rememberedBuiltInTerminalSessionIDForGlobalNavigation() -> String? {
-        guard
-            Self.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
-                appIsActive: NSApp.isActive, mainWindowIsFocused: window?.isKeyWindow == true,
-                commandPaletteIsFocused: commandPalette.commandPalettePanel?.isKeyWindow == true)
-        else { return nil }
-        if let sessionID = lastFocusedBuiltInTerminalSessionID { return sessionID }
-        return nil
+        guard Self.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: NSApp.isActive) else { return nil }
+        return panelCoordinator.focusedSessionID()
     }
 
     nonisolated static func preferredWorkspaceIDForAppToggle(focusedTerminalSessionWorkspaceID: String?, focusedWindowWorkspaceID: String?) -> String?
     { focusedTerminalSessionWorkspaceID ?? focusedWindowWorkspaceID }
 
-    nonisolated static func shouldRestoreReturnApplicationAfterMainHide(
-        returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?, auxiliaryTerminalWindowsVisible: Bool
-    ) -> Bool { return returnTerminalSessionID == nil && returnApplicationProcessID != nil && !auxiliaryTerminalWindowsVisible }
-
-    nonisolated static func shouldHideAppAfterMainHide(
-        returnTerminalSessionID: String?, returnApplicationProcessID: pid_t?, auxiliaryTerminalWindowsVisible: Bool
-    ) -> Bool { return returnTerminalSessionID == nil && !auxiliaryTerminalWindowsVisible }
-
-    nonisolated static func shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: String?) -> Bool { return returnTerminalSessionID == nil }
+    /// Terminal panes live inside the main window, so hiding it hides them too; the
+    /// only after-hide restoration is returning focus to the previously frontmost app.
+    nonisolated static func shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: pid_t?) -> Bool {
+        returnApplicationProcessID != nil
+    }
 
     nonisolated static func returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: pid_t?, currentProcessID: pid_t) -> pid_t? {
         guard let frontmostApplicationProcessID, frontmostApplicationProcessID != currentProcessID else { return nil }
@@ -9644,38 +9378,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         logHotkeyDebug("toggle_window begin \(hotkeyWindowStateSummary())")
         if Self.shouldHideMainWindowForToggle(appIsHidden: NSApp.isHidden, mainWindowIsFocused: window.isKeyWindow) {
             logHotkeyDebug("toggle_window hide_main_only")
-            let returnTerminalSessionID = appToggleReturnTerminalSessionID
             let returnApplicationProcessID = appToggleReturnApplicationProcessID
-            let shouldRestoreTerminalFocus = Self.shouldRestoreTerminalFocusAfterMainHide(
-                returnTerminalSessionID: returnTerminalSessionID, auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
-            let shouldRestoreReturnApplication = Self.shouldRestoreReturnApplicationAfterMainHide(
-                returnTerminalSessionID: returnTerminalSessionID, returnApplicationProcessID: returnApplicationProcessID,
-                auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
-            let shouldHideApp = Self.shouldHideAppAfterMainHide(
-                returnTerminalSessionID: returnTerminalSessionID, returnApplicationProcessID: returnApplicationProcessID,
-                auxiliaryTerminalWindowsVisible: hasVisibleTerminalSessionWindowsForHotkeyState())
-            if shouldHideApp {
-                window.orderOut(nil)
-                NSApp.hide(nil)
-            } else if Self.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: returnTerminalSessionID) {
-                window.miniaturize(nil)
-            } else {
-                window.orderOut(nil)
-            }
-            if shouldRestoreTerminalFocus, let returnTerminalSessionID {
-                let restoreStartedAt = Date()
-                focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
-                logPerfMetric(
-                    "toggle_window_return_terminal_focus", target: "session=\(returnTerminalSessionID)",
-                    elapsedMS: windowShortcutElapsedMS(since: restoreStartedAt), success: true)
-            } else if shouldRestoreReturnApplication, let returnApplicationProcessID {
+            window.orderOut(nil)
+            NSApp.hide(nil)
+            if Self.shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: returnApplicationProcessID),
+                let returnApplicationProcessID
+            {
                 let restoreStartedAt = Date()
                 activateReturnApplication(processIdentifier: returnApplicationProcessID)
                 logPerfMetric(
                     "toggle_window_return_application_focus", target: "pid=\(returnApplicationProcessID)",
                     elapsedMS: windowShortcutElapsedMS(since: restoreStartedAt), success: true)
             }
-            appToggleReturnTerminalSessionID = nil
             appToggleReturnApplicationProcessID = nil
             logHotkeyPerfMetric("toggle_window", action: "hide", context: perfContext)
             return
@@ -9683,7 +9397,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let returnApplicationProcessID = Self.returnApplicationProcessIDForAppToggle(
             frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             currentProcessID: ProcessInfo.processInfo.processIdentifier)
-        let focusedTerminalSessionID = focusedTerminalSessionIDForToggle()
+        let focusedTerminalSessionID = panelCoordinator.focusedSessionID()
         let focusedTerminalWorkspaceID: String?
         let selectionRefreshSource: String
         if let terminalSessionID = focusedTerminalSessionID {
@@ -9717,8 +9431,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         logHotkeyDebug("toggle_window show_main focused_workspace=\(focusedWorkspaceID ?? "nil") \(hotkeyWindowStateSummary())")
         logPerfMetric("toggle_window_flow", target: "main", elapsedMS: windowShortcutElapsedMS(since: toggleStartedAt), success: true)
         logHotkeyPerfMetric("toggle_window", action: "show", context: perfContext)
-        appToggleReturnTerminalSessionID = focusedTerminalSessionID
-        appToggleReturnApplicationProcessID = focusedTerminalSessionID == nil ? returnApplicationProcessID : nil
+        appToggleReturnApplicationProcessID = returnApplicationProcessID
         scheduleDeferredHotkeySelectionRefresh(focusedWorkspaceID: focusedWorkspaceID ?? nil, source: selectionRefreshSource)
     }
 

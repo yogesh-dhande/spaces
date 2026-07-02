@@ -7,45 +7,6 @@ import workspacecore
 @testable import spacesterminalui
 @testable import spacesui
 
-/// Test state provider backed by the on-disk terminal session store the daemon
-/// writes; production injects a Device-API-backed model. Lets these summon/focus
-/// tests keep seeding state through `TerminalSessionPersistence`.
-@MainActor final class PersistenceBackedTerminalSessionStateProvider: TerminalSessionStateProviding {
-    private let paths: TerminalSessionPaths
-    init(paths: TerminalSessionPaths) { self.paths = paths }
-    var currentLaunchConfiguration: TerminalSessionLaunchConfiguration? { try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths) }
-    var currentRuntimeState: TerminalSessionRuntimeState? { try? TerminalSessionPersistence.readRuntimeState(paths: paths) }
-    var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot? { try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) }
-    var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload? { try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) }
-    func refreshState() {}
-    func startStateStream(
-        onUpdate _: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect _: @escaping @MainActor ((any Error)?) -> Void
-    ) {}
-}
-
-// Persistence-backed control/window-frame closures for tests (production injects
-// Device API + SpacesClientDatabase closures into the now-DB-free controller).
-func persistenceBackedAttachAction(_ paths: TerminalSessionPaths) -> @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void {
-    { client, mode in
-        let sessionID =
-            (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths))?.sessionID ?? (paths.rootDirectory as NSString).lastPathComponent
-        try TerminalSessionPersistence.attachClient(
-            sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: ISO8601DateFormatter().string(from: Date()))
-    }
-}
-
-func persistenceBackedDetachAction(_ paths: TerminalSessionPaths) -> @Sendable (String) throws -> Void {
-    { clientID in try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date())) }
-}
-
-func persistenceBackedLoadWindowFrame(_ paths: TerminalSessionPaths) -> (TerminalAttachmentMode) throws -> TerminalSessionWindowFrame? {
-    { mode in try TerminalSessionPersistence.readWindowFrame(mode: mode, paths: paths) }
-}
-
-func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (TerminalSessionWindowFrame, TerminalAttachmentMode) throws -> Void {
-    { frame, mode in try TerminalSessionPersistence.writeWindowFrame(frame, mode: mode, paths: paths) }
-}
-
 // Some tests resolve the active profile through the process-global SPACES_DB_PATH, so this suite pins an
 // isolated database root for its lifetime and runs serialized to keep that override race-free.
 @Suite(.serialized) final class AppKitControllerWindowSummonTests {
@@ -207,70 +168,17 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
         }
     }
 
-    @Test func toggleHotkeyRestoresTerminalFocusOnlyWhenReturnTargetAndAuxiliaryWindowExist() {
-        #expect(AppKitController.shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: "session-1", auxiliaryTerminalWindowsVisible: true))
-        #expect(!AppKitController.shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: nil, auxiliaryTerminalWindowsVisible: true))
-        #expect(
-            !AppKitController.shouldRestoreTerminalFocusAfterMainHide(returnTerminalSessionID: "session-1", auxiliaryTerminalWindowsVisible: false))
-    }
-
-    @Test func toggleHotkeyRestoresReturnApplicationOnlyWhenNoTerminalReturnTargetExists() {
-        #expect(
-            AppKitController.shouldRestoreReturnApplicationAfterMainHide(
-                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
-        #expect(
-            !AppKitController.shouldRestoreReturnApplicationAfterMainHide(
-                returnTerminalSessionID: "session-1", returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
-        #expect(
-            !AppKitController.shouldRestoreReturnApplicationAfterMainHide(
-                returnTerminalSessionID: nil, returnApplicationProcessID: nil, auxiliaryTerminalWindowsVisible: false))
-        #expect(
-            !AppKitController.shouldRestoreReturnApplicationAfterMainHide(
-                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: true))
+    // Terminal panes live inside the main window, so hiding it needs no terminal
+    // return-focus handling; the only restoration is the previously frontmost app.
+    @Test func toggleHotkeyRestoresReturnApplicationOnlyWhenOneWasCaptured() {
+        #expect(AppKitController.shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: 123))
+        #expect(!AppKitController.shouldRestoreReturnApplicationAfterMainHide(returnApplicationProcessID: nil))
     }
 
     @Test func toggleHotkeyCapturesOnlyNonSpacesReturnApplicationProcessID() {
         #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 123, currentProcessID: 456) == 123)
         #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: 456, currentProcessID: 456) == nil)
         #expect(AppKitController.returnApplicationProcessIDForAppToggle(frontmostApplicationProcessID: nil, currentProcessID: 456) == nil)
-    }
-
-    @MainActor @Test func localShortcutMonitorBypassesFocusedTerminalWindow() {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let controller = TerminalSessionWindowController(
-            sessionID: "session-shortcuts", paths: .init(rootDirectory: root.path),
-            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
-            attachClientAction: persistenceBackedAttachAction(.init(rootDirectory: root.path)),
-            detachClientAction: persistenceBackedDetachAction(.init(rootDirectory: root.path)),
-            loadWindowFrameAction: persistenceBackedLoadWindowFrame(.init(rootDirectory: root.path)),
-            saveWindowFrameAction: persistenceBackedSaveWindowFrame(.init(rootDirectory: root.path)))
-
-        #expect(AppKitController.shouldBypassLocalShortcutMonitor(for: controller.window))
-        #expect(!AppKitController.shouldBypassLocalShortcutMonitor(for: NSWindow()))
-        #expect(!AppKitController.shouldBypassLocalShortcutMonitor(for: nil))
-    }
-
-    @Test func toggleHotkeyMiniaturizesMainWindowOnlyWhenNoTerminalReturnTargetExists() {
-        #expect(AppKitController.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: nil))
-        #expect(!AppKitController.shouldMiniaturizeMainWindowAfterHide(returnTerminalSessionID: "session-1"))
-    }
-
-    @Test func toggleHotkeyHidesAppWhenReturningToExternalApplicationWithoutAuxiliaryWindows() {
-        #expect(
-            AppKitController.shouldHideAppAfterMainHide(
-                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
-        #expect(
-            AppKitController.shouldHideAppAfterMainHide(
-                returnTerminalSessionID: nil, returnApplicationProcessID: nil, auxiliaryTerminalWindowsVisible: false))
-        #expect(
-            !AppKitController.shouldHideAppAfterMainHide(
-                returnTerminalSessionID: "session-1", returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: false))
-        #expect(
-            !AppKitController.shouldHideAppAfterMainHide(
-                returnTerminalSessionID: nil, returnApplicationProcessID: 123, auxiliaryTerminalWindowsVisible: true))
     }
 
     @Test func commandPalettePresentationCompletesOnlyAfterPaletteBecomesKey() {
@@ -294,44 +202,28 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
         }
     }
 
-    @Test func globalWindowNavigationUsesRememberedBuiltInTerminalSessionOnlyDuringActiveTerminalFocus() {
+    @Test func globalWindowNavigationResolvesWorkspaceFromFocusedPaneThenWindowThenActive() {
         #expect(AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: true))
         #expect(!AppKitController.shouldUseFocusedBuiltInTerminalWindowForGlobalNavigation(appIsActive: false))
         #expect(AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.google.Chrome"))
         #expect(!AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: "com.apple.TextEdit"))
         #expect(!AppKitController.shouldUseFocusedChromeWindowForWorkspaceLookup(frontmostApplicationBundleIdentifier: nil))
         #expect(
-            AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
-                appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: false))
-        #expect(
-            !AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
-                appIsActive: false, mainWindowIsFocused: false, commandPaletteIsFocused: false))
-        #expect(
-            !AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
-                appIsActive: true, mainWindowIsFocused: true, commandPaletteIsFocused: false))
-        #expect(
-            !AppKitController.shouldUseRememberedBuiltInTerminalSessionForGlobalNavigation(
-                appIsActive: true, mainWindowIsFocused: false, commandPaletteIsFocused: true))
-        #expect(
             AppKitController.preferredWorkspaceIDForGlobalNavigation(
-                focusedTerminalSessionWorkspaceID: "terminal", focusedWindowWorkspaceID: "focused", rememberedTerminalSessionWorkspaceID: nil,
-                activeWorkspaceID: "active")
+                focusedTerminalSessionWorkspaceID: "terminal", focusedWindowWorkspaceID: "focused", activeWorkspaceID: "active")
                 == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "terminal", source: "focused_terminal_session"))
         #expect(
             AppKitController.preferredWorkspaceIDForGlobalNavigation(
-                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "focused", rememberedTerminalSessionWorkspaceID: "remembered",
-                activeWorkspaceID: "active") == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "focused", source: "focused_window")
-        )
+                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: "focused", activeWorkspaceID: "active")
+                == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "focused", source: "focused_window"))
         #expect(
             AppKitController.preferredWorkspaceIDForGlobalNavigation(
-                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, rememberedTerminalSessionWorkspaceID: "remembered",
-                activeWorkspaceID: "active")
-                == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "remembered", source: "remembered_terminal_session"))
-        #expect(
-            AppKitController.preferredWorkspaceIDForGlobalNavigation(
-                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, rememberedTerminalSessionWorkspaceID: nil,
-                activeWorkspaceID: "active")
+                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, activeWorkspaceID: "active")
                 == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: "active", source: "active_workspace"))
+        #expect(
+            AppKitController.preferredWorkspaceIDForGlobalNavigation(
+                focusedTerminalSessionWorkspaceID: nil, focusedWindowWorkspaceID: nil, activeWorkspaceID: nil)
+                == AppKitController.GlobalNavigationWorkspaceResolution(workspaceID: nil, source: "none"))
         #expect(AppKitController.activeWorkspaceIDForGlobalNavigation(appIsActive: true, activeWorkspaceID: "active") == "active")
         #expect(AppKitController.activeWorkspaceIDForGlobalNavigation(appIsActive: false, activeWorkspaceID: "active") == nil)
     }
@@ -344,151 +236,10 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
         #expect(!AppKitController.effectiveMainWindowVisibilityForHotkeyState(rawMainWindowIsVisible: false, commandPaletteMainWindowVisibility: nil))
     }
 
-    @MainActor @Test func liveWindowReuseReturnsExistingController() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-1", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "session-1", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-
-        let controller = TerminalSessionWindowController(
-            sessionID: "session-1", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in },
-            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
-
-        let selected = AppKitController.liveTerminalSessionWindowController(controller)
-
-        #expect(selected === controller)
-    }
-
-    @MainActor @Test func liveWindowReuseReturnsNilWhenControllerClosed() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-2", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "session-2", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-
-        let controller = TerminalSessionWindowController(
-            sessionID: "session-2", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in },
-            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
-        controller.closeForSessionTermination()
-        controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
-
-        let selected = AppKitController.liveTerminalSessionWindowController(controller)
-
-        #expect(selected == nil)
-    }
-
-    @MainActor @Test func focusableWindowReuseReturnsExistingController() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-3", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "session-3", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-
-        let controller = TerminalSessionWindowController(
-            sessionID: "session-3", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-            preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in },
-            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
-
-        let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-3")
-
-        #expect(selected?.controller === controller)
-        #expect(selected?.route == "existing_window")
-    }
-
-    @MainActor @Test func focusableWindowReuseReturnsNilWhenControllerClosed() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-4", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "session-4", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-
-        let controller = TerminalSessionWindowController(
-            sessionID: "session-4", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-            preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in },
-            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
-        controller.closeForSessionTermination()
-        controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
-
-        let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-4")
-
-        #expect(selected == nil)
-    }
-
-    @MainActor @Test func focusableOwnerWindowReuseReturnsNilWhenNoLiveWindowExists() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let selected = AppKitController.focusableTerminalSessionWindowController(nil, sessionID: "missing-session")
-
-        #expect(selected == nil)
-    }
-
-    @MainActor @Test func focusableWindowReuseLabelsExistingWindowRoute() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: "session-5", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
-        try TerminalSessionPersistence.writeRuntimeState(
-            .init(
-                sessionID: "session-5", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
-            paths: paths)
-
-        let controller = TerminalSessionWindowController(
-            sessionID: "session-5", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-            preferredAttachmentMode: .owner, attachClientAction: { _, _ in }, detachClientAction: { _ in },
-            loadWindowFrameAction: persistenceBackedLoadWindowFrame(paths), saveWindowFrameAction: persistenceBackedSaveWindowFrame(paths))
-
-        let selected = AppKitController.focusableTerminalSessionWindowController(controller, sessionID: "session-5")
-
-        #expect(selected?.controller === controller)
-        #expect(selected?.route == "existing_window")
-    }
-
-    // Ad hoc terminate-on-window-close is now a pure decision over device-owned
-    // liveness: the caller derives `hasLiveAttachments` from the device overview's
-    // attachment snapshot (the daemon prunes stale/lease-expired remote clients),
-    // so these cases validate the decision logic rather than re-test daemon pruning.
+    // Ad hoc terminate-on-pane-close is a pure decision over device-owned liveness:
+    // the caller derives `hasLiveAttachments` from the device overview's attachment
+    // snapshot (the daemon prunes stale/lease-expired remote clients), so these cases
+    // validate the decision logic rather than re-test daemon pruning.
     @MainActor @Test func adHocSessionWithLiveAttachmentIsNotTerminated() {
         #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(hasLiveAttachments: true, isConfiguredProcessSession: false))
     }
@@ -497,7 +248,7 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
         #expect(AppKitController.shouldTerminateAdHocBuiltInTerminalSession(hasLiveAttachments: false, isConfiguredProcessSession: false))
     }
 
-    @MainActor @Test func configuredProcessSessionIsNeverTerminatedOnWindowClose() {
+    @MainActor @Test func configuredProcessSessionIsNeverTerminatedOnPaneClose() {
         #expect(!AppKitController.shouldTerminateAdHocBuiltInTerminalSession(hasLiveAttachments: false, isConfiguredProcessSession: true))
     }
 
@@ -505,12 +256,5 @@ func persistenceBackedSaveWindowFrame(_ paths: TerminalSessionPaths) -> (Termina
         #expect(
             !AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
                 hasLiveAttachments: false, isConfiguredProcessSession: false, isAppTerminatingAndKeepingSessions: true))
-    }
-
-    private func writeLaunchConfiguration(sessionID: String, paths: TerminalSessionPaths) throws {
-        try TerminalSessionPersistence.writeLaunchConfiguration(
-            .init(
-                sessionID: sessionID, backend: .ghosttyEmbedded, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-                createdAt: "2026-05-17T18:00:00Z"), paths: paths)
     }
 }

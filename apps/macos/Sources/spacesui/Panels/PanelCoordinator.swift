@@ -95,6 +95,9 @@ import spacesdevicecore
         }
     }
 
+    /// The live content controller for a session, if its pane is open anywhere.
+    func content(forSessionID sessionID: String) -> TerminalPaneContentController? { contentControllers[sessionID] }
+
     /// The content controller owning `responder` (keyboard-routing and focus lookups).
     func contentOwning(responder: NSResponder?) -> TerminalPaneContentController? {
         guard let responder else { return nil }
@@ -161,6 +164,13 @@ import spacesdevicecore
         activateFocusedPane(scope: placement.scope)
     }
 
+    /// Focuses a session's existing pane, if it has one (command-palette return focus).
+    @discardableResult func focusPane(forSessionID sessionID: String) -> Bool {
+        guard let placement = placement(forSessionID: sessionID) else { return false }
+        focus(placement: placement)
+        return true
+    }
+
     func focusPane(scope: PanelScope, paneID: String, moveKeyboardFocus: Bool) {
         mutateLayout(scope: scope) { PanelLayoutEngine.focusPane(paneID: paneID, in: $0) }
         if moveKeyboardFocus { activateFocusedPane(scope: scope) }
@@ -218,13 +228,28 @@ import spacesdevicecore
         activateFocusedPane(scope: scope)
     }
 
+    /// Closes a session's pane wherever it lives. `sessionIsTerminating` marks a
+    /// daemon-driven close (the session is already stopping), so the client detach —
+    /// and with it the attachment-driven unattached ad hoc cleanup — is skipped.
+    func closePane(forSessionID sessionID: String, sessionIsTerminating: Bool = false) {
+        guard let placement = placement(forSessionID: sessionID) else { return }
+        if sessionIsTerminating, let content = contentControllers.removeValue(forKey: sessionID) { content.closeForSessionTermination() }
+        closePane(scope: placement.scope, paneID: placement.paneID)
+    }
+
+    /// Detaches every open pane's terminal client at app termination without stopping
+    /// sessions (daemon-owned sessions keep running across quit; panes are rebuilt on
+    /// relaunch from the persisted layout).
+    func closeAllContentForTermination() {
+        for content in contentControllers.values { content.close() }
+    }
+
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
+        // Closing detaches the pane's client; the attachment-state observer then runs
+        // the unattached ad hoc cleanup against the authoritative snapshot, so an ad
+        // hoc shell stops only when no other client is still attached.
         content.close()
-        // Ad hoc shells stop when their pane closes (matching the old window-close
-        // semantics); configured process/agent sessions keep running and stay
-        // recoverable through their sidebar target.
-        if content.sessionKind == .shell { host.stopAdHocTerminalSession(workspaceID: content.workspaceID, sessionID: sessionID) }
     }
 
     private func beginSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection) {

@@ -21,8 +21,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
 /// Window-independent terminal session content: the terminal container hosting a
 /// Ghostty surface, the text-renderer fallback, input row, takeover UI, find
 /// handling, keyboard translation, runtime toolbar, and attachment lifecycle.
-/// Hosts embed `view` into a window (currently `TerminalSessionWindowController`)
-/// or, in the future, into a tabbed pane container, and route key events through
+/// Hosts embed `view` into a tabbed pane container and route key events through
 /// `handleKeyEvent(_:)` / `handleCommandKeyEquivalent(_:)`.
 @MainActor public final class TerminalSessionPaneViewController: NSObject, NSUserInterfaceValidations {
     private static let takeoverAttemptTimeout: TimeInterval = 10

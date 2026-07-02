@@ -65,23 +65,6 @@ extension AppKitController {
         }
     }
 
-    /// Stops an ad hoc terminal session whose pane was explicitly closed.
-    func stopAdHocTerminalSession(workspaceID: String, sessionID: String) {
-        guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await Self.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.stopWorkspaceTerminal(
-                    workspaceID: workspaceID, sessionID: sessionID, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
-            switch result {
-            case .success(let response): self.applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-            case .failure(let error): self.showError(error)
-            }
-        }
-    }
-
     /// The pane open request for a session already known to the overview (layout
     /// restore path).
     func paneOpenRequest(workspaceID: String, sessionID: String) -> DeviceTerminalOpenRequest? {

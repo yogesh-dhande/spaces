@@ -244,36 +244,6 @@ public final class SpacesClientDatabase {
             })
     }
 
-    public func writeTerminalWindowFrame(_ frame: TerminalSessionWindowFrame, rootDirectory: String, sessionID: String, mode: TerminalAttachmentMode)
-        throws
-    {
-        try execute(
-            sql: """
-                INSERT INTO terminal_window_frames(root_directory, session_id, mode, x, y, width, height, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(root_directory, mode) DO UPDATE SET
-                  session_id = excluded.session_id,
-                  x = excluded.x,
-                  y = excluded.y,
-                  width = excluded.width,
-                  height = excluded.height,
-                  updated_at = excluded.updated_at
-                """, bindings: [rootDirectory, sessionID, mode.rawValue, frame.x, frame.y, frame.width, frame.height, Self.timestamp()])
-    }
-
-    public func terminalWindowFrame(rootDirectory: String, mode: TerminalAttachmentMode) throws -> TerminalSessionWindowFrame? {
-        guard
-            let row = try queryRow(
-                sql: """
-                    SELECT x, y, width, height
-                    FROM terminal_window_frames
-                    WHERE root_directory = ? AND mode = ?
-                    """, bindings: [rootDirectory, mode.rawValue]), row.count >= 4, let x = Double(row[0]), let y = Double(row[1]),
-            let width = Double(row[2]), let height = Double(row[3])
-        else { return nil }
-        return TerminalSessionWindowFrame(x: x, y: y, width: width, height: height)
-    }
-
     /// Records the desktop (yabai) window ID captured for a runtime target on the local desktop.
     public func setDesktopWindowID(deviceID: String, workspaceID: String, runtimeTargetID: String, windowID: Int) throws {
         try execute(
@@ -700,6 +670,9 @@ public final class SpacesClientDatabase {
               PRIMARY KEY (device_id, project_id)
             );
 
+            -- Legacy: per-session window frames from the one-window-per-terminal era.
+            -- Terminals now render as panes inside panel layouts (workspace_panel_layouts);
+            -- the table stays only because client migrations are additive/non-destructive.
             CREATE TABLE IF NOT EXISTS terminal_window_frames (
               root_directory TEXT NOT NULL,
               session_id TEXT NOT NULL,

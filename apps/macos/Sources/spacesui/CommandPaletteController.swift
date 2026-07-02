@@ -140,7 +140,7 @@ final class CommandPaletteController {
 
     func commandPaletteDefaultWorkspaceID() -> String? {
         let focusedTerminalWorkspaceID: String?
-        if let terminalSessionID = host.focusedTerminalSessionIDForToggle() {
+        if let terminalSessionID = host.panelCoordinator.focusedSessionID() {
             let lookupStartedAt = Date()
             focusedTerminalWorkspaceID = host.clientWorkspaceID(forTerminalSession: terminalSessionID)
             host.logPerfMetric(
@@ -244,7 +244,7 @@ final class CommandPaletteController {
         let panel = ensureCommandPalettePanel()
         let mainWindowWasVisible = host.rawMainWindowVisibility()
         host.logHotkeyDebug("present_palette begin \(host.hotkeyWindowStateSummary())")
-        let focusedTerminalSessionID = host.focusedTerminalSessionIDForToggle()
+        let focusedTerminalSessionID = host.panelCoordinator.focusedSessionID()
         let returnApplicationProcessID = AppKitController.returnApplicationProcessIDForAppToggle(
             frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             currentProcessID: ProcessInfo.processInfo.processIdentifier)
@@ -290,7 +290,7 @@ final class CommandPaletteController {
         if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: commandPaletteReturnTerminalSessionID),
             let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
         {
-            host.focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
+            host.panelCoordinator.focusPane(forSessionID: returnTerminalSessionID)
         } else if AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
             returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID),
             let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
