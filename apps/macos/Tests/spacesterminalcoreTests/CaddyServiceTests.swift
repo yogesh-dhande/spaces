@@ -34,6 +34,28 @@ final class CaddyServiceTests: XCTestCase {
         XCTAssertEqual(resolved.path, executable.path)
     }
 
+    func testResolveExecutableURLFindsBundledCaddyThroughDaemonHelperSymlink() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-helper-\(UUID().uuidString)", isDirectory: true)
+        let resources = directory.appendingPathComponent("Applications/Spaces.app/Contents/Resources", isDirectory: true)
+        let helperBin = directory.appendingPathComponent("Users/test/.spaces/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: helperBin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let daemonTarget = resources.appendingPathComponent("spacesd", isDirectory: false)
+        let caddyTarget = resources.appendingPathComponent("caddy", isDirectory: false)
+        try Data("#!/bin/sh\n".utf8).write(to: daemonTarget)
+        try Data("#!/bin/sh\n".utf8).write(to: caddyTarget)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: daemonTarget.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: caddyTarget.path)
+        let daemonHelper = helperBin.appendingPathComponent("spacesd", isDirectory: false)
+        try FileManager.default.createSymbolicLink(at: daemonHelper, withDestinationURL: daemonTarget)
+
+        let resolved = try CaddyService.resolveExecutableURL(environment: ["_": daemonHelper.path])
+
+        XCTAssertEqual(resolved.path, caddyTarget.path)
+    }
+
     func testEnsureRunningDoesNotUnlinkLiveAdminSocketWhenReloadFails() throws {
         let directory = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent(
             "caddy-live-socket-\(UUID().uuidString.prefix(8))", isDirectory: true)

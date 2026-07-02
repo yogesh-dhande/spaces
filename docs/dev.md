@@ -83,7 +83,7 @@ The service router also needs a bundled Caddy binary. For branch-local setup, ru
 apps/macos/scripts/setup_caddy.sh
 ```
 
-That fetches a pinned universal Caddy binary into `apps/macos/.local/caddy/caddy`, mirroring `setup_ghostty.sh`. Standard app packaging invokes the same setup script before bundling Caddy into the app at `Contents/Resources/caddy`; DMG installs also place Caddy beside the installed daemon at `/usr/local/bin/spaces-caddy` so launchd-started `spacesd` can run the local reverse proxy for workspace services without replacing a user-managed `caddy` executable.
+That fetches a pinned universal Caddy binary into `apps/macos/.local/caddy/caddy`, mirroring `setup_ghostty.sh`. Standard app packaging invokes the same setup script before bundling Caddy into the app at `Contents/Resources/caddy`; DMG installs link `/usr/local/bin/spaces-caddy` to that bundled resource so launchd-started `spacesd` can run the local reverse proxy for workspace services without replacing a user-managed `caddy` executable.
 
 The Ghostty fork is tracked as the submodule at `apps/macos/vendor/ghostty`. The parent repo's submodule pointer is the single source of truth for the Ghostty commit used by both `GhosttyKit.xcframework` and `libghostty-vt`.
 By default, `setup_ghostty.sh` reuses local artifacts only when `apps/macos/.local/ghostty-artifacts/manifest.json` matches the submodule SHA, setup script version, Zig version, and Xcode build version, and records a clean source build. When the worktree-local artifacts do not match, default setup next checks a shared, content-addressed cache and restores from it with a local copy before falling back to a download. Otherwise it downloads the Spaces-owned GitHub release named `ghostty-artifacts-<full-ghostty-sha>` and validates the same manifest fields before install. When the downloaded release artifact validates except for a different Xcode build, default setup leaves the download uninstalled and builds locally from the pinned submodule. The `--download-only` mode used by CI and publishing workflows is download-only and fails on an Xcode build mismatch.
@@ -223,7 +223,7 @@ After install, verify the remote pairing command over strict SSH. The Mac app us
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <host> '~/.spaces/bin/spaces pair --json'
 ```
 
-Remote Macs are installed from the signed DMG instead of a headless artifact. The DMG install creates `/Applications/Spaces.app`, `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, `~/.spaces/bin/spaces`, `~/.spaces/bin/spacesd`, the per-user LaunchAgent, and the default `~/.spaces` state directories. Remote Mac pairing rejects partial installs before running the pairing command.
+Remote Macs are installed from the signed DMG instead of a headless artifact. The DMG install creates `/Applications/Spaces.app`, links `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and `/usr/local/bin/spaces-caddy` to `Spaces.app/Contents/Resources/`, links `~/.spaces/bin/spaces` and `~/.spaces/bin/spacesd` to the same bundled binaries, writes the per-user LaunchAgent with `~/.spaces/bin/spacesd` as its program, and creates the default `~/.spaces` state directories. Remote Mac pairing rejects partial installs before running the pairing command.
 
 For focused terminal latency probes:
 
@@ -611,7 +611,7 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts for automatic setup. The app bundle carries `spaces` and `spacesd` in `Contents/Resources`; the DMG installer also copies both executables to the selected CLI install directory and creates `~/.spaces/bin` helper links so installed CLI commands and remote Mac pairing use the same path.
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts for automatic setup. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates.
 
 ## Website Deploy
 

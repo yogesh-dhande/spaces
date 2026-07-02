@@ -121,6 +121,7 @@ let appTargets: [Target] = [
             "systembridge",
             "spacesdeviceapi",
             "spacesclientcore",
+            "spacesterminalcore",
             "spacesterminalui",
             .product(name: "Sparkle", package: "Sparkle"),
         ]
@@ -168,7 +169,7 @@ let executableTargets: [Target] = [
     .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
     .executableTarget(
         name: "SpacesApp",
-        dependencies: ["spacesui"],
+        dependencies: ["spacesui", "spacesterminalcore"],
         path: "Sources/SpacesApp",
         exclude: ["Info.plist"],
         resources: [.copy("AppIcon.icns")],

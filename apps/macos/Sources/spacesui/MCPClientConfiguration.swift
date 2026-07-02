@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 /// Builds the copyable MCP client configuration shown in Settings → MCP.
 ///
@@ -17,10 +18,12 @@ enum MCPClientConfiguration {
         bundleResourceCLIPath: String? = defaultBundleResourceCLIPath(),
         homeDirectoryPath: String = NSHomeDirectory()
     ) -> String {
-        let helperPath = "\(homeDirectoryPath)/.spaces/bin/spaces"
+        let helperPath =
+            SpacesBinaryLayout.userHelperLinkURL(for: .spaces, homeDirectoryURL: URL(fileURLWithPath: homeDirectoryPath, isDirectory: true))?.path
+            ?? "\(homeDirectoryPath)/.spaces/bin/spaces"
         var candidates = [helperPath]
         if let bundleResourceCLIPath { candidates.append(bundleResourceCLIPath) }
-        candidates.append("/usr/local/bin/spaces")
+        candidates.append(SpacesBinaryLayout.systemLinkURL(for: .spaces).path)
         return candidates.first(where: { fileManager.isExecutableFile(atPath: $0) }) ?? helperPath
     }
 

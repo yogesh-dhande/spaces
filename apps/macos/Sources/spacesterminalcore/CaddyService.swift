@@ -151,15 +151,19 @@ import Foundation
             throws -> URL
         {
             let currentExecutablePath = environment["_"] ?? Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
-            let currentExecutableDirectory = URL(fileURLWithPath: currentExecutablePath).deletingLastPathComponent()
+            let currentExecutableURL = URL(fileURLWithPath: currentExecutablePath)
+            let currentExecutableDirectory = currentExecutableURL.deletingLastPathComponent()
+            let resolvedCurrentExecutableDirectory = currentExecutableURL.resolvingSymlinksInPath().deletingLastPathComponent()
             let currentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
             let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
                 "Resources", isDirectory: true)
             let candidates = [
                 environment[executableEnvironmentVariable],
                 currentExecutableDirectory.appendingPathComponent("spaces-caddy", isDirectory: false).path(percentEncoded: false),
+                resolvedCurrentExecutableDirectory.appendingPathComponent("caddy", isDirectory: false).path(percentEncoded: false),
                 Bundle.main.resourceURL?.appendingPathComponent("caddy", isDirectory: false).path(percentEncoded: false),
                 bundledResourceDirectory.appendingPathComponent("caddy", isDirectory: false).path(percentEncoded: false),
+                SpacesBinaryLayout.systemLinkURL(for: .spacesCaddy).path,
                 currentDirectory.appendingPathComponent("apps/macos/.local/caddy/caddy", isDirectory: false).path(percentEncoded: false),
                 currentDirectory.appendingPathComponent(".local/caddy/caddy", isDirectory: false).path(percentEncoded: false),
             ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
