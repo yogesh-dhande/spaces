@@ -1406,23 +1406,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             seedInitialRuntimeState: seedInitialRuntimeState, resolvedSummaryMatch: resolvedSummaryMatch)
     }
 
-    private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) -> Bool {
-        // The seed launch configuration wins over the model's own overview lookup, so it
-        // must carry the session's real shell/command. Prefer the request (resolved from
-        // the source overview), then the loaded summary for a row-built request, and only
-        // fall back to a default shell when neither knows the session yet.
+    private func openDeviceTerminalSession(_ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil) async
+        -> Bool
+    {
+        // The seed launch configuration wins over the model's own overview lookup, and the
+        // live Device API state payload never resends shell/command, so seed one only when a
+        // real shell is known — from the request (resolved from the source overview) or the
+        // loaded summary for a row-built request. When neither knows it yet (a row opened
+        // before the session reached the overview), pass no seed and resolve through the
+        // missing-summary path, which fetches a fresh overview off-main; fabricating a
+        // "/bin/bash" placeholder here would win over that lookup and mislabel the window's
+        // launch command for the session's lifetime.
         let summary = terminalSessionSummaryMatch(sessionID: request.sessionID)?.summary
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
-            shell: request.shell ?? summary?.shell ?? "/bin/bash", command: request.command ?? summary?.command,
-            createdAt: request.createdAt ?? ISO8601DateFormatter().string(from: Date()), workspaceID: request.workspaceID, kind: request.kind)
+        let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
+        let seedLaunchConfiguration = (request.shell ?? summary?.shell).map { shell in
+            TerminalSessionLaunchConfiguration(
+                sessionID: request.sessionID, backend: .ghosttyEmbedded, title: request.title, workingDirectory: request.workingDirectory,
+                shell: shell, command: request.command ?? summary?.command, createdAt: createdAt, workspaceID: request.workspaceID, kind: request.kind
+            )
+        }
         let initialRuntimeState = request.initialState.map {
             TerminalSessionRuntimeState(
                 sessionID: request.sessionID, backend: .ghosttyEmbedded, servicePID: request.servicePID ?? 0, childPID: request.childPID, state: $0,
-                updatedAt: request.updatedAt ?? launchConfiguration.createdAt, title: request.title, workingDirectory: request.workingDirectory)
+                updatedAt: request.updatedAt ?? createdAt, title: request.title, workingDirectory: request.workingDirectory)
         }
-        return openTerminalSessionWindow(
-            sessionID: request.sessionID, mode: .owner, requestID: requestID, seedDevice: device, seedLaunchConfiguration: launchConfiguration,
+        return await openTerminalSessionWindowResolvingMissingSummary(
+            sessionID: request.sessionID, mode: .owner, requestID: requestID, seedDevice: device, seedLaunchConfiguration: seedLaunchConfiguration,
             seedInitialRuntimeState: initialRuntimeState) != nil
     }
 
@@ -8505,7 +8514,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             if let request = Self.deviceTerminalOpenRequest(
                                 workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? localDeviceOverview)
                             {
-                                _ = openDeviceTerminalSession(request, device: device)
+                                _ = await openDeviceTerminalSession(request, device: device)
                             }
                         } else {
                             _ = await openTerminalSessionWindowResolvingMissingSummary(sessionID: sessionID, mode: .owner)
@@ -9190,7 +9199,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         _ request: DeviceTerminalOpenRequest, device: SpacesPairedDeviceRecord, requestID: String? = nil
     ) async -> Bool {
         if isRemoteDeviceID(deviceID(forWorkspaceID: request.workspaceID)) {
-            return openDeviceTerminalSession(request, device: device, requestID: requestID)
+            return await openDeviceTerminalSession(request, device: device, requestID: requestID)
         }
         return await focusTerminalSessionWindowResolvingMissingSummary(sessionID: request.sessionID, requestID: requestID)
     }
