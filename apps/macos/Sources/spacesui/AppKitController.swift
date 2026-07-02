@@ -6706,7 +6706,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func workspaceDetailShortcutFooterSegments() -> [(label: String, setting: ShortcutSetting)] {
         [
-            ("Toggle app", .guiHotkey), ("Palette", .guiCommandPaletteHotkey), ("Alerts", .guiAlertsShortcut), ("Settings", .guiOpenSettingsShortcut),
+            ("Toggle app", .guiHotkey), ("Palette", .guiCommandPaletteHotkey), ("Settings", .guiOpenSettingsShortcut),
             ("Open editor", .guiOpenEditorShortcut), ("New terminal", .guiOpenTerminalShortcut), ("Next window", .guiNextShortcut),
             ("Prev window", .guiPreviousShortcut),
         ]
