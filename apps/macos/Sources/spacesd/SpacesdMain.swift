@@ -1333,6 +1333,7 @@ private enum SpacesDaemonMobileCredentialStore {
 @main struct SpacesDaemonMain {
     static func main() {
         configureProcessSignals()
+        configureCLISearchPath()
 
         if environmentValue("SPACESD_PRINT_CERTIFICATE_FINGERPRINT") == "1" {
             do {
@@ -1377,6 +1378,21 @@ private enum SpacesDaemonMobileCredentialStore {
             _ = signal(SIGPIPE, SIG_IGN)
             _ = signal(SIGHUP, SIG_IGN)
         #endif
+    }
+
+    /// spacesd is the parent of every terminal shell, workspace runtime process, and
+    /// coding-agent hook it spawns, and those children resolve `spaces` from this
+    /// process's PATH. Prepend the daemon executable's own directory (which ships the
+    /// version-matched CLI) so children inherit a PATH that resolves `spaces` without
+    /// root-owned symlinks or daemon-specific shell-profile edits. This must run before
+    /// anything snapshots the environment.
+    private static func configureCLISearchPath() {
+        guard
+            let path = SpacesCLISearchPath.pathPrependingSiblingCLIDirectory(
+                executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath),
+                currentPATH: environmentValue("PATH"))
+        else { return }
+        setenv("PATH", path, 1)
     }
 
     #if canImport(Glibc)

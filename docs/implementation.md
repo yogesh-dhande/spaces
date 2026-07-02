@@ -785,6 +785,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Configured process restart closes the old native Spaces terminal window and terminates the old service session before the replacement session is recorded as current. The process row remains the configured slot; the terminal session identity changes only through that explicit replacement path.
 - Immediate process-start failures should be surfaced from the recent built-in session output itself so launch errors report the real command failure instead of a follow-on recovery error.
 - Core external dependencies that the GUI invokes directly, such as `yabai` and `git`, are resolved through a shared executable-locator path instead of relying on the Finder app environment to provide a complete `PATH`.
+- At startup `spacesd` prepends its own executable directory to the process `PATH` when a sibling `spaces` executable exists there, preserving inherited `PATH` entries including empty components. This gives the daemon's child process environment the version-matched CLI path on Linux installs where the user-scoped installer cannot claim `/usr/local/bin`, and in repo-local development builds.
 - Global app settings also store the app-toggle hotkey and the separate command-palette hotkey.
 - Global settings also store the shared window focus pulse color and enabled state behind window-scoped keys.
 - Each `ProcessTemplate` stores name, command, kind, and on-exit behavior. Persisted `execution_mode` values are ignored.
