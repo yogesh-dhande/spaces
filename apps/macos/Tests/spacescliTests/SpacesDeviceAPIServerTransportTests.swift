@@ -261,6 +261,38 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    func testCreateProjectOverviewResolvesServiceURLBrowserSessions() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let projectDir = root.appendingPathComponent("service-url-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-SERVICE-URL", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let config = SpacesDeviceProjectConfig(
+                ports: [SpacesDeviceServiceDefinition(id: "service-web", name: "web")],
+                processes: [SpacesDeviceProcessTemplate(id: "process-web", name: "webserver", command: "PORT=$SPACES_WEB_PORT npm run dev")],
+                browserSessions: [SpacesDeviceBrowserSession(name: "weburl", url: "$SPACES_WEB_URL")])
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: projectDir.path, gitURL: nil, config: config)), authToken: pairingStore.authToken,
+                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok, response.message)
+            let workspaceID = try XCTUnwrap(response.workspaceID)
+            let workspace = try XCTUnwrap(response.overview?.workspaces.first(where: { $0.id == workspaceID }))
+            let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspaceID)
+            XCTAssertEqual(workspace.config.browserSessions.first?.url, "$SPACES_WEB_URL")
+            XCTAssertEqual(
+                workspace.config.resolvedBrowserSessions.first?.url, "http://web.\(slug).localhost:\(AppConfig.defaultRouterPort)")
+        }
+    }
+
     func testRestartWorkspaceLifecycleUsesDeviceAPIOrchestratorPath() throws {
         try withTemporaryProfile { root in
             let transportKey = SpacesDeviceAPISettings.generateTransportKey()

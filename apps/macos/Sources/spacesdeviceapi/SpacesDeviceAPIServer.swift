@@ -1195,13 +1195,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let workspaces = try projects.flatMap { project in
             try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
                 let slug = SpacesProfile.workspaceHostSlug(branch: workspace.branch, workspaceID: workspace.id)
+                let resolvedBrowserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
                 return SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
                     agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id),
                     assignedPorts: (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id).map {
                         SpacesDeviceAssignedPort(name: $0.name, port: $0.port, url: "http://\($0.name).\(slug).localhost:\(routerPort)")
-                    }) ?? [], resolvedBrowserSessions: (try? orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)) ?? [],
+                    }) ?? [], resolvedBrowserSessions: resolvedBrowserSessions,
                     setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id), terminalDaemonEndpoint: nil)
             }
         }

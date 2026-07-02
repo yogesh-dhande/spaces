@@ -39,7 +39,7 @@ extension WorkspaceOrchestrator {
                         Self.writeStandardError("spaces: duplicate Caddy host \(host); skipping workspace \(workspace.id) service \(name)\n")
                         continue
                     }
-                    routes.append(CaddyRoute(host: host, upstream: "127.0.0.1:\(assignment.port)"))
+                    routes.append(CaddyRoute(host: host, upstream: "localhost:\(assignment.port)"))
                 }
             }
         }

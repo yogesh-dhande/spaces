@@ -18,9 +18,9 @@ final class CaddyRouteTableTests: XCTestCase {
 
         XCTAssertEqual(Set(routes.map(\.host)), ["web.\(slug).localhost", "backend.\(slug).localhost"])
         let webRoute = try XCTUnwrap(routes.first { $0.host == "web.\(slug).localhost" })
-        XCTAssertEqual(webRoute.upstream, "127.0.0.1:21001")
+        XCTAssertEqual(webRoute.upstream, "localhost:21001")
         let backendRoute = try XCTUnwrap(routes.first { $0.host == "backend.\(slug).localhost" })
-        XCTAssertEqual(backendRoute.upstream, "127.0.0.1:21002")
+        XCTAssertEqual(backendRoute.upstream, "localhost:21002")
     }
 
     func testRouteTableIsEmptyWhenNoServicesAssigned() throws {
