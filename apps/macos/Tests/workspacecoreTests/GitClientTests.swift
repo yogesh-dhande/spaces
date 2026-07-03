@@ -521,4 +521,61 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "main")
     }
 
+    // Tests readRemoteDefaultBranchFile returns the file contents from the declared default branch without a full checkout.
+    func testReadRemoteDefaultBranchFileReturnsCommittedFileContents() throws {
+        let repo = try makeTempGitRepo(name: "remote-file-repo")
+        let yaml = "version: 1\nprocesses:\n  - name: web\n    command: npm run dev\n"
+        try commitFile(named: "spaces.yaml", contents: yaml, in: repo)
+
+        let file = try GitClient().readRemoteDefaultBranchFile(gitURL: repo.path, path: "spaces.yaml")
+        XCTAssertEqual(file.defaultBranch, "main")
+        XCTAssertEqual(file.contents, yaml)
+    }
+
+    // Tests readRemoteDefaultBranchFile follows HEAD instead of guessing main when both branches exist.
+    func testReadRemoteDefaultBranchFileUsesRepositoryDefaultBranchWhenMainAlsoExists() throws {
+        let repo = try makeTempGitRepo(name: "remote-file-default-master", initialBranch: "master")
+        let masterYAML = "version: 1\nstopScript: echo master\n"
+        let mainYAML = "version: 1\nstopScript: echo main\n"
+        try commitFile(named: "spaces.yaml", contents: masterYAML, in: repo)
+        try runGit(["checkout", "-b", "main"], cwd: repo.path)
+        try commitFile(named: "spaces.yaml", contents: mainYAML, in: repo)
+        try runGit(["checkout", "master"], cwd: repo.path)
+
+        let file = try GitClient().readRemoteDefaultBranchFile(gitURL: repo.path, path: "spaces.yaml")
+
+        XCTAssertEqual(file.defaultBranch, "master")
+        XCTAssertEqual(file.contents, masterYAML)
+    }
+
+    // Tests readRemoteDefaultBranchFile returns nil contents when the requested file is absent on the default branch.
+    func testReadRemoteDefaultBranchFileReturnsNilWhenFileAbsent() throws {
+        let repo = try makeTempGitRepo(name: "remote-file-missing-repo")
+        let file = try GitClient().readRemoteDefaultBranchFile(gitURL: repo.path, path: "spaces.yaml")
+        XCTAssertEqual(file.defaultBranch, "main")
+        XCTAssertNil(file.contents)
+    }
+
+    // Tests readRemoteDefaultBranchFile throws when the repository cannot be reached, so the URL error surfaces.
+    func testReadRemoteDefaultBranchFileThrowsForUnreachableRepository() throws {
+        let missing = try makeTempDirectory().appendingPathComponent("does-not-exist", isDirectory: true)
+        XCTAssertThrowsError(try GitClient().readRemoteDefaultBranchFile(gitURL: missing.path, path: "spaces.yaml"))
+    }
+
+    // Tests repositoryDefaultBranch rejects a symbolic HEAD that does not point at an existing branch.
+    func testRepositoryDefaultBranchThrowsWhenHeadHasNoBranch() throws {
+        let repo = try makeTempDirectory()
+        try runGit(["init", "-b", "main"], cwd: repo.path)
+
+        XCTAssertThrowsError(try GitClient().repositoryDefaultBranch(path: repo.path)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Could not determine the repository's default branch."))
+        }
+    }
+
+    private func commitFile(named name: String, contents: String, in repo: URL) throws {
+        try contents.write(to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        try runGit(["add", name], cwd: repo.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add \(name)"], cwd: repo.path)
+    }
+
 }

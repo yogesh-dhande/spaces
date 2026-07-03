@@ -309,37 +309,22 @@ public enum SpacesDeviceClient {
     }
 
     public static func createProject(
-        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, preparedGitProjectHandle: String? = nil,
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(
-                command: .createProject(
-                    .init(projectDir: projectDir, gitURL: gitURL, config: config, preparedGitProjectHandle: preparedGitProjectHandle))),
-            device: device, clientApp: clientApp, profile: profile)
-    }
-
-    /// Clones a git repository on the target daemon and returns its detected config plus an opaque
-    /// handle to the clone (or replacement candidates to confirm first). The handle is later passed
-    /// to `createProject` to adopt the clone, or to `discardPreparedGitProject` to delete it.
-    public static func prepareGitProject(
-        gitURL: String, replaceExistingManagedDirectories: Bool, device: SpacesPairedDeviceRecord,
+        projectDir: String?, gitURL: String?, config: SpacesDeviceProjectConfig? = nil, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> SpacesDeviceGitProjectPreparation {
-        let response = try request(
-            .init(command: .prepareGitProject(.init(gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories))),
-            device: device, clientApp: clientApp, profile: profile)
-        guard let preparation = response.gitProjectPreparation else { throw SpacesDeviceClientError.requestRejected(response.message) }
-        return preparation
-    }
-
-    @discardableResult public static func discardPreparedGitProject(
-        preparedGitProjectHandle: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
-        profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(command: .discardPreparedGitProject(.init(preparedGitProjectHandle: preparedGitProjectHandle))), device: device,
-            clientApp: clientApp, profile: profile)
+            .init(command: .createProject(.init(projectDir: projectDir, gitURL: gitURL, config: config))), device: device, clientApp: clientApp,
+            profile: profile)
+    }
+
+    /// Loads a git repository's `spaces.yaml` (single file, no clone) to populate the add-project form,
+    /// along with any managed directories a later Create would replace. The full clone happens at Create.
+    public static func previewGitProject(
+        gitURL: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceGitProjectPreview {
+        let response = try request(.init(command: .previewGitProject(.init(gitURL: gitURL))), device: device, clientApp: clientApp, profile: profile)
+        guard let preview = response.gitProjectPreview else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return preview
     }
 
     public static func deleteProject(
@@ -606,10 +591,9 @@ public enum SpacesDeviceClient {
 
     static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
-        case .createProject, .prepareGitProject, .discardPreparedGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace,
-            .launchWorkspace, .stopWorkspace, .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal,
-            .stopWorkspaceTerminal, .runWorkspaceProcess, .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent,
-            .restartCodingAgent:
+        case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
+            .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
+            .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,

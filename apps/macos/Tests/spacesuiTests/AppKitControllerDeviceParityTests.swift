@@ -43,6 +43,14 @@ import workspacecore
         #expect(!AppKitController.SidebarDeviceLoadState.loading.isOffline)
     }
 
+    @Test func addProjectDeviceIsSelectableOnlyWhenReachable() {
+        // Offline devices are not selectable in the add-project device step: creating on one would make
+        // the source step's Continue hang on a request that only times out.
+        #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loaded))
+        #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loading))
+        #expect(!AppKitController.addProjectDeviceIsSelectable(loadState: .offline("daemon down")))
+    }
+
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
         // Known reachability failures a relaunch can resolve — the daemon answered that its Device API is
         // not running, or its control endpoint was unreachable (daemon down) — offer the action.

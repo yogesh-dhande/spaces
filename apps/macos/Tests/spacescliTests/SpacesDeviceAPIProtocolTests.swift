@@ -74,29 +74,25 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
-    func testGitProjectPreparationCommandsAndResultRoundTripThroughCodec() throws {
-        let prepare = SpacesDeviceAPIRequest(
-            command: .prepareGitProject(.init(gitURL: "https://example.com/repo.git", replaceExistingManagedDirectories: true)), authToken: "SECRET")
-        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(prepare)), prepare)
-        // Preparing clones, so it must not be replayed after an ambiguous connection failure.
-        XCTAssertFalse(prepare.isSafeToReplayAfterConnectionFailure)
+    func testGitProjectPreviewCommandAndResultRoundTripThroughCodec() throws {
+        let preview = SpacesDeviceAPIRequest(command: .previewGitProject(.init(gitURL: "https://example.com/repo.git")), authToken: "SECRET")
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(preview)), preview)
+        // The preview only reads spaces.yaml and has no side effects, so it is replay-safe.
+        XCTAssertTrue(preview.isSafeToReplayAfterConnectionFailure)
 
-        let discard = SpacesDeviceAPIRequest(command: .discardPreparedGitProject(.init(preparedGitProjectHandle: "HANDLE")), authToken: "SECRET")
-        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(discard)), discard)
-        XCTAssertFalse(discard.isSafeToReplayAfterConnectionFailure)
-
-        // createProject carries the opaque handle so the daemon adopts the existing clone.
+        // The git create carries only the URL and config; the clone happens as part of Create.
         let create = SpacesDeviceAPIRequest(
-            command: .createProject(.init(projectDir: nil, gitURL: "https://example.com/repo.git", config: nil, preparedGitProjectHandle: "HANDLE")),
+            command: .createProject(.init(projectDir: nil, gitURL: "https://example.com/repo.git", config: SpacesDeviceProjectConfig())),
             authToken: "SECRET")
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(create)), create)
 
-        let preparation = SpacesDeviceGitProjectPreparation(
-            preparedGitProjectHandle: "HANDLE", name: "repo", defaultBranch: "main", config: SpacesDeviceProjectConfig(),
-            replacementCandidates: [SpacesDeviceManagedDirectoryReplacementCandidate(kind: "projectRepository", path: "/tmp/repo")])
-        let response = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .gitProjectPreparation(preparation))
+        let result = SpacesDeviceGitProjectPreview(
+            config: SpacesDeviceProjectConfig(),
+            replacementCandidates: [SpacesDeviceManagedDirectoryReplacementCandidate(kind: "projectRepository", path: "/tmp/repo")],
+            spacesYAMLFound: true)
+        let response = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .gitProjectPreview(result))
         let decoded = try JSONDecoder().decode(SpacesDeviceAPIResponse.self, from: JSONEncoder().encode(response))
-        XCTAssertEqual(decoded.gitProjectPreparation, preparation)
+        XCTAssertEqual(decoded.gitProjectPreview, result)
     }
 
     func testAmbiguousRequestPayloadIsRejected() throws {
