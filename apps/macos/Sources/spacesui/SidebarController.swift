@@ -972,10 +972,22 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         accessoryStack.spacing = 4
         accessoryStack.translatesAutoresizingMaskIntoConstraints = false
         accessoryStack.setContentHuggingPriority(.required, for: .horizontal)
-        let settingsButton = host.sidebarRowIconButton(
-            symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(AppKitController.showProjectSettings(_:)))
-        settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
-        settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
+        // A non-git project stands in for its single workspace and has no separate
+        // template to edit (it can never spawn more workspaces), so its gear opens that
+        // workspace's settings — the live config that actually runs — rather than project
+        // settings. Git project rows keep opening project settings.
+        let settingsButton: NSButton
+        if let nonGitWorkspace = nonGitProjectTargetWorkspace(project) {
+            settingsButton = host.sidebarRowIconButton(
+                symbol: "gearshape", tooltip: "Workspace settings for \(project.name)", action: #selector(AppKitController.showWorkspaceSettings(_:)))
+            settingsButton.identifier = NSUserInterfaceItemIdentifier(nonGitWorkspace.id)
+            settingsButton.setAccessibilityIdentifier("sidebar-workspace-settings-\(nonGitWorkspace.id)")
+        } else {
+            settingsButton = host.sidebarRowIconButton(
+                symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(AppKitController.showProjectSettings(_:)))
+            settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
+            settingsButton.setAccessibilityIdentifier("sidebar-project-settings-\(project.id)")
+        }
         let projectActions = AppKitController.sidebarProjectActions(isGitRepo: project.isGitRepo)
         if projectActions.showsSettings { accessoryStack.addArrangedSubview(settingsButton) }
 
@@ -1161,8 +1173,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             chipSlot.addSubview(chip)
             NSLayoutConstraint.activate([
                 chip.leadingAnchor.constraint(equalTo: chipSlot.leadingAnchor),
-                chip.trailingAnchor.constraint(lessThanOrEqualTo: chipSlot.trailingAnchor),
-                chip.topAnchor.constraint(equalTo: chipSlot.topAnchor), chip.bottomAnchor.constraint(equalTo: chipSlot.bottomAnchor),
+                chip.trailingAnchor.constraint(lessThanOrEqualTo: chipSlot.trailingAnchor), chip.topAnchor.constraint(equalTo: chipSlot.topAnchor),
+                chip.bottomAnchor.constraint(equalTo: chipSlot.bottomAnchor),
             ])
         }
         row.addArrangedSubview(chipSlot)
@@ -1210,9 +1222,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         NSLayoutConstraint.activate([
             // Flush with the workspace card's leading edge: the ⌘-number chip column
             // aligns under the workspace row instead of adding a second indent level.
-            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10), row.topAnchor.constraint(equalTo: cell.topAnchor),
-            row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor), row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            row.topAnchor.constraint(equalTo: cell.topAnchor), row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
         ])
         return cell
     }
@@ -1649,8 +1660,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.setAccessibilityIdentifier("sidebar-alerts")
 
         let bellIcon = NSImageView()
-        bellIcon.image = NSImage(systemSymbolName: "bell", accessibilityDescription: "Alerts")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        bellIcon.image = NSImage(systemSymbolName: "bell", accessibilityDescription: "Alerts")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
         bellIcon.contentTintColor = .secondaryLabelColor
         bellIcon.setContentHuggingPriority(.required, for: .horizontal)
 

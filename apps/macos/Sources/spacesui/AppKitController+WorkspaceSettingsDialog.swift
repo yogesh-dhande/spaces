@@ -77,11 +77,18 @@ extension AppKitController {
             launchers: config.agentLaunchers, subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
         agentLaunchersSection.onCommit = { updated in commit { $0.agentLaunchers = updated } }
 
+        // Service rows show `remote:local` while a remote service has a live SSH forward, so the
+        // section is tracked as the visible ports section: starting or stopping a forward while
+        // this dialog is open refreshes the port texts in place through refreshVisibleServicePortDisplays.
         let portsSection = PortsSection(
-            ports: config.ports, collapsedDisplayPorts: detail.assignedPorts.map { Optional.some($0.port) },
+            ports: config.ports,
+            collapsedDisplayPortTexts: Self.servicePortDisplayTexts(
+                assignedPorts: detail.assignedPorts, forwards: workspaceServiceForwards(workspaceID: workspace.id)),
             collapsedDisplayURLs: detail.assignedPorts.map { $0.url.isEmpty ? nil : $0.url },
             subtitle: "Per-workspace named ports, exposed as env vars.")
         portsSection.onCommit = { updated in commit { $0.ports = updated } }
+        visibleWorkspacePortsSection = portsSection
+        visiblePortsWorkspaceID = workspace.id
 
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",

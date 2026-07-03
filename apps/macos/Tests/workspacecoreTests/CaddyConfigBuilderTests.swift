@@ -24,7 +24,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
         let routes = [
             CaddyRoute(host: "web.ws.localhost", upstream: "127.0.0.1:21001"), CaddyRoute(host: "backend.ws.localhost", upstream: "127.0.0.1:21002"),
         ]
-        let data = CaddyConfigBuilder.makeJSON(routes: routes, listenPort: 8088, adminSocketPath: "/tmp/caddy-admin.sock")
+        let data = CaddyConfigBuilder.makeJSON(routes: routes, listenPort: 7391, adminSocketPath: "/tmp/caddy-admin.sock")
         let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
 
         let admin = try XCTUnwrap(root["admin"] as? [String: Any])
@@ -34,7 +34,7 @@ final class CaddyConfigBuilderTests: XCTestCase {
         let spaces = try XCTUnwrap(servers?["spaces"] as? [String: Any])
         let automaticHTTPS = try XCTUnwrap(spaces["automatic_https"] as? [String: Any])
         XCTAssertEqual(automaticHTTPS["disable"] as? Bool, true)
-        XCTAssertEqual(spaces["listen"] as? [String], ["127.0.0.1:8088", "[::1]:8088"])
+        XCTAssertEqual(spaces["listen"] as? [String], ["127.0.0.1:7391", "[::1]:7391"])
 
         let routeObjects = try XCTUnwrap(spaces["routes"] as? [[String: Any]])
         XCTAssertEqual(routeObjects.count, 2)
@@ -88,6 +88,34 @@ final class CaddyConfigBuilderTests: XCTestCase {
                 key: "remote-browser:device:workspace:web:31002", route: CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:41002")))
 
         XCTAssertEqual(try CaddyRouteRegistry.routes(path: path), [CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:41002")])
+    }
+
+    func testRouteRegistryReplaceReportsChangeAndSkipsIdenticalRewrite() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        let path = root.appendingPathComponent("routes.json").path
+        let entries = [
+            CaddyRouteRegistryEntry(key: "remote:workspace:web", route: CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:31001")),
+            CaddyRouteRegistryEntry(key: "remote:workspace:api", route: CaddyRoute(host: "api.remote.localhost", upstream: "127.0.0.1:31002")),
+        ]
+
+        XCTAssertTrue(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: entries))
+        let written = try Data(contentsOf: URL(fileURLWithPath: path))
+
+        // Re-publishing the same forward must not rewrite the file (callers use the change signal
+        // to skip notifying the daemon, so a warm re-open triggers no Caddy reload).
+        XCTAssertFalse(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: entries))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), written)
+
+        let updated = [
+            CaddyRouteRegistryEntry(key: "remote:workspace:web", route: CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:31009"))
+        ]
+        XCTAssertTrue(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: updated))
+        XCTAssertEqual(
+            try CaddyRouteRegistry.routes(path: path),
+            [
+                CaddyRoute(host: "api.remote.localhost", upstream: "127.0.0.1:31002"),
+                CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:31009"),
+            ])
     }
 
     func testRouteRegistryRemovesEntriesByKey() throws {

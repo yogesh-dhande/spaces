@@ -283,6 +283,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var didStartBackgroundServices = false
     private let browserSSHForwardManager = BrowserSSHForwardManager()
     private var remoteBrowserForwardRevisions: [String: Int] = [:]
+    // The open workspace settings dialog's Services section, kept so an SSH forward start/stop can
+    // refresh the rows' port texts in place instead of rebuilding the section. The section object is
+    // owned by its view (RowSectionCard.retain), so the weak reference clears itself when the dialog
+    // closes. Set from the workspace settings dialog, which lives in a separate file, so these are
+    // module-internal rather than private.
+    weak var visibleWorkspacePortsSection: PortsSection?
+    var visiblePortsWorkspaceID: String?
     var chromeAutomationSetupController: ChromeAutomationSetupController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
@@ -3350,14 +3357,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard device.id != localDeviceID else { return }
         let manager = browserSSHForwardManager
         let revision = nextRemoteBrowserForwardRevision(deviceID: device.id)
-        Task.detached(priority: .utility) { manager.reconcile(device: device, overview: overview, revision: revision) }
+        Task.detached(priority: .utility) { [weak self] in
+            manager.reconcile(device: device, overview: overview, revision: revision)
+            await self?.refreshVisibleServicePortDisplays(deviceID: device.id)
+        }
     }
 
     func stopRemoteBrowserForwards(deviceID: String) {
         guard deviceID != localDeviceID else { return }
         let manager = browserSSHForwardManager
         let revision = nextRemoteBrowserForwardRevision(deviceID: deviceID)
-        Task.detached(priority: .utility) { manager.stop(deviceID: deviceID, revision: revision) }
+        Task.detached(priority: .utility) { [weak self] in
+            manager.stop(deviceID: deviceID, revision: revision)
+            await self?.refreshVisibleServicePortDisplays(deviceID: deviceID)
+        }
     }
 
     private func nextRemoteBrowserForwardRevision(deviceID: String) -> Int {
@@ -5474,6 +5487,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return candidateURL
         }
         return nil
+    }
+
+    /// Live SSH-forward snapshots for a workspace's services: remote workspaces read the forward
+    /// manager, local workspaces have no forwards (their assigned port is already local).
+    func workspaceServiceForwards(workspaceID: String) -> [BrowserSSHForwardManager.ServiceForwardSnapshot] {
+        let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID)
+        guard isRemoteDeviceID(workspaceDeviceID) else { return [] }
+        return browserSSHForwardManager.forwardedServicePorts(deviceID: workspaceDeviceID, workspaceID: workspaceID)
+    }
+
+    /// Refreshes the open workspace settings dialog's Services rows' port texts after an SSH forward
+    /// for `deviceID` starts or stops. Reloads the section in place (preserving open editors); when
+    /// no workspace settings dialog is open the weak section reference is nil and this is a no-op.
+    private func refreshVisibleServicePortDisplays(deviceID: String) {
+        guard let section = visibleWorkspacePortsSection, let workspaceID = visiblePortsWorkspaceID,
+            self.deviceID(forWorkspaceID: workspaceID) == deviceID, let workspace = deviceWorkspaceSummary(workspaceID: workspaceID)
+        else { return }
+        section.reload(
+            ports: section.currentPorts,
+            collapsedDisplayPortTexts: Self.servicePortDisplayTexts(
+                assignedPorts: workspace.assignedPorts, forwards: workspaceServiceForwards(workspaceID: workspaceID)))
+    }
+
+    /// The Services row port text: `remote:local` while a remote service has a live SSH forward
+    /// (e.g. "3000:52341"), otherwise the bare assigned port.
+    nonisolated static func servicePortDisplay(assignedPort: Int?, forwardedLocalPort: Int?) -> String? {
+        guard let assignedPort, assignedPort > 0 else { return nil }
+        guard let forwardedLocalPort else { return String(assignedPort) }
+        return "\(assignedPort):\(forwardedLocalPort)"
+    }
+
+    nonisolated static func servicePortDisplayTexts(
+        assignedPorts: [SpacesDeviceAssignedPort], forwards: [BrowserSSHForwardManager.ServiceForwardSnapshot]
+    ) -> [String?] {
+        var localPorts: [String: Int] = [:]
+        for forward in forwards { localPorts["\(forward.serviceName):\(forward.remotePort)"] = forward.localPort }
+        return assignedPorts.map { servicePortDisplay(assignedPort: $0.port, forwardedLocalPort: localPorts["\($0.name):\($0.port)"]) }
     }
 
     private func clearActiveAddProjectFormState() {
@@ -8335,21 +8385,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// cannot be scripted. Remote service sessions use this after their URL has been routed through
     /// the Mac Caddy router.
     private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
-        let focused = await Task.detached(priority: .userInitiated) {
+        let startedAt = Date()
+        let result: (focused: Bool, path: String, focusMS: Int) = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
-            guard chrome.isAvailable() else { return false }
+            let focusStartedAt = Date()
             let store = ClientBrowserWindowIDStore()
             if let trackedID = try? store.windowID(workspaceID: workspaceID, targetURL: targetURL),
                 (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
             {
-                return true
+                return (true, "focused_tracked", TerminalPerformance.elapsedMS(since: focusStartedAt))
             }
             let newWindowID = (try? chrome.openWindow(url: targetURL, background: false)) ?? -1
-            guard newWindowID > 0 else { return false }
+            guard newWindowID > 0 else { return (false, "fallback", TerminalPerformance.elapsedMS(since: focusStartedAt)) }
             try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: newWindowID)
-            return true
+            return (true, "opened_window", TerminalPerformance.elapsedMS(since: focusStartedAt))
         }.value
-        if !focused { NSWorkspace.shared.open(fallbackURL) }
+        if !result.focused { NSWorkspace.shared.open(fallbackURL) }
+        logPerfMetric(
+            "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: result.focused, detail: "path=\(result.path) focus_ms=\(result.focusMS)")
     }
 
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
@@ -8466,6 +8520,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }.value
                 switch routeResult {
                 case .success(let routedURL):
+                    refreshVisibleServicePortDisplays(deviceID: device.id)
                     await focusLocalChromeTab(workspaceID: workspaceID, targetURL: routedURL.absoluteString, fallbackURL: routedURL)
                 case .failure(let error):
                     showError(error)
