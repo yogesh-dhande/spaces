@@ -26,6 +26,14 @@ import workspacecore
             let remotePort: Int
         }
 
+        /// One live local forward for a workspace service, exposed so service rows can display the
+        /// Mac-local forwarded port next to the remote port.
+        struct ServiceForwardSnapshot: Equatable, Sendable {
+            let serviceName: String
+            let remotePort: Int
+            let localPort: Int
+        }
+
         private struct WorkspaceKey: Hashable {
             let deviceID: String
             let workspaceID: String
@@ -64,6 +72,24 @@ import workspacecore
             private static func canConnect(port: Int) -> Bool { BrowserSSHForwardManager.canConnect(port: port) }
         }
 
+        /// Per-stage durations for one forward resolution. Timings are collected while the work
+        /// runs (including under `forwardsLock`), but the metric line is logged only after the
+        /// lock is released because perf logging does file I/O.
+        private struct ForwardTimings {
+            var reusedForward = false
+            var planMS = 0
+            var sshSpawnMS = 0
+            var portWaitMS = 0
+            var publishMS = 0
+            var publishSkipped = false
+            var caddyWaitMS = 0
+
+            var detail: String {
+                "branch=\(reusedForward ? "warm" : "cold") plan_ms=\(planMS) ssh_spawn_ms=\(sshSpawnMS) port_wait_ms=\(portWaitMS)"
+                    + " publish_ms=\(publishMS) publish_skipped=\(publishSkipped ? 1 : 0) caddy_wait_ms=\(caddyWaitMS)"
+            }
+        }
+
         private let forwardsLock = NSLock()
         private var workspaceForwards: [WorkspaceKey: WorkspaceForward] = [:]
         private var deviceRevisions: [String: Int] = [:]
@@ -80,19 +106,37 @@ import workspacecore
         func routedURL(targetURL: String, workspace: SpacesDeviceWorkspaceSummary, device: SpacesPairedDeviceRecord, timeout: TimeInterval = 5) throws
             -> URL
         {
+            let startedAt = Date()
             guard let plan = Self.routePlan(targetURL: targetURL, assignedPorts: workspace.assignedPorts) else {
                 guard let url = URL(string: targetURL) else { throw WorkspaceError.invalidArgument(message: "Browser session URL is invalid.") }
                 return url
             }
-            let forward = try ensureWorkspaceForward(workspace: workspace, device: device, timeout: timeout, revision: nil)
-            guard let service = forward.service(matching: plan) else {
-                throw WorkspaceError.invalidArgument(message: "Browser session URL no longer matches a workspace service.")
+            var timings = ForwardTimings()
+            timings.planMS = TerminalPerformance.elapsedMS(since: startedAt)
+            do {
+                let forward = try ensureWorkspaceForward(workspace: workspace, device: device, timeout: timeout, revision: nil, timings: &timings)
+                guard let service = forward.service(matching: plan) else {
+                    throw WorkspaceError.invalidArgument(message: "Browser session URL no longer matches a workspace service.")
+                }
+                let caddyWaitStartedAt = Date()
+                let configJSON = try waitForCaddyConfig(routeHost: service.descriptor.routeHost, upstream: service.upstream, timeout: timeout)
+                timings.caddyWaitMS = TerminalPerformance.elapsedMS(since: caddyWaitStartedAt)
+                let localRouterPort = try Self.routerPort(configJSON: configJSON)
+                guard let routedPlan = Self.routePlan(
+                    targetURL: targetURL, assignedPorts: workspace.assignedPorts, localRouterPort: localRouterPort)
+                else { throw WorkspaceError.invalidArgument(message: "Browser session URL no longer matches a workspace service.") }
+                logRouteMetric(plan: plan, startedAt: startedAt, success: true, timings: timings)
+                return routedPlan.browserURL
+            } catch {
+                logRouteMetric(plan: plan, startedAt: startedAt, success: false, timings: timings)
+                throw error
             }
-            let configJSON = try waitForCaddyConfig(routeHost: service.descriptor.routeHost, upstream: service.upstream, timeout: timeout)
-            let localRouterPort = try Self.routerPort(configJSON: configJSON)
-            guard let routedPlan = Self.routePlan(targetURL: targetURL, assignedPorts: workspace.assignedPorts, localRouterPort: localRouterPort)
-            else { throw WorkspaceError.invalidArgument(message: "Browser session URL no longer matches a workspace service.") }
-            return routedPlan.browserURL
+        }
+
+        private func logRouteMetric(plan: RoutePlan, startedAt: Date, success: Bool, timings: ForwardTimings) {
+            TerminalPerformance.logMetric(
+                "browser_route", target: "\(plan.routeHost):\(plan.remotePort)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                success: success, detail: timings.detail)
         }
 
         func reconcile(device: SpacesPairedDeviceRecord, overview: SpacesDeviceOverviewPayload, timeout: TimeInterval = 5, revision: Int? = nil) {
@@ -102,14 +146,44 @@ import workspacecore
             stopWorkspaces(deviceID: device.id, keepingWorkspaceIDs: Set(desiredWorkspaces.map(\.id)), revision: revision)
             for workspace in desiredWorkspaces {
                 guard isCurrentRevision(deviceID: device.id, revision: revision) else { return }
+                let workspaceStartedAt = Date()
+                var timings = ForwardTimings()
                 do {
-                    let forward = try ensureWorkspaceForward(workspace: workspace, device: device, timeout: timeout, revision: revision)
+                    let forward = try ensureWorkspaceForward(
+                        workspace: workspace, device: device, timeout: timeout, revision: revision, timings: &timings)
+                    let caddyWaitStartedAt = Date()
                     _ = try waitForCaddyConfig(routes: forward.caddyRoutes, timeout: timeout)
+                    timings.caddyWaitMS = TerminalPerformance.elapsedMS(since: caddyWaitStartedAt)
+                    logReconcileMetric(workspace: workspace, device: device, startedAt: workspaceStartedAt, success: true, timings: timings)
                 } catch is CancellationError { return } catch {
+                    logReconcileMetric(workspace: workspace, device: device, startedAt: workspaceStartedAt, success: false, timings: timings)
                     NSLog(
                         "spaces: failed to preload remote browser forwards for \(device.name) workspace \(workspace.displayName): \(String(describing: error))"
                     )
                 }
+            }
+        }
+
+        private func logReconcileMetric(
+            workspace: SpacesDeviceWorkspaceSummary, device: SpacesPairedDeviceRecord, startedAt: Date, success: Bool, timings: ForwardTimings
+        ) {
+            TerminalPerformance.logWorkspaceMetric(
+                "browser_forward_reconcile", workspaceID: workspace.id, target: device.id,
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: success, detail: timings.detail)
+        }
+
+        /// Snapshot of the live local forwards for one workspace, for display only: it checks
+        /// process liveness but does not probe ports. Uses a try-lock because a cold forward spawn
+        /// can hold `forwardsLock` for seconds off the main actor — a contended read returns empty
+        /// and the post-reconcile display refresh repaints once the forward is up.
+        func forwardedServicePorts(deviceID: String, workspaceID: String) -> [ServiceForwardSnapshot] {
+            guard forwardsLock.try() else { return [] }
+            defer { forwardsLock.unlock() }
+            guard let forward = workspaceForwards[WorkspaceKey(deviceID: deviceID, workspaceID: workspaceID)], forward.process.isRunning else {
+                return []
+            }
+            return forward.services.values.map {
+                ServiceForwardSnapshot(serviceName: $0.descriptor.serviceName, remotePort: $0.descriptor.remotePort, localPort: $0.localPort)
             }
         }
 
@@ -170,7 +244,8 @@ import workspacecore
         }
 
         private func ensureWorkspaceForward(
-            workspace: SpacesDeviceWorkspaceSummary, device: SpacesPairedDeviceRecord, timeout: TimeInterval, revision: Int?
+            workspace: SpacesDeviceWorkspaceSummary, device: SpacesPairedDeviceRecord, timeout: TimeInterval, revision: Int?,
+            timings: inout ForwardTimings
         ) throws -> WorkspaceForward {
             let key = WorkspaceKey(deviceID: device.id, workspaceID: workspace.id)
             let descriptors = Self.serviceDescriptors(assignedPorts: workspace.assignedPorts)
@@ -184,13 +259,17 @@ import workspacecore
                 if let revision, deviceRevisions[device.id] != revision { throw CancellationError() }
                 if let existing = workspaceForwards[key], existing.matches(descriptors) {
                     forward = existing
+                    timings.reusedForward = true
                 } else {
                     if let stale = workspaceForwards.removeValue(forKey: key) { if stale.process.isRunning { stale.process.terminate() } }
                     try removeRemoteBrowserCaddyRoutes(deviceID: key.deviceID, workspaceID: key.workspaceID)
-                    forward = try startWorkspaceForwardLocked(descriptors: descriptors, key: key, device: device, timeout: timeout)
+                    forward = try startWorkspaceForwardLocked(
+                        descriptors: descriptors, key: key, device: device, timeout: timeout, timings: &timings)
                     workspaceForwards[key] = forward
                 }
-                try publishCaddyRoutes(forward: forward)
+                let publishStartedAt = Date()
+                timings.publishSkipped = try !publishCaddyRoutes(forward: forward)
+                timings.publishMS = TerminalPerformance.elapsedMS(since: publishStartedAt)
                 forwardsLock.unlock()
             } catch {
                 forwardsLock.unlock()
@@ -217,7 +296,8 @@ import workspacecore
         }
 
         private func startWorkspaceForwardLocked(
-            descriptors: [ServiceDescriptor], key: WorkspaceKey, device: SpacesPairedDeviceRecord, timeout: TimeInterval
+            descriptors: [ServiceDescriptor], key: WorkspaceKey, device: SpacesPairedDeviceRecord, timeout: TimeInterval,
+            timings: inout ForwardTimings
         ) throws -> WorkspaceForward {
             var usedLocalPorts = Set<Int>()
             var services: [ServiceDescriptor: ServiceForward] = [:]
@@ -233,6 +313,7 @@ import workspacecore
                 guard let service = services[descriptor] else { return nil }
                 return SSHForwardBinding(localPort: service.localPort, remotePort: descriptor.remotePort)
             }
+            let spawnStartedAt = Date()
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             process.arguments = try Self.sshArguments(device: device, bindings: bindings)
@@ -240,27 +321,49 @@ import workspacecore
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             try process.run()
+            timings.sshSpawnMS = TerminalPerformance.elapsedMS(since: spawnStartedAt)
 
+            let portWaitStartedAt = Date()
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
                 if !process.isRunning { break }
                 if services.values.allSatisfy({ Self.canConnect(port: $0.localPort) }) {
+                    timings.portWaitMS = TerminalPerformance.elapsedMS(since: portWaitStartedAt)
                     return WorkspaceForward(process: process, services: services)
                 }
-                Thread.sleep(forTimeInterval: 0.05)
+                Thread.sleep(forTimeInterval: 0.01)
             }
+            timings.portWaitMS = TerminalPerformance.elapsedMS(since: portWaitStartedAt)
             if process.isRunning { process.terminate() }
             throw WorkspaceError.invalidArgument(message: "Timed out opening SSH browser forward for \(device.name).")
         }
 
-        private func publishCaddyRoutes(forward: WorkspaceForward) throws {
+        /// Publishes the forward's routes to the client-owned registry and notifies the daemon,
+        /// returning true when a notification was posted. The daemon is only kicked when the
+        /// registry actually changed or the live router config does not carry the routes yet
+        /// (e.g. the daemon restarted after an earlier publish); a warm re-open of an
+        /// already-routed forward skips both the registry write and the daemon's Caddy reload.
+        private func publishCaddyRoutes(forward: WorkspaceForward) throws -> Bool {
             let registryPath = try CaddyService.routeRegistryPath()
             let entries = forward.services.values.sorted { lhs, rhs in
                 if lhs.descriptor.serviceName != rhs.descriptor.serviceName { return lhs.descriptor.serviceName < rhs.descriptor.serviceName }
                 return lhs.descriptor.remotePort < rhs.descriptor.remotePort
             }.map { CaddyRouteRegistryEntry(key: $0.registryKey, route: $0.caddyRoute) }
-            try CaddyRouteRegistry.replace(path: registryPath, removingKeys: [], upserting: entries)
+            let registryChanged = try CaddyRouteRegistry.replace(path: registryPath, removingKeys: [], upserting: entries)
+            guard registryChanged || !configContainsRoutes(forward.caddyRoutes) else { return false }
             try IPCNotification.post(IPCNotification.caddyRouteRegistryDidChange)
+            return true
+        }
+
+        private func configContainsRoutes(_ routes: [CaddyRoute]) -> Bool {
+            guard let configPath = try? CaddyService.configFilePath(), let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+                let config = String(data: data, encoding: .utf8)
+            else { return false }
+            return Self.configContains(config, routeMatches: routes.map { (host: $0.host, upstream: $0.upstream) })
+        }
+
+        private static func configContains(_ config: String, routeMatches: [(host: String, upstream: String)]) -> Bool {
+            routeMatches.allSatisfy { config.contains("\"\($0.host)\"") && config.contains("\"\($0.upstream)\"") }
         }
 
         private func removeRemoteBrowserCaddyRoutes(deviceID: String? = nil, workspaceID: String? = nil, keepingWorkspaceIDs: Set<String> = []) throws
@@ -315,11 +418,11 @@ import workspacecore
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
                 if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)), let config = String(data: data, encoding: .utf8),
-                    routeMatches.allSatisfy({ config.contains("\"\($0.host)\"") && config.contains("\"\($0.upstream)\"") })
+                    Self.configContains(config, routeMatches: routeMatches)
                 {
                     return data
                 }
-                Thread.sleep(forTimeInterval: 0.05)
+                Thread.sleep(forTimeInterval: 0.01)
             }
             throw WorkspaceError.invalidArgument(message: timeoutMessage)
         }
