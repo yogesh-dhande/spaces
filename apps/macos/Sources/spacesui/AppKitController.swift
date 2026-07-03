@@ -372,6 +372,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         launchProfile = launchContext.profile
         appOwnerLease = launchContext.appOwnerLease
         ipcNotificationObject = launchContext.profile.ipcNotificationObject
+        // Bind the active theme before any Theme token or embedded terminal is touched;
+        // an unset or unknown stored id resolves to the default theme.
+        if let storedThemeID = (try? SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appThemeID)) ?? nil {
+            ActiveTheme.id = ThemeID(rawValue: storedThemeID)
+        }
         switch launchContext.desktopControlState {
         case .active(let lease):
             desktopControlLease = lease
