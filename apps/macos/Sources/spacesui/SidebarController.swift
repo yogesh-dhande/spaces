@@ -1149,10 +1149,23 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.translatesAutoresizingMaskIntoConstraints = false
 
         // The ⌘-number chip leads the row (left of the kind icon), matching the
-        // command palette's chip-icon-title ordering.
+        // command palette's chip-icon-title ordering. Every row carries the fixed-width
+        // slot — chips render only on the selected workspace's rows, and reserving the
+        // space keeps target rows vertically aligned across workspaces either way.
+        let chipSlot = NSView()
+        chipSlot.translatesAutoresizingMaskIntoConstraints = false
+        chipSlot.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        chipSlot.setContentHuggingPriority(.required, for: .horizontal)
         if host.selectedWorkspaceID == workspace.id, let index = item.shortcutIndex {
-            row.addArrangedSubview(RowPrimitives.shortcutChip(host.windowShortcutBadgeText(index: index)))
+            let chip = RowPrimitives.shortcutChip(host.windowShortcutBadgeText(index: index))
+            chipSlot.addSubview(chip)
+            NSLayoutConstraint.activate([
+                chip.leadingAnchor.constraint(equalTo: chipSlot.leadingAnchor),
+                chip.trailingAnchor.constraint(lessThanOrEqualTo: chipSlot.trailingAnchor),
+                chip.topAnchor.constraint(equalTo: chipSlot.topAnchor), chip.bottomAnchor.constraint(equalTo: chipSlot.bottomAnchor),
+            ])
         }
+        row.addArrangedSubview(chipSlot)
 
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?.withSymbolConfiguration(
@@ -1607,7 +1620,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(iconView)
         stack.addArrangedSubview(appNameLabel)

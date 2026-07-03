@@ -3067,10 +3067,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Creates and shows the NSWindow shell (size, title, center, delegate, makeKeyAndOrderFront) without setting content.
     private func buildShellWindow() {
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
-        window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Spaces"
-        // No visible titlebar: content (the sidebar top bar and the panel's tab strip)
-        // reaches the window top, with the app name shown next to the sidebar logo.
+        // A hidden, transparent titlebar that content does NOT extend under (same
+        // shell as panel windows): the strip above the content shows the window
+        // background and hosts the traffic lights and window dragging. Content must
+        // stay out of the titlebar region — NSTitlebarContainerView intercepts
+        // mouse events there, which leaves chrome like the tab strip unclickable.
         window.titleVisibility = .hidden
         window.setAccessibilityIdentifier("spaces-main-window")
         window.backgroundColor = sidebarPanelBackgroundColor()
@@ -3167,8 +3170,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         alertsRow.translatesAutoresizingMaskIntoConstraints = false
 
         // The app identity row (logo, name, devices/settings/reload) is the sidebar's
-        // footer; the content above starts below the traffic lights (the titlebar is
-        // hidden with a full-size content view).
+        // footer; the Alerts row leads the content, which starts just below the
+        // titlebar strip.
         let footerSeparator = NSBox()
         footerSeparator.boxType = .separator
         footerSeparator.translatesAutoresizingMaskIntoConstraints = false
@@ -3182,7 +3185,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         NSLayoutConstraint.activate([
             alertsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-            alertsRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 34),
+            alertsRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
 
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
@@ -3198,6 +3201,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             topBarRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             topBarRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             topBarRow.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
+            // Same strip height as the right panel's footer so the two separators
+            // meet in one line across the window.
+            topBarRow.heightAnchor.constraint(equalToConstant: 26),
         ])
 
         return container
@@ -4819,8 +4825,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         let deviceWorkspace = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspaceSummary)
         let setupState = Self.localSetupState(from: deviceWorkspace.setupState)
-        prepareWorkspaceDetailContainer(workspaceID: workspace.id)
         if !Self.shouldRequestNormalWorkspaceDetailRefresh(setupStatus: setupState.status) {
+            prepareWorkspaceDetailContainer(workspaceID: workspace.id)
             showWorkspaceSetupDetail(project: project, workspace: workspace, setupState: setupState, logTail: deviceWorkspace.setupState?.logTail)
             return
         }
@@ -4828,11 +4834,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         // The right panel is the workspace's panel (tabs of terminal panes) and
         // nothing else; workspace identity and actions live in the footer strip below.
-        // The panel view instance is stable per workspace, so overview ticks re-parent
-        // it without recreating hosted terminal surfaces.
         let scope = PanelScope.workspace(deviceID: workspaceDeviceID, workspaceID: workspace.id)
         panelCoordinator.restoreLayoutIfNeeded(scope: scope)
         let panelView = panelCoordinator.panelView(for: scope)
+        // Overview ticks land here every few seconds. When this workspace's panel is
+        // already the visible detail, tearing it down and re-adding it would dismiss
+        // transient chrome hanging off it (the tab rename popover) and churn layout —
+        // only the footer's status needs refreshing.
+        if panelView.superview === detailContainer, visibleDetailWorkspaceID == workspace.id {
+            populateWorkspaceDetailFooter(workspace: workspace)
+            return
+        }
+        prepareWorkspaceDetailContainer(workspaceID: workspace.id)
         panelView.removeFromSuperview()
         detailContainer.addSubview(panelView)
         NSLayoutConstraint.activate([
