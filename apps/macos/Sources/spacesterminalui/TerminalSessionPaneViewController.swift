@@ -620,10 +620,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
     static func applyBrandPrimaryStyle(to button: NSButton, title: String) {
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.backgroundColor = CGColor(srgbRed: 61 / 255, green: 198 / 255, blue: 184 / 255, alpha: 1)
+        // Same fill/ink in both appearances (see the theme's primary-button tokens).
+        button.layer?.backgroundColor = NSColor(themeColor: ActiveTheme.descriptor.dark.primaryButtonFill).cgColor
         button.layer?.cornerRadius = 6
         button.layer?.masksToBounds = true
-        let ink = NSColor(srgbRed: 15 / 255, green: 21 / 255, blue: 23 / 255, alpha: 1)
+        let ink = NSColor(themeColor: ActiveTheme.descriptor.dark.primaryButtonText)
         button.contentTintColor = ink
         button.attributedTitle = NSAttributedString(
             string: title, attributes: [.foregroundColor: ink, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])

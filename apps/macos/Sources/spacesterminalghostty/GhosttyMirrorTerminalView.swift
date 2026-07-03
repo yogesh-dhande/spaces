@@ -102,7 +102,7 @@
             self.launchConfiguration = launchConfiguration
             super.init(frame: .zero)
             wantsLayer = true
-            layer?.backgroundColor = NSColor.black.cgColor
+            layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor
             installSurfaceHostView()
             installSearchOverlay()
         }

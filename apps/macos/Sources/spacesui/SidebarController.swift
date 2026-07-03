@@ -1399,7 +1399,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let source = isDark ? dark : light
-            return NSColor(calibratedRed: CGFloat(source.0) / 255, green: CGFloat(source.1) / 255, blue: CGFloat(source.2) / 255, alpha: alpha)
+            // sRGB, not calibrated/generic RGB: the design values are CSS (sRGB) numbers, and
+            // every other surface — Theme tokens and the Ghostty terminal background — renders
+            // them as sRGB. Calibrated RGB rendered the same numbers a shade lighter, which made
+            // the sidebar visibly mismatch the terminal background.
+            return NSColor(srgbRed: CGFloat(source.0) / 255, green: CGFloat(source.1) / 255, blue: CGFloat(source.2) / 255, alpha: alpha)
         }
     }
 

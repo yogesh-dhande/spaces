@@ -70,8 +70,8 @@ extension TerminalSessionPaneViewController {
         outputView.isGrammarCheckingEnabled = false
         outputView.isAutomaticTextCompletionEnabled = false
         outputView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        outputView.backgroundColor = .textBackgroundColor
-        outputView.textColor = .textColor
+        outputView.backgroundColor = .activeTheme(\.terminal.background)
+        outputView.textColor = .activeTheme(\.terminal.foreground)
         outputView.drawsBackground = true
         outputView.isHorizontallyResizable = true
         outputView.isVerticallyResizable = true
@@ -150,7 +150,7 @@ extension TerminalSessionPaneViewController {
 
         terminalContainer.translatesAutoresizingMaskIntoConstraints = false
         terminalContainer.wantsLayer = true
-        terminalContainer.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        terminalContainer.layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor
         terminalContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
         bodyStackView.translatesAutoresizingMaskIntoConstraints = false

@@ -37,4 +37,7 @@ public enum SettingsKey {
     public static let defaultGUIWindowShortcut = "cmd+1"
     public static let alertsDismissedAttentionItems = "alerts_dismissed_attention_items"
     public static let activeWorkspaceID = "active_workspace_id"
+    /// Client-side theme selection (a `ThemeID` raw value). Internal-only: persisted and
+    /// honored at launch, but not exposed through any settings UI or CLI yet.
+    public static let appThemeID = "app_theme_id"
 }
