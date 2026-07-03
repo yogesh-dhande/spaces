@@ -90,6 +90,34 @@ final class CaddyConfigBuilderTests: XCTestCase {
         XCTAssertEqual(try CaddyRouteRegistry.routes(path: path), [CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:41002")])
     }
 
+    func testRouteRegistryReplaceReportsChangeAndSkipsIdenticalRewrite() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
+        let path = root.appendingPathComponent("routes.json").path
+        let entries = [
+            CaddyRouteRegistryEntry(key: "remote:workspace:web", route: CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:31001")),
+            CaddyRouteRegistryEntry(key: "remote:workspace:api", route: CaddyRoute(host: "api.remote.localhost", upstream: "127.0.0.1:31002")),
+        ]
+
+        XCTAssertTrue(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: entries))
+        let written = try Data(contentsOf: URL(fileURLWithPath: path))
+
+        // Re-publishing the same forward must not rewrite the file (callers use the change signal
+        // to skip notifying the daemon, so a warm re-open triggers no Caddy reload).
+        XCTAssertFalse(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: entries))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), written)
+
+        let updated = [
+            CaddyRouteRegistryEntry(key: "remote:workspace:web", route: CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:31009"))
+        ]
+        XCTAssertTrue(try CaddyRouteRegistry.replace(path: path, removingKeys: [], upserting: updated))
+        XCTAssertEqual(
+            try CaddyRouteRegistry.routes(path: path),
+            [
+                CaddyRoute(host: "api.remote.localhost", upstream: "127.0.0.1:31002"),
+                CaddyRoute(host: "web.remote.localhost", upstream: "127.0.0.1:31009"),
+            ])
+    }
+
     func testRouteRegistryRemovesEntriesByKey() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-registry-\(UUID().uuidString)", isDirectory: true)
         let path = root.appendingPathComponent("routes.json").path

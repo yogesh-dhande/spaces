@@ -5,37 +5,48 @@ import workspacecore
 @testable import spacesui
 
 @MainActor @Suite struct PortsSectionTests {
-    @Test func collapsedPortRowShowsReservedPortValue() {
-        let row = PortRowView(port: ServiceDefinition(name: "api"), reservedPort: 3000)
+    @Test func collapsedPortRowShowsPortTextInMonospace() {
+        let row = PortRowView(port: ServiceDefinition(name: "api"), portText: "3000")
 
         #expect(row.collapsedPrimaryTextForTesting == "api")
         #expect(row.collapsedPrimaryTextIsSelectableForTesting)
-        #expect(row.collapsedDetailTextForTesting == "3000")
+        #expect(row.collapsedPortTextForTesting == "3000")
+        #expect(row.collapsedDetailTextForTesting.isEmpty)
     }
 
-    @Test func sectionUsesConfiguredPortDisplayValuesByIndex() {
-        let section = PortsSection(ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")], collapsedDisplayPorts: [3000, 3001])
+    @Test func collapsedPortRowShowsRemoteLocalPortPairNextToServiceURL() {
+        let row = PortRowView(port: ServiceDefinition(name: "web"), portText: "3000:52341", displayURL: "http://web.demo.localhost:7391")
 
-        #expect(section.rowCount == 2)
-        #expect(section.row(at: 0)?.collapsedDetailTextForTesting == "3000")
-        #expect(section.row(at: 1)?.collapsedDetailTextForTesting == "3001")
-    }
-
-    @Test func collapsedServiceRowPrefersServiceURLOverPort() {
-        let row = PortRowView(port: ServiceDefinition(name: "web"), reservedPort: 21001, displayURL: "http://web.demo.localhost:7391")
-
-        #expect(row.collapsedPrimaryTextForTesting == "web")
+        #expect(row.collapsedPortTextForTesting == "3000:52341")
         #expect(row.collapsedDetailTextForTesting == "http://web.demo.localhost:7391")
     }
 
-    @Test func sectionPassesServiceURLsByIndex() {
-        let section = PortsSection(
-            ports: [ServiceDefinition(name: "web"), ServiceDefinition(name: "backend")], collapsedDisplayPorts: [21001, 21002],
-            collapsedDisplayURLs: ["http://web.demo.localhost:7391", nil])
+    @Test func collapsedPortRowHidesPortLabelWithoutPortText() {
+        let row = PortRowView(port: ServiceDefinition(name: "web"))
 
-        #expect(section.row(at: 0)?.collapsedDetailTextForTesting == "http://web.demo.localhost:7391")
-        // Falls back to the bare port when no URL is provided for that index.
-        #expect(section.row(at: 1)?.collapsedDetailTextForTesting == "21002")
+        #expect(row.collapsedPortTextForTesting.isEmpty)
+    }
+
+    @Test func sectionUsesConfiguredPortDisplayValuesByIndex() {
+        let section = PortsSection(
+            ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")], collapsedDisplayPortTexts: ["3000", "3001:52341"],
+            collapsedDisplayURLs: [nil, "http://web.demo.localhost:7391"])
+
+        #expect(section.rowCount == 2)
+        #expect(section.row(at: 0)?.collapsedPortTextForTesting == "3000")
+        #expect(section.row(at: 1)?.collapsedPortTextForTesting == "3001:52341")
+        #expect(section.row(at: 1)?.collapsedDetailTextForTesting == "http://web.demo.localhost:7391")
+    }
+
+    @Test func reloadSwapsPortTextsWithoutDroppingOpenEditorDraft() {
+        let section = PortsSection(ports: [ServiceDefinition(name: "web")], collapsedDisplayPortTexts: ["3000"])
+        section.row(at: 0)?.onBeginEdit?()
+        #expect(section.isEditing(at: 0))
+
+        section.reload(ports: section.currentPorts, collapsedDisplayPortTexts: ["3000:52341"])
+
+        #expect(section.isEditing(at: 0))
+        #expect(section.row(at: 0)?.collapsedPortTextForTesting == "3000:52341")
     }
 
     @Test func replaceClearsDraftStateBeforeLoadingImportedPorts() {

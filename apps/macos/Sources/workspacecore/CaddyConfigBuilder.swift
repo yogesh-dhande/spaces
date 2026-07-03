@@ -60,8 +60,12 @@ public enum CaddyRouteRegistry {
 
     public static func upsert(path: String, entry: CaddyRouteRegistryEntry) throws { try replace(path: path, removingKeys: [], upserting: [entry]) }
 
-    public static func replace(path: String, removingKeys: Set<String>, upserting newEntries: [CaddyRouteRegistryEntry]) throws {
-        guard !removingKeys.isEmpty || !newEntries.isEmpty else { return }
+    /// Returns true when the stored entries changed and the file was rewritten; an identical
+    /// result leaves the file untouched so callers can skip notifying the daemon.
+    @discardableResult public static func replace(path: String, removingKeys: Set<String>, upserting newEntries: [CaddyRouteRegistryEntry]) throws
+        -> Bool
+    {
+        guard !removingKeys.isEmpty || !newEntries.isEmpty else { return false }
         mutationLock.lock()
         defer { mutationLock.unlock() }
         // Evict any prior entry for the same registry key *and* any prior entry that routes the same
@@ -69,12 +73,15 @@ public enum CaddyRouteRegistry {
         // embeds the daemon-local remote port, so a re-forwarded service whose port changed would
         // otherwise leave a stale entry under the old key. Dropping it keeps one registry entry per
         // host with the newest upstream winning.
-        var entries = try loadEntries(path: path).filter { !removingKeys.contains($0.key) }
+        let loaded = try loadEntries(path: path)
+        var entries = loaded.filter { !removingKeys.contains($0.key) }
         for entry in newEntries {
             entries.removeAll { $0.key == entry.key || $0.route.host == entry.route.host }
             entries.append(entry)
         }
+        guard entries != loaded else { return false }
         try write(entries, path: path)
+        return true
     }
 
     public static func remove(path: String, keys: Set<String>) throws { try replace(path: path, removingKeys: keys, upserting: []) }
