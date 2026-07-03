@@ -3604,9 +3604,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func updateDeviceWorkspaceConfig(workspaceID: String, update: (inout WorkspaceSettings) -> Void) throws {
-        guard let device = deviceForDaemonStateMutation() else { throw Self.deviceNotLoadedError() }
+        // Route to the daemon that owns this workspace, not the current sidebar
+        // selection: free-standing surfaces (the workspace settings dialog) can outlive
+        // a selection change, and misrouting would hit the wrong daemon or fail to find
+        // the workspace.
+        guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else { throw Self.deviceNotLoadedError() }
         guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else {
-            throw WorkspaceError.invalidArgument(message: "Workspace not found on the selected device.")
+            throw WorkspaceError.invalidArgument(message: "Workspace not found.")
         }
         var settings = Self.localWorkspaceSettings(from: workspace.config)
         update(&settings)
@@ -4868,6 +4872,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // only the footer's status needs refreshing.
         if panelView.superview === detailContainer, visibleDetailWorkspaceID == workspace.id {
             populateWorkspaceDetailFooter(workspace: workspace)
+            // The tab strip titles derive from runtime-target names, which an overview
+            // tick can rename without touching the layout; refresh them in place since
+            // this fast path skips the panel re-render.
+            panelCoordinator.refreshTabTitles(scope: scope)
             return
         }
         prepareWorkspaceDetailContainer(workspaceID: workspace.id)

@@ -47,8 +47,11 @@ extension AppKitController {
         // --- Config sections, committing immediately like the sections always have for workspaces ---
         let workspaceID = workspace.id
         func commit(_ update: @escaping (inout WorkspaceSettings) -> Void) {
+            // Route by this dialog's workspace, not the sidebar selection: the dialog is
+            // free-standing, so the selection may have moved to another device or
+            // workspace by the time an auto-save fires.
             do {
-                if deviceForDaemonStateMutation() != nil {
+                if deviceForWorkspaceMutation(workspaceID: workspaceID) != nil {
                     try updateDeviceWorkspaceConfig(workspaceID: workspaceID, update: update)
                 } else {
                     showDeviceNotLoadedError()

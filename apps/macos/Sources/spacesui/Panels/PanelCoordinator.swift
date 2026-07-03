@@ -125,6 +125,11 @@ import spacesdevicecore
     /// numbered shortcuts, and cycling: focus the session's existing pane wherever it
     /// lives, else open it as a new tab in its workspace's panel.
     @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
+        // Adopt the workspace's persisted layout first: on a fresh launch a session
+        // opened before its panel was ever shown (command palette, focus IPC) is not
+        // yet in an in-memory panel, so without this the placement search misses it and
+        // openSessionInNewTab would overwrite the saved tabs/splits with a one-tab layout.
+        restoreLayoutIfNeeded(scope: workspaceScope(forWorkspaceID: request.workspaceID))
         if let placement = placement(forSessionID: request.sessionID) {
             focus(placement: placement)
             return true
@@ -395,8 +400,11 @@ import spacesdevicecore
 
     private func fillSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection, request: AppKitController.DeviceTerminalOpenRequest) {
         // A session already open elsewhere moves into the new split rather than
-        // duplicating (one pane per session).
+        // duplicating (one pane per session). Picking the source pane's own session is a
+        // no-op: removing it first would leave splitPane with no paneID to split,
+        // orphaning the session's pane and its content controller.
         if let existing = placement(forSessionID: request.sessionID) {
+            guard existing.paneID != paneID else { return }
             mutateLayout(scope: existing.scope) { PanelLayoutEngine.removePane(paneID: existing.paneID, from: $0) }
         }
         guard let content = ensureContentController(request: request) else { return }
@@ -442,6 +450,17 @@ import spacesdevicecore
         }
         contentControllers[request.sessionID] = content
         return content
+    }
+
+    /// Recomputes every tab's title for a visible panel in place (the lightweight
+    /// per-tab path, which preserves an in-progress rename editor). The workspace-detail
+    /// fast path calls this on overview ticks: those can rename runtime targets without
+    /// mutating the layout, so nothing else would re-derive the tab strip titles.
+    func refreshTabTitles(scope: PanelScope) {
+        guard let state = panels[scope], let view = state.view else { return }
+        for tab in state.layout.tabs { view.updateTabTitle(tabTitle(forTabID: tab.id, in: state.layout), forTabID: tab.id) }
+        syncPanelWindowTitle(scope: scope)
+        syncFocusedPaneFooter(scope: scope)
     }
 
     private func refreshTabTitles(forSessionID sessionID: String?) {
