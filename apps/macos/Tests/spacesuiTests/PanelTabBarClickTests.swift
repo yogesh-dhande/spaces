@@ -70,6 +70,28 @@ import Testing
         #expect(closed == "t2")
     }
 
+    /// In the main window the tab strip sits inside the hidden titlebar region, where
+    /// a view that acts as a window-drag area never receives mouseDown — the click
+    /// moves the window instead of selecting the tab.
+    @Test func tabItemsAreNotWindowDragAreas() throws {
+        let (bar, _) = makeBarInWindow()
+        let item = try #require(tabItemView(withID: "t2", in: bar))
+        #expect(!item.mouseDownCanMoveWindow)
+    }
+
+    /// Re-rendering with unchanged state must not recreate the tab item views —
+    /// rebuild churn tears down transient chrome like the rename popover's anchor.
+    @Test func unchangedUpdateKeepsTabItemViews() throws {
+        let (bar, _) = makeBarInWindow()
+        let itemBefore = try #require(tabItemView(withID: "t2", in: bar))
+        bar.update(tabIDs: ["t1", "t2"], titlesByTabID: ["t1": "one", "t2": "two"], selectedTabID: "t1")
+        let itemAfter = try #require(tabItemView(withID: "t2", in: bar))
+        #expect(itemBefore === itemAfter)
+        bar.update(tabIDs: ["t1", "t2"], titlesByTabID: ["t1": "one", "t2": "two"], selectedTabID: "t2")
+        let itemAfterSelectionChange = try #require(tabItemView(withID: "t2", in: bar))
+        #expect(itemBefore !== itemAfterSelectionChange)
+    }
+
     /// The rename menu must come from whatever view hit-testing resolves for a
     /// right-click over the title text (the label must not claim the event).
     @Test func rightClickOverTitleOffersRenameMenu() throws {

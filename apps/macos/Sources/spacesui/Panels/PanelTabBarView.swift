@@ -6,7 +6,7 @@ import systembridge
 /// on the right. Splits act on the selected tab's focused pane, so panes carry no
 /// header of their own until a tab actually holds more than one. Custom chrome instead
 /// of NSTabView so tabs stay compact and the strip can later host drag-out.
-@MainActor final class PanelTabBarView: NSView {
+@MainActor final class PanelTabBarView: NSView, NSPopoverDelegate {
     var onSelectTab: ((String) -> Void)?
     var onCloseTab: ((String) -> Void)?
     var onNewTab: (() -> Void)?
@@ -22,6 +22,8 @@ import systembridge
     private var selectedTabID: String?
     private var tabIDs: [String] = []
     private var renamePopover: NSPopover?
+    /// A rebuild requested while the rename popover was open, replayed on close.
+    private var rebuildDeferredForRename = false
 
     init() {
         super.init(frame: .zero)
@@ -82,6 +84,9 @@ import systembridge
     }
 
     func update(tabIDs: [String], titlesByTabID: [String: String], selectedTabID: String?) {
+        // Renders arrive on every layout pass (including overview ticks that changed
+        // nothing); only a real change rebuilds the strip.
+        guard tabIDs != self.tabIDs || titlesByTabID != self.titlesByTabID || selectedTabID != self.selectedTabID else { return }
         self.tabIDs = tabIDs
         self.titlesByTabID = titlesByTabID
         self.selectedTabID = selectedTabID
@@ -95,6 +100,12 @@ import systembridge
     }
 
     private func rebuildTabs() {
+        // Rebuilding while the rename editor is up would remove its anchor tab and
+        // dismiss the popover mid-edit; apply the pending state when it closes.
+        if renamePopover?.isShown == true {
+            rebuildDeferredForRename = true
+            return
+        }
         for view in tabsStack.arrangedSubviews {
             tabsStack.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -137,6 +148,7 @@ import systembridge
         let popover = NSPopover()
         popover.contentViewController = content
         popover.behavior = .transient
+        popover.delegate = self
         renamePopover = popover
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
         field.window?.makeFirstResponder(field)
@@ -147,6 +159,14 @@ import systembridge
         renamePopover?.close()
         renamePopover = nil
         onRenameTab?(tabID, sender.stringValue)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        renamePopover = nil
+        if rebuildDeferredForRename {
+            rebuildDeferredForRename = false
+            rebuildTabs()
+        }
     }
 
     @objc private func newTabClicked() { onNewTab?() }
@@ -225,6 +245,12 @@ import systembridge
         guard let hit = super.hitTest(point) else { return nil }
         return hit is NSButton ? hit : self
     }
+
+    /// The main window's tab strip sits inside the (hidden) titlebar region, where a
+    /// non-opaque view defaults to acting as a window-drag area — clicks would move
+    /// the window instead of reaching `mouseDown`. The strip's empty trailing space
+    /// stays draggable; the tabs themselves must not be.
+    override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) { onSelect(tabID) }
 
