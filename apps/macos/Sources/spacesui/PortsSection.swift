@@ -57,7 +57,8 @@ import workspacecore
     // MARK: Public API
 
     func reload(ports: [ServiceDefinition], collapsedDisplayPortTexts: [String?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
-        update(ports: ports, collapsedDisplayPortTexts: collapsedDisplayPortTexts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: true)
+        update(
+            ports: ports, collapsedDisplayPortTexts: collapsedDisplayPortTexts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: true)
     }
 
     func replace(ports: [ServiceDefinition], collapsedDisplayPortTexts: [String?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
@@ -66,7 +67,8 @@ import workspacecore
             ports: ports, collapsedDisplayPortTexts: collapsedDisplayPortTexts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: false)
     }
 
-    private func update(ports: [ServiceDefinition], collapsedDisplayPortTexts: [String?]?, collapsedDisplayURLs: [String?]?, preservingEditing: Bool) {
+    private func update(ports: [ServiceDefinition], collapsedDisplayPortTexts: [String?]?, collapsedDisplayURLs: [String?]?, preservingEditing: Bool)
+    {
         self.ports = ports
         if let collapsedDisplayPortTexts { self.collapsedDisplayPortTexts = collapsedDisplayPortTexts }
         if let collapsedDisplayURLs { self.collapsedDisplayURLs = collapsedDisplayURLs }

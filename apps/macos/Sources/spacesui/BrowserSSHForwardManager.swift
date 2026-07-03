@@ -122,8 +122,7 @@ import workspacecore
                     try waitForCaddyConfig(routeHost: service.descriptor.routeHost, upstream: service.upstream, timeout: timeout)
                 }
                 let localRouterPort = try Self.routerPort(configJSON: configJSON)
-                guard let routedPlan = Self.routePlan(
-                    targetURL: targetURL, assignedPorts: workspace.assignedPorts, localRouterPort: localRouterPort)
+                guard let routedPlan = Self.routePlan(targetURL: targetURL, assignedPorts: workspace.assignedPorts, localRouterPort: localRouterPort)
                 else { throw WorkspaceError.invalidArgument(message: "Browser session URL no longer matches a workspace service.") }
                 logRouteMetric(plan: plan, startedAt: startedAt, success: true, timings: timings)
                 return routedPlan.browserURL
@@ -166,8 +165,8 @@ import workspacecore
             workspace: SpacesDeviceWorkspaceSummary, device: SpacesPairedDeviceRecord, startedAt: Date, success: Bool, timings: ForwardTimings
         ) {
             TerminalPerformance.logWorkspaceMetric(
-                "browser_forward_reconcile", workspaceID: workspace.id, target: device.id,
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: success, detail: timings.detail)
+                "browser_forward_reconcile", workspaceID: workspace.id, target: device.id, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                success: success, detail: timings.detail)
         }
 
         /// Snapshot of the live local forwards for one workspace, for display only: it checks
@@ -261,8 +260,7 @@ import workspacecore
                 } else {
                     if let stale = workspaceForwards.removeValue(forKey: key) { if stale.process.isRunning { stale.process.terminate() } }
                     try removeRemoteBrowserCaddyRoutes(deviceID: key.deviceID, workspaceID: key.workspaceID)
-                    forward = try startWorkspaceForwardLocked(
-                        descriptors: descriptors, key: key, device: device, timeout: timeout, timings: &timings)
+                    forward = try startWorkspaceForwardLocked(descriptors: descriptors, key: key, device: device, timeout: timeout, timings: &timings)
                     workspaceForwards[key] = forward
                 }
                 let publishStartedAt = Date()

@@ -15,10 +15,10 @@ import workspacecore
     }
 
     @Test func collapsedPortRowShowsRemoteLocalPortPairNextToServiceURL() {
-        let row = PortRowView(port: ServiceDefinition(name: "web"), portText: "3000:52341", displayURL: "http://web.demo.localhost:8088")
+        let row = PortRowView(port: ServiceDefinition(name: "web"), portText: "3000:52341", displayURL: "http://web.demo.localhost:7391")
 
         #expect(row.collapsedPortTextForTesting == "3000:52341")
-        #expect(row.collapsedDetailTextForTesting == "http://web.demo.localhost:8088")
+        #expect(row.collapsedDetailTextForTesting == "http://web.demo.localhost:7391")
     }
 
     @Test func collapsedPortRowHidesPortLabelWithoutPortText() {
@@ -30,12 +30,12 @@ import workspacecore
     @Test func sectionUsesConfiguredPortDisplayValuesByIndex() {
         let section = PortsSection(
             ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "web")], collapsedDisplayPortTexts: ["3000", "3001:52341"],
-            collapsedDisplayURLs: [nil, "http://web.demo.localhost:8088"])
+            collapsedDisplayURLs: [nil, "http://web.demo.localhost:7391"])
 
         #expect(section.rowCount == 2)
         #expect(section.row(at: 0)?.collapsedPortTextForTesting == "3000")
         #expect(section.row(at: 1)?.collapsedPortTextForTesting == "3001:52341")
-        #expect(section.row(at: 1)?.collapsedDetailTextForTesting == "http://web.demo.localhost:8088")
+        #expect(section.row(at: 1)?.collapsedDetailTextForTesting == "http://web.demo.localhost:7391")
     }
 
     @Test func reloadSwapsPortTextsWithoutDroppingOpenEditorDraft() {

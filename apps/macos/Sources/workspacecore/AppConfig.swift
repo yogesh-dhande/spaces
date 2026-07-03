@@ -2,7 +2,7 @@ import Foundation
 
 public struct AppConfig: Sendable {
     /// Shared high port the Caddy router listens on; service URLs are `http://<svc>.<slug>.localhost:<routerPort>`.
-    public static let defaultRouterPort = 8088
+    public static let defaultRouterPort = 7391
 
     public var editor: EditorPreference?
     public var portRange: PortRange

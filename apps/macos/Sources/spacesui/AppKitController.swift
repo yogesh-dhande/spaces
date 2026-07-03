@@ -1347,8 +1347,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 let created = TerminalSessionWindowController(
                     sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: mode, performInitialRefresh: false,
-                    sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
-                    attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                    sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction,
+                    takeoverAction: takeoverAction, attachClientAction: attachClientAction, detachClientAction: detachClientAction,
+                    detachClientSynchronouslyOnClose: false,
                     onWindowFocus: { [weak self] sessionID in self?.lastFocusedBuiltInTerminalSessionID = sessionID },
                     onWindowClose: { [weak self] sessionID, clientID, sessionIsTerminating in
                         if self?.lastFocusedBuiltInTerminalSessionID == sessionID { self?.lastFocusedBuiltInTerminalSessionID = nil }
@@ -6023,8 +6024,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let section = PortsSection(
             ports: config.ports,
             collapsedDisplayPortTexts: Self.servicePortDisplayTexts(
-                assignedPorts: assignedPorts, forwards: workspaceServiceForwards(workspaceID: workspace.id)),
-            collapsedDisplayURLs: serviceURLs)
+                assignedPorts: assignedPorts, forwards: workspaceServiceForwards(workspaceID: workspace.id)), collapsedDisplayURLs: serviceURLs)
         section.onCommit = { [weak self] updated in
             guard let self else { return }
             do {
@@ -9293,9 +9293,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
         if !result.focused { NSWorkspace.shared.open(fallbackURL) }
         logPerfMetric(
-            "browser_focus", target: URL(string: targetURL)?.host ?? targetURL,
-            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: result.focused,
-            detail: "path=\(result.path) focus_ms=\(result.focusMS)")
+            "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: result.focused, detail: "path=\(result.path) focus_ms=\(result.focusMS)")
     }
 
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
