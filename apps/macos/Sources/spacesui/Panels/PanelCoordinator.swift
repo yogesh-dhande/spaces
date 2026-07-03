@@ -436,7 +436,7 @@ import spacesdevicecore
         guard let content = host.makeTerminalPaneContent(request: request) else { return nil }
         content.onTitleChanged = { [weak self, weak content] title in
             guard let self, let content, let sessionID = content.descriptor.terminalSessionID,
-                let placement = self.placement(forSessionID: sessionID)
+                self.placement(forSessionID: sessionID) != nil
             else { return }
             self.refreshTabTitles(forSessionID: sessionID)
         }

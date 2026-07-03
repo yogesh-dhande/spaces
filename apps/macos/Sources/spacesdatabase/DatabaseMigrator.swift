@@ -59,9 +59,11 @@ public struct DatabaseMigrator: Sendable {
 
         var backupURL: URL?
         while version < currentSchemaVersion {
+            // Upgrades run serially: every intermediate version's step applies in order, so a
+            // missing step means the database cannot reach the current version at all.
             guard let step = steps.first(where: { $0.fromVersion == version }) else {
                 throw SpacesDatabaseError.migrationFailed(
-                    message: "No migration path exists from schema version \(version) to \(currentSchemaVersion).")
+                    message: "No migration step exists from schema version \(version); cannot reach version \(currentSchemaVersion).")
             }
 
             do {

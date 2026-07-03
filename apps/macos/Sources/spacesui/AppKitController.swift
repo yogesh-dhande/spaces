@@ -2387,8 +2387,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let now = ISO8601DateFormatter().string(from: Date())
         return rows.enumerated().map { index, row in
             WindowRecord(
-                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory, windowID: nil,
-                terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
+                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,                 terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
         }
     }
 
@@ -6315,15 +6314,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc func addWorkspace(_ sender: NSButton) {
         guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
-        showAddWorkspaceForm(project: project)
-    }
-
-    @objc private func addWorkspaceFromToolbar(_ sender: NSButton) {
-        if let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) {
-            showAddWorkspaceForm(project: project)
-            return
-        }
-        guard let project = currentProjectForNewWorkspace() else { return }
         showAddWorkspaceForm(project: project)
     }
 

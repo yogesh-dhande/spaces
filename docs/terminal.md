@@ -24,7 +24,6 @@ SQLite stores:
 - runtime state, service PID, child PID, title, working directory, and last known columns or rows
 - known client identities and remote lease timestamps
 - owner or viewer attachment history
-- saved terminal window frames
 - final Ghostty remote session-state payloads keyed by session ID
 
 The session directory keeps:
@@ -56,8 +55,8 @@ Each live session also participates in a service-level control path:
 
 ## App Client Runtime
 - Built-in Spaces terminals are service-owned, so `SpacesApp` windows attach to sessions and can reconnect after app quit or relaunch.
-- The Mac GUI treats terminal session state as device-owned daemon state: launch configuration, runtime state, attachment ownership, and the latest render payload are reached through the owning device's Device API, never by opening the daemon's `spaces.db`. Local and remote terminal windows share one path — a `DeviceTerminalSessionStateModel` (conforming to `TerminalSessionStateProviding`) owns one pinned-TLS session client and one `subscribe` stream per session, seeds launch configuration from the device overview, fetches catch-up state with `state`, and fans its single subscription out to both the window controller (metadata) and `RemoteGhosttySessionHost` (render). `TerminalSessionWindowController` reads only through the injected provider; the host renders only from injected state and writes no local mirror. For the local device this routes through the loopback Device API endpoint rather than the per-session Unix control socket.
-- Only Mac presentation state stays client-side, in `spaces-client.db`: terminal window frames (loaded and saved through `SpacesClientDatabase`), collapsed projects, selected workspace, shortcut settings, and browser/window IDs.
+- The Mac GUI treats terminal session state as device-owned daemon state: launch configuration, runtime state, attachment ownership, and the latest render payload are reached through the owning device's Device API, never by opening the daemon's `spaces.db`. Local and remote terminal panes share one path — a `DeviceTerminalSessionStateModel` (conforming to `TerminalSessionStateProviding`) owns one pinned-TLS session client and one `subscribe` stream per session, seeds launch configuration from the device overview, fetches catch-up state with `state`, and fans its single subscription out to both the pane controller (metadata) and `RemoteGhosttySessionHost` (render). `TerminalSessionPaneViewController` reads only through the injected provider; the host renders only from injected state and writes no local mirror. For the local device this routes through the loopback Device API endpoint rather than the per-session Unix control socket.
+- Only Mac presentation state stays client-side, in `spaces-client.db`: panel layouts and panel-window frames, collapsed projects, selected workspace, shortcut settings, and browser/window IDs.
 - An ended session's final render comes from the device `state` response, not a local on-disk cache; there is no remote-state mirror in `spaces.db`.
 - App shutdown does not terminate service-owned terminal sessions. The quit prompt offers a destructive stop-all option for users who want to end every live service session before quitting.
 

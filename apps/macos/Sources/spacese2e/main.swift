@@ -1353,8 +1353,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
-                    name: $0.name, app: $0.app, role: $0.role, detail: $0.detail, targetURL: $0.targetURL, windowID: $0.windowID,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID)
+                    name: $0.name, app: $0.app, role: $0.role, detail: $0.detail, targetURL: $0.targetURL,                     terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID)
             },
             agentWindows: try orchestrator.agentWindows(workspaceID: workspace.id).map {
                 AgentWindowPayload(
@@ -1944,7 +1943,6 @@ private struct WindowPayload: Codable {
     let role: String
     let detail: String?
     let targetURL: String?
-    let windowID: Int?
     let terminalTrackingID: String?
     let terminalNativeID: String?
 }

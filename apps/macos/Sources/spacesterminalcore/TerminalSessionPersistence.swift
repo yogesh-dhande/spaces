@@ -728,46 +728,6 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func writeWindowFrame(_ frame: TerminalSessionWindowFrame, mode: TerminalAttachmentMode, paths: TerminalSessionPaths) throws {
-        let root = normalizedRootDirectory(paths.rootDirectory)
-        try paths.ensureDirectories()
-        try withDatabase(paths: paths) { database in
-            try database.withImmediateTransaction {
-                let sessionID = try existingSessionID(rootDirectory: root, database: database)
-                try database.execute(
-                    sql: """
-                        INSERT INTO terminal_window_frames(root_directory, session_id, mode, x, y, width, height, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(root_directory, mode) DO UPDATE SET
-                          session_id = excluded.session_id,
-                          x = excluded.x,
-                          y = excluded.y,
-                          width = excluded.width,
-                          height = excluded.height,
-                          updated_at = excluded.updated_at
-                        """,
-                    bindings: [
-                        root, sessionID, mode.rawValue, frame.x, frame.y, frame.width, frame.height, ISO8601DateFormatter().string(from: Date()),
-                    ])
-            }
-        }
-    }
-
-    public static func readWindowFrame(mode: TerminalAttachmentMode, paths: TerminalSessionPaths) throws -> TerminalSessionWindowFrame? {
-        let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
-            guard
-                let row = try database.queryRow(
-                    sql: """
-                        SELECT x, y, width, height
-                        FROM terminal_window_frames
-                        WHERE root_directory = ? AND mode = ?
-                        """, bindings: [root, mode.rawValue])
-            else { return nil }
-            return try decodeWindowFrame(row: row)
-        }
-    }
-
     private static func upsertClient(
         _ client: TerminalClient, sessionID: String, rootDirectory: String, leaseRefreshedAt: String, database: SpacesSQLiteDatabase
     ) throws {
@@ -898,14 +858,6 @@ public enum TerminalSessionPersistence {
         guard let mode = TerminalAttachmentMode(rawValue: row[3]) else { throw TerminalSessionPersistenceError.invalidValue("mode", row[3]) }
         return TerminalAttachment(
             id: row[0], sessionID: row[1], clientID: row[2], mode: mode, attachedAt: row[4], detachedAt: row[5].isEmpty ? nil : row[5])
-    }
-
-    private static func decodeWindowFrame(row: [String]) throws -> TerminalSessionWindowFrame {
-        guard row.count >= 4 else { throw TerminalSessionPersistenceError.invalidRow("terminal_window_frames") }
-        guard let x = Double(row[0]), let y = Double(row[1]), let width = Double(row[2]), let height = Double(row[3]) else {
-            throw TerminalSessionPersistenceError.invalidValue("window_frame", row.joined(separator: ","))
-        }
-        return TerminalSessionWindowFrame(x: x, y: y, width: width, height: height)
     }
 
     private static func withDatabase<T>(paths: TerminalSessionPaths, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {

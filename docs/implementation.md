@@ -9,7 +9,7 @@ Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
 - The macOS client tracks and focuses windows itself: its own AppKit windows for Spaces terminals, Chrome AppleScript window IDs for browser sessions, Spaces terminal session IDs for processes and coding agents, and process IDs for cleaning up non-terminal processes.
 - Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
-- Store startup accepts only the current app schema and fails closed for unsupported schema versions.
+- Store startup migrates older databases serially through every intermediate schema version and fails closed for versions it has no migration step for.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
 
 ## Module Map
@@ -193,10 +193,10 @@ flowchart TD
 ### Database
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, terminal window frames, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
+- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, panel layouts and panel-window frames, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active daemon schema is version `3`.
+- `migration_state.current_version` records the canonical schema version; `DatabaseSchema.currentVersion` (daemon) and `SpacesClientDatabase.currentVersion` (client) are the source of truth for the active version numbers.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -223,10 +223,11 @@ flowchart TD
 
 ### Migration Rules
 - Fresh installs create the latest schema directly and record the current schema version.
-- Store startup validates `migration_state.current_version` against the canonical schema version and fails closed when they do not match.
-- There is no compatibility migration ladder for retired schema versions.
+- Databases behind the current version upgrade serially through every intermediate version at startup: each migration step moves exactly one version forward (vN to vN+1), and a database several versions behind applies each step in order. There are no version-skipping steps or jump paths.
+- Startup fails closed when the recorded version has no migration step (a pre-ladder or corrupted marker) or is newer than the running binary supports.
+- Migrations carry existing user data forward; tables and columns nothing reads or writes anymore are dropped by a migration step and removed from the schema definitions.
 - Startup runs `PRAGMA integrity_check` and fails if validation does not return `ok`.
-- Client database migrations create a timestamped backup before applying schema steps. A failed migration restores the latest backup and reports a startup error. Client backups contain metadata only; paired-device tokens stay in Keychain.
+- Daemon migrations create a pre-migration backup for steps that require one. Client database migrations create a timestamped backup before applying schema steps; a failed migration restores the latest backup and reports a startup error. Client backups contain metadata only; paired-device tokens stay in Keychain.
 
 ## Data Model
 
@@ -392,16 +393,6 @@ erDiagram
     TEXT updated_at
   }
 
-  runtime_target_events {
-    TEXT id PK
-    TEXT runtime_target_id FK
-    TEXT event_type
-    TEXT source
-    TEXT message
-    INTEGER window_id
-    TEXT created_at
-  }
-
   agent_session_events {
     TEXT id PK
     TEXT agent_session_id FK
@@ -473,17 +464,6 @@ erDiagram
     TEXT detached_at
   }
 
-  terminal_window_frames {
-    TEXT root_directory PK
-    TEXT session_id
-    TEXT mode PK
-    REAL x
-    REAL y
-    REAL width
-    REAL height
-    TEXT updated_at
-  }
-
   terminal_remote_session_states {
     TEXT session_id PK
     TEXT root_directory
@@ -541,7 +521,6 @@ erDiagram
   workspaces ||--o{ agent_sessions : tracks
   workspaces ||--o{ terminal_sessions : logical_owner
   runtime_targets ||--o| browser_targets : extends
-  runtime_targets ||--o{ runtime_target_events : records
   runtime_targets ||--o{ running_processes : focus_target
   runtime_targets ||--o{ agent_sessions : focus_target
   runtime_targets ||--o{ agent_session_events : referenced_by
@@ -549,7 +528,6 @@ erDiagram
   terminal_sessions ||--o| terminal_runtime_states : state
   terminal_sessions ||--o{ terminal_clients : clients
   terminal_sessions ||--o{ terminal_attachments : attachments
-  terminal_sessions ||--o{ terminal_window_frames : frames
   terminal_sessions ||--o| terminal_remote_session_states : final_render
   terminal_sessions ||--o{ terminal_agent_signal_events : pending_signals
 ```
@@ -590,46 +568,6 @@ erDiagram
     INTEGER is_collapsed
   }
 
-  terminal_window_frames {
-    TEXT root_directory PK
-    TEXT mode PK
-    TEXT session_id
-    REAL x
-    REAL y
-    REAL width
-    REAL height
-  }
-
-  runtime_targets {
-    TEXT id PK
-    TEXT device_id
-    TEXT workspace_id
-    TEXT type
-    TEXT app
-    INTEGER window_id
-    TEXT tracking_id
-    INTEGER order_index
-  }
-
-  browser_targets {
-    TEXT runtime_target_id PK
-    TEXT target_url
-    TEXT resolved_url
-  }
-
-  runtime_target_events {
-    TEXT id PK
-    TEXT runtime_target_id FK
-    TEXT event_type
-    INTEGER window_id
-  }
-
-  local_window_focus_state {
-    TEXT key PK
-    TEXT workspace_id
-    INTEGER window_id
-  }
-
   browser_session_window_ids {
     TEXT device_id PK
     TEXT workspace_id PK
@@ -637,17 +575,27 @@ erDiagram
     INTEGER window_id
   }
 
+  workspace_panel_layouts {
+    TEXT device_id PK
+    TEXT workspace_id PK
+    TEXT layout_json
+  }
+
+  panel_windows {
+    TEXT id PK
+    TEXT layout_json
+    REAL x
+    REAL y
+    REAL width
+    REAL height
+  }
+
   migration_state {
     INTEGER current_version
   }
-
-  runtime_targets ||--o| browser_targets : extends
-  runtime_targets ||--o{ runtime_target_events : records
 ```
 
-Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`), and `browser_session_window_ids` (the dedicated Chrome window opened for a browser session, keyed by `device_id`+`workspace_id`+resolved `target_url`).
-
-`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not read or written. They were scaffolded for the thin-client split and are inert.
+Client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `workspace_panel_layouts` (one versioned JSON layout document per workspace panel), `panel_windows` (extra panel windows: layout document plus window frame), and `browser_session_window_ids` (the dedicated Chrome window opened for a browser session, keyed by `device_id`+`workspace_id`+resolved `target_url`).
 
 ### Window-ID ownership
 

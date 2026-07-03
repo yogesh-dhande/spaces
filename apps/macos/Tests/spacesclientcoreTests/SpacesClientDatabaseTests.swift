@@ -26,74 +26,6 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try database.projectCollapseStates(deviceID: "local"), ["project-1": true])
     }
 
-    func testDesktopWindowIDRoundTripIsScopedByDeviceWorkspaceAndRuntimeTarget() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 101)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b", windowID: 202)
-        // Same runtime-target id but a different workspace must not collide.
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-a", windowID: 303)
-
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 101)
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b"), 202)
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-a"), 303)
-        XCTAssertNil(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "missing"))
-
-        XCTAssertEqual(try database.desktopWindowIDs(deviceID: "local", workspaceID: "ws-1"), ["rt-a": 101, "rt-b": 202])
-    }
-
-    func testDesktopWindowIDReverseLookupResolvesOwningRuntimeTargets() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 9999)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-2", runtimeTargetID: "rt-b", windowID: 9999)
-
-        let matches = try database.desktopWindowIDMatches(deviceID: "local", windowID: 9999)
-        XCTAssertEqual(Set(matches.map(\.workspaceID)), ["ws-1", "ws-2"])
-        XCTAssertEqual(Set(matches.map(\.runtimeTargetID)), ["rt-a", "rt-b"])
-        XCTAssertTrue(try database.desktopWindowIDMatches(deviceID: "local", windowID: 0).isEmpty)
-    }
-
-    func testSetDesktopWindowIDUpdatesExistingRow() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 1)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 2)
-
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 2)
-        XCTAssertEqual(try database.desktopWindowIDs(deviceID: "local", workspaceID: "ws-1").count, 1)
-    }
-
-    func testClearDesktopWindowIDRemovesOnlyTheMatchingRow() throws {
-        let database = try makeTemporaryClientDatabase()
-
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 1)
-        try database.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b", windowID: 2)
-
-        try database.clearDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a")
-
-        XCTAssertNil(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"))
-        XCTAssertEqual(try database.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-b"), 2)
-    }
-
-    func testDesktopWindowIDsSurviveMigrationFromVersionTwo() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let path = root.appendingPathComponent("spaces-client.db").path
-
-        // Open at the previous schema version (without the desktop_window_ids table), then reopen
-        // at the current version to exercise the v2 -> v3 migration path.
-        let legacy = try SpacesClientDatabase(
-            path: path, currentVersion: 2, migrationSteps: SpacesClientDatabase.defaultMigrationSteps.filter { $0.toVersion <= 2 })
-        try legacy.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
-
-        let migrated = try SpacesClientDatabase(path: path)
-        XCTAssertTrue(try migrated.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
-        try migrated.setDesktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a", windowID: 7)
-        XCTAssertEqual(try migrated.desktopWindowID(deviceID: "local", workspaceID: "ws-1", runtimeTargetID: "rt-a"), 7)
-    }
-
     func testWorkspacePanelLayoutRoundTripsAndDeletes() throws {
         let database = try makeTemporaryClientDatabase()
 
@@ -130,8 +62,9 @@ final class SpacesClientDatabaseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("spaces-client.db").path
 
-        // Open at a pre-panel schema version, then reopen at the current version to exercise
-        // the v4 -> v6 migration path (through the reserved no-op v5 step).
+        // Open at a pre-panel schema version, then reopen at the current version; the migrator
+        // steps serially through every intermediate version (reserved no-op v5, panel layouts,
+        // unused-table drops) and user data survives.
         let legacy = try SpacesClientDatabase(
             path: path, currentVersion: 4, migrationSteps: SpacesClientDatabase.defaultMigrationSteps.filter { $0.toVersion <= 4 })
         try legacy.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
@@ -140,6 +73,19 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertTrue(try migrated.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
         try migrated.writeWorkspacePanelLayout(deviceID: "local", workspaceID: "ws-1", layoutJSON: "{\"version\":1}")
         XCTAssertEqual(try migrated.workspacePanelLayout(deviceID: "local", workspaceID: "ws-1"), "{\"version\":1}")
+    }
+
+    // Any database at a released schema version must reach the current version by applying every
+    // intermediate step serially — the step list may never skip a version.
+    func testMigrationStepsFormOneSerialChainToCurrentVersion() {
+        var version = 1
+        while version < SpacesClientDatabase.currentVersion {
+            guard let step = SpacesClientDatabase.defaultMigrationSteps.first(where: { $0.fromVersion == version }) else {
+                return XCTFail("No client migration step from schema version \(version)")
+            }
+            XCTAssertEqual(step.toVersion, version + 1, "Step from \(version) must move exactly one version forward")
+            version = step.toVersion
+        }
     }
 
     func testDefaultPathUsesEnvironmentOverride() throws {

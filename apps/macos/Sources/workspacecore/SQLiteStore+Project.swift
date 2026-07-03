@@ -88,10 +88,6 @@ extension SQLiteStore {
         try withImmediateTransaction {
             try execute(
                 sql:
-                    "DELETE FROM runtime_target_events WHERE runtime_target_id IN (SELECT id FROM runtime_targets WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))",
-                bindings: [id])
-            try execute(
-                sql:
                     "DELETE FROM agent_session_events WHERE agent_session_id IN (SELECT id FROM agent_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))",
                 bindings: [id])
             try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)", bindings: [id])
