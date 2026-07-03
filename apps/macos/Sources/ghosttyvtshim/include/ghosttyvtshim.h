@@ -32,11 +32,24 @@ typedef struct {
     uint64_t len;
 } SpacesGhosttyVtScrollbar;
 
+// The Spaces terminal theme applied to a headless session's default colors, so the render frames
+// a remote (Linux daemon) session streams to the client match the app's theme instead of
+// libghostty-vt's built-in palette. Each color is packed 0x00RRGGBB. `palette_rgb` is the 16
+// ANSI colors (0-15); the shim fills indices 16-255 with the standard xterm cube and grayscale.
+typedef struct {
+    uint32_t foreground_rgb;
+    uint32_t background_rgb;
+    uint32_t cursor_rgb;
+    uint32_t palette_rgb[16];
+} SpacesGhosttyVtTheme;
+
+// `theme` is optional: pass NULL to keep libghostty-vt's built-in default palette.
 SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
     uint16_t columns,
     uint16_t rows,
     // Ghostty measures scrollback in bytes, not rows.
-    size_t max_scrollback
+    size_t max_scrollback,
+    const SpacesGhosttyVtTheme *theme
 );
 
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session);
