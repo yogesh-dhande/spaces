@@ -121,6 +121,7 @@ let appTargets: [Target] = [
             "systembridge",
             "spacesdeviceapi",
             "spacesclientcore",
+            "spacesterminalcore",
             "spacesterminalui",
             .product(name: "Sparkle", package: "Sparkle"),
         ]
@@ -168,7 +169,7 @@ let executableTargets: [Target] = [
     .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
     .executableTarget(
         name: "SpacesApp",
-        dependencies: ["spacesui"],
+        dependencies: ["spacesui", "spacesterminalcore"],
         path: "Sources/SpacesApp",
         exclude: ["Info.plist"],
         resources: [.copy("AppIcon.icns")],
@@ -189,10 +190,11 @@ let testTargets: [Target] = [
     .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
     .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
     .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
+    .testTarget(name: "spacesdTests", dependencies: ["spacesd", "spacesterminalcore"]),
     .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
     .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
     .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
-    .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi"]),
+    .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
     .testTarget(name: "spacesuiTests", dependencies: ["spacesui"]),
     .testTarget(
         name: "spacescliTests",

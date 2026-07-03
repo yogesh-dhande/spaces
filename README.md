@@ -81,7 +81,7 @@ On first launch Spaces asks macOS for permission to control Google Chrome (the A
 
 ## Install
 
-Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/spaces/releases/latest). The installer drops `Spaces.app`, `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, `~/.spaces/bin` helper links, and a per-user LaunchAgent that keeps `spacesd` available after login. In-app updates are delivered via Sparkle.
+Download the signed DMG from [GitHub Releases](https://github.com/yogesh-dhande/spaces/releases/latest). The installer places `Spaces.app` in `/Applications`, links `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and `/usr/local/bin/spaces-caddy` to the app bundle resources, creates `~/.spaces/bin` helper links, and installs a per-user LaunchAgent that keeps `spacesd` available after login. In-app updates are delivered via Sparkle.
 
 ## Development
 

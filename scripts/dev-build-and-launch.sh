@@ -9,6 +9,15 @@ CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
 POST_LAUNCH_MONITOR_SECONDS="${SPACES_POST_LAUNCH_MONITOR_SECONDS:-45}"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 
+remote_shell_quote() {
+  python3 - "$1" <<'PY'
+import shlex
+import sys
+
+print(shlex.quote(sys.argv[1]))
+PY
+}
+
 print_failure_diagnostics() {
   echo "Spaces exited; last log lines:"
   tail -n 80 "$LOG_FILE" || true
@@ -54,7 +63,72 @@ print(process.pid)
 PY
 }
 
+deploy_remote_linux_spacesd_if_configured() (
+  set -euo pipefail
+  source "$repo_root/scripts/spaces-e2e-env.sh"
+  spaces_e2e_load_env "$repo_root"
+
+  local remote_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
+  [[ -n "$remote_host" ]] || return 0
+
+  local remote_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
+  local remote_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
+  local remote_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
+  [[ "$remote_daemon_port" =~ ^[0-9]+$ ]] || {
+    echo "SPACES_E2E_REMOTE_DAEMON_PORT must be numeric, got: $remote_daemon_port" >&2
+    exit 1
+  }
+
+  local ssh_destination="$remote_host"
+  if [[ -n "$remote_user" ]]; then
+    ssh_destination="$remote_user@$remote_host"
+  fi
+
+  local -a ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes)
+  if [[ -n "$remote_port" ]]; then
+    ssh_args+=(-p "$remote_port")
+  fi
+
+  echo "Preparing remote Linux spacesd from current checkout at $ssh_destination..."
+  local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
+  artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
+  eval "$artifact_assignments"
+  artifact_url="${artifact_url:-}"
+  [[ "$artifact_url" == file://* ]] || {
+    echo "Remote Linux artifact URL must be file://, got: $artifact_url" >&2
+    exit 1
+  }
+
+  archive_path="${artifact_url#file://}"
+  install_root="$(dirname "$archive_path")/dev-launch-install"
+  quoted_archive="$(remote_shell_quote "$archive_path")"
+  quoted_install="$(remote_shell_quote "$install_root")"
+  ssh "${ssh_args[@]}" "$ssh_destination" \
+    "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_daemon_port $quoted_install/install.sh" >/dev/null
+
+  ssh "${ssh_args[@]}" "$ssh_destination" "python3 - $(remote_shell_quote "$remote_daemon_port")" <<'PY'
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+deadline = time.time() + 60
+last_error = None
+while time.time() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            raise SystemExit(0)
+    except OSError as exc:
+        last_error = exc
+        time.sleep(0.5)
+raise SystemExit(f"remote spacesd Device API port {port} did not open: {last_error}")
+PY
+  ssh "${ssh_args[@]}" "$ssh_destination" "~/.spaces/bin/spaces mobile status" >/dev/null
+  echo "Remote Linux spacesd is running the current checkout artifact on $ssh_destination."
+)
+
 "$repo_root/scripts/swiftpm.sh" build
+deploy_remote_linux_spacesd_if_configured
 
 spaces_profile_eval_shell_env "$CLI"
 if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then

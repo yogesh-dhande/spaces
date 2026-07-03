@@ -1256,6 +1256,22 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     }
 }
 
+public struct SpacesDeviceTerminalPasteImageRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let clientID: String
+    public let ownerEpoch: UInt64
+    public let fileExtension: String
+    public let imageData: Data
+
+    public init(sessionID: String, clientID: String, ownerEpoch: UInt64, fileExtension: String, imageData: Data) {
+        self.sessionID = sessionID
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+        self.fileExtension = fileExtension
+        self.imageData = imageData
+    }
+}
+
 public struct SpacesDeviceTerminalSubscriptionRequest: Codable, Sendable, Equatable {
     public let sessionID: String
     public let clientID: String?
@@ -1331,6 +1347,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case restartCodingAgent(SpacesDeviceCodingAgentMutationRequest)
     case state(SpacesDeviceTerminalSessionRequest)
     case terminalControl(SpacesDeviceTerminalControlRequest)
+    case terminalPasteImage(SpacesDeviceTerminalPasteImageRequest)
     case subscribe(SpacesDeviceTerminalSubscriptionRequest)
     case resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest)
     case readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest)
@@ -1375,6 +1392,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .restartCodingAgent: "restartCodingAgent"
         case .state: "state"
         case .terminalControl(let payload): payload.action.rawValue
+        case .terminalPasteImage: "terminalPasteImage"
         case .subscribe: "subscribe"
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
@@ -1388,6 +1406,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .renameTerminalSession(let payload): payload.sessionID
         case .state(let payload): payload.sessionID
         case .terminalControl(let payload): payload.sessionID
+        case .terminalPasteImage(let payload): payload.sessionID
         case .subscribe(let payload): payload.sessionID
         case .resolveTerminalLink(let payload): payload.sessionID
         case .readTerminalLinkChunk(let payload): payload.sessionID
@@ -1398,6 +1417,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     public var terminalClientID: String? {
         switch self {
         case .terminalControl(let payload): payload.clientID
+        case .terminalPasteImage(let payload): payload.clientID
         case .subscribe(let payload): payload.clientID
         default: nil
         }
@@ -1468,6 +1488,7 @@ extension SpacesDeviceAPICommand: Codable {
         case restartCodingAgent
         case state
         case terminalControl
+        case terminalPasteImage
         case subscribe
         case resolveTerminalLink
         case readTerminalLinkChunk
@@ -1527,6 +1548,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .restartCodingAgent: self = .restartCodingAgent(try container.decode(SpacesDeviceCodingAgentMutationRequest.self, forKey: key))
         case .state: self = .state(try container.decode(SpacesDeviceTerminalSessionRequest.self, forKey: key))
         case .terminalControl: self = .terminalControl(try container.decode(SpacesDeviceTerminalControlRequest.self, forKey: key))
+        case .terminalPasteImage: self = .terminalPasteImage(try container.decode(SpacesDeviceTerminalPasteImageRequest.self, forKey: key))
         case .subscribe: self = .subscribe(try container.decode(SpacesDeviceTerminalSubscriptionRequest.self, forKey: key))
         case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(SpacesDeviceTerminalLinkResolveRequest.self, forKey: key))
         case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunkRequest.self, forKey: key))
@@ -1573,6 +1595,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .restartCodingAgent(let payload): try container.encode(payload, forKey: .restartCodingAgent)
         case .state(let payload): try container.encode(payload, forKey: .state)
         case .terminalControl(let payload): try container.encode(payload, forKey: .terminalControl)
+        case .terminalPasteImage(let payload): try container.encode(payload, forKey: .terminalPasteImage)
         case .subscribe(let payload): try container.encode(payload, forKey: .subscribe)
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)

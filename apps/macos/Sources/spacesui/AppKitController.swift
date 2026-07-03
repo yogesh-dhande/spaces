@@ -1345,6 +1345,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID), requestSender: requestSender,
                     applyState: applyControlState)
             }
+            let pasteImageAction: @MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse = { image in
+                guard let clientID = remoteClientStore.current() else {
+                    return TerminalControlResponse(ok: false, message: "Terminal pane is not attached.")
+                }
+                let ownerEpoch = stateModel.latestRemoteStatePayload?.renderOwnerEpoch ?? 0
+                return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
+            }
             let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                 try Self.sendDeviceTerminalControl(
                     sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
@@ -1352,7 +1359,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
-                sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, takeoverAction: takeoverAction,
+                sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
                 attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
@@ -2392,7 +2399,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let now = ISO8601DateFormatter().string(from: Date())
         return rows.enumerated().map { index, row in
             WindowRecord(
-                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,                 terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
+                id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,
+                terminalTrackingID: row.sessionID, role: "terminal", orderIndex: index, lastSeenAt: now)
         }
     }
 
@@ -3275,8 +3283,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             footer.topAnchor.constraint(equalTo: footerSeparator.bottomAnchor, constant: 2),
             footer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             footer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2),
-            footer.heightAnchor.constraint(equalToConstant: 26),
+            footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -2), footer.heightAnchor.constraint(equalToConstant: 26),
         ])
         showPlaceholder()
         return container
@@ -4925,8 +4932,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let branch = (workspace.branch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !branch.isEmpty, branch != workspace.displayName {
             let branchIcon = NSImageView()
-            branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")?
-                .withSymbolConfiguration(.init(pointSize: 9, weight: .regular))
+            branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")?.withSymbolConfiguration(
+                .init(pointSize: 9, weight: .regular))
             branchIcon.contentTintColor = .tertiaryLabelColor
             branchIcon.setContentHuggingPriority(.required, for: .horizontal)
             let branchLabel = NSTextField(labelWithString: branch)
@@ -4994,8 +5001,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func footerActionButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton(
-            image: NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
-                .withSymbolConfiguration(.init(pointSize: 12, weight: .regular)) ?? NSImage(), target: self, action: action)
+            image: NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(
+                .init(pointSize: 12, weight: .regular)) ?? NSImage(), target: self, action: action)
         button.bezelStyle = .inline
         button.isBordered = false
         button.toolTip = tooltip
@@ -5068,8 +5075,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
             stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
-            scrollView.widthAnchor.constraint(equalToConstant: 320),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12), scrollView.widthAnchor.constraint(equalToConstant: 320),
         ])
         content.view = contentView
 
@@ -8969,9 +8975,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     public func splitViewDidResizeSubviews(_ notification: Notification) {
         // The titlebar tab strip starts at the right pane's leading edge; keep it in
         // step with divider drags.
-        if let sidebarWidth = splitView?.arrangedSubviews.first?.frame.width, sidebarWidth > 0 {
-            panelTabStripView.sidebarWidth = sidebarWidth
-        }
+        if let sidebarWidth = splitView?.arrangedSubviews.first?.frame.width, sidebarWidth > 0 { panelTabStripView.sidebarWidth = sidebarWidth }
     }
 
     public func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
@@ -9529,9 +9533,9 @@ extension AppKitController {
     /// empty query shows the list head directly. The normal palette's recency ranking
     /// and focus-identity dedup would collapse picker rows, which are all built
     /// around the same placeholder focus request.
-    nonisolated static func visibleSessionPickerItems(
-        allItems: [CommandPaletteItem], query: String, maxEmptyQueryItems: Int = 10
-    ) -> [CommandPaletteItem] {
+    nonisolated static func visibleSessionPickerItems(allItems: [CommandPaletteItem], query: String, maxEmptyQueryItems: Int = 10)
+        -> [CommandPaletteItem]
+    {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedQuery.isEmpty { return Array(allItems.prefix(maxEmptyQueryItems)) }
         let rankedIDs = CommandPaletteFuzzySearch.rank(query: trimmedQuery, candidates: allItems.map(\.searchCandidate)).map(\.id)

@@ -95,6 +95,7 @@ import workspacecore
         private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
     #endif
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
+    private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
     private var databaseChangeObserver: NSObjectProtocol?
     #if os(Linux)
         private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
@@ -103,7 +104,6 @@ import workspacecore
         private var databaseDistributedChangeObserver: NSObjectProtocol?
         private var caddyRouteRegistryDistributedChangeObserver: NSObjectProtocol?
         private var processExitMonitor: ProcessExitMonitorService?
-        private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
         private var caddyRouterService: CaddyRouterService?
     #endif
     private lazy var deviceAPISupervisor = SpacesDaemonDeviceAPISupervisor(
@@ -152,17 +152,17 @@ import workspacecore
         }
         worktreeService.start()
         worktreeDiscoveryService = worktreeService
+        let foregroundAgentReconciler = TerminalForegroundAgentReconciler(databasePath: databasePath) { error in
+            writeStandardError("spacesd terminal_foreground_agent_reconcile_error error=\(error)\n")
+        }
+        foregroundAgentReconciler.start()
+        terminalForegroundAgentReconciler = foregroundAgentReconciler
         #if os(macOS)
             let monitor = ProcessExitMonitorService(databasePath: databasePath) { error in
                 writeStandardError("spacesd process_exit_monitor_error error=\(error)\n")
             }
             monitor.start()
             processExitMonitor = monitor
-            let foregroundAgentReconciler = TerminalForegroundAgentReconciler(databasePath: databasePath) { error in
-                writeStandardError("spacesd terminal_foreground_agent_reconcile_error error=\(error)\n")
-            }
-            foregroundAgentReconciler.start()
-            terminalForegroundAgentReconciler = foregroundAgentReconciler
             let caddyRouter = CaddyRouterService(databasePath: databasePath) { error in
                 writeStandardError("spacesd caddy_router_error error=\(error)\n")
             }
@@ -247,11 +247,11 @@ import workspacecore
         #endif
         worktreeDiscoveryService?.stop()
         worktreeDiscoveryService = nil
+        terminalForegroundAgentReconciler?.stop()
+        terminalForegroundAgentReconciler = nil
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
-            terminalForegroundAgentReconciler?.stop()
-            terminalForegroundAgentReconciler = nil
             caddyRouterService?.stop()
             caddyRouterService = nil
         #endif

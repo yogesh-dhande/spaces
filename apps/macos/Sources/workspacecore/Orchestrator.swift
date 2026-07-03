@@ -897,8 +897,8 @@ public final class WorkspaceOrchestrator {
         for window in uniqueWindows {
             let stored = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
-                terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
+                targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
+                role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
             index += 1
             try store.upsert(window: stored)
         }
@@ -1310,7 +1310,8 @@ public final class WorkspaceOrchestrator {
         let appName = TerminalHost.spaces.appName
         try store.upsert(
             window: WindowRecord(
-                id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil,                 terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+                id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil,
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
         try markWorkspaceRunningIfNeeded(workspace)
         return WorkspaceTerminalLaunchReservation(
             sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
@@ -1339,8 +1340,8 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: reservation.windowRecordID, workspaceID: reservation.workspaceID, app: reservation.appName, name: reservation.title,
-                    detail: nil, targetURL: nil, terminalTrackingID: session.sessionID,
-                    terminalNativeID: session.sessionID, role: "terminal", orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
+                    detail: nil, targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
+                    orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspaceID: reservation.workspaceID, launchedAtFallback: reservation.createdAt)
             return session.sessionID
         } catch {
@@ -1923,7 +1924,7 @@ public final class WorkspaceOrchestrator {
     }
 
     private func runtimePID(fromFile path: String) -> Int? {
-        guard let contents = try? String(contentsOfFile: path) else { return nil }
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pid = Int(trimmed), pid > 0 else { return nil }
         return pid

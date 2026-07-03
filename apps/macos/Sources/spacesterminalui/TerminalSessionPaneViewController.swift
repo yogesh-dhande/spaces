@@ -106,6 +106,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
     var isViewerTakeoverShellActive = false
     let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse
     let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse
+    let pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)?
+    let pasteboardImageReadAction: @MainActor () -> TerminalPasteboardImageReadResult
     private let takeoverAction: @Sendable (String) throws -> TerminalControlResponse
     private let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void
     private let detachClientAction: @Sendable (String) throws -> Void
@@ -164,6 +166,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
         preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
+        pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
+        pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         attachClientAction: @escaping @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void,
         detachClientAction: @escaping @Sendable (String) throws -> Void, copySelectionAction: (@MainActor () -> Bool)? = nil,
@@ -198,6 +202,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
             sendKeyAction ?? { [socketPath = paths.controlSocketPath, client] key in
                 try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key, clientID: client.id), socketPath: socketPath)
             }
+        self.pasteImageAction = pasteImageAction
+        self.pasteboardImageReadAction = pasteboardImageReadAction ?? { TerminalPasteboardImageReader.readImage() }
         self.takeoverAction =
             takeoverAction ?? { clientID in
                 try TerminalControlClient.send(
@@ -214,9 +220,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         self.onWindowFocus = onWindowFocus
         self.onWindowClose = onWindowClose
         self.sessionHostProvider =
-            sessionHostProvider ?? { launchConfiguration, paths in
-                RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            }
+            sessionHostProvider ?? { launchConfiguration, paths in RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths) }
         displayTitle = "Terminal \(sessionID)"
         super.init()
         startObservingApplicationActivation()
@@ -757,19 +761,16 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     private func startObservingApplicationActivation() {
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(
-                forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
-            ) { [weak self] _ in MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_active", requestWindowFocus: false) } })
+            NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_active", requestWindowFocus: false) }
+            })
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(
-                forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
-            ) { [weak self] _ in
+            NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.syncGhosttyOwnerFocus(reason: "app_inactive", requestWindowFocus: false, focused: false) }
             })
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(
-                forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
-            ) { [weak self] notification in
+            NotificationCenter.default.addObserver(forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main) {
+                [weak self] notification in
                 let changedSessionID = notification.userInfo?["sessionID"] as? String
                 Task { @MainActor [weak self] in
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
@@ -777,28 +778,25 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 }
             })
         notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(
-                forName: .spacesTerminalSessionMetadataDidChange, object: nil, queue: .main
-            ) { [weak self] notification in
-                let changedSessionID = notification.userInfo?["sessionID"] as? String
-                MainActor.assumeIsolated {
-                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                    self.refreshNow()
-                }
-            })
-        notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(
-                forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main
-            ) { [weak self] notification in
-                let changedSessionID = notification.userInfo?["sessionID"] as? String
-                MainActor.assumeIsolated {
-                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                    self.refreshNow()
-                }
-            })
-        notificationObservers.tokens.append(
-            NotificationCenter.default.addObserver(forName: .spacesTerminalOutputDidChange, object: nil, queue: .main) {
+            NotificationCenter.default.addObserver(forName: .spacesTerminalSessionMetadataDidChange, object: nil, queue: .main) {
                 [weak self] notification in
+                let changedSessionID = notification.userInfo?["sessionID"] as? String
+                MainActor.assumeIsolated {
+                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    self.refreshNow()
+                }
+            })
+        notificationObservers.tokens.append(
+            NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main) {
+                [weak self] notification in
+                let changedSessionID = notification.userInfo?["sessionID"] as? String
+                MainActor.assumeIsolated {
+                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    self.refreshNow()
+                }
+            })
+        notificationObservers.tokens.append(
+            NotificationCenter.default.addObserver(forName: .spacesTerminalOutputDidChange, object: nil, queue: .main) { [weak self] notification in
                 let changedSessionID = notification.userInfo?["sessionID"] as? String
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }

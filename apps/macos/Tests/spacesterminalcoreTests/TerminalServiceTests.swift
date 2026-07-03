@@ -11,8 +11,8 @@ import XCTest
         func testCapturedStandardOutputDrainsOutputLargerThanThePipeBuffer() throws {
             let result = try XCTUnwrap(
                 TerminalService.capturedStandardOutput(
-                    executableURL: URL(fileURLWithPath: "/bin/sh"),
-                    arguments: ["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'"]))
+                    executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'"])
+            )
 
             XCTAssertEqual(result.terminationStatus, 0)
             XCTAssertEqual(result.output.count, 256 * 1024)
@@ -46,6 +46,42 @@ import XCTest
             let resolved = try TerminalService.resolveExecutableURL(environment: ["_": appExecutable.path])
 
             XCTAssertEqual(resolved.path, service.path)
+        }
+
+        func testResolveExecutableURLFindsServiceBesideBundledCLIResource() throws {
+            let root = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let resources = root.appendingPathComponent("Spaces.app/Contents/Resources", isDirectory: true)
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            let cli = resources.appendingPathComponent("spaces", isDirectory: false)
+            let service = resources.appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: cli)
+            try makeExecutableFile(at: service)
+
+            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cli.path])
+
+            XCTAssertEqual(resolved.path, service.path)
+        }
+
+        func testResolveExecutableURLFindsServiceThroughHomeHelperSymlink() throws {
+            let root = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let resources = root.appendingPathComponent("Applications/Spaces.app/Contents/Resources", isDirectory: true)
+            let helperBin = root.appendingPathComponent("Users/test/.spaces/bin", isDirectory: true)
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: helperBin, withIntermediateDirectories: true)
+            let cliTarget = resources.appendingPathComponent("spaces", isDirectory: false)
+            let serviceTarget = resources.appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: cliTarget)
+            try makeExecutableFile(at: serviceTarget)
+            let cliHelper = helperBin.appendingPathComponent("spaces", isDirectory: false)
+            let serviceHelper = helperBin.appendingPathComponent("spacesd", isDirectory: false)
+            try FileManager.default.createSymbolicLink(at: cliHelper, withDestinationURL: cliTarget)
+            try FileManager.default.createSymbolicLink(at: serviceHelper, withDestinationURL: serviceTarget)
+
+            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cliHelper.path])
+
+            XCTAssertEqual(resolved.path, serviceHelper.path)
         }
 
         func testParseProcessIDsIgnoresWhitespaceAndInvalidLines() {

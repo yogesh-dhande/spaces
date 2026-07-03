@@ -18,7 +18,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     func testRemoteInstallPreflightAllowsDarwinDMGInstall() throws {
         let probe = RemoteInstallProbe(
             operatingSystem: "Darwin", architecture: "arm64", linuxID: nil, linuxVersionID: nil, spacesAppInstalled: true, systemCLIExecutable: true,
-            systemDaemonExecutable: true, canonicalCLIExecutable: true, launchAgentInstalled: true)
+            systemDaemonExecutable: true, systemCaddyExecutable: true, canonicalCLIExecutable: true, canonicalDaemonExecutable: true,
+            launchAgentInstalled: true)
 
         XCTAssertNoThrow(try SpacesDevicePairingClient.validateRemoteInstallProbe(probe, destination: "studio.local"))
     }
@@ -26,7 +27,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     func testRemoteInstallPreflightRequiresDMGForDarwin() throws {
         let probe = RemoteInstallProbe(
             operatingSystem: "Darwin", architecture: "arm64", linuxID: nil, linuxVersionID: nil, spacesAppInstalled: false, systemCLIExecutable: true,
-            systemDaemonExecutable: true, canonicalCLIExecutable: false, launchAgentInstalled: false)
+            systemDaemonExecutable: true, systemCaddyExecutable: true, canonicalCLIExecutable: false, canonicalDaemonExecutable: false,
+            launchAgentInstalled: false)
 
         XCTAssertThrowsError(try SpacesDevicePairingClient.validateRemoteInstallProbe(probe, destination: "studio.local")) { error in
             guard case .remoteMacDMGInstallRequired(let message) = error as? SpacesRemoteDevicePairingError else {
@@ -48,7 +50,9 @@ final class SpacesDevicePairingClientTests: XCTestCase {
             spaces_app=1
             usr_local_spaces=1
             usr_local_spacesd=1
+            usr_local_spaces_caddy=1
             home_spaces_cli=1
+            home_spacesd=1
             launch_agent=1
             """, destination: "studio.local")
 
@@ -56,7 +60,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
             probe,
             RemoteInstallProbe(
                 operatingSystem: "Darwin", architecture: "arm64", linuxID: nil, linuxVersionID: nil, spacesAppInstalled: true,
-                systemCLIExecutable: true, systemDaemonExecutable: true, canonicalCLIExecutable: true, launchAgentInstalled: true))
+                systemCLIExecutable: true, systemDaemonExecutable: true, systemCaddyExecutable: true, canonicalCLIExecutable: true,
+                canonicalDaemonExecutable: true, launchAgentInstalled: true))
     }
 
     func testRemoteInstallProbeParsesLinuxPlatform() throws {
@@ -237,6 +242,34 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertLessThan(lingerRange.lowerBound, restartRange.lowerBound)
         XCTAssertTrue(script.contains("loginctl enable-linger"))
         XCTAssertTrue(script.contains("keep background services running after SSH disconnects"))
+    }
+
+    func testLinuxArtifactInstallerKeepsSpacesAndDaemonInSameRelease() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/build_linux_spacesd_artifact.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains(#"ln -sfn "$release_dir/bin/spacesd" "$bin_root/spacesd""#))
+        XCTAssertTrue(script.contains(#"ln -sfn "$release_dir/bin/spaces" "$bin_root/spaces""#))
+        XCTAssertTrue(script.contains("ExecStart=%h/.spaces/bin/spacesd"))
+        XCTAssertTrue(script.contains("systemctl --user restart spacesd.service"))
+    }
+
+    func testDMGInstallerUsesAppResourcesAsCanonicalMacBinarySource() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/create-dmg.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains(#"CLI_TARGET="$APP_RESOURCE_DIR/spaces""#))
+        XCTAssertTrue(script.contains(#"SERVICE_TARGET="$APP_RESOURCE_DIR/spacesd""#))
+        XCTAssertTrue(script.contains(#"CADDY_TARGET="$APP_RESOURCE_DIR/caddy""#))
+        XCTAssertTrue(script.contains(#"/bin/ln -sfn "$CLI_TARGET" "$CLI_PATH""#))
+        XCTAssertTrue(script.contains(#"/bin/ln -sfn "$SERVICE_TARGET" "$SERVICE_PATH""#))
+        XCTAssertTrue(script.contains(#"/bin/ln -sfn "$CADDY_TARGET" "$CADDY_PATH""#))
+        XCTAssertTrue(script.contains(#"/bin/ln -sfn "$cli_target" "$bin_dir/spaces""#))
+        XCTAssertTrue(script.contains(#"/bin/ln -sfn "$daemon_target" "$bin_dir/spacesd""#))
+        XCTAssertTrue(script.contains(#"LAUNCH_SERVICE_PATH="$INSTALL_HOME/.spaces/bin/spacesd""#))
+        XCTAssertTrue(script.contains(#"install_launch_agent "$LAUNCH_SERVICE_PATH""#))
     }
 
     func testRemoteDeviceE2EDoesNotKeepSSHSessionAliveForLinuxService() throws {

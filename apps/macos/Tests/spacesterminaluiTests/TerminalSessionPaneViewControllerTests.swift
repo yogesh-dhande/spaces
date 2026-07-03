@@ -251,13 +251,29 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         return window
     }
 
+    private func imageData(type: NSBitmapImageRep.FileType = .png, width: Int = 2, height: Int = 2) throws -> Data {
+        let bitmap = try XCTUnwrap(
+            NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32))
+        for x in 0..<width {
+            for y in 0..<height {
+                bitmap.setColor(NSColor(calibratedRed: CGFloat(x + 1) / CGFloat(width + 1), green: 0.25, blue: 0.75, alpha: 1), atX: x, y: y)
+            }
+        }
+        return try XCTUnwrap(bitmap.representation(using: type, properties: [:]))
+    }
+
     @MainActor private func makeGhosttyController(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, host: FakeGhosttySessionHost? = nil,
         performInitialRefresh: Bool = true, attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil, detachClientAction: (@Sendable (String) throws -> Void)? = nil,
         copySelectionAction: (@MainActor () -> Bool)? = nil, detachClientSynchronouslyOnClose: Bool = true,
-        pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
-        ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        pasteClipboardAction: (@MainActor () -> Bool)? = nil,
+        pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
+        pasteboardImageReadAction: (@MainActor () -> TerminalPasteboardImageReadResult)? = nil,
+        ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil, ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
         sessionHostProvider: (@MainActor @Sendable (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? =
             nil
     ) -> TerminalSessionPaneViewController {
@@ -270,7 +286,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }()
         return TerminalSessionPaneViewController(
             sessionID: sessionID, paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-            preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh, takeoverAction: takeoverAction,
+            preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh, pasteImageAction: pasteImageAction,
+            pasteboardImageReadAction: pasteboardImageReadAction, takeoverAction: takeoverAction,
             attachClientAction: attachClientAction ?? persistenceBackedAttachAction(paths),
             detachClientAction: detachClientAction ?? persistenceBackedDetachAction(paths), copySelectionAction: copySelectionAction,
             detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, defersInitialOwnerClientAttach: attachClientAction == nil,
@@ -1589,6 +1606,48 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(controller.validateUserInterfaceItem(ValidatedItem(action: #selector(NSText.selectAll(_:)))))
     }
 
+    @MainActor func testGhosttyOwnerCommandVPastesImageBeforeTextPaste() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = TerminalPasteboardImage(fileExtension: "png", imageData: try imageData(type: .png))
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-image-command-v", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-image-command-v", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        var pastedImages: [TerminalPasteboardImage] = []
+        var textPasteCalls = 0
+        let pastedImage = expectation(description: "image pasted")
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        let controller = makeGhosttyController(
+            sessionID: "session-image-command-v", paths: paths, host: host,
+            pasteClipboardAction: {
+                textPasteCalls += 1
+                return true
+            },
+            pasteImageAction: { image in
+                pastedImages.append(image)
+                pastedImage.fulfill()
+                return TerminalControlResponse(ok: true, message: "Pasted image path.")
+            }, pasteboardImageReadAction: { .image(image) })
+
+        controller.paste(nil)
+        await fulfillment(of: [pastedImage], timeout: 1)
+
+        XCTAssertEqual(pastedImages.count, 1)
+        XCTAssertEqual(pastedImages.first?.fileExtension, "png")
+        XCTAssertEqual(textPasteCalls, 0)
+        XCTAssertFalse(host.pastedClipboard)
+    }
+
     @MainActor func testGhosttyOwnerCommandKeyEquivalentsDispatchEditAndFindActions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1621,6 +1680,76 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             host.recordedBindingActions,
             ["copy_to_clipboard", "select_all", "start_search", "search_selection", "navigate_search:next", "navigate_search:previous"])
         XCTAssertTrue(host.pastedClipboard)
+    }
+
+    @MainActor func testGhosttyOwnerControlVPastesImageAndConsumesTerminalKey() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = TerminalPasteboardImage(fileExtension: "png", imageData: try imageData(type: .png))
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-control-v-image", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-control-v-image", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        var pastedImages: [TerminalPasteboardImage] = []
+        let pastedImage = expectation(description: "image pasted")
+        let controller = makeGhosttyController(
+            sessionID: "session-control-v-image", paths: paths, host: host,
+            pasteImageAction: { image in
+                pastedImages.append(image)
+                pastedImage.fulfill()
+                return TerminalControlResponse(ok: true, message: "Pasted image path.")
+            }, pasteboardImageReadAction: { .image(image) })
+        controller.showEmbedded(focus: true)
+        let event = try keyEvent(keyCode: kVK_ANSI_V, characters: "\u{16}", modifiers: .control, charactersIgnoringModifiers: "v")
+
+        XCTAssertTrue(controller.handleKeyEvent(event))
+        await fulfillment(of: [pastedImage], timeout: 1)
+
+        XCTAssertEqual(pastedImages.count, 1)
+        XCTAssertTrue(host.handledKeySpecifiers.isEmpty)
+    }
+
+    @MainActor func testGhosttyOwnerControlVWithoutImageReachesTerminalInput() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: "session-control-v-text", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-control-v-text", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "owner")
+        var pastedImages: [TerminalPasteboardImage] = []
+        let controller = makeGhosttyController(
+            sessionID: "session-control-v-text", paths: paths, host: host,
+            pasteImageAction: { image in
+                pastedImages.append(image)
+                return TerminalControlResponse(ok: true, message: "Pasted image path.")
+            }, pasteboardImageReadAction: { .noImage })
+        controller.showEmbedded(focus: true)
+        let event = try keyEvent(keyCode: kVK_ANSI_V, characters: "\u{16}", modifiers: .control, charactersIgnoringModifiers: "v")
+
+        XCTAssertTrue(controller.handleKeyEvent(event))
+
+        XCTAssertTrue(pastedImages.isEmpty)
+        XCTAssertEqual(host.handledKeySpecifiers, ["ctrl+v"])
     }
 
     @MainActor func testGhosttyOwnerControlCRemainsTerminalInput() throws {

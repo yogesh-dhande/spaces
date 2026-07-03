@@ -61,6 +61,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private static let ownerGatedTerminalCommands: Set<SpacesDeviceTerminalControlAction> = [.send, .key, .clearScreen, .resize, .scroll]
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
+    static let terminalPasteImageMaxBytes = 10 * 1024 * 1024
+    private static let terminalPasteImageExtensions: Set<String> = [
+        "avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp",
+    ]
 
     #if canImport(Network) && canImport(Security)
         private struct NetworkShaper: Sendable {
@@ -1075,6 +1079,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .restartCodingAgent(let payload): return try handleRestartCodingAgentRequest(payload)
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
+        case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
@@ -1136,9 +1141,79 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, result: sessionState.map(SpacesDeviceAPIResult.terminalState))
     }
 
+    private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {
+        let startedAt = Date()
+        let sessionID = payload.sessionID
+        let clientID = Self.normalizedClientID(payload.clientID)
+        guard let clientID else { return SpacesDeviceAPIResponse(ok: false, message: "Missing device client ID.") }
+        guard !payload.imageData.isEmpty else { return SpacesDeviceAPIResponse(ok: false, message: "Missing image payload.") }
+        guard payload.imageData.count <= Self.terminalPasteImageMaxBytes else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Image payload exceeds the 10 MiB limit.")
+        }
+        let fileExtension = Self.normalizedPasteImageExtension(payload.fileExtension)
+        guard let fileExtension else { return SpacesDeviceAPIResponse(ok: false, message: "Unsupported image file extension.") }
+
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.")
+        }
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
+        }
+        guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
+            TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot) == clientID
+        else { return SpacesDeviceAPIResponse(ok: false, message: "Only the active owner can paste images into the terminal.") }
+        if let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch, ownerEpoch != payload.ownerEpoch
+        {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: "Ignoring stale owner epoch \(payload.ownerEpoch); current owner epoch is \(ownerEpoch).")
+        }
+
+        let remotePath = "/tmp/spaces-paste-\(UUID().uuidString).\(fileExtension)"
+        try Self.writeUserOnlyPasteImage(payload.imageData, toPath: remotePath)
+        let terminalRequest = TerminalControlRequest(command: "send", text: remotePath, clientID: clientID, ownerEpoch: payload.ownerEpoch)
+        let response: TerminalControlResponse
+        do { response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath) } catch {
+            try? FileManager.default.removeItem(atPath: remotePath)
+            throw error
+        }
+        if !response.ok { try? FileManager.default.removeItem(atPath: remotePath) }
+        TerminalPerformance.logMetric(
+            "device_api_terminalPasteImage", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: response.ok, detail: "bytes=\(payload.imageData.count) extension=\(fileExtension)")
+        return SpacesDeviceAPIResponse(ok: response.ok, message: response.ok ? "Pasted image path." : response.message)
+    }
+
     private static func normalizedClientID(_ value: String?) -> String? {
         guard let clientID = value?.trimmingCharacters(in: .whitespacesAndNewlines), !clientID.isEmpty else { return nil }
         return clientID
+    }
+
+    private static func normalizedPasteImageExtension(_ value: String) -> String? {
+        let normalized = value.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines)).lowercased()
+        guard !normalized.isEmpty, terminalPasteImageExtensions.contains(normalized) else { return nil }
+        return normalized
+    }
+
+    private static func writeUserOnlyPasteImage(_ data: Data, toPath path: String) throws {
+        let fileDescriptor = open(path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        guard fileDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        do {
+            try data.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress else { return }
+                var offset = 0
+                while offset < rawBuffer.count {
+                    let written = write(fileDescriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+                    guard written > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                    offset += written
+                }
+            }
+            close(fileDescriptor)
+        } catch {
+            close(fileDescriptor)
+            try? FileManager.default.removeItem(atPath: path)
+            throw error
+        }
     }
 
     // Frozen-core daemon status: wire protocol numbers plus the restart-impact counts a daemon

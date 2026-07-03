@@ -11,7 +11,10 @@ public enum SpacesWireProtocol {
     // 2: SpacesDeviceTerminalSessionSummary carries the session shell/command (shell is a
     //    required decode field) and TerminalClient carries leaseRefreshedAt. A protocol-1
     //    daemon's overview omits these, so client and daemon must match exactly.
-    // 3: renameTerminalSession Device API command; a protocol-2 daemon cannot decode it.
+    // 3: Device API adds renameTerminalSession and terminalPasteImage (uploads an image
+    //    payload to the owning daemon and injects the daemon-local temp path into the
+    //    terminal). Both are new mutating wire operations a protocol-2 daemon cannot decode,
+    //    so clients and daemons must update in lockstep.
     public static let version = 3
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and

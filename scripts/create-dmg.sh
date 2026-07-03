@@ -39,7 +39,7 @@ if [ $# -ne 3 ]; then
 fi
 
 DMG_ROOT="$1"
-INSTALL_HOME="$2"
+INSTALL_HOME="${2%/}"
 INSTALL_UID="$3"
 SOURCE_APP="$DMG_ROOT/Spaces.app"
 
@@ -79,6 +79,8 @@ copy_ghostty_vt_dylibs() {
 
 install_user_state_paths() {
   local user_home="$1"
+  local cli_target="$2"
+  local daemon_target="$3"
   local state_root="$user_home/.spaces"
   local data_root="$user_home/spaces"
   local bin_dir="$state_root/bin"
@@ -89,8 +91,8 @@ install_user_state_paths() {
   install_user="$(/usr/bin/stat -f %Su "$user_home" 2>/dev/null || true)"
 
   /bin/mkdir -p "$bin_dir" "$runtime_dir" "$workspaces_dir" "$repos_dir"
-  /bin/ln -sfn "$CLI_PATH" "$bin_dir/spaces"
-  /bin/ln -sfn "$SERVICE_PATH" "$bin_dir/spacesd"
+  /bin/ln -sfn "$cli_target" "$bin_dir/spaces"
+  /bin/ln -sfn "$daemon_target" "$bin_dir/spacesd"
 
   if [[ -n "$install_user" ]]; then
     /usr/sbin/chown "$install_user" "$state_root" "$data_root" "$bin_dir" "$runtime_dir" "$workspaces_dir" "$repos_dir" 2>/dev/null || true
@@ -150,23 +152,22 @@ CLI_DIR="/usr/local/bin"
 CLI_PATH="$CLI_DIR/spaces"
 SERVICE_PATH="$CLI_DIR/spacesd"
 CADDY_PATH="$CLI_DIR/spaces-caddy"
+APP_RESOURCE_DIR="$APP_PATH/Contents/Resources"
+CLI_TARGET="$APP_RESOURCE_DIR/spaces"
+SERVICE_TARGET="$APP_RESOURCE_DIR/spacesd"
+CADDY_TARGET="$APP_RESOURCE_DIR/caddy"
+LAUNCH_SERVICE_PATH="$INSTALL_HOME/.spaces/bin/spacesd"
 /bin/mkdir -p /Applications /usr/local/bin
 /bin/rm -rf "$APP_PATH"
 /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
 /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
-/bin/cp "$APP_PATH/Contents/Resources/spaces" "$CLI_PATH"
-/bin/cp "$APP_PATH/Contents/Resources/spacesd" "$SERVICE_PATH"
-/bin/cp "$APP_PATH/Contents/Resources/caddy" "$CADDY_PATH"
-/bin/chmod 755 "$CLI_PATH"
-/bin/chmod 755 "$SERVICE_PATH"
-/bin/chmod 755 "$CADDY_PATH"
+/bin/ln -sfn "$CLI_TARGET" "$CLI_PATH"
+/bin/ln -sfn "$SERVICE_TARGET" "$SERVICE_PATH"
+/bin/ln -sfn "$CADDY_TARGET" "$CADDY_PATH"
 copy_ghostty_vt_dylibs
-/usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" 2>/dev/null || true
-/usr/bin/xattr -d com.apple.quarantine "$SERVICE_PATH" 2>/dev/null || true
-/usr/bin/xattr -d com.apple.quarantine "$CADDY_PATH" 2>/dev/null || true
-install_user_state_paths "$INSTALL_HOME"
-LAUNCH_AGENT_PATH="$(install_launch_agent "$SERVICE_PATH" "$INSTALL_HOME" "$INSTALL_UID")"
-emit_result "$APP_PATH" "$CLI_PATH" "$SERVICE_PATH" "$LAUNCH_AGENT_PATH"
+install_user_state_paths "$INSTALL_HOME" "$CLI_TARGET" "$SERVICE_TARGET"
+LAUNCH_AGENT_PATH="$(install_launch_agent "$LAUNCH_SERVICE_PATH" "$INSTALL_HOME" "$INSTALL_UID")"
+emit_result "$APP_PATH" "$CLI_PATH" "$LAUNCH_SERVICE_PATH" "$LAUNCH_AGENT_PATH"
 EOF
 chmod +x "$installer_script"
 

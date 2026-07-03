@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import spacesterminalcore
 import spacesui
 import workspacecore
 
@@ -17,6 +18,8 @@ import workspacecore
             fputs("Spaces failed to prepare launch context: \(error.localizedDescription)\n", stderr)
             Darwin.exit(1)
         }
+
+        _ = SpacesMacInstallationRepair.repairCurrentAppInstallation()
 
         let app = NSApplication.shared
         let delegate = AppKitController(launchContext: launchContext)

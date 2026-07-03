@@ -172,8 +172,7 @@ import Foundation
         static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
             let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
             guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
-            guard
-                let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"]),
+            guard let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"]),
                 result.terminationStatus == 0
             else { return [] }
             return parseSocketOwnerProcessIDs(String(decoding: result.output, as: UTF8.self), socketPath: socketPath)
@@ -317,15 +316,19 @@ import Foundation
             throws -> URL
         {
             let currentExecutablePath = environment["_"] ?? Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
-            let currentExecutableDirectory = URL(fileURLWithPath: currentExecutablePath).deletingLastPathComponent()
+            let currentExecutableURL = URL(fileURLWithPath: currentExecutablePath)
+            let currentExecutableDirectory = currentExecutableURL.deletingLastPathComponent()
+            let resolvedCurrentExecutableDirectory = currentExecutableURL.resolvingSymlinksInPath().deletingLastPathComponent()
             let currentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
             let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
                 "Resources", isDirectory: true)
             let candidates = [
                 environment["SPACESD_EXECUTABLE"],
                 currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
+                resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
                 Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
                 bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
+                SpacesBinaryLayout.userHelperLinkURL(for: .spacesd)?.path, SpacesBinaryLayout.systemLinkURL(for: .spacesd).path,
                 currentDirectory.appendingPathComponent("apps/macos/.build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
                 currentDirectory.appendingPathComponent("apps/macos/.build/release/spacesd", isDirectory: false).path(percentEncoded: false),
                 currentDirectory.appendingPathComponent(".build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
