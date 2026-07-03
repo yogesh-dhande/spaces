@@ -177,6 +177,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         var attachedMode: TerminalAttachmentMode?
         var attachedModes: [TerminalAttachmentMode] = []
         var detachedClientID: String?
+        /// The detached client id observed at the moment the close hook ran, used to prove the hook
+        /// fires only after the async detach has landed.
+        var detachedClientIDWhenCloseHookRan: String?
+        var closeHookRan = false
     }
 
     private final class TakeoverAttemptRecorder: @unchecked Sendable {
@@ -422,6 +426,59 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         await fulfillment(of: [detachedExpectation], timeout: 1)
         XCTAssertEqual(capture.detachedClientID, capture.attachedClientID)
+    }
+
+    /// The close hook must run only after the async detach has landed, so the owner's ad hoc cleanup
+    /// reads an attachment snapshot that already reflects this client leaving. Asserting the detach was
+    /// captured by the time the hook fires guards against the pane leaking a shell on close.
+    @MainActor func testCloseEmbeddedRunsCloseHookAfterAsyncDetach() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let hookRan = expectation(description: "close hook runs")
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-close-hook", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID }, detachClientSynchronouslyOnClose: false,
+            onCloseClientDetached: {
+                capture.detachedClientIDWhenCloseHookRan = capture.detachedClientID
+                hookRan.fulfill()
+            })
+
+        controller.showEmbedded(focus: true)
+        XCTAssertNotNil(capture.attachedClientID)
+
+        controller.closeEmbedded()
+
+        await fulfillment(of: [hookRan], timeout: 1)
+        XCTAssertEqual(capture.detachedClientIDWhenCloseHookRan, capture.attachedClientID)
+    }
+
+    /// A session-terminating close is the daemon already stopping the session, so it must not fire the
+    /// close hook — running the ad hoc cleanup then would be redundant work against a dying session.
+    @MainActor func testCloseForSessionTerminationSkipsCloseHook() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let capture = ClientCapture()
+        let controller = TerminalSessionPaneViewController(
+            sessionID: "session-terminate-no-hook", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: { client, _ in capture.attachedClientID = client.id },
+            detachClientAction: { clientID in capture.detachedClientID = clientID }, detachClientSynchronouslyOnClose: false,
+            onCloseClientDetached: { capture.closeHookRan = true })
+
+        controller.showEmbedded(focus: true)
+        XCTAssertNotNil(capture.attachedClientID)
+
+        controller.closeEmbedded(sessionIsTerminating: true)
+
+        XCTAssertNil(capture.detachedClientID)
+        XCTAssertFalse(capture.closeHookRan)
     }
 
     @MainActor func testViewerShowAttachesClientAsViewer() throws {

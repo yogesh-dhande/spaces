@@ -246,10 +246,18 @@ extension AppKitController {
         case .browser:
             do {
                 try updateDeviceWorkspaceConfig(workspaceID: workspaceID) { settings in
-                    guard let index = settings.browserSessions.firstIndex(where: { $0.url == item.browserTargetURL }) else { return }
+                    guard let index = Self.configuredBrowserSessionIndex(named: item.title, in: settings.browserSessions) else { return }
                     settings.browserSessions[index].name = title
                 }
             } catch { showError(error) }
         }
+    }
+
+    /// The configured browser session a sidebar row targets. The row's `browserTargetURL` is the
+    /// env/service-resolved URL, while the config stores the raw (unsubstituted) URL, so matching on
+    /// the URL would silently miss any session that uses substitution. Resolution preserves the
+    /// configured name, so match on it — the way the process and agent rows fall back to name matching.
+    nonisolated static func configuredBrowserSessionIndex(named name: String, in sessions: [BrowserSession]) -> Int? {
+        sessions.firstIndex { normalizedRunRowName($0.name ?? "") == normalizedRunRowName(name) }
     }
 }

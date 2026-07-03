@@ -104,6 +104,21 @@ import workspacecore
         #expect(byKey["launcher:codex"]?.launcherID == "launcher-codex")
     }
 
+    /// A browser rename must find the configured session by its (substitution-invariant) name.
+    /// The sidebar row carries the env-resolved URL (`http://localhost:3000`), while the config
+    /// stores the raw `http://localhost:$PORT`, so a URL comparison would silently miss it.
+    @Test func browserRenameMatchesConfiguredSessionByName() {
+        let browser = fixtureItems().first { $0.kind == .browser }
+        #expect(browser?.title == "App")
+        #expect(browser?.browserTargetURL == "http://localhost:3000")
+
+        let sessions = [BrowserSession(name: "App", url: "http://localhost:$PORT")]
+        #expect(AppKitController.configuredBrowserSessionIndex(named: browser?.title ?? "", in: sessions) == 0)
+        // A resolved-URL comparison against the raw config would not match.
+        #expect(sessions.firstIndex { $0.url == browser?.browserTargetURL } == nil)
+        #expect(AppKitController.configuredBrowserSessionIndex(named: "Unknown", in: sessions) == nil)
+    }
+
     @Test func shortcutIndexStopsAfterTen() {
         let terminalRows = (0..<12).map { index in
             SpacesDeviceWorkspaceTerminalRow(

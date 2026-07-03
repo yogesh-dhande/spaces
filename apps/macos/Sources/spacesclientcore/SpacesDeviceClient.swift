@@ -533,8 +533,8 @@ public enum SpacesDeviceClient {
     /// rejected with a 401 while the transport key looked healthy. A remote device cannot regenerate its
     /// own credentials, so a missing remote transport key surfaces as `missingTransportKey` (the client
     /// must re-pair); a remote token is returned as-is (possibly nil, the pre-existing behavior).
-    static func credentialsEnsuringLocalRecovery(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?) throws
-        -> (transportKey: String, authToken: String?)
+    public static func credentialsEnsuringLocalRecovery(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?)
+        throws -> (transportKey: String, authToken: String?)
     {
         if device.id == SpacesPairedDeviceRecord.localDeviceID {
             let hasTransportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) != nil

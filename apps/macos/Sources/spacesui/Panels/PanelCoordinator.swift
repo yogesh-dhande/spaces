@@ -370,9 +370,11 @@ import spacesdevicecore
 
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
-        // Closing detaches the pane's client; the attachment-state observer then runs
-        // the unattached ad hoc cleanup against the authoritative snapshot, so an ad
-        // hoc shell stops only when no other client is still attached.
+        // Closing detaches the pane's client and, once the daemon has processed that detach, runs the
+        // unattached ad hoc cleanup against the authoritative snapshot (via the pane's close-detach
+        // hook). The cleanup is driven directly from the close because this controller's own state
+        // stream is torn down here, so the detach would no longer surface as an attachment-state
+        // change to observe. An ad hoc shell stops only when no other client is still attached.
         content.close()
     }
 

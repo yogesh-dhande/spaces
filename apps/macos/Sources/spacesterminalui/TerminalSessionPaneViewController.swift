@@ -124,6 +124,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     let onWindowFocus: (@MainActor (String) -> Void)?
     let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
+    /// Runs after a user close has detached this pane's client and the daemon has processed that
+    /// detach (fired off the async detach's completion). The owner uses it to stop an ad hoc shell
+    /// that no longer has any attached client, since tearing the pane down also tears down the state
+    /// stream that would otherwise surface the detach as an attachment-state change.
+    let onCloseClientDetached: (@MainActor @Sendable () -> Void)?
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var isResolvingGhosttySessionHost = false
@@ -175,6 +180,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
         ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
         onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
+        onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
@@ -219,6 +225,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         self.ownerSurfaceFocusAction = ownerSurfaceFocusAction
         self.onWindowFocus = onWindowFocus
         self.onWindowClose = onWindowClose
+        self.onCloseClientDetached = onCloseClientDetached
         self.sessionHostProvider =
             sessionHostProvider ?? { launchConfiguration, paths in RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths) }
         displayTitle = "Terminal \(sessionID)"
@@ -589,13 +596,23 @@ private final class NotificationObserverBag: @unchecked Sendable {
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
-    func detachLocalClientIfNeeded(synchronously: Bool = true) {
-        guard isClientAttached else { return }
+    /// `onDetached`, when provided, runs once the detach has landed — after the daemon has
+    /// processed it in the async case — so a caller that then reads the authoritative attachment
+    /// snapshot sees this client already gone. It also runs when there is nothing to detach, so a
+    /// close always gets its post-detach hook.
+    func detachLocalClientIfNeeded(synchronously: Bool = true, onDetached: (@MainActor @Sendable () -> Void)? = nil) {
+        guard isClientAttached else {
+            onDetached?()
+            return
+        }
         guard synchronously else {
             let clientID = client.id
             isClientAttached = false
             lastRequestedAttachmentMode = nil
-            Task.detached(priority: .utility) { [detachClientAction] in try? detachClientAction(clientID) }
+            Task.detached(priority: .utility) { [detachClientAction] in
+                try? detachClientAction(clientID)
+                if let onDetached { await MainActor.run { onDetached() } }
+            }
             return
         }
         do {
@@ -603,6 +620,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
             isClientAttached = false
             lastRequestedAttachmentMode = nil
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
+        onDetached?()
     }
 
     func syncGhosttyOwnerFocus(reason: String, requestWindowFocus: Bool, focused explicitFocused: Bool? = nil) {
