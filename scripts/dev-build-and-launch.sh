@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LOCAL_ONLY=0
+for argument in "$@"; do
+  case "$argument" in
+    --local) LOCAL_ONLY=1 ;;
+    -h|--help)
+      echo "Usage: $(basename "$0") [--local]"
+      echo "  --local  Skip the remote Linux spacesd deploy configured via .env."
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $argument (usage: $(basename "$0") [--local])" >&2
+      exit 1
+      ;;
+  esac
+done
+
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$repo_root/apps/macos/.build/debug/SpacesApp"
 CLI="$repo_root/apps/macos/.build/debug/spaces"
@@ -128,7 +144,9 @@ PY
 )
 
 "$repo_root/scripts/swiftpm.sh" build
-deploy_remote_linux_spacesd_if_configured
+if [[ "$LOCAL_ONLY" == "0" ]]; then
+  deploy_remote_linux_spacesd_if_configured
+fi
 
 spaces_profile_eval_shell_env "$CLI"
 if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
