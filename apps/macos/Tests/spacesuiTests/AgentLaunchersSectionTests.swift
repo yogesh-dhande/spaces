@@ -41,8 +41,8 @@ import workspacecore
         section.runtimeAgentWindows = [
             AgentWindowRecord(
                 id: "codex-runtime", workspaceID: "workspace", provider: .spaces, label: "Codex",
-                terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-codex",
-                claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now")
+                terminalTarget: TerminalTargetRecord(trackingID: "session-codex"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
+                status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
         #expect(section.rowCount == 1)
@@ -89,8 +89,7 @@ import workspacecore
         section.runtimeAgentWindows = [
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "ghostty-hook-1",
-                terminalNativeID: "ghostty-terminal-1", codexThreadID: nil, status: .waiting, createdAt: "now",
-                updatedAt: "now")
+                terminalNativeID: "ghostty-terminal-1", codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
         ]
         section.runtimeWindowTitleByAgentWindowID = ["adhoc": "shell-1"]
 

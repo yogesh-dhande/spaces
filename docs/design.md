@@ -32,6 +32,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 
 ## Color And Surfaces
 - Use the shared `Theme` tokens as the source of truth. Do not hard-code one-off colors for production UI.
+- Token values live in the theme system (`ThemeRegistry` in `spacesterminalcore`): each theme defines one semantic token set per appearance plus the terminal colors exported to embedded Ghostty surfaces, so the app chrome and terminals always share one palette. `Theme` (AppKit) is an adapter over the active descriptor — add new tokens to the descriptor, not as ad-hoc colors in an adapter or view.
 - The palette should remain warm-neutral with restrained accenting, not pure grayscale and not loud by default.
 - Use a small number of semantic surface layers:
   - Background for the app shell.

@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 10
+    public static let currentVersion = 11
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -109,6 +109,18 @@ public enum DatabaseSchema {
         // Ghostty set_title-driven runtime title updates never clobber a user's rename.
         DatabaseMigrationStep(fromVersion: 9, toVersion: 10, description: "Add terminal session user title", requiresBackup: false) { database in
             try executeBatch(database: database, sql: "ALTER TABLE terminal_sessions ADD COLUMN user_title TEXT;")
+        },
+        // terminal_window_frames is from the one-window-per-terminal era (terminals render as
+        // panes inside client-owned panel layouts); runtime_target_events was only ever deleted
+        // from, never written or read. Nothing reads or writes either table.
+        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "Drop unused window frame and target event tables", requiresBackup: true)
+        { database in
+            try executeBatch(
+                database: database,
+                sql: """
+                    DROP TABLE IF EXISTS terminal_window_frames;
+                    DROP TABLE IF EXISTS runtime_target_events;
+                    """)
         },
     ]
 
@@ -224,18 +236,6 @@ public enum DatabaseSchema {
             CREATE UNIQUE INDEX IF NOT EXISTS terminal_attachments_active_client_unique
             ON terminal_attachments(root_directory, client_id)
             WHERE detached_at IS NULL;
-
-            CREATE TABLE IF NOT EXISTS terminal_window_frames (
-              root_directory TEXT NOT NULL,
-              session_id TEXT NOT NULL,
-              mode TEXT NOT NULL,
-              x REAL NOT NULL,
-              y REAL NOT NULL,
-              width REAL NOT NULL,
-              height REAL NOT NULL,
-              updated_at TEXT NOT NULL,
-              PRIMARY KEY (root_directory, mode)
-            );
 
             \(terminalRemoteSessionStateSQL)
             \(terminalAgentSignalEventsSQL)
@@ -436,16 +436,6 @@ public enum DatabaseSchema {
               updated_at TEXT NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS runtime_target_events (
-              id TEXT PRIMARY KEY,
-              runtime_target_id TEXT NOT NULL,
-              event_type TEXT NOT NULL,
-              source TEXT NOT NULL,
-              message TEXT,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS agent_session_events (

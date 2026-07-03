@@ -1704,9 +1704,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         guard try deviceOrchestrator(store: store).renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title)
-        else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not a renamable workspace terminal.")
-        }
+        else { return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not a renamable workspace terminal.") }
         return try refreshedMutationResponse(message: "Renamed terminal session.", workspaceID: workspaceID, sessionID: sessionID)
     }
 

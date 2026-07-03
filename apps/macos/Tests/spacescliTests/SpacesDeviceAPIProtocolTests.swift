@@ -56,8 +56,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
     func testRenameTerminalSessionRequestRoundTripsAndIsNotReplaySafe() throws {
         let request = SpacesDeviceAPIRequest(
-            command: .renameTerminalSession(.init(workspaceID: "workspace-1", sessionID: "session-1", title: "build watcher")),
-            authToken: "SECRET")
+            command: .renameTerminalSession(.init(workspaceID: "workspace-1", sessionID: "session-1", title: "build watcher")), authToken: "SECRET")
 
         XCTAssertEqual(request.commandName, "renameTerminalSession")
         XCTAssertEqual(request.sessionID, "session-1")

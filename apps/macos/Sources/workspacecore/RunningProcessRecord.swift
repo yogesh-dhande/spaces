@@ -39,14 +39,12 @@ public struct RunningProcessRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, templateID: String? = nil, templateName: String, command: String, runtimeTargetID: String? = nil,
-        terminalApp: String?, terminalTrackingID: String? = nil, terminalNativeID: String? = nil, pid: Int?,
-        status: RunningProcessState, logPath: String?, lastOutputAt: String?, startedAt: String?, exitedAt: String?
+        terminalApp: String?, terminalTrackingID: String? = nil, terminalNativeID: String? = nil, pid: Int?, status: RunningProcessState,
+        logPath: String?, lastOutputAt: String?, startedAt: String?, exitedAt: String?
     ) {
         let resolvedTrackingID = terminalTrackingID ?? terminalNativeID
         let terminalTarget: TerminalTargetRecord? =
-            if resolvedTrackingID != nil {
-                TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: resolvedTrackingID)
-            } else { nil }
+            if resolvedTrackingID != nil { TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: resolvedTrackingID) } else { nil }
         self.init(
             id: id, workspaceID: workspaceID, templateID: templateID, templateName: templateName, command: command, runtimeTargetID: runtimeTargetID,
             terminalApp: terminalApp, terminalTarget: terminalTarget, pid: pid, status: status, logPath: logPath, lastOutputAt: lastOutputAt,
@@ -60,8 +58,8 @@ public struct RunningProcessRecord: Codable, Sendable {
     ) {
         self.init(
             id: id, workspaceID: workspaceID, templateID: templateID, templateName: templateName, command: command, runtimeTargetID: nil,
-            terminalApp: terminalApp, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, pid: pid,
-            status: status, logPath: logPath, lastOutputAt: lastOutputAt, startedAt: startedAt, exitedAt: exitedAt)
+            terminalApp: terminalApp, terminalTrackingID: terminalTrackingID, terminalNativeID: terminalNativeID, pid: pid, status: status,
+            logPath: logPath, lastOutputAt: lastOutputAt, startedAt: startedAt, exitedAt: exitedAt)
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }

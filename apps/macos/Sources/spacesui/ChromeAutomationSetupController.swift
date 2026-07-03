@@ -44,9 +44,9 @@ import systembridge
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.alignment = .center
 
-        let body = NSTextField(wrappingLabelWithString:
-            "Spaces opens and focuses your workspace browser sessions in Google Chrome. macOS asks for your "
-            + "permission before Spaces can control Chrome.")
+        let body = NSTextField(
+            wrappingLabelWithString: "Spaces opens and focuses your workspace browser sessions in Google Chrome. macOS asks for your "
+                + "permission before Spaces can control Chrome.")
         body.font = .systemFont(ofSize: 13)
         body.textColor = .secondaryLabelColor
         body.alignment = .center
@@ -88,10 +88,8 @@ import systembridge
 
         container.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            stack.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
-            body.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor), stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            stack.widthAnchor.constraint(lessThanOrEqualToConstant: 420), body.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
             statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
         ])
     }
@@ -145,7 +143,5 @@ import systembridge
         NSWorkspace.shared.open(url)
     }
 
-    @objc private func recheck() {
-        applyStatus(ChromeAutomationPermission.status())
-    }
+    @objc private func recheck() { applyStatus(ChromeAutomationPermission.status()) }
 }

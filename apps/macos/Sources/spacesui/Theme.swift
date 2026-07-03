@@ -1,84 +1,71 @@
 import AppKit
+import spacesterminalcore
 
-/// Spaces brand tokens for the AppKit GUI.
+/// AppKit adapter over the active theme descriptor.
 ///
-/// Values mirror `apps/web/app/globals.css` and
-/// `design-mocks/workspace-detail/shared.css` one-for-one so the mocks remain
-/// the source of truth. When adding a new token, add it to `shared.css` first
-/// and then encode it here.
+/// The token values live in `ThemeRegistry` (`spacesterminalcore`), which stays the single
+/// source of truth shared with embedded Ghostty terminals; this type only converts the
+/// descriptor's raw colors into appearance-dynamic `NSColor`s. Call sites keep referencing
+/// `Theme.<token>`. The active descriptor is bound once at launch (see `ActiveTheme`), so
+/// these static values never observe a mid-session theme change.
 enum Theme {
     // MARK: Surfaces
 
     /// Window background.
-    static let bg = dynamic(light: (248, 247, 241), dark: (15, 21, 23))
+    static let bg = dynamic(\.background)
     /// Section card background.
-    static let surface = dynamic(light: (255, 255, 255), dark: (29, 42, 45))
+    static let surface = dynamic(\.surface)
     /// Secondary surface used inside cards (editing forms, stop script).
-    static let surface2 = dynamic(light: (241, 239, 230), dark: (23, 33, 36))
+    static let surface2 = dynamic(\.surface2)
     /// Floating palette background — slightly darker than surface so selection tints read lighter.
-    static let paletteSurface = dynamic(light: (250, 249, 244), dark: (25, 37, 40))
-    /// Sidebar background (matches `--sidebar-bg`).
-    static let sidebarBg = dynamic(light: (241, 239, 230), dark: (15, 21, 23))
+    static let paletteSurface = dynamic(\.paletteSurface)
+    /// Sidebar background.
+    static let sidebarBg = dynamic(\.sidebarBackground)
 
     // MARK: Text
 
-    static let text = dynamic(light: (16, 32, 40), dark: (234, 240, 239))
-    static let muted = dynamic(light: (58, 77, 87), dark: (173, 192, 196))
-    static let mutedSecondary = dynamic(light: (111, 132, 141), dark: (122, 138, 141))
+    static let text = dynamic(\.text)
+    static let muted = dynamic(\.muted)
+    static let mutedSecondary = dynamic(\.mutedSecondary)
 
     // MARK: Lines
 
-    static let border = dynamic(light: (213, 216, 211), dark: (48, 67, 70))
-    static let borderStrong = dynamic(light: (184, 189, 181), dark: (63, 84, 88))
+    static let border = dynamic(\.border)
+    static let borderStrong = dynamic(\.borderStrong)
 
-    // MARK: Accent (teal)
+    // MARK: Accent
 
-    static let accent = dynamic(light: (15, 122, 118), dark: (89, 219, 205))
-    static let accentStrong = dynamic(light: (13, 95, 93), dark: (61, 198, 184))
+    static let accent = dynamic(\.accent)
+    static let accentStrong = dynamic(\.accentStrong)
     /// Fill color for accented backgrounds (filter chips, type-icon tile for
     /// browser/project, selected sidebar row, focus ring approximation).
-    /// Alpha differs per mode: 0.12 light, 0.16 dark — same as CSS.
-    static let accentTint = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(89, 219, 205, alpha: 0.16) : color(15, 122, 118, alpha: 0.12)
-    }
+    static let accentTint = dynamic(\.accentTint)
     /// Foreground text/symbols on top of `accentStrong` (primary buttons, badges).
-    /// White in light, dark ink in dark — ensures WCAG contrast in both modes.
-    static let onAccent = dynamic(light: (255, 255, 255), dark: (15, 21, 23))
+    static let onAccent = dynamic(\.onAccent)
 
-    /// Fill for primary action buttons — uses the bright teal in both appearances so
-    /// dark ink text is always readable (mirrors the mock's dark-mode button style).
-    static let primaryButtonFill = dynamic(light: (61, 198, 184), dark: (61, 198, 184))
-    /// Dark ink text for primary action buttons — pairs with `primaryButtonFill`.
-    static let primaryButtonText = dynamic(light: (15, 21, 23), dark: (15, 21, 23))
+    /// Fill for primary action buttons — pairs with `primaryButtonText` in both appearances.
+    static let primaryButtonFill = dynamic(\.primaryButtonFill)
+    /// Ink text for primary action buttons — pairs with `primaryButtonFill`.
+    static let primaryButtonText = dynamic(\.primaryButtonText)
 
     // MARK: Semantic status
 
-    static let green = dynamic(light: (58, 158, 95), dark: (76, 208, 122))
-    static let red = dynamic(light: (198, 58, 47), dark: (255, 107, 96))
-    static let orange = dynamic(light: (208, 122, 26), dark: (245, 167, 66))
+    static let green = dynamic(\.green)
+    static let red = dynamic(\.red)
+    static let orange = dynamic(\.orange)
 
     // MARK: Row states
 
     /// Subtle background applied on hover.
-    static let rowHover = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(234, 240, 239, alpha: 0.06) : color(15, 32, 40, alpha: 0.04)
-    }
+    static let rowHover = dynamic(\.rowHover)
     /// Background for the selected sidebar row.
-    static let rowSelected = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(89, 219, 205, alpha: 0.18) : color(15, 122, 118, alpha: 0.14)
-    }
+    static let rowSelected = dynamic(\.rowSelected)
     /// Muted selected-row tint for the command palette — same hue as rowSelected but lower alpha.
-    static let rowSelectedCard = dynamic(light: (15, 122, 118), dark: (89, 219, 205), alpha: 0.07)
-    /// Subtle teal border for a selected palette row.
-    static let rowSelectedCardBorder = dynamic(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.28)
+    static let rowSelectedCard = dynamic(\.rowSelectedCard)
+    /// Subtle accent border for a selected palette row.
+    static let rowSelectedCardBorder = dynamic(\.rowSelectedCardBorder)
     /// Neutral chip background (project chip, shortcut chip, branch chip).
-    static let chipBg = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(234, 240, 239, alpha: 0.08) : color(15, 32, 40, alpha: 0.06)
-    }
+    static let chipBg = dynamic(\.chipBackground)
 
     // MARK: Element pairs
 
@@ -86,34 +73,21 @@ enum Theme {
     static let iconBrowserBg = accentTint
     static let iconBrowserFg = accentStrong
 
-    /// Type-icon tile for processes: green at 0.16 alpha over green glyph.
-    /// Alpha stays constant across modes so it tracks `green` automatically.
-    static let iconProcessBg = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(76, 208, 122, alpha: 0.16) : color(58, 158, 95, alpha: 0.16)
-    }
+    /// Type-icon tile for processes: green tint over green glyph.
+    static let iconProcessBg = dynamic(\.iconProcessBackground)
     static let iconProcessFg = green
 
     /// Type-icon tile for coding agents: neutral ink tint over muted glyph.
-    static let iconAgentBg = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(234, 240, 239, alpha: 0.10) : color(15, 32, 40, alpha: 0.08)
-    }
+    static let iconAgentBg = dynamic(\.iconAgentBackground)
     static let iconAgentFg = muted
 
     /// Type-icon tile for port definitions: orange tint over orange glyph.
-    static let iconPortBg = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(245, 167, 66, alpha: 0.14) : color(208, 122, 26, alpha: 0.12)
-    }
+    static let iconPortBg = dynamic(\.iconPortBackground)
     static let iconPortFg = orange
 
-    /// Running status dot: solid green with an expanded halo at 0.22 alpha.
+    /// Running status dot: solid green with an expanded halo.
     static let statusRunningFill = green
-    static let statusRunningHalo = NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return isDark ? color(76, 208, 122, alpha: 0.22) : color(58, 158, 95, alpha: 0.22)
-    }
+    static let statusRunningHalo = dynamic(\.statusRunningHalo)
     static let statusExitedStroke = red
     static let statusIdleStroke = mutedSecondary
     static let statusWaitingFill = orange
@@ -145,18 +119,19 @@ enum Theme {
         ])
     }
 
-    /// Applies the design-system primary button style (bright-teal fill, dark ink text).
+    /// Applies the design-system primary button style (accent fill, ink text).
     /// Call after setting `button.title` so `attributedTitle` picks up the correct string.
     ///
     /// Uses a layer background instead of `bezelColor` because on macOS 26, `bezelColor`
     /// takes full ownership of title rendering and ignores `contentTintColor`/`attributedTitle`.
+    /// The fill and ink are the same in both appearances, so plain colors are safe on a layer.
     @MainActor static func applyPrimaryStyle(to button: NSButton) {
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.backgroundColor = CGColor(srgbRed: 61 / 255, green: 198 / 255, blue: 184 / 255, alpha: 1)
+        button.layer?.backgroundColor = primaryButtonFill.cgColor
         button.layer?.cornerRadius = 5
         button.layer?.masksToBounds = true
-        let fg = NSColor(srgbRed: 15 / 255, green: 21 / 255, blue: 23 / 255, alpha: 1)
+        let fg = primaryButtonText
         button.contentTintColor = fg
         button.attributedTitle = NSAttributedString(
             string: button.title, attributes: [.foregroundColor: fg, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
@@ -193,15 +168,17 @@ enum Theme {
 
     // MARK: Helpers
 
-    private static func dynamic(light: (Int, Int, Int), dark: (Int, Int, Int), alpha: CGFloat = 1.0) -> NSColor {
+    private static func dynamic(_ token: KeyPath<ThemeAppearanceTokens, ThemeColor>) -> NSColor {
         NSColor(name: nil) { appearance in
+            let descriptor = ActiveTheme.descriptor
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            let rgb = isDark ? dark : light
-            return color(rgb.0, rgb.1, rgb.2, alpha: alpha)
+            return nsColor((isDark ? descriptor.dark : descriptor.light)[keyPath: token])
         }
     }
 
-    private static func color(_ r: Int, _ g: Int, _ b: Int, alpha: CGFloat) -> NSColor {
-        NSColor(srgbRed: CGFloat(r) / 255.0, green: CGFloat(g) / 255.0, blue: CGFloat(b) / 255.0, alpha: alpha)
+    private static func nsColor(_ color: ThemeColor) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat(color.red) / 255.0, green: CGFloat(color.green) / 255.0, blue: CGFloat(color.blue) / 255.0,
+            alpha: CGFloat(color.alpha))
     }
 }

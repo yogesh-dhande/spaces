@@ -204,7 +204,6 @@ final class AgentHookTests: XCTestCase {
         let windows = try store.windows(workspaceID: workspace.id)
         XCTAssertEqual(windows.count, 1)
         XCTAssertEqual(windows.first?.role, "terminal")
-        XCTAssertNil(windows.first?.windowID)
         XCTAssertEqual(windows.first?.terminalTrackingID, "workspace-session")
     }
 
@@ -227,7 +226,7 @@ final class AgentHookTests: XCTestCase {
     func testHandleAgentExitKeepsLiveAdHocSpacesSessionIdleWithoutPersistingSignalWindowID() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces-test.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -252,7 +251,6 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(storedAgent.terminalTrackingID, sessionID)
         let trackedWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
         XCTAssertEqual(trackedWindow.terminalTrackingID, sessionID)
-        XCTAssertNil(trackedWindow.windowID)
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
     }
@@ -281,7 +279,6 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).count, 1)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).first?.terminalTrackingID, "configured-session")
-        XCTAssertNil(try store.windows(workspaceID: workspace.id).first?.windowID)
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
     }

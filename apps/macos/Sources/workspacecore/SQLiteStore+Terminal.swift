@@ -51,9 +51,6 @@ extension SQLiteStore {
                           resolved_url = excluded.resolved_url
                         """, bindings: [runtimeTargetID, window.targetURL ?? "", window.detail ?? ""])
             }
-            // Desktop window IDs are client-owned: record the captured yabai window outside spaces.db,
-            // keyed by the resolved runtime-target id (the row this upsert wrote).
-            try persistDesktopWindowID(workspaceID: window.workspaceID, runtimeTargetID: runtimeTargetID, windowID: window.windowID)
         }
     }
 
@@ -77,25 +74,6 @@ extension SQLiteStore {
                 ORDER BY rt.order_index
                 """, bindings: [workspaceID])
         return rows.compactMap { decodeWindow(row: $0) }
-    }
-
-    /// Reverse-lookup of the runtime targets that own a captured desktop window. Desktop window
-    /// IDs live in the injected client store, so this resolves them there and re-fetches the
-    /// matching window records. With no client store injected (daemon/CLI), there are no matches.
-    public func windows(windowID: Int) throws -> [WindowRecord] {
-        guard let desktopWindowIDStore else { return [] }
-        let matches = try desktopWindowIDStore.desktopWindowMatches(windowID: windowID)
-        var result: [WindowRecord] = []
-        for match in matches {
-            if let window = try windows(workspaceID: match.workspaceID).first(where: { $0.id == match.runtimeTargetID }) { result.append(window) }
-        }
-        return result
-    }
-
-    public func workspaceID(windowID: Int) throws -> String? {
-        // Resolve through windows(windowID:) so the answer is validated against live runtime targets:
-        // a client-store entry for a since-deleted target must not resolve to a stale workspace.
-        try windows(windowID: windowID).first?.workspaceID
     }
 
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? {
@@ -136,18 +114,6 @@ extension SQLiteStore {
         return row?.first
     }
 
-    public func workspaceIDForAgentWindow(yabaiWindowID: Int) throws -> String? {
-        guard let desktopWindowIDStore else { return nil }
-        // A captured desktop window maps to a runtime-target id; return the workspace whose agent
-        // session is linked to that runtime target.
-        for match in try desktopWindowIDStore.desktopWindowMatches(windowID: yabaiWindowID) {
-            if let agent = try agentWindows(workspaceID: match.workspaceID).first(where: { $0.runtimeTargetID == match.runtimeTargetID }) {
-                return agent.workspaceID
-            }
-        }
-        return nil
-    }
-
     public func deleteWindows(workspaceID: String) throws {
         try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id = ?", bindings: [workspaceID])
     }
@@ -161,7 +127,7 @@ extension SQLiteStore {
         let role = row[7]
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], name: row[3].isEmpty ? nil : row[3], detail: row[4].isEmpty ? nil : row[4],
-            targetURL: targetURL, windowID: overlaidWindowID(workspaceID: row[1], runtimeTargetID: row[0]), terminalTrackingID: trackingID,
+            targetURL: targetURL, terminalTrackingID: trackingID,
             terminalNativeID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0, lastSeenAt: row[9])
     }
 }

@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 5
+    public static let currentVersion = 7
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -244,87 +244,6 @@ public final class SpacesClientDatabase {
             })
     }
 
-    public func writeTerminalWindowFrame(_ frame: TerminalSessionWindowFrame, rootDirectory: String, sessionID: String, mode: TerminalAttachmentMode)
-        throws
-    {
-        try execute(
-            sql: """
-                INSERT INTO terminal_window_frames(root_directory, session_id, mode, x, y, width, height, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(root_directory, mode) DO UPDATE SET
-                  session_id = excluded.session_id,
-                  x = excluded.x,
-                  y = excluded.y,
-                  width = excluded.width,
-                  height = excluded.height,
-                  updated_at = excluded.updated_at
-                """, bindings: [rootDirectory, sessionID, mode.rawValue, frame.x, frame.y, frame.width, frame.height, Self.timestamp()])
-    }
-
-    public func terminalWindowFrame(rootDirectory: String, mode: TerminalAttachmentMode) throws -> TerminalSessionWindowFrame? {
-        guard
-            let row = try queryRow(
-                sql: """
-                    SELECT x, y, width, height
-                    FROM terminal_window_frames
-                    WHERE root_directory = ? AND mode = ?
-                    """, bindings: [rootDirectory, mode.rawValue]), row.count >= 4, let x = Double(row[0]), let y = Double(row[1]),
-            let width = Double(row[2]), let height = Double(row[3])
-        else { return nil }
-        return TerminalSessionWindowFrame(x: x, y: y, width: width, height: height)
-    }
-
-    /// Records the desktop (yabai) window ID captured for a runtime target on the local desktop.
-    public func setDesktopWindowID(deviceID: String, workspaceID: String, runtimeTargetID: String, windowID: Int) throws {
-        try execute(
-            sql: """
-                INSERT INTO desktop_window_ids(device_id, workspace_id, runtime_target_id, window_id, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(device_id, workspace_id, runtime_target_id) DO UPDATE SET
-                  window_id = excluded.window_id,
-                  updated_at = excluded.updated_at
-                """, bindings: [deviceID, workspaceID, runtimeTargetID, windowID, Self.timestamp()])
-    }
-
-    public func desktopWindowID(deviceID: String, workspaceID: String, runtimeTargetID: String) throws -> Int? {
-        try queryRow(
-            sql: "SELECT window_id FROM desktop_window_ids WHERE device_id = ? AND workspace_id = ? AND runtime_target_id = ?",
-            bindings: [deviceID, workspaceID, runtimeTargetID])?.first.flatMap(Int.init)
-    }
-
-    public func desktopWindowIDs(deviceID: String, workspaceID: String) throws -> [String: Int] {
-        let rows = try queryRows(
-            sql: "SELECT runtime_target_id, window_id FROM desktop_window_ids WHERE device_id = ? AND workspace_id = ?",
-            bindings: [deviceID, workspaceID])
-        var result: [String: Int] = [:]
-        for row in rows {
-            guard row.count >= 2, let windowID = Int(row[1]) else { continue }
-            result[row[0]] = windowID
-        }
-        return result
-    }
-
-    public func clearDesktopWindowID(deviceID: String, workspaceID: String, runtimeTargetID: String) throws {
-        try execute(
-            sql: "DELETE FROM desktop_window_ids WHERE device_id = ? AND workspace_id = ? AND runtime_target_id = ?",
-            bindings: [deviceID, workspaceID, runtimeTargetID])
-    }
-
-    /// Reverse lookup for "which runtime targets own this desktop window", most-recently-updated first.
-    public func desktopWindowIDMatches(deviceID: String, windowID: Int) throws -> [(workspaceID: String, runtimeTargetID: String)] {
-        try queryRows(
-            sql: """
-                SELECT workspace_id, runtime_target_id
-                FROM desktop_window_ids
-                WHERE device_id = ? AND window_id = ?
-                ORDER BY updated_at DESC
-                """, bindings: [deviceID, windowID]
-        ).compactMap { row in
-            guard row.count >= 2 else { return nil }
-            return (row[0], row[1])
-        }
-    }
-
     /// Records the dedicated Chrome window opened for a workspace browser session on the local
     /// desktop. A browser "window" is client/desktop-local state (not daemon state), keyed by
     /// the session's resolved target URL so re-focus returns to the same window.
@@ -367,6 +286,76 @@ public final class SpacesClientDatabase {
         try execute(sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
     }
 
+    // MARK: - Panel layouts
+
+    public func writeWorkspacePanelLayout(deviceID: String, workspaceID: String, layoutJSON: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO workspace_panel_layouts(device_id, workspace_id, layout_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(device_id, workspace_id) DO UPDATE SET
+                  layout_json = excluded.layout_json,
+                  updated_at = excluded.updated_at
+                """, bindings: [deviceID, workspaceID, layoutJSON, Self.timestamp()])
+    }
+
+    public func workspacePanelLayout(deviceID: String, workspaceID: String) throws -> String? {
+        try queryRow(
+            sql: "SELECT layout_json FROM workspace_panel_layouts WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])?.first
+    }
+
+    public func deleteWorkspacePanelLayout(deviceID: String, workspaceID: String) throws {
+        try execute(sql: "DELETE FROM workspace_panel_layouts WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
+    }
+
+    public struct PanelWindowRecord: Sendable, Equatable {
+        public let id: String
+        public let layoutJSON: String
+        public let frame: (x: Double, y: Double, width: Double, height: Double)?
+
+        public init(id: String, layoutJSON: String, frame: (x: Double, y: Double, width: Double, height: Double)?) {
+            self.id = id
+            self.layoutJSON = layoutJSON
+            self.frame = frame
+        }
+
+        public static func == (lhs: PanelWindowRecord, rhs: PanelWindowRecord) -> Bool {
+            lhs.id == rhs.id && lhs.layoutJSON == rhs.layoutJSON && lhs.frame?.x == rhs.frame?.x && lhs.frame?.y == rhs.frame?.y
+                && lhs.frame?.width == rhs.frame?.width && lhs.frame?.height == rhs.frame?.height
+        }
+    }
+
+    public func upsertPanelWindow(_ record: PanelWindowRecord) throws {
+        try execute(
+            sql: """
+                INSERT INTO panel_windows(id, layout_json, x, y, width, height, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  layout_json = excluded.layout_json,
+                  x = excluded.x, y = excluded.y, width = excluded.width, height = excluded.height,
+                  updated_at = excluded.updated_at
+                """,
+            bindings: [
+                record.id, record.layoutJSON, record.frame.map { "\($0.x)" } ?? "", record.frame.map { "\($0.y)" } ?? "",
+                record.frame.map { "\($0.width)" } ?? "", record.frame.map { "\($0.height)" } ?? "", Self.timestamp(),
+            ])
+    }
+
+    public func panelWindows() throws -> [PanelWindowRecord] {
+        try queryRows(sql: "SELECT id, layout_json, x, y, width, height FROM panel_windows ORDER BY updated_at, id").compactMap { row in
+            guard row.count >= 6 else { return nil }
+            let frame: (x: Double, y: Double, width: Double, height: Double)?
+            if let x = Double(row[2]), let y = Double(row[3]), let width = Double(row[4]), let height = Double(row[5]) {
+                frame = (x, y, width, height)
+            } else {
+                frame = nil
+            }
+            return PanelWindowRecord(id: row[0], layoutJSON: row[1], frame: frame)
+        }
+    }
+
+    public func deletePanelWindow(id: String) throws { try execute(sql: "DELETE FROM panel_windows WHERE id = ?", bindings: [id]) }
+
     public func backupURLs() throws -> [URL] { try backupManager.existingBackups() }
 
     private func initializeSchema() throws {
@@ -391,8 +380,11 @@ public final class SpacesClientDatabase {
         let backupURL = try backupManager.createMigrationBackup(sourceHandle: db, fromVersion: version, toVersion: schemaVersion)
         do {
             while version < schemaVersion {
+                // Upgrades run serially: every intermediate version's step applies in order, so a
+                // missing step means the database cannot reach the current version at all.
                 guard let step = migrationSteps.first(where: { $0.fromVersion == version }) else {
-                    throw SpacesClientError.invalidArgument("No client database migration path from \(version) to \(schemaVersion).")
+                    throw SpacesClientError.invalidArgument(
+                        "No client database migration step exists from version \(version); cannot reach version \(schemaVersion).")
                 }
                 try withImmediateTransaction {
                     try step.apply(db)
@@ -603,9 +595,9 @@ public final class SpacesClientDatabase {
 
             \(clientStateSchemaSQL)
 
-            \(desktopWindowIDsSchemaSQL)
-
             \(browserSessionWindowIDsSchemaSQL)
+
+            \(panelLayoutsSchemaSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL
@@ -613,6 +605,8 @@ public final class SpacesClientDatabase {
         """
 
     private static let dropSchemaSQL = """
+            DROP TABLE IF EXISTS panel_windows;
+            DROP TABLE IF EXISTS workspace_panel_layouts;
             DROP TABLE IF EXISTS browser_session_window_ids;
             DROP TABLE IF EXISTS desktop_window_ids;
             DROP TABLE IF EXISTS local_window_focus_state;
@@ -641,71 +635,6 @@ public final class SpacesClientDatabase {
               PRIMARY KEY (device_id, project_id)
             );
 
-            CREATE TABLE IF NOT EXISTS terminal_window_frames (
-              root_directory TEXT NOT NULL,
-              session_id TEXT NOT NULL,
-              mode TEXT NOT NULL,
-              x REAL NOT NULL,
-              y REAL NOT NULL,
-              width REAL NOT NULL,
-              height REAL NOT NULL,
-              updated_at TEXT NOT NULL,
-              PRIMARY KEY (root_directory, mode)
-            );
-
-            CREATE TABLE IF NOT EXISTS runtime_targets (
-              id TEXT PRIMARY KEY,
-              device_id TEXT NOT NULL,
-              workspace_id TEXT NOT NULL,
-              type TEXT NOT NULL,
-              name TEXT,
-              detail TEXT,
-              app TEXT NOT NULL,
-              window_id INTEGER,
-              tracking_id TEXT,
-              order_index INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS browser_targets (
-              runtime_target_id TEXT PRIMARY KEY,
-              target_url TEXT,
-              resolved_url TEXT,
-              FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS runtime_target_events (
-              id TEXT PRIMARY KEY,
-              runtime_target_id TEXT NOT NULL,
-              event_type TEXT NOT NULL,
-              source TEXT NOT NULL,
-              message TEXT,
-              window_id INTEGER,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS local_window_focus_state (
-              key TEXT PRIMARY KEY,
-              workspace_id TEXT,
-              window_id INTEGER,
-              updated_at TEXT NOT NULL
-            );
-        """
-
-    // Desktop (yabai) window IDs are client/desktop-local: they only exist for the local device
-    // and are keyed by the daemon-owned runtime-target id. Keeping this client-side lets the GUI
-    // focus desktop windows identically whether the daemon is local or remote.
-    private static let desktopWindowIDsSchemaSQL = """
-            CREATE TABLE IF NOT EXISTS desktop_window_ids (
-              device_id TEXT NOT NULL,
-              workspace_id TEXT NOT NULL,
-              runtime_target_id TEXT NOT NULL,
-              window_id INTEGER NOT NULL,
-              updated_at TEXT NOT NULL,
-              PRIMARY KEY (device_id, workspace_id, runtime_target_id)
-            );
         """
 
     // Browser session windows are client/desktop-local: the dedicated Chrome window opened for
@@ -723,16 +652,55 @@ public final class SpacesClientDatabase {
             );
         """
 
+    // Panel layouts are client-local UI state: which sessions are open in which
+    // tabs/panes per workspace, plus extra panel windows, as a versioned JSON document
+    // per panel (see `PanelLayout` in spacesui).
+    private static let panelLayoutsSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS workspace_panel_layouts (
+              device_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              layout_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (device_id, workspace_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS panel_windows (
+              id TEXT PRIMARY KEY,
+              layout_json TEXT NOT NULL,
+              x REAL,
+              y REAL,
+              width REAL,
+              height REAL,
+              updated_at TEXT NOT NULL
+            );
+        """
+
     public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
         SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
             try executeClientBatch(database: database, sql: clientStateSchemaSQL)
         },
-        SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Add client-owned desktop window IDs") { database in
-            try executeClientBatch(database: database, sql: desktopWindowIDsSchemaSQL)
-        },
+        SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Reserve dropped desktop window IDs version") { _ in },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
             try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
         }, SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Reserve merged client schema version") { _ in },
+        SpacesClientMigrationStep(fromVersion: 5, toVersion: 6, description: "Add panel layouts") { database in
+            try executeClientBatch(database: database, sql: panelLayoutsSchemaSQL)
+        },
+        // Drops tables nothing reads or writes: terminal_window_frames is from the
+        // one-window-per-terminal era (panes in panel layouts replaced it), and the rest were
+        // scaffolded for the thin-client split before panes removed desktop window identity.
+        SpacesClientMigrationStep(fromVersion: 6, toVersion: 7, description: "Drop unused window tracking tables") { database in
+            try executeClientBatch(
+                database: database,
+                sql: """
+                    DROP TABLE IF EXISTS terminal_window_frames;
+                    DROP TABLE IF EXISTS runtime_target_events;
+                    DROP TABLE IF EXISTS browser_targets;
+                    DROP TABLE IF EXISTS runtime_targets;
+                    DROP TABLE IF EXISTS local_window_focus_state;
+                    DROP TABLE IF EXISTS desktop_window_ids;
+                    """)
+        },
     ]
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }

@@ -114,8 +114,7 @@
                     self.stateRefreshRetryTask?.cancel()
                     self.stateRefreshRetryTask = nil
                     self.apply(payload)
-                case .failure:
-                    self.scheduleStateRefreshRetry()
+                case .failure: self.scheduleStateRefreshRetry()
                 }
             }
         }

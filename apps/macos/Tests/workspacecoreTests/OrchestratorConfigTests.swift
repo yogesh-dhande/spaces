@@ -44,13 +44,13 @@ extension OrchestratorTests {
     func testNextWindowOrderIndexUsesRoleOffsetAndMax() {
         let windows = [
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "Chrome", title: "Browser", windowID: 10, role: "browser", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: "ws", app: "Chrome", title: "Browser", role: "browser", orderIndex: 0,
                 lastSeenAt: "now"),
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 1", windowID: 11, role: "terminal", orderIndex: 200,
+                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 1", role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"),
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 2", windowID: 12, role: "terminal", orderIndex: 205,
+                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 2", role: "terminal", orderIndex: 205,
                 lastSeenAt: "now"),
         ]
 
@@ -170,7 +170,7 @@ extension OrchestratorTests {
         let sessionID = "session-1"
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell-1", windowID: nil, terminalTrackingID: sessionID,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell-1", terminalTrackingID: sessionID,
                 role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withSpacesProfileEnvironment(dbPath: dbPath) {
@@ -228,7 +228,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: "session-123", terminalNativeID: "session-123", role: "terminal", orderIndex: 200,
+                terminalTrackingID: "session-123", terminalNativeID: "session-123", role: "terminal", orderIndex: 200,
                 lastSeenAt: "2026-05-10T18:00:00Z"))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-123"), workspace.id)
@@ -276,7 +276,7 @@ extension OrchestratorTests {
         XCTAssertEqual(names, ["Frontend", "API"])
     }
 
-    func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWithoutDesktopWindowIDWhileSessionIsLive() throws {
+    func testRefreshWorkspaceWindowsPreservesAdHocBuiltInTerminalWindowWhileSessionIsLive() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path)
@@ -291,7 +291,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
@@ -334,7 +334,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
@@ -377,7 +377,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
@@ -436,7 +436,7 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "stale", windowID: 909, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "stale", role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
 
         // Why: verify refresh prunes missing/stale tracked windows without implicitly changing lifecycle state.
@@ -470,7 +470,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Frontend", targetURL: "http://localhost:3001",
-                windowID: 909, role: "browser", orderIndex: 0, lastSeenAt: "now"))
+                role: "browser", orderIndex: 0, lastSeenAt: "now"))
 
         var didMutate = true
         didMutate = try orchestrator.refreshWorkspaceWindows(workspaceID: workspace.id)
@@ -518,15 +518,15 @@ extension OrchestratorTests {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "Spaces", title: "default-stale", windowID: 910, role: "terminal",
+                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "Spaces", title: "default-stale", role: "terminal",
                 orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "Spaces", title: "active-stale", windowID: 911, role: "terminal",
+                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "Spaces", title: "active-stale", role: "terminal",
                 orderIndex: 0, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "Spaces", title: "archived-stale", windowID: 912, role: "terminal",
+                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "Spaces", title: "archived-stale", role: "terminal",
                 orderIndex: 0, lastSeenAt: "now"))
 
         // Why: confirm bulk refresh reconciles active workspaces only and leaves archived workspace rows unchanged.
@@ -764,7 +764,7 @@ extension OrchestratorTests {
     func testRenameAdHocBuiltInTerminalSessionPersistsUserTitleOverRuntimeTitleUpdates() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -776,7 +776,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -815,7 +815,7 @@ extension OrchestratorTests {
     func testRenameAdHocBuiltInTerminalSessionRefusesConfiguredProcessSessions() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
-        let store = try SQLiteStore(path: dbPath, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
+        let store = try SQLiteStore(path: dbPath)
         let orchestrator = WorkspaceOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -900,7 +900,7 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", windowID: 707, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 

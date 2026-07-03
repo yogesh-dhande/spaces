@@ -104,6 +104,13 @@ extension AppKitController {
         return Self.sidebarRuntimeTargetItems(detail: context.detail, browserSessions: context.browserSessions)
     }
 
+    /// The runtime target's display name for a terminal session (what the sidebar row
+    /// shows), so pane and tab titles match the target list instead of the terminal's
+    /// own window title.
+    func runtimeTargetTitle(forSessionID sessionID: String, workspaceID: String) -> String? {
+        sidebarRuntimeTargetItems(workspaceID: workspaceID).first { $0.sessionID == sessionID }?.title
+    }
+
     /// Opens or focuses a sidebar runtime target through the same resolution pipeline the
     /// numbered shortcuts, command palette, and window cycling use, so a sidebar click
     /// behaves identically to those paths.

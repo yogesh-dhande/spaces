@@ -4,7 +4,7 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
-extension TerminalSessionWindowController {
+extension TerminalSessionPaneViewController {
     public func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
         case #selector(NSText.copy(_:)):
@@ -105,7 +105,7 @@ extension TerminalSessionWindowController {
         }
     }
 
-    public override func selectAll(_ sender: Any?) {
+    @objc public func selectAll(_ sender: Any?) {
         if visibleRenderer == .ghosttyOwner {
             guard performLiveTerminalReadOnlyBindingAction("select_all") else { return }
             return
@@ -184,7 +184,10 @@ extension TerminalSessionWindowController {
         } catch { updateInputStatus(message: String(describing: error), isError: true) }
     }
 
-    func handleTerminalWindowKeyEvent(_ event: NSEvent) -> Bool {
+    /// Handles a key-down event bound for the terminal. Hosts call this from their
+    /// key routing (the window's `sendEvent` today); returns true when the event
+    /// was consumed by the live terminal.
+    public func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown, backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return false }
         if Int(event.keyCode) == kVK_Escape, canPerformLiveTerminalReadOnlyAction, ghosttyRendererHost?.debugSearchState.isVisible == true {
             _ = ghosttyRendererHost?.performBindingAction("end_search")
@@ -196,7 +199,10 @@ extension TerminalSessionWindowController {
         return ghosttyRendererHost?.handleKeyEvent(event, for: client.id) ?? false
     }
 
-    func handleTerminalWindowCommandKeyEquivalent(_ event: NSEvent) -> Bool {
+    /// Handles a Command key equivalent (copy/paste/select-all/find family) for the
+    /// terminal. Hosts call this from their `performKeyEquivalent` routing; returns
+    /// true when the shortcut was consumed.
+    public func handleCommandKeyEquivalent(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown, backend == .ghosttyEmbedded, preferredAttachmentMode == .owner,
             visibleRenderer == .ghosttyOwner || visibleRenderer == .ghosttyEndedFinalRender
         else { return false }

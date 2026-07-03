@@ -81,8 +81,8 @@ import workspacecore
             focusRequest: .agentWindow(
                 .init(
                     id: "agent-1", workspaceID: "workspace-a", provider: .spaces, label: "Claude", terminalTrackingID: nil, codexThreadID: nil,
-                    status: .waiting, createdAt: "2026-04-30T00:00:00Z", updatedAt: "2026-04-30T00:00:00Z")),
-            alertsAttentionID: "attention-2", workspaceTitle: "Workspace A", status: .agent(.waiting))
+                    status: .waiting, createdAt: "2026-04-30T00:00:00Z", updatedAt: "2026-04-30T00:00:00Z")), alertsAttentionID: "attention-2",
+            workspaceTitle: "Workspace A", status: .agent(.waiting))
         let workspaceItem = makeItem(
             id: "workspace-a::0", source: .workspaceTarget, workspaceID: "workspace-a", kind: .process, label: "Frontend", detail: "bun dev",
             focusRequest: .workspaceProcess(workspaceID: "workspace-a", processID: "proc-1"), workspaceTitle: "Workspace A",
@@ -126,6 +126,35 @@ import workspacecore
 
         #expect(visible.count == 9)
         #expect(visible.map(\.id) == Array((1...9).map { "alerts::\($0)" }))
+    }
+
+    /// Picker rows all carry the same placeholder focus request, so the normal
+    /// palette's focus-identity dedup would collapse them to one row; the picker's
+    /// empty query must instead show the host-ordered list head (up to ten rows).
+    @Test func sessionPickerEmptyQueryShowsFirstTenRows() {
+        let items = (0...11).map { index in
+            makeItem(
+                id: "picker:\(index)", source: .workspaceTarget, workspaceID: "workspace-a", kind: .window,
+                label: index == 0 ? "New terminal session" : "session-\(index)", detail: nil,
+                focusRequest: .workspaceWindow(workspaceID: "workspace-a", index: 1))
+        }
+
+        let visible = AppKitController.visibleSessionPickerItems(allItems: items, query: "")
+
+        #expect(visible.map(\.id) == (0...9).map { "picker:\($0)" })
+    }
+
+    @Test func sessionPickerQuerySearchesAllRowsAcrossWorkspaces() {
+        let items = (1...15).map { index in
+            makeItem(
+                id: "picker:\(index)", source: .workspaceTarget, workspaceID: "workspace-\(index)", kind: .window, label: "session-\(index)",
+                detail: nil, focusRequest: .workspaceWindow(workspaceID: "workspace-\(index)", index: 1),
+                workspaceTitle: "Workspace \(index)")
+        }
+
+        let visible = AppKitController.visibleSessionPickerItems(allItems: items, query: "session-15")
+
+        #expect(visible.first?.id == "picker:15")
     }
 
     @Test func searchQueryUsesAllWorkspaceItems() {

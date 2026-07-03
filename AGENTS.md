@@ -54,8 +54,10 @@
 ## Data and Migration Rules
 - Installed/default database path: `~/.spaces/spaces.db`.
 - Repo-local development builds default to `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`.
-- Use additive, non-destructive migrations that preserve existing data.
-- Never add any destructive migration or reset path that can remove existing projects or workspaces.
+- Migrations must faithfully carry existing user data forward to the new schema version; never lose or corrupt data the product still uses.
+- Schema upgrades run serially through every intermediate version: each migration step moves exactly one version forward (vN to vN+1), and a database several versions behind applies each step in order. Never add a step that skips versions or a special-cased jump path.
+- Tables and columns that no code reads or writes anymore may be dropped in a migration; remove their schema definitions in the same change.
+- Never add any migration or reset path that can remove existing projects or workspaces.
 
 ## GUI Rules
 - UI should feel modern and compact.
@@ -80,6 +82,7 @@
 - Do not use C-style number formatting in SwiftUI text.
 - Prefer static member lookup where possible.
 - Do not use old-style GCD like `DispatchQueue.main.async`.
+- When capturing a child process's output through a `Pipe`, drain the pipe (`readDataToEndOfFile()` or a readability handler) BEFORE `waitUntilExit()`/`waitpid`. Waiting first deadlocks both processes as soon as the child writes more than the kernel's 64KB pipe buffer.
 - Filter user-entered text with `localizedStandardContains()`.
 - Avoid force unwrap and force try unless failure is unrecoverable.
 

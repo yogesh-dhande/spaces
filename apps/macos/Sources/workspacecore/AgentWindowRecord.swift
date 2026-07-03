@@ -39,9 +39,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     ) {
         let resolvedTrackingID = terminalTrackingID ?? terminalNativeID
         let terminalTarget: TerminalTargetRecord? =
-            if resolvedTrackingID != nil {
-                TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: resolvedTrackingID)
-            } else { nil }
+            if resolvedTrackingID != nil { TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: resolvedTrackingID) } else { nil }
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: runtimeTargetID, terminalTarget: terminalTarget,
             sessionKey: codexThreadID, status: status, createdAt: createdAt, updatedAt: updatedAt)
@@ -53,8 +51,7 @@ public struct AgentWindowRecord: Codable, Sendable {
     ) {
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: nil, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, status: status,
-            createdAt: createdAt, updatedAt: updatedAt)
+            terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, status: status, createdAt: createdAt, updatedAt: updatedAt)
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }

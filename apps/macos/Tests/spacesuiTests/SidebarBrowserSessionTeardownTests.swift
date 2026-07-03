@@ -22,8 +22,7 @@ struct SidebarBrowserSessionTeardownTests {
 
     @Test func reportsWorkspaceThatDisappearedFromRuntimeMap() {
         // Archive/delete drops the workspace out of the overview entirely; it still needs teardown.
-        let ids = SidebarController.workspaceIDsTransitionedToNotRunning(
-            previous: ["ws-1": status("ws-1", isRunning: true)], current: [:])
+        let ids = SidebarController.workspaceIDsTransitionedToNotRunning(previous: ["ws-1": status("ws-1", isRunning: true)], current: [:])
         #expect(ids == ["ws-1"])
     }
 

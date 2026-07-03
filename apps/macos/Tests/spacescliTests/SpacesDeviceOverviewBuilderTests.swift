@@ -274,7 +274,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             terminalApp: "Spaces", terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil,
             lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         let processWindow = WindowRecord(
-            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", windowID: nil, terminalTrackingID: "session-api",
+            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", terminalTrackingID: "session-api",
             terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
@@ -373,10 +373,10 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: nil)
         let terminalWindow = WindowRecord(
-            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", windowID: nil, terminalTrackingID: "session-shell",
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-shell",
             terminalNativeID: "session-shell", role: "terminal", orderIndex: 0, lastSeenAt: "now")
         let processWindow = WindowRecord(
-            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "api", windowID: nil, terminalTrackingID: "session-api",
+            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "api", terminalTrackingID: "session-api",
             terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
@@ -399,8 +399,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             isRunning: true, lastLaunchedAt: nil)
         // The runtime title mimics a Ghostty set_title update that arrived after the manual rename.
         let session = makeSessionCatalogEntry(
-            sessionID: "session-renamed", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id,
-            attachmentSnapshot: .init(), userTitle: "build watcher", runtimeTitle: "vim main.swift")
+            sessionID: "session-renamed", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+            userTitle: "build watcher", runtimeTitle: "vim main.swift")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project], workspaces: [.init(project: project, workspace: workspace)], sessions: [session])
@@ -415,7 +415,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
             isRunning: true, lastLaunchedAt: nil)
         let terminalWindow = WindowRecord(
-            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", windowID: nil, terminalTrackingID: nil,
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: nil,
             terminalNativeID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(

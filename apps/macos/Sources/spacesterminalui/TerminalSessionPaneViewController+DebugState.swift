@@ -3,7 +3,35 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
-extension TerminalSessionWindowController {
+/// Snapshot of a pane's rendered/debug state for the dump IPC and tests. The name and
+/// field set predate the pane hosting model (panes once lived in their own windows);
+/// the shape is a parsed E2E surface, so it stays stable.
+public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
+    public let renderedOutput: String
+    public let visibleSurfaceOutput: String?
+    public let showsTerminalSurface: Bool
+    public let showsTextRenderer: Bool
+    public let rendererSummary: String
+    public let summary: String
+    public let state: String
+    public let windowTitle: String
+    public let didCloseWindow: Bool
+    public let surfaceColumns: Int?
+    public let surfaceRows: Int?
+    public let windowIsKey: Bool
+    public let firstResponderTypeName: String?
+    public let searchVisible: Bool
+    public let searchQuery: String
+    public let searchTotal: Int?
+    public let searchSelected: Int?
+    public let attachmentMode: String
+    public let takeoverPending: Bool
+    public let takeoverButtonVisible: Bool
+    public let takeoverButtonEnabled: Bool
+    public let takeoverMessage: String
+}
+
+extension TerminalSessionPaneViewController {
     public func debugRefreshStateForTesting(skipOwnerAttach: Bool = false) {
         if skipOwnerAttach { debugForceRefreshSkippingOwnerAttach() } else { debugForceRefresh() }
     }
@@ -42,20 +70,11 @@ extension TerminalSessionWindowController {
     var debugRendererSummary: String { rendererLabel.stringValue }
     var debugSummary: String { summaryLabel.stringValue }
     var debugState: String { stateLabel.stringValue }
-    var debugWindowTitle: String { window?.title ?? "" }
-    var debugWindowRepresentedPath: String? { window?.representedURL?.path }
-    var debugWindowFrame: NSRect { window?.frame ?? .zero }
-    func debugShouldDeferInitialOwnerPresentationInProduction(wasVisible: Bool = false) -> Bool {
-        shouldDeferInitialOwnerPresentation(wasVisible: wasVisible, runningUnderXCTest: false)
-    }
     public var attachmentMode: TerminalAttachmentMode { preferredAttachmentMode }
-    public var didClose: Bool { didCloseWindow }
-    public var terminalSessionID: String { sessionID }
     var debugDidCloseWindow: Bool { didCloseWindow }
     func debugForceRefresh() { refreshNow() }
     func debugForceRefreshSkippingOwnerAttach() { refreshNow(allowGhosttyOwnerAttach: false) }
     func debugAttachLocalClientIfNeeded() { attachLocalClientIfNeeded() }
-    func debugFlushPendingWindowFramePersistence() async { await pendingWindowFramePersistTask?.value }
     public var clientID: String { client.id }
     var debugTakeoverPending: Bool { takeoverTask != nil }
     func debugSetTakeoverTaskStartedAt(_ date: Date?) { takeoverTaskStartedAt = date }
@@ -68,19 +87,6 @@ extension TerminalSessionWindowController {
     var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
     var debugShowsStateLabel: Bool { !stateLabel.isHidden }
     var debugShowsHeader: Bool { !headerStackView.isHidden }
-    var debugRuntimeToolbarTitle: String { runtimeToolbarTitleLabel.stringValue }
-    var debugShowsRuntimeToolbarTitle: Bool { !runtimeToolbarTitleLabel.isHidden }
-    var debugShowsRuntimeToolbar: Bool { !runtimeToolbarStackView.isHidden }
-    var debugShowsRuntimeRunButton: Bool { !runtimeToolbarRunButton.isHidden }
-    var debugShowsRuntimeStopButton: Bool { !runtimeToolbarStopButton.isHidden }
-    var debugShowsRuntimeRestartButton: Bool { !runtimeToolbarRestartButton.isHidden }
-    var debugRuntimeToolbarTrailingGap: CGFloat {
-        runtimeToolbarStackView.layoutSubtreeIfNeeded()
-        return runtimeToolbarStackView.bounds.maxX - runtimeToolbarButtonStackView.frame.maxX
-    }
-    func debugRunRuntimeToolbarAction() { runRuntimeFromToolbar() }
-    func debugStopRuntimeToolbarAction() { stopRuntimeFromToolbar() }
-    func debugRestartRuntimeToolbarAction() { restartRuntimeFromToolbar() }
     var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
     var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
     var debugInputStatus: String { inputStatusLabel.stringValue }
@@ -124,7 +130,6 @@ extension TerminalSessionWindowController {
         outputScrollView.reflectScrolledClipView(outputScrollView.contentView)
     }
     var debugOutputHorizontalOffset: CGFloat { outputScrollView.contentView.documentVisibleRect.minX }
-    var debugContentWidth: CGFloat { window?.contentView?.frame.width ?? 0 }
     var debugTerminalContainerWidth: CGFloat { terminalContainer.frame.width }
     var debugBodyWidth: CGFloat { bodyStackView.frame.width }
     var debugTakeoverContainerWidth: CGFloat { takeoverContainerView.frame.width }

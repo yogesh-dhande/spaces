@@ -139,7 +139,22 @@ final class StoreTests: XCTestCase {
                 """)
 
         XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
-            XCTAssertEqual(error.localizedDescription, "No migration path exists from schema version 0 to \(DatabaseSchema.currentVersion).")
+            XCTAssertEqual(
+                error.localizedDescription,
+                "No migration step exists from schema version 0; cannot reach version \(DatabaseSchema.currentVersion).")
+        }
+    }
+
+    // Any database at a released schema version must reach the current version by applying every
+    // intermediate step serially — the step list may never skip a version.
+    func testMigrationStepsFormOneSerialChainToCurrentVersion() {
+        var version = 1
+        while version < DatabaseSchema.currentVersion {
+            guard let step = DatabaseSchema.migrationSteps.first(where: { $0.fromVersion == version }) else {
+                return XCTFail("No migration step from schema version \(version)")
+            }
+            XCTAssertEqual(step.toVersion, version + 1, "Step from \(version) must move exactly one version forward")
+            version = step.toVersion
         }
     }
 
@@ -442,9 +457,8 @@ final class StoreTests: XCTestCase {
         XCTAssertThrowsError(
             try store.upsert(
                 project: ProjectRecord(
-                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil,
-                    stopScript: nil, ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")], processes: [],
-                    browserSessions: [], agentLaunchers: [])))
+                    id: project.id, name: project.name, dir: project.dir, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
+                    ports: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")], processes: [], browserSessions: [], agentLaunchers: [])))
         XCTAssertThrowsError(
             try store.setWorkspaceServiceDefinitions(
                 workspaceID: workspace.id, definitions: [ServiceDefinition(name: "api"), ServiceDefinition(name: "api")]))
@@ -538,10 +552,10 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(processes[0].status, .exited)
 
         let firstWindow = WindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Browser", windowID: 42, role: "browser", orderIndex: 0,
+            id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Browser", role: "browser", orderIndex: 0,
             lastSeenAt: "now")
         let secondWindow = WindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, title: "Terminal", windowID: 43, role: "terminal",
+            id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, title: "Terminal", role: "terminal",
             orderIndex: 1, lastSeenAt: "now")
         try store.upsert(window: firstWindow)
         try store.upsert(window: secondWindow)
@@ -648,7 +662,7 @@ final class StoreTests: XCTestCase {
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "term", windowID: 77, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "term", role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
 
         try store.deleteWorkspace(id: workspace.id)
@@ -686,7 +700,7 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["api"])
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, windowID: 91, role: "browser", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, role: "browser", orderIndex: 0,
                 lastSeenAt: "now"))
 
         try store.deleteProject(id: project.id)
