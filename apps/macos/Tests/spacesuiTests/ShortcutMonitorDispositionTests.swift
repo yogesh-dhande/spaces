@@ -24,13 +24,13 @@ import Testing
                 == .runAppShortcuts)
     }
 
-    @Test func panelWindowCloseTabShortcutMatchesPlainCommandWOnly() {
-        #expect(AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command]))
-        #expect(AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "W", eventModifiers: [.command, .capsLock]))
-        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: []))
-        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command, .shift]))
-        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command, .option]))
-        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: "q", eventModifiers: [.command]))
-        #expect(!AppKitController.isPanelWindowCloseTabShortcut(charactersIgnoringModifiers: nil, eventModifiers: [.command]))
+    @Test func closePaneShortcutMatchesPlainCommandWOnly() {
+        #expect(AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command]))
+        #expect(AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: "W", eventModifiers: [.command, .capsLock]))
+        #expect(!AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: "w", eventModifiers: []))
+        #expect(!AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command, .shift]))
+        #expect(!AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: "w", eventModifiers: [.command, .option]))
+        #expect(!AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: "q", eventModifiers: [.command]))
+        #expect(!AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: nil, eventModifiers: [.command]))
     }
 }

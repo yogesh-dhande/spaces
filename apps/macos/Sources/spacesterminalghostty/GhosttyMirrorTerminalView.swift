@@ -102,7 +102,7 @@
             self.launchConfiguration = launchConfiguration
             super.init(frame: .zero)
             wantsLayer = true
-            layer?.backgroundColor = NSColor.black.cgColor
+            layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor
             installSurfaceHostView()
             installSearchOverlay()
         }
@@ -407,12 +407,17 @@
                 updateSurfaceFocus()
                 return
             }
-            if window.firstResponder !== self { window.makeFirstResponder(self) }
-            updateSurfaceFocus()
-            if window.firstResponder !== self {
-                window.makeFirstResponder(self)
+            // Reclaim focus only when it fell back to the window itself (mirror
+            // re-parenting resigns it during structural updates). This runs on every
+            // render frame for every attached owner pane, so grabbing focus
+            // unconditionally would continuously steal it from sibling panes and from
+            // other controls in the window (the tab rename editor, sidebar editors).
+            guard window.firstResponder === window else {
                 updateSurfaceFocus()
+                return
             }
+            window.makeFirstResponder(self)
+            updateSurfaceFocus()
             if deferIfNeeded { scheduleDeferredFirstResponderRestore() }
         }
 

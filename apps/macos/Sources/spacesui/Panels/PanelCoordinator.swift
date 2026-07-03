@@ -42,9 +42,9 @@ import spacesdevicecore
         let view = WorkspacePanelView(scope: scope)
         view.onSelectTab = { [weak self] tabID in self?.selectTab(scope: scope, tabID: tabID) }
         view.onCloseTab = { [weak self] tabID in self?.closeTab(scope: scope, tabID: tabID) }
+        view.onRenameTab = { [weak self] tabID, title in self?.renameTab(scope: scope, tabID: tabID, title: title) }
         view.onNewTab = { [weak self] in self?.host.openNewTerminalTab(scope: scope) }
         view.onSplitPane = { [weak self] paneID, direction in self?.beginSplit(scope: scope, paneID: paneID, direction: direction) }
-        view.onClosePane = { [weak self] paneID in self?.closePane(scope: scope, paneID: paneID) }
         view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
         view.onSplitWeightsChanged = { [weak self] splitID, weights in self?.updateSplitWeights(scope: scope, splitID: splitID, weights: weights) }
         view.paneContentProvider = { [weak self] pane in
@@ -233,14 +233,6 @@ import spacesdevicecore
         for tab in layout(for: scope).tabs { closeTab(scope: scope, tabID: tab.id) }
     }
 
-    /// The panel-window ⌘W behavior: close the selected tab; closing the last tab
-    /// closes the window through the empty-layout dismissal funnel.
-    func closeSelectedTab(panelWindowID: String) {
-        let scope = PanelScope.globalWindow(panelWindowID: panelWindowID)
-        guard let tabID = layout(for: scope).selectedTabID else { return }
-        closeTab(scope: scope, tabID: tabID)
-    }
-
     /// Reopens a persisted global panel window at startup: adopts the (already pruned)
     /// layout, materializes content controllers for its sessions, and shows the shell
     /// at its saved frame without stealing focus.
@@ -329,6 +321,12 @@ import spacesdevicecore
     func selectTab(scope: PanelScope, tabID: String) {
         mutateLayout(scope: scope) { PanelLayoutEngine.selectTab(tabID: tabID, in: $0) }
         activateFocusedPane(scope: scope)
+    }
+
+    /// Sets a tab's user-chosen name (persisted with the layout); an empty name
+    /// returns the tab to its derived title.
+    func renameTab(scope: PanelScope, tabID: String, title: String?) {
+        mutateLayout(scope: scope) { PanelLayoutEngine.renameTab(tabID: tabID, title: title, in: $0) }
     }
 
     func closeTab(scope: PanelScope, tabID: String) {
@@ -438,9 +436,8 @@ import spacesdevicecore
         guard let content = host.makeTerminalPaneContent(request: request) else { return nil }
         content.onTitleChanged = { [weak self, weak content] title in
             guard let self, let content, let sessionID = content.descriptor.terminalSessionID,
-                let placement = self.placement(forSessionID: sessionID)
+                self.placement(forSessionID: sessionID) != nil
             else { return }
-            self.panels[placement.scope]?.view?.paneView(forPaneID: placement.paneID)?.updateTitle(title)
             self.refreshTabTitles(forSessionID: sessionID)
         }
         contentControllers[request.sessionID] = content
@@ -451,14 +448,49 @@ import spacesdevicecore
         guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
         view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
         syncPanelWindowTitle(scope: placement.scope)
+        syncFocusedPaneFooter(scope: placement.scope)
     }
 
-    /// A tab is titled after its first pane's content.
+    /// The selected workspace footer shows the focused pane's identity; re-sync it
+    /// whenever a workspace panel's layout or titles change.
+    private func syncFocusedPaneFooter(scope: PanelScope) {
+        guard case .workspace(_, let workspaceID) = scope else { return }
+        host.refreshWorkspaceFooterFocusedPane(workspaceID: workspaceID)
+    }
+
+    /// The focused pane's identity for a workspace panel (footer display).
+    func focusedPaneInfo(deviceID: String, workspaceID: String) -> (paneID: String, title: String)? {
+        let layout = layout(for: .workspace(deviceID: deviceID, workspaceID: workspaceID))
+        guard let paneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: paneID, in: layout),
+            let sessionID = pane.content.terminalSessionID
+        else { return nil }
+        return (paneID, contentTitle(forSessionID: sessionID))
+    }
+
+    /// Closes a panel's focused pane (the ⌘W behavior — the last pane of a tab takes
+    /// the tab with it, and a global window's last tab closes the window).
+    @discardableResult func closeFocusedPane(scope: PanelScope) -> Bool {
+        let layout = layout(for: scope)
+        guard let paneID = layout.focusedPaneID, PanelLayoutEngine.pane(withID: paneID, in: layout) != nil else { return false }
+        closePane(scope: scope, paneID: paneID)
+        return true
+    }
+
+    /// A tab is titled after its user-chosen name when set, else its first pane's
+    /// content.
     private func tabTitle(forTabID tabID: String, in layout: PanelLayout) -> String {
-        guard let tab = layout.tabs.first(where: { $0.id == tabID }), let first = PanelLayoutEngine.panes(in: tab).first,
-            let sessionID = first.content.terminalSessionID
-        else { return "Terminal" }
-        return contentControllers[sessionID]?.displayTitle ?? "Terminal"
+        guard let tab = layout.tabs.first(where: { $0.id == tabID }) else { return "Terminal" }
+        if let custom = tab.title { return custom }
+        guard let first = PanelLayoutEngine.panes(in: tab).first, let sessionID = first.content.terminalSessionID else { return "Terminal" }
+        return contentTitle(forSessionID: sessionID)
+    }
+
+    /// A pane's display title: the runtime target's name (what the sidebar row shows —
+    /// e.g. "codex", "npm:dev") when the session backs one, else the terminal's own
+    /// title.
+    private func contentTitle(forSessionID sessionID: String) -> String {
+        guard let content = contentControllers[sessionID] else { return "Terminal" }
+        return host.runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle
     }
 
     // MARK: - Rendering / persistence
@@ -491,5 +523,6 @@ import spacesdevicecore
         view.apply(
             layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
         syncPanelWindowTitle(scope: scope)
+        syncFocusedPaneFooter(scope: scope)
     }
 }

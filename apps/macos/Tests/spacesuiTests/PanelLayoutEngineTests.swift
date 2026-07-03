@@ -124,15 +124,22 @@ import Testing
         #expect(PanelLayoutEngine.location(of: .terminalSession(deviceID: "device", sessionID: "missing"), in: layout) == nil)
     }
 
-    @Test func selectTabKeepsFocusedPaneOnlyWhenItLivesThere() throws {
+    @Test func selectTabRestoresItsMostRecentlyFocusedPane() throws {
         var layout = layoutWithTab("tab-1", paneID: "a")
         layout = try #require(PanelLayoutEngine.splitPane(paneID: "a", direction: .right, newPane: pane("b"), newSplitID: "s1", in: layout))
         layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("c"), to: layout)
         layout = PanelLayoutEngine.selectTab(tabID: "tab-1", in: layout)
-        #expect(layout.focusedPaneID == "a")
+        #expect(layout.focusedPaneID == "b")
         layout = PanelLayoutEngine.focusPane(paneID: "b", in: layout)
         layout = PanelLayoutEngine.selectTab(tabID: "tab-2", in: layout)
         #expect(layout.focusedPaneID == "c")
+        // Reselecting tab-1 restores the pane that last held focus there, not the
+        // first pane.
+        layout = PanelLayoutEngine.selectTab(tabID: "tab-1", in: layout)
+        #expect(layout.focusedPaneID == "b")
+        // A remembered pane that has since closed falls back to the first pane.
+        layout = PanelLayoutEngine.selectTab(tabID: "tab-2", in: layout)
+        layout = PanelLayoutEngine.removePane(paneID: "b", from: layout)
         layout = PanelLayoutEngine.selectTab(tabID: "tab-1", in: layout)
         #expect(layout.focusedPaneID == "a")
     }
@@ -151,6 +158,15 @@ import Testing
 
         let emptiedSource = PanelLayoutEngine.removePane(paneID: "a", from: source)
         #expect(emptiedSource.isEmpty)
+    }
+
+    @Test func renameTabSetsCustomTitleAndEmptyClearsIt() {
+        var layout = layoutWithTab()
+        layout = PanelLayoutEngine.renameTab(tabID: "tab-1", title: "  build watch  ", in: layout)
+        #expect(layout.tabs[0].title == "build watch")
+        layout = PanelLayoutEngine.renameTab(tabID: "tab-1", title: "   ", in: layout)
+        #expect(layout.tabs[0].title == nil)
+        #expect(PanelLayoutEngine.renameTab(tabID: "missing", title: "x", in: layout) == layout)
     }
 
     @Test func layoutRoundTripsThroughJSON() throws {

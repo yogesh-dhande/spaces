@@ -81,7 +81,7 @@ extension WorkspaceOrchestrator {
         try store.upsert(
             window: WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: nextDetail, targetURL: window.targetURL,
-                windowID: window.windowID, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
+                terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
                 role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
         return true
     }
@@ -327,7 +327,7 @@ extension WorkspaceOrchestrator {
         }
         let updated = WindowRecord(
             id: trackedWindow.id, workspaceID: trackedWindow.workspaceID, app: trackedWindow.app, name: trackedWindow.name,
-            detail: trackedWindow.detail, targetURL: trackedWindow.targetURL, windowID: trackedWindow.windowID, terminalTrackingID: resolvedSessionID,
+            detail: trackedWindow.detail, targetURL: trackedWindow.targetURL, terminalTrackingID: resolvedSessionID,
             terminalNativeID: resolvedNativeID, role: trackedWindow.role, orderIndex: trackedWindow.orderIndex, lastSeenAt: nowISO8601())
         try store.upsert(window: updated)
         return updated

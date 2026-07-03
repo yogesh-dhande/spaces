@@ -75,13 +75,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let summaryLabel = NSTextField(labelWithString: "")
     let stateLabel = NSTextField(labelWithString: "")
     let rendererLabel = NSTextField(labelWithString: "")
-    let runtimeToolbarStackView = NSStackView()
-    let runtimeToolbarTitleLabel = NSTextField(labelWithString: "")
-    let runtimeToolbarRunButton = NSButton()
-    let runtimeToolbarStopButton = NSButton()
-    let runtimeToolbarRestartButton = NSButton()
-    let runtimeToolbarButtonStackView = NSStackView()
-    let runtimeToolbarSpacerView = NSView()
     let inputField = NSTextField(string: "")
     let inputStatusLabel = NSTextField(labelWithString: "")
     let sendButton = NSButton(title: "Send", target: nil, action: nil)
@@ -98,7 +91,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let terminalContainer = NSView()
     let headerStackView = NSStackView()
     let bodyStackView = NSStackView()
-    var bodyTopToHeaderConstraint: NSLayoutConstraint?
     var bodyTopToContentConstraint: NSLayoutConstraint?
     var bodyBottomToContentConstraint: NSLayoutConstraint?
     var bodyBottomToTakeoverConstraint: NSLayoutConstraint?
@@ -130,7 +122,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     let onWindowFocus: (@MainActor (String) -> Void)?
     let onWindowClose: (@MainActor (String, String, Bool) -> Void)?
-    let runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)?
     private let sessionHostProvider: @MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting
     private var clientGhosttySessionHost: (any TerminalGhosttySessionHosting)?
     private var isResolvingGhosttySessionHost = false
@@ -152,8 +143,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
     private var lastObservedOwnerClientID: String?
     var lastObservedRuntimeState: TerminalSessionRuntimeState?
     var shouldShowOwnerStateLabel = true
-    var runtimeControls: TerminalSessionRuntimeControls?
-    var runtimeControlsDirty = true
     var inputStatusIsError = false
     private let notificationObservers = NotificationObserverBag()
     private var pendingOwnershipTransitionStartedAt: Date?
@@ -182,7 +171,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
         ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
         onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
-        runtimeControlsProvider: (@MainActor (String) -> TerminalSessionRuntimeControls?)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
@@ -225,7 +213,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
         self.ownerSurfaceFocusAction = ownerSurfaceFocusAction
         self.onWindowFocus = onWindowFocus
         self.onWindowClose = onWindowClose
-        self.runtimeControlsProvider = runtimeControlsProvider
         self.sessionHostProvider =
             sessionHostProvider ?? { launchConfiguration, paths in
                 RemoteGhosttySessionHost(launchConfiguration: launchConfiguration, paths: paths)
@@ -234,7 +221,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
         super.init()
         startObservingApplicationActivation()
         buildUI()
-        refreshRuntimeControlsIfNeeded(force: true)
         if performInitialRefresh { refreshNow() }
     }
 
@@ -418,7 +404,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
         do {
-            refreshRuntimeControlsIfNeeded()
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
             if let launchConfiguration {
                 currentLaunchConfiguration = launchConfiguration
@@ -635,10 +620,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
     static func applyBrandPrimaryStyle(to button: NSButton, title: String) {
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.backgroundColor = CGColor(srgbRed: 61 / 255, green: 198 / 255, blue: 184 / 255, alpha: 1)
+        // Same fill/ink in both appearances (see the theme's primary-button tokens).
+        button.layer?.backgroundColor = NSColor(themeColor: ActiveTheme.descriptor.dark.primaryButtonFill).cgColor
         button.layer?.cornerRadius = 6
         button.layer?.masksToBounds = true
-        let ink = NSColor(srgbRed: 15 / 255, green: 21 / 255, blue: 23 / 255, alpha: 1)
+        let ink = NSColor(themeColor: ActiveTheme.descriptor.dark.primaryButtonText)
         button.contentTintColor = ink
         button.attributedTitle = NSAttributedString(
             string: title, attributes: [.foregroundColor: ink, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
@@ -797,7 +783,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 let changedSessionID = notification.userInfo?["sessionID"] as? String
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                    self.markRuntimeControlsDirty()
                     self.refreshNow()
                 }
             })
@@ -808,7 +793,6 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 let changedSessionID = notification.userInfo?["sessionID"] as? String
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                    self.markRuntimeControlsDirty()
                     self.refreshNow()
                 }
             })

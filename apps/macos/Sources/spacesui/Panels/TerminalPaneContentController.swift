@@ -65,8 +65,6 @@ import spacesterminalui
 
     func useSelectionForFind(_ sender: Any?) { pane.useSelectionForFind(sender) }
 
-    func setRuntimeControls(_ controls: TerminalSessionRuntimeControls?) { pane.setRuntimeControls(controls) }
-
     // MARK: - E2E/testing passthroughs (driven by the terminal IPC handlers)
 
     func performShortcutForTesting(action: String, text: String?) { pane.performShortcutForTesting(action: action, text: text) }

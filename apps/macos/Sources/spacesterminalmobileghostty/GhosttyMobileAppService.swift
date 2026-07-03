@@ -4,6 +4,7 @@ import Foundation
 #if canImport(UIKit)
     import GhosttyKit
     import UIKit
+    import spacesterminalcore
 
     public enum GhosttyMobileActionEvent: Sendable, Equatable {
         public enum OpenURLKind: Sendable, Equatable {
@@ -75,7 +76,11 @@ import Foundation
 
             guard let config else {
                 guard let newConfig = ghostty_config_new() else { throw GhosttyMobileAppServiceError.configuration("ghostty_config_new failed") }
-                ghostty_config_load_default_files(newConfig)
+                // Embedded terminals load ONLY the Spaces-generated config — never ambient
+                // Ghostty config files — so the look is owned by the active Spaces theme.
+                try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor).withCString { path in
+                    ghostty_config_load_file(newConfig, path)
+                }
                 ghostty_config_finalize(newConfig)
                 self.config = newConfig
                 try startApp(config: newConfig)

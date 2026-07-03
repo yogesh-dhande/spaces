@@ -20,8 +20,6 @@ import AppKit
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-    func paneView(forPaneID paneID: String) -> PaneView? { paneViewsByID[paneID] }
-
     /// Rebuilds the tree for `root` (nil clears). Cached pane views for ids no longer
     /// present are dropped; their content lifecycle is the coordinator's concern.
     func render(root: PaneNode?) {

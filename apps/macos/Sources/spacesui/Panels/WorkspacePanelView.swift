@@ -10,8 +10,8 @@ import AppKit
     var onSelectTab: ((String) -> Void)?
     var onCloseTab: ((String) -> Void)?
     var onNewTab: (() -> Void)?
+    var onRenameTab: ((_ tabID: String, _ title: String?) -> Void)?
     var onSplitPane: ((_ paneID: String, _ direction: PaneSplitDirection) -> Void)?
-    var onClosePane: ((String) -> Void)?
     var onFocusPane: ((String) -> Void)?
     var onSplitWeightsChanged: ((_ splitID: String, _ weights: [Double]) -> Void)?
     /// Resolves a pane's live content controller; nil renders the pane empty (e.g. a
@@ -22,15 +22,19 @@ import AppKit
     private let paneTree = PaneTreeView()
     private let emptyStateLabel = NSTextField(labelWithString: "No open terminals")
     private var renderedLayout = PanelLayout()
+    private var renderedTitles: [String: String] = [:]
+    /// A titlebar-hosted tab strip driven by this panel instead of the built-in one
+    /// (main-window presentation). The built-in strip stays for panel windows.
+    private weak var externalTabBar: PanelTabBarView?
+    private var paneTreeTopToTabBar: NSLayoutConstraint!
+    private var paneTreeTopToView: NSLayoutConstraint!
 
     init(scope: PanelScope) {
         self.scope = scope
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        tabBar.onSelectTab = { [weak self] tabID in self?.onSelectTab?(tabID) }
-        tabBar.onCloseTab = { [weak self] tabID in self?.onCloseTab?(tabID) }
-        tabBar.onNewTab = { [weak self] in self?.onNewTab?() }
+        wire(tabBar)
         paneTree.onSplitWeightsChanged = { [weak self] splitID, weights in self?.onSplitWeightsChanged?(splitID, weights) }
         paneTree.onConfigurePane = { [weak self] paneView, pane in self?.configure(paneView: paneView, pane: pane) }
 
@@ -41,50 +45,97 @@ import AppKit
         addSubview(tabBar)
         addSubview(paneTree)
         addSubview(emptyStateLabel)
+        paneTreeTopToTabBar = paneTree.topAnchor.constraint(equalTo: tabBar.bottomAnchor)
+        paneTreeTopToView = paneTree.topAnchor.constraint(equalTo: topAnchor)
         NSLayoutConstraint.activate([
             tabBar.topAnchor.constraint(equalTo: topAnchor), tabBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             tabBar.trailingAnchor.constraint(equalTo: trailingAnchor),
-            paneTree.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
-            paneTree.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            paneTree.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            paneTree.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            paneTreeTopToTabBar,
+            paneTree.leadingAnchor.constraint(equalTo: leadingAnchor),
+            paneTree.trailingAnchor.constraint(equalTo: trailingAnchor),
+            paneTree.bottomAnchor.constraint(equalTo: bottomAnchor),
             emptyStateLabel.centerXAnchor.constraint(equalTo: centerXAnchor), emptyStateLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-    func paneView(forPaneID paneID: String) -> PaneView? { paneTree.paneView(forPaneID: paneID) }
+    private func wire(_ bar: PanelTabBarView) {
+        bar.onSelectTab = { [weak self] tabID in self?.onSelectTab?(tabID) }
+        bar.onCloseTab = { [weak self] tabID in self?.onCloseTab?(tabID) }
+        bar.onNewTab = { [weak self] in self?.onNewTab?() }
+        bar.onRenameTab = { [weak self] tabID, title in self?.onRenameTab?(tabID, title) }
+        bar.onSplitFocusedPane = { [weak self] direction in
+            guard let self, let paneID = self.splitTargetPaneID() else { return }
+            self.onSplitPane?(paneID, direction)
+        }
+    }
+
+    /// Adopts a shared, externally hosted tab strip (the main window's titlebar
+    /// accessory): this panel takes over the strip's callbacks and content, and its
+    /// built-in strip collapses. Only the adopting panel updates the shared strip —
+    /// background panels fall back to their own (hidden) one.
+    func adoptExternalTabBar(_ bar: PanelTabBarView) {
+        if externalTabBar === bar, bar.hostingOwner === self { return }
+        externalTabBar = bar
+        bar.hostingOwner = self
+        wire(bar)
+        paneTreeTopToTabBar.isActive = false
+        paneTreeTopToView.isActive = true
+        applyToActiveTabBar()
+    }
+
+    private var drivesExternalTabBar: Bool {
+        guard let externalTabBar else { return false }
+        return externalTabBar.hostingOwner === self
+    }
 
     /// Renders the layout: tab strip, selected tab's pane tree, focused-pane chrome,
     /// and the empty state when no tabs exist. `newTabShortcutHint` labels the empty
     /// state with the New-terminal shortcut when known.
     func apply(layout: PanelLayout, titlesByTabID: [String: String], newTabShortcutHint: String? = nil) {
         renderedLayout = layout
-        tabBar.update(tabIDs: layout.tabs.map(\.id), titlesByTabID: titlesByTabID, selectedTabID: layout.selectedTabID)
+        renderedTitles = titlesByTabID
+        applyToActiveTabBar()
         let selectedTab = layout.tabs.first { $0.id == layout.selectedTabID }
         paneTree.render(root: selectedTab?.root)
         emptyStateLabel.isHidden = !layout.isEmpty
-        tabBar.isHidden = layout.isEmpty
         if layout.isEmpty {
             emptyStateLabel.stringValue = newTabShortcutHint.map { "No open terminals — \($0) opens one" } ?? "No open terminals"
         }
-        applyFocusChrome()
     }
 
-    func updateTabTitle(_ title: String, forTabID tabID: String) { tabBar.updateTitle(title, forTabID: tabID) }
+    private func applyToActiveTabBar() {
+        if drivesExternalTabBar, let externalTabBar {
+            tabBar.isHidden = true
+            externalTabBar.isHidden = renderedLayout.isEmpty
+            externalTabBar.update(tabIDs: renderedLayout.tabs.map(\.id), titlesByTabID: renderedTitles, selectedTabID: renderedLayout.selectedTabID)
+        } else {
+            tabBar.isHidden = renderedLayout.isEmpty
+            tabBar.update(tabIDs: renderedLayout.tabs.map(\.id), titlesByTabID: renderedTitles, selectedTabID: renderedLayout.selectedTabID)
+        }
+    }
 
-    private func applyFocusChrome() {
-        guard let selectedTab = renderedLayout.tabs.first(where: { $0.id == renderedLayout.selectedTabID }) else { return }
-        for pane in PanelLayoutEngine.panes(in: selectedTab) {
-            paneTree.paneView(forPaneID: pane.id)?.isFocusedPane = pane.id == renderedLayout.focusedPaneID
+    /// The pane a tab-bar split targets: the focused pane when it lives in the
+    /// selected tab, else the selected tab's first pane.
+    private func splitTargetPaneID() -> String? {
+        guard let selectedTab = renderedLayout.tabs.first(where: { $0.id == renderedLayout.selectedTabID }) else { return nil }
+        let panes = PanelLayoutEngine.panes(in: selectedTab)
+        if let focusedPaneID = renderedLayout.focusedPaneID, panes.contains(where: { $0.id == focusedPaneID }) { return focusedPaneID }
+        return panes.first?.id
+    }
+
+    func updateTabTitle(_ title: String, forTabID tabID: String) {
+        renderedTitles[tabID] = title
+        if drivesExternalTabBar, let externalTabBar {
+            externalTabBar.updateTitle(title, forTabID: tabID)
+        } else {
+            tabBar.updateTitle(title, forTabID: tabID)
         }
     }
 
     private func configure(paneView: PaneView, pane: Pane) {
         let paneID = pane.id
-        paneView.onSplit = { [weak self] direction in self?.onSplitPane?(paneID, direction) }
-        paneView.onClose = { [weak self] in self?.onClosePane?(paneID) }
         paneView.onFocusRequest = { [weak self] in self?.onFocusPane?(paneID) }
         if let content = paneContentProvider?(pane) { paneView.attachContent(content) }
     }

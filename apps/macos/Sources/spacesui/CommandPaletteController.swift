@@ -618,9 +618,12 @@ final class CommandPalettePanel: NSPanel {
 
     func applyCommandPaletteFilter() {
         let query = commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        commandPaletteFilteredItems = AppKitController.visibleCommandPaletteItems(
-            allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
-            recentFocusIdentities: recentCommandPaletteFocusIdentities)
+        commandPaletteFilteredItems =
+            sessionPickerContext != nil
+            ? AppKitController.visibleSessionPickerItems(allItems: commandPaletteItems, query: query)
+            : AppKitController.visibleCommandPaletteItems(
+                allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
+                recentFocusIdentities: recentCommandPaletteFocusIdentities)
         commandPaletteSelectedIndex = commandPaletteFilteredItems.isEmpty ? 0 : 0
         host.logHotkeyDebug(
             "apply_palette_filter query=\(query.isEmpty ? "<empty>" : query) all=\(commandPaletteItems.count) filtered=\(commandPaletteFilteredItems.count) context_workspace=\(commandPaletteContextWorkspaceID ?? "nil")"

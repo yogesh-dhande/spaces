@@ -29,8 +29,15 @@ public enum SettingsKey {
     public static let defaultGUINextShortcut = "]"
     public static let guiPreviousShortcut = "gui_previous_shortcut"
     public static let defaultGUIPreviousShortcut = "["
+    public static let guiSidebarNextShortcut = "gui_sidebar_next_shortcut"
+    public static let defaultGUISidebarNextShortcut = "down"
+    public static let guiSidebarPreviousShortcut = "gui_sidebar_previous_shortcut"
+    public static let defaultGUISidebarPreviousShortcut = "up"
     public static let guiWindowShortcut = "gui_window_shortcut"
     public static let defaultGUIWindowShortcut = "cmd+1"
     public static let alertsDismissedAttentionItems = "alerts_dismissed_attention_items"
     public static let activeWorkspaceID = "active_workspace_id"
+    /// Client-side theme selection (a `ThemeID` raw value). Internal-only: persisted and
+    /// honored at launch, but not exposed through any settings UI or CLI yet.
+    public static let appThemeID = "app_theme_id"
 }
