@@ -1208,7 +1208,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         cell.addSubview(row)
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 22),
+            // Flush with the workspace card's leading edge: the ⌘-number chip column
+            // aligns under the workspace row instead of adding a second indent level.
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10), row.topAnchor.constraint(equalTo: cell.topAnchor),
             row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
         ])
