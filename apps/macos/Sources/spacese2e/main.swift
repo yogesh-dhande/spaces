@@ -1199,8 +1199,8 @@ private struct SeedFixtureCommand: ParsableCommand {
         process.standardOutput = output
         process.standardError = Pipe()
         try process.run()
-        process.waitUntilExit()
         let path = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        process.waitUntilExit()
         guard process.terminationStatus == 0, let path, !path.isEmpty else { throw ValidationError("Required executable not found in PATH: \(name)") }
         return path
     }

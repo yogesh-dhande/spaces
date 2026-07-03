@@ -82,6 +82,7 @@
 - Do not use C-style number formatting in SwiftUI text.
 - Prefer static member lookup where possible.
 - Do not use old-style GCD like `DispatchQueue.main.async`.
+- When capturing a child process's output through a `Pipe`, drain the pipe (`readDataToEndOfFile()` or a readability handler) BEFORE `waitUntilExit()`/`waitpid`. Waiting first deadlocks both processes as soon as the child writes more than the kernel's 64KB pipe buffer.
 - Filter user-entered text with `localizedStandardContains()`.
 - Avoid force unwrap and force try unless failure is unrecoverable.
 
