@@ -11,7 +11,7 @@ import workspacecore
     // MARK: State
 
     private var ports: [ServiceDefinition]
-    private var collapsedDisplayPorts: [Int?]
+    private var collapsedDisplayPortTexts: [String?]
     private var collapsedDisplayURLs: [String?]
     private let rowsStack = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
@@ -20,9 +20,9 @@ import workspacecore
 
     // MARK: Init
 
-    init(ports: [ServiceDefinition] = [], collapsedDisplayPorts: [Int?] = [], collapsedDisplayURLs: [String?] = [], subtitle: String? = nil) {
+    init(ports: [ServiceDefinition] = [], collapsedDisplayPortTexts: [String?] = [], collapsedDisplayURLs: [String?] = [], subtitle: String? = nil) {
         self.ports = ports
-        self.collapsedDisplayPorts = collapsedDisplayPorts
+        self.collapsedDisplayPortTexts = collapsedDisplayPortTexts
         self.collapsedDisplayURLs = collapsedDisplayURLs
 
         let container = NSStackView()
@@ -56,18 +56,19 @@ import workspacecore
 
     // MARK: Public API
 
-    func reload(ports: [ServiceDefinition], collapsedDisplayPorts: [Int?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
-        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: true)
+    func reload(ports: [ServiceDefinition], collapsedDisplayPortTexts: [String?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
+        update(ports: ports, collapsedDisplayPortTexts: collapsedDisplayPortTexts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: true)
     }
 
-    func replace(ports: [ServiceDefinition], collapsedDisplayPorts: [Int?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
+    func replace(ports: [ServiceDefinition], collapsedDisplayPortTexts: [String?]? = nil, collapsedDisplayURLs: [String?]? = nil) {
         pendingDraftIndex = nil
-        update(ports: ports, collapsedDisplayPorts: collapsedDisplayPorts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: false)
+        update(
+            ports: ports, collapsedDisplayPortTexts: collapsedDisplayPortTexts, collapsedDisplayURLs: collapsedDisplayURLs, preservingEditing: false)
     }
 
-    private func update(ports: [ServiceDefinition], collapsedDisplayPorts: [Int?]?, collapsedDisplayURLs: [String?]?, preservingEditing: Bool) {
+    private func update(ports: [ServiceDefinition], collapsedDisplayPortTexts: [String?]?, collapsedDisplayURLs: [String?]?, preservingEditing: Bool) {
         self.ports = ports
-        if let collapsedDisplayPorts { self.collapsedDisplayPorts = collapsedDisplayPorts }
+        if let collapsedDisplayPortTexts { self.collapsedDisplayPortTexts = collapsedDisplayPortTexts }
         if let collapsedDisplayURLs { self.collapsedDisplayURLs = collapsedDisplayURLs }
         refreshRows(animated: true, preservingEditing: preservingEditing)
     }
@@ -91,7 +92,7 @@ import workspacecore
         rows.removeAll()
         for (index, port) in ports.enumerated() {
             let row = PortRowView(
-                port: port, reservedPort: collapsedDisplayPorts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
+                port: port, portText: collapsedDisplayPortTexts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
@@ -125,7 +126,7 @@ import workspacecore
         if pendingDraftIndex == index { pendingDraftIndex = nil }
         row.exitEditing(animated: true)
         row.rebindCollapsedContent(
-            from: edited, reservedPort: collapsedDisplayPorts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
+            from: edited, portText: collapsedDisplayPortTexts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
         onCommit?(ports)
     }
 
@@ -170,11 +171,12 @@ import workspacecore
     private(set) var isEditing: Bool = false
 
     private let nameLabel = NSTextField(labelWithString: "")
+    private let portLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private var currentPort: ServiceDefinition
     private var nameField: NSTextField?
 
-    init(port: ServiceDefinition, reservedPort: Int? = nil, displayURL: String? = nil) {
+    init(port: ServiceDefinition, portText: String? = nil, displayURL: String? = nil) {
         self.currentPort = port
         super.init(frame: .zero)
         body.orientation = .vertical
@@ -187,31 +189,30 @@ import workspacecore
             body.topAnchor.constraint(equalTo: topAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         let collapsedLine = Self.makeCollapsedLine(
-            nameLabel: nameLabel, detailLabel: detailLabel, onEdit: { [weak self] in self?.onBeginEdit?() },
+            nameLabel: nameLabel, portLabel: portLabel, detailLabel: detailLabel, onEdit: { [weak self] in self?.onBeginEdit?() },
             onRemove: { [weak self] in self?.onRemove?() })
         collapsedContainer = collapsedLine.row
         body.addArrangedSubview(collapsedContainer)
         collapsedContainer.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         configureActionButtonsForHover(collapsedLine.actionButtons)
-        rebindCollapsedContent(from: port, reservedPort: reservedPort, displayURL: displayURL)
+        rebindCollapsedContent(from: port, portText: portText, displayURL: displayURL)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    func rebindCollapsedContent(from port: ServiceDefinition, reservedPort: Int? = nil, displayURL: String? = nil) {
+    func rebindCollapsedContent(from port: ServiceDefinition, portText: String? = nil, displayURL: String? = nil) {
         currentPort = port
         nameLabel.stringValue = port.name.isEmpty ? "(unnamed)" : port.name
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = Theme.text
         nameLabel.isSelectable = true
-        // Prefer the derived service URL (the stable, browser-facing identity); fall back to the bare
-        // assigned port number when no URL is available (e.g. the project-level template section).
-        let trimmedURL = displayURL?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedURL, !trimmedURL.isEmpty {
-            detailLabel.stringValue = trimmedURL
-        } else {
-            detailLabel.stringValue = reservedPort.map(String.init) ?? ""
-        }
+        let trimmedPortText = portText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        portLabel.stringValue = trimmedPortText
+        portLabel.isHidden = trimmedPortText.isEmpty
+        portLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        portLabel.textColor = Theme.muted
+        portLabel.isSelectable = true
+        detailLabel.stringValue = displayURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
         detailLabel.textColor = Theme.muted
         detailLabel.lineBreakMode = .byTruncatingTail
@@ -274,17 +275,18 @@ import workspacecore
 
     var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
     var collapsedPrimaryTextIsSelectableForTesting: Bool { nameLabel.isSelectable }
+    var collapsedPortTextForTesting: String { portLabel.isHidden ? "" : portLabel.stringValue }
     var collapsedDetailTextForTesting: String { detailLabel.stringValue }
 
     private static func makeCollapsedLine(
-        nameLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void
+        nameLabel: NSTextField, portLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void
     ) -> (row: NSStackView, actionButtons: [NSButton]) {
         let leading: [NSView] = [RowPrimitives.typeIconTile(.port, symbol: "network", accessibilityLabel: "Port")]
         let editButton = buildActionButton(symbol: "pencil", tooltip: "Edit") { _ in onEdit() }
         editButton.setAccessibilityIdentifier("service-row-edit")
         let removeButton = buildActionButton(symbol: "trash", tooltip: "Remove") { _ in onRemove() }
         removeButton.setAccessibilityIdentifier("service-row-remove")
-        let textStack = NSStackView(views: [nameLabel, detailLabel])
+        let textStack = NSStackView(views: [nameLabel, portLabel, detailLabel])
         textStack.orientation = .horizontal
         textStack.alignment = .firstBaseline
         textStack.spacing = 6
