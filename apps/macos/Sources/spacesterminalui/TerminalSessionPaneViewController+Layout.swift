@@ -33,42 +33,6 @@ extension TerminalSessionPaneViewController {
         rendererLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         rendererLabel.stringValue = rendererMode.statusSummary
 
-        runtimeToolbarTitleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        runtimeToolbarTitleLabel.textColor = .labelColor
-        runtimeToolbarTitleLabel.lineBreakMode = .byTruncatingTail
-        runtimeToolbarTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        runtimeToolbarTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        runtimeToolbarTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        runtimeToolbarButtonStackView.translatesAutoresizingMaskIntoConstraints = false
-        runtimeToolbarButtonStackView.orientation = .horizontal
-        runtimeToolbarButtonStackView.alignment = .centerY
-        runtimeToolbarButtonStackView.spacing = 4
-        configureRuntimeToolbarButton(runtimeToolbarRunButton, symbol: "play.fill", tooltip: "Run", action: #selector(runRuntimeFromToolbar))
-        configureRuntimeToolbarButton(
-            runtimeToolbarRestartButton, symbol: "arrow.clockwise", tooltip: "Restart", action: #selector(restartRuntimeFromToolbar))
-        configureRuntimeToolbarButton(runtimeToolbarStopButton, symbol: "stop.fill", tooltip: "Stop", action: #selector(stopRuntimeFromToolbar))
-        runtimeToolbarRunButton.setAccessibilityIdentifier("terminal-runtime-run")
-        runtimeToolbarRestartButton.setAccessibilityIdentifier("terminal-runtime-restart")
-        runtimeToolbarStopButton.setAccessibilityIdentifier("terminal-runtime-stop")
-        for button in [runtimeToolbarRunButton, runtimeToolbarRestartButton, runtimeToolbarStopButton] {
-            runtimeToolbarButtonStackView.addArrangedSubview(button)
-            NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 22), button.heightAnchor.constraint(equalToConstant: 20)])
-        }
-        runtimeToolbarSpacerView.translatesAutoresizingMaskIntoConstraints = false
-        runtimeToolbarSpacerView.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        runtimeToolbarSpacerView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        runtimeToolbarStackView.translatesAutoresizingMaskIntoConstraints = false
-        runtimeToolbarStackView.orientation = .horizontal
-        runtimeToolbarStackView.alignment = .centerY
-        runtimeToolbarStackView.distribution = .fill
-        runtimeToolbarStackView.spacing = 6
-        runtimeToolbarStackView.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        runtimeToolbarStackView.addArrangedSubview(runtimeToolbarSpacerView)
-        runtimeToolbarStackView.addArrangedSubview(runtimeToolbarButtonStackView)
-        runtimeToolbarStackView.isHidden = true
-
         inputField.translatesAutoresizingMaskIntoConstraints = false
         inputField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         inputField.placeholderString = "Send input to the session"
@@ -106,8 +70,8 @@ extension TerminalSessionPaneViewController {
         outputView.isGrammarCheckingEnabled = false
         outputView.isAutomaticTextCompletionEnabled = false
         outputView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        outputView.backgroundColor = .textBackgroundColor
-        outputView.textColor = .textColor
+        outputView.backgroundColor = .activeTheme(\.terminal.background)
+        outputView.textColor = .activeTheme(\.terminal.foreground)
         outputView.drawsBackground = true
         outputView.isHorizontallyResizable = true
         outputView.isVerticallyResizable = true
@@ -177,13 +141,16 @@ extension TerminalSessionPaneViewController {
         headerStackView.alignment = .width
         headerStackView.distribution = .fill
         headerStackView.spacing = 6
-        for view in [runtimeToolbarStackView, titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel] {
+        for view in [titleLabel, summaryLabel, stateLabel, rendererLabel, inputRowStackView, inputStatusLabel] {
             headerStackView.addArrangedSubview(view)
         }
+        // The header rows are data holders for state the debug dump and tests read;
+        // panes render the terminal surface only, so the header never shows.
+        headerStackView.isHidden = true
 
         terminalContainer.translatesAutoresizingMaskIntoConstraints = false
         terminalContainer.wantsLayer = true
-        terminalContainer.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        terminalContainer.layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor
         terminalContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
         bodyStackView.translatesAutoresizingMaskIntoConstraints = false
@@ -197,7 +164,6 @@ extension TerminalSessionPaneViewController {
 
         [headerStackView, bodyStackView, takeoverContainerView].forEach(contentView.addSubview)
 
-        bodyTopToHeaderConstraint = bodyStackView.topAnchor.constraint(equalTo: headerStackView.bottomAnchor, constant: 6)
         bodyTopToContentConstraint = bodyStackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12)
         bodyBottomToContentConstraint = bodyStackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
         bodyBottomToTakeoverConstraint = bodyStackView.bottomAnchor.constraint(equalTo: takeoverContainerView.topAnchor, constant: -12)
@@ -293,31 +259,18 @@ extension TerminalSessionPaneViewController {
     }
 
     func updateHeaderLayoutVisibility() {
-        // Session metadata remains available through debug accessors, but regular
-        // terminal panes do not show a detail header.
+        // Session metadata remains available through debug accessors, but panes render
+        // the terminal surface only — the header stack never shows.
         if isViewerTakeoverShellActive {
-            headerStackView.isHidden = true
             bodyStackView.isHidden = true
             outputScrollView.isHidden = true
-            bodyTopToHeaderConstraint?.isActive = false
             bodyTopToContentConstraint?.isActive = true
             bodyBottomToTakeoverConstraint?.isActive = false
             bodyBottomToContentConstraint?.isActive = false
             return
         }
         bodyStackView.isHidden = false
-        let showsRuntimeToolbar = !runtimeToolbarStackView.isHidden
-        if showsRuntimeToolbar {
-            titleLabel.isHidden = true
-            summaryLabel.isHidden = true
-            stateLabel.isHidden = true
-            rendererLabel.isHidden = true
-            inputRowStackView.isHidden = true
-            inputStatusLabel.isHidden = true
-        }
-        headerStackView.isHidden = !showsRuntimeToolbar
-        bodyTopToHeaderConstraint?.isActive = showsRuntimeToolbar
-        bodyTopToContentConstraint?.isActive = !showsRuntimeToolbar
+        bodyTopToContentConstraint?.isActive = true
         bodyBottomToTakeoverConstraint?.isActive = !takeoverContainerView.isHidden
         bodyBottomToContentConstraint?.isActive = takeoverContainerView.isHidden
     }

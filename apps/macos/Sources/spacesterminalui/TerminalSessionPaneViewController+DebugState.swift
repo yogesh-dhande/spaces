@@ -87,19 +87,6 @@ extension TerminalSessionPaneViewController {
     var debugShowsSummaryLabel: Bool { !summaryLabel.isHidden }
     var debugShowsStateLabel: Bool { !stateLabel.isHidden }
     var debugShowsHeader: Bool { !headerStackView.isHidden }
-    var debugRuntimeToolbarTitle: String { runtimeToolbarTitleLabel.stringValue }
-    var debugShowsRuntimeToolbarTitle: Bool { !runtimeToolbarTitleLabel.isHidden }
-    var debugShowsRuntimeToolbar: Bool { !runtimeToolbarStackView.isHidden }
-    var debugShowsRuntimeRunButton: Bool { !runtimeToolbarRunButton.isHidden }
-    var debugShowsRuntimeStopButton: Bool { !runtimeToolbarStopButton.isHidden }
-    var debugShowsRuntimeRestartButton: Bool { !runtimeToolbarRestartButton.isHidden }
-    var debugRuntimeToolbarTrailingGap: CGFloat {
-        runtimeToolbarStackView.layoutSubtreeIfNeeded()
-        return runtimeToolbarStackView.bounds.maxX - runtimeToolbarButtonStackView.frame.maxX
-    }
-    func debugRunRuntimeToolbarAction() { runRuntimeFromToolbar() }
-    func debugStopRuntimeToolbarAction() { stopRuntimeFromToolbar() }
-    func debugRestartRuntimeToolbarAction() { restartRuntimeFromToolbar() }
     var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
     var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
     var debugInputStatus: String { inputStatusLabel.stringValue }

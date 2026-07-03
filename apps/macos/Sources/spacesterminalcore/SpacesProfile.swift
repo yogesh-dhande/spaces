@@ -283,13 +283,15 @@ public struct LiveSpacesGitProfileProbe: SpacesGitProfileProbe {
             process.standardOutput = stdout
             process.standardError = stderr
             try process.run()
+            // Drain both pipes before waiting: a child that writes more than the 64KB pipe
+            // buffer blocks until someone reads, so waiting first deadlocks both processes.
+            let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+            let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             if process.terminationStatus != 0 {
-                let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
                 let message = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
                 throw NSError(domain: "SpacesGitProfileProbe", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message])
             }
-            let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
             return String(data: outputData, encoding: .utf8) ?? ""
         }
     #endif

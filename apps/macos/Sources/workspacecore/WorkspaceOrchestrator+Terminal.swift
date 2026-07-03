@@ -94,7 +94,7 @@ extension WorkspaceOrchestrator {
                 try store.upsert(
                     window: WindowRecord(
                         id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
-                        targetURL: window.targetURL, windowID: window.windowID, terminalTrackingID: window.terminalTrackingID,
+                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
                         terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
             }
             if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {

@@ -482,7 +482,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-process-api", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
@@ -595,7 +595,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "old-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api", targetURL: nil,
-                windowID: 999, terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", role: "terminal", orderIndex: 200,
+                terminalTrackingID: "old-spaces-session", terminalNativeID: "old-spaces-session", role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
@@ -793,8 +793,7 @@ extension OrchestratorTests {
                 terminalTrackingID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: processID, workspaceID: workspace.id, app: "Spaces", name: "web", detail: "npm run web", windowID: 222,
-                terminalTrackingID: "session-web", terminalNativeID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                id: processID, workspaceID: workspace.id, app: "Spaces", name: "web", detail: "npm run web", terminalTrackingID: "session-web", terminalNativeID: nil, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try orchestrator.updateRunningWorkspaceProcesses(
             workspaceID: workspace.id, processes: [ProcessTemplate(id: process.id, name: "frontend", command: "npm run web", onExit: .restart)],
@@ -910,12 +909,10 @@ extension OrchestratorTests {
                 terminalTrackingID: "session-worker", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: "window-web", workspaceID: workspace.id, app: "Spaces", name: "web", detail: "npm run web", windowID: 221,
-                terminalTrackingID: "session-web", terminalNativeID: nil, role: "terminal", orderIndex: 100, lastSeenAt: "now"))
+                id: "window-web", workspaceID: workspace.id, app: "Spaces", name: "web", detail: "npm run web", terminalTrackingID: "session-web", terminalNativeID: nil, role: "terminal", orderIndex: 100, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: "window-worker", workspaceID: workspace.id, app: "Spaces", name: "worker", detail: "npm run worker", windowID: 222,
-                terminalTrackingID: "session-worker", terminalNativeID: nil, role: "terminal", orderIndex: 101, lastSeenAt: "now"))
+                id: "window-worker", workspaceID: workspace.id, app: "Spaces", name: "worker", detail: "npm run worker", terminalTrackingID: "session-worker", terminalNativeID: nil, role: "terminal", orderIndex: 101, lastSeenAt: "now"))
 
         try orchestrator.updateRunningWorkspaceProcesses(workspaceID: workspace.id, processes: [worker], restartChangedCommands: false)
 
@@ -1072,7 +1069,7 @@ extension OrchestratorTests {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", windowID: 501, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -1121,12 +1118,10 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", windowID: 501,
-                terminalTrackingID: "spaces-frontend", terminalNativeID: "spaces-frontend", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "frontend", terminalTrackingID: "spaces-frontend", terminalNativeID: "spaces-frontend", role: "terminal", orderIndex: 200, lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "backend", windowID: 502,
-                terminalTrackingID: "spaces-backend", terminalNativeID: "spaces-backend", role: "terminal", orderIndex: 201, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "backend", terminalTrackingID: "spaces-backend", terminalNativeID: "spaces-backend", role: "terminal", orderIndex: 201, lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateName: "frontend", command: "npm run dev",
@@ -1144,7 +1139,7 @@ extension OrchestratorTests {
         XCTAssertEqual(terminateCapture.sessionIDs, ["spaces-frontend", "spaces-backend"])
     }
 
-    func testStopWorkspaceClosesBuiltInTerminalSessionWithoutTrackedDesktopWindowID() throws {
+    func testStopWorkspaceClosesBuiltInTerminalSession() throws {
         let store = try makeTemporaryStore()
         let terminateCapture = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -1166,7 +1161,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "tracked-window-spaces", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
@@ -1193,7 +1188,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "tracked-ad-hoc-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
@@ -1225,7 +1220,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "process-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: nil, targetURL: nil,
-                windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         XCTAssertFalse(try orchestrator.stopBuiltInTerminalSessionClosedByUser(sessionID: sessionID))
 
@@ -1251,7 +1246,7 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", windowID: 501, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -1332,7 +1327,7 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 559, terminalTrackingID: "workspace-session",
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", terminalTrackingID: "workspace-session",
                 role: "terminal", orderIndex: 200, lastSeenAt: "now"))
         try store.upsert(
             runningProcess: RunningProcessRecord(
@@ -1369,7 +1364,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
-                targetURL: nil, windowID: 601, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
                 lastSeenAt: "now"))
 
         try orchestrator.stopWorkspaceProcess(workspaceID: workspace.id, processID: processID)
@@ -1399,7 +1394,7 @@ extension OrchestratorTests {
                 terminalTarget: nil, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", windowID: 200, role: "terminal", orderIndex: 0,
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "api", role: "terminal", orderIndex: 0,
                 lastSeenAt: "now"))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
@@ -1539,7 +1534,7 @@ extension OrchestratorTests {
 
         // Insert a tracked "editor" window (non-browser, non-Spaces) so lines 702-705 are reached.
         let editorWindow = WindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, app: "Cursor", title: "editor", windowID: 42, role: "editor", orderIndex: 100,
+            id: UUID().uuidString, workspaceID: workspace.id, app: "Cursor", title: "editor", role: "editor", orderIndex: 100,
             lastSeenAt: "2024-01-01T00:00:00Z")
         try store.upsert(window: editorWindow)
 

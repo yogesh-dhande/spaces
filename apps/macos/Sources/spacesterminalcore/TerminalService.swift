@@ -169,23 +169,31 @@ import Foundation
             return false
         }
 
-        private static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
+        static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
             let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
             guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
+            guard
+                let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"]),
+                result.terminationStatus == 0
+            else { return [] }
+            return parseSocketOwnerProcessIDs(String(decoding: result.output, as: UTF8.self), socketPath: socketPath)
+        }
 
+        /// Runs a short-lived process and captures its stdout. The pipe must be drained BEFORE
+        /// waiting for exit: a child that writes more than the kernel's pipe buffer (64KB) blocks
+        /// until someone reads, so waiting first deadlocks both processes. `lsof -nP -U` output
+        /// routinely exceeds that buffer on a busy desktop.
+        static func capturedStandardOutput(executableURL: URL, arguments: [String]) -> (terminationStatus: Int32, output: Data)? {
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: executablePath)
-            process.arguments = ["-nP", "-U"]
+            process.executableURL = executableURL
+            process.arguments = arguments
             let output = Pipe()
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-                process.waitUntilExit()
-            } catch { return [] }
+            do { try process.run() } catch { return nil }
             let data = output.fileHandleForReading.readDataToEndOfFile()
-            guard process.terminationStatus == 0 else { return [] }
-            return parseSocketOwnerProcessIDs(String(decoding: data, as: UTF8.self), socketPath: socketPath)
+            process.waitUntilExit()
+            return (process.terminationStatus, data)
         }
 
         static func parseProcessIDs(_ output: String) -> Set<pid_t> {

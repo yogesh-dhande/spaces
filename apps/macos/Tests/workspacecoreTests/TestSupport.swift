@@ -29,53 +29,7 @@ extension XCTestCase {
         addTeardownBlock { for (name, value) in originalValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
         setenv(SpacesProfile.databasePathEnvironmentVariable, dbURL.path, 1)
         setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeURL.path, 1)
-        // Desktop window IDs live outside spaces.db in production (client-owned). The in-memory
-        // store mirrors that: window IDs round-trip through it instead of the daemon database.
-        return try SQLiteStore(path: dbURL.path, desktopWindowIDStore: InMemoryDesktopWindowIDStore())
-    }
-}
-
-/// Test double for the client-owned desktop window-ID store. Mirrors the production contract:
-/// window IDs are keyed by the runtime-target id and resolved on read.
-final class InMemoryDesktopWindowIDStore: DesktopWindowIDStore, @unchecked Sendable {
-    private struct Key: Hashable {
-        let workspaceID: String
-        let runtimeTargetID: String
-    }
-
-    private let lock = NSLock()
-    private var windowIDs: [Key: Int] = [:]
-    private var order: [Key] = []  // most-recently-updated last
-
-    func desktopWindowID(workspaceID: String, runtimeTargetID: String) throws -> Int? {
-        lock.lock()
-        defer { lock.unlock() }
-        return windowIDs[Key(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)]
-    }
-
-    func setDesktopWindowID(workspaceID: String, runtimeTargetID: String, windowID: Int) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        let key = Key(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
-        windowIDs[key] = windowID
-        order.removeAll { $0 == key }
-        order.append(key)
-    }
-
-    func clearDesktopWindowID(workspaceID: String, runtimeTargetID: String) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        let key = Key(workspaceID: workspaceID, runtimeTargetID: runtimeTargetID)
-        windowIDs[key] = nil
-        order.removeAll { $0 == key }
-    }
-
-    func desktopWindowMatches(windowID: Int) throws -> [(workspaceID: String, runtimeTargetID: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return order.reversed().compactMap { key in
-            windowIDs[key] == windowID ? (workspaceID: key.workspaceID, runtimeTargetID: key.runtimeTargetID) : nil
-        }
+        return try SQLiteStore(path: dbURL.path)
     }
 }
 
@@ -99,7 +53,7 @@ func seedTerminalSessionWindow(store: SQLiteStore, workspaceID: String, sessionI
     try store.upsert(
         window: WindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, app: TerminalHost.spaces.appName, name: sessionID, detail: nil, targetURL: nil,
-            windowID: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 }
 
 /// Marks a built-in terminal session as live for window-reconciliation purposes. Window liveness is

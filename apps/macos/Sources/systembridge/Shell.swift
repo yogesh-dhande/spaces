@@ -548,11 +548,12 @@ public enum Shell {
             process.standardError = err
             if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
             try process.run()
-            process.waitUntilExit()
-
+            // Drain both pipes before waiting: a child that writes more than the 64KB pipe
+            // buffer blocks until someone reads, so waiting first deadlocks both processes.
             let data = out.fileHandleForReading.readDataToEndOfFile()
+            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             if process.terminationStatus != 0 {
-                let errData = err.fileHandleForReading.readDataToEndOfFile()
                 let text = String(data: errData, encoding: .utf8) ?? ""
                 throw NSError(domain: "spaces.shell", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
             }
@@ -638,11 +639,12 @@ public enum Shell {
             process.standardError = err
             if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
             try process.run()
-            process.waitUntilExit()
-
+            // Drain both pipes before waiting: a child that writes more than the 64KB pipe
+            // buffer blocks until someone reads, so waiting first deadlocks both processes.
             let data = out.fileHandleForReading.readDataToEndOfFile()
+            let errData = err.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             if process.terminationStatus != 0 {
-                let errData = err.fileHandleForReading.readDataToEndOfFile()
                 let text = String(data: errData, encoding: .utf8) ?? ""
                 throw NSError(domain: "spaces.shell", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: text])
             }

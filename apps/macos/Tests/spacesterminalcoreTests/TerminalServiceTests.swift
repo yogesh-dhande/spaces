@@ -5,6 +5,19 @@ import XCTest
 
 #if os(macOS)
     final class TerminalServiceTests: XCTestCase {
+        // Regression: capturing output used to wait for exit before draining the pipe, which
+        // deadlocks as soon as the child writes more than the kernel's 64KB pipe buffer
+        // (observed live with `lsof -nP -U` during socket-owner lookups).
+        func testCapturedStandardOutputDrainsOutputLargerThanThePipeBuffer() throws {
+            let result = try XCTUnwrap(
+                TerminalService.capturedStandardOutput(
+                    executableURL: URL(fileURLWithPath: "/bin/sh"),
+                    arguments: ["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'"]))
+
+            XCTAssertEqual(result.terminationStatus, 0)
+            XCTAssertEqual(result.output.count, 256 * 1024)
+        }
+
         func testResolveExecutableURLFindsServiceNextToInstalledCLI() throws {
             let root = try makeTemporaryDirectory()
             defer { try? FileManager.default.removeItem(at: root) }

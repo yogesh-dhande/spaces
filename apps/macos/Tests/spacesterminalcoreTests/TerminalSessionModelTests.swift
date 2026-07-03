@@ -321,23 +321,6 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertThrowsError(try TerminalSessionPaths.forSession(id: "."))
     }
 
-    func testWindowFramePersistsPerAttachmentMode() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let paths = TerminalSessionPaths(rootDirectory: root.path)
-        try writeLaunchConfiguration(sessionID: "session-window-frame", paths: paths)
-        let ownerFrame = TerminalSessionWindowFrame(x: 100, y: 120, width: 980, height: 640)
-        let viewerFrame = TerminalSessionWindowFrame(x: 160, y: 180, width: 720, height: 480)
-
-        try TerminalSessionPersistence.writeWindowFrame(ownerFrame, mode: .owner, paths: paths)
-        try TerminalSessionPersistence.writeWindowFrame(viewerFrame, mode: .viewer, paths: paths)
-
-        XCTAssertEqual(try TerminalSessionPersistence.readWindowFrame(mode: .owner, paths: paths), ownerFrame)
-        XCTAssertEqual(try TerminalSessionPersistence.readWindowFrame(mode: .viewer, paths: paths), viewerFrame)
-    }
-
     func testRemoteSessionStatePersistsFinalPayload() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

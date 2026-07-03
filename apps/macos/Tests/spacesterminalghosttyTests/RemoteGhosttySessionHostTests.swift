@@ -963,7 +963,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         if host.hasRenderableSurface() { XCTAssertTrue(normalize(host.debugVisibleSurfaceText()).contains("alpha")) }
     }
 
-    @MainActor func testRemoteOwnerFrameUpdateRestoresMirrorFirstResponder() throws {
+    /// Render frames arrive continuously, so the mirror may reclaim first responder only when
+    /// focus fell back to the window itself (the state re-parenting leaves behind). A frame
+    /// update must never steal focus from another focused control — that is exactly how the
+    /// tab-rename editor and sidebar editors used to lose their editing session.
+    @MainActor func testRemoteOwnerFrameUpdateReclaimsFirstResponderOnlyFromWindowFloor() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1015,7 +1019,26 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
                 renderUpdate: try renderUpdate(text: "beta", sessionRevision: 2)))
 
-        waitForCondition("owner first responder restored") { window.firstResponder is GhosttyMirrorTerminalView }
+        // The frame update must not steal focus from the control the user is in.
+        let stealDeadline = Date().addingTimeInterval(0.5)
+        while Date() < stealDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertTrue(window.firstResponder === dummyResponder, "Render frame stole first responder from a focused control")
+        }
+
+        // Once focus falls back to the window floor, the next frame reclaims it for the mirror.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        server.broadcast(
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "remote-owner-focus", reason: "state_change", emittedAt: "2026-06-02T00:00:02Z", sessionStateRevision: 3,
+                sessionStateFlags: 1, screenStateRevision: 3,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "remote-owner-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                    updatedAt: "2026-06-02T00:00:02Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "gamma", sessionRevision: 3)))
+
+        waitForCondition("owner first responder restored from window floor") { window.firstResponder is GhosttyMirrorTerminalView }
     }
 
     @MainActor func testRemoteRenderableViewerPreservesSnapshotAcrossAttachmentStateChanges() throws {

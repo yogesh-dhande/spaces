@@ -334,16 +334,15 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsert(
                 window: WindowRecord(
                     id: "browser-window", workspaceID: workspace.id, app: "Google Chrome", name: "docs", detail: "http://localhost:9000/docs",
-                    targetURL: "http://localhost:9000/docs", windowID: nil, role: "browser", orderIndex: 0, lastSeenAt: "2026-06-18T12:00:02Z"))
+                    targetURL: "http://localhost:9000/docs", role: "browser", orderIndex: 0, lastSeenAt: "2026-06-18T12:00:02Z"))
             try store.upsert(
                 window: WindowRecord(
-                    id: "shell-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: "zsh", windowID: 18,
-                    terminalTrackingID: "shell-session", terminalNativeID: "shell-session", role: "terminal", orderIndex: 300,
+                    id: "shell-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: "zsh", terminalTrackingID: "shell-session", terminalNativeID: "shell-session", role: "terminal", orderIndex: 300,
                     lastSeenAt: "2026-06-18T12:00:03Z"))
             try store.upsert(
                 window: WindowRecord(
                     id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Mock Agent", detail: "codex",
-                    windowID: 19, terminalTrackingID: "agent-session", terminalNativeID: "agent-session", role: "terminal", orderIndex: 400,
+                    terminalTrackingID: "agent-session", terminalNativeID: "agent-session", role: "terminal", orderIndex: 400,
                     lastSeenAt: "2026-06-18T12:00:04Z"))
             try store.upsertAgentWindow(
                 AgentWindowRecord(
