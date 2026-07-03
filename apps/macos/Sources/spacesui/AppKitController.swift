@@ -2589,6 +2589,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         candidateCount == 0 || decision == .replace
     }
 
+    /// Whether saving a project's settings should sync the template to its workspaces. A non-git
+    /// project stands in for its single workspace, so it always syncs (the edits are the config that
+    /// runs); a git project syncs only when a pending import chose Update All Workspaces.
+    static func projectSaveSyncsAllWorkspaces(isGitRepo: Bool, pendingImportUpdateAllWorkspaces: Bool) -> Bool {
+        !isGitRepo || pendingImportUpdateAllWorkspaces
+    }
+
     @discardableResult static func applyProjectImportWorkspaceSyncDecision(_ decision: ProjectImportWorkspaceSyncDecision, to refs: ProjectFieldRefs)
         -> Bool
     {
@@ -6433,9 +6440,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
             if let device = deviceForDaemonStateMutation() {
-                let decision = presentProjectImportWorkspaceSyncPrompt()
-                guard decision != .cancel else { return }
-                let updateAllWorkspaces = decision == .updateAllWorkspaces
+                // A non-git project's template always syncs to its single workspace, so it takes the
+                // sync path unprompted; git projects choose whether to update existing workspaces.
+                let updateAllWorkspaces: Bool
+                if isGitProject(refs.projectID) {
+                    let decision = presentProjectImportWorkspaceSyncPrompt()
+                    guard decision != .cancel else { return }
+                    updateAllWorkspaces = decision == .updateAllWorkspaces
+                } else {
+                    updateAllWorkspaces = true
+                }
                 let response = try SpacesDeviceClient.importProjectSpacesYAML(
                     projectID: refs.projectID, updateAllWorkspaces: updateAllWorkspaces, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -6487,8 +6501,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.agentLaunchersSection.replace(launchers: settings.agentLaunchers)
     }
 
+    /// Whether the project is a git repo (vs a non-git project standing in for its single
+    /// workspace). Unknown project ids default to git so the workspace-sync prompt is preserved.
+    private func isGitProject(_ projectID: String) -> Bool {
+        projects.first { $0.id == projectID }?.isGitRepo ?? true
+    }
+
     private func confirmProjectImportWorkspaceSyncIfNeeded(_ refs: ProjectFieldRefs) -> Bool {
         guard refs.hasPendingImportedConfig else { return true }
+        // A non-git project's template always syncs to its single workspace (see
+        // updateProjectConfig), so there is no "project only" choice to offer — proceed unprompted.
+        guard isGitProject(refs.projectID) else { return true }
         return Self.applyProjectImportWorkspaceSyncDecision(presentProjectImportWorkspaceSyncPrompt(), to: refs)
     }
 
@@ -9145,8 +9168,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func persistProjectFields(_ refs: ProjectFieldRefs) throws {
         if let device = deviceForDaemonStateMutation() {
+            // A non-git project stands in for its single workspace, so its project settings are the
+            // config that runs: sync the saved template to that workspace unconditionally. Git
+            // projects keep the template/per-workspace split and only sync a pending import when the
+            // user chose Update All Workspaces.
+            let updateAllWorkspaces = Self.projectSaveSyncsAllWorkspaces(
+                isGitRepo: isGitProject(refs.projectID), pendingImportUpdateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces)
             let response = try SpacesDeviceClient.updateProjectConfig(
-                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces,
+                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: updateAllWorkspaces,
                 device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
