@@ -34,6 +34,13 @@ final class ThemeRegistryTests: XCTestCase {
         XCTAssertEqual(brand.light.terminal.cursorColor, brand.light.accent)
     }
 
+    func testTerminalExportResolvesByAppearance() {
+        // The daemon picks a remote session's palette from the attaching client's appearance.
+        let brand = ThemeRegistry.spacesBrand
+        XCTAssertEqual(brand.terminal(for: .light), brand.light.terminal)
+        XCTAssertEqual(brand.terminal(for: .dark), brand.dark.terminal)
+    }
+
     func testThemeColorPacksToRGBForTheTerminalShim() {
         // 0x00RRGGBB packing, alpha dropped — the form handed to the C terminal shim for remote
         // (Linux daemon) session theming.

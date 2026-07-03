@@ -143,6 +143,14 @@ public struct ThemeAppearanceTokens: Sendable {
     }
 }
 
+/// Which appearance variant of a theme to render, i.e. the OS light/dark mode. A client resolves
+/// this from its own appearance and sends it to a remote daemon so the daemon's headless terminal
+/// session renders with the matching variant (the daemon cannot read the client's OS appearance).
+public enum ThemeAppearance: String, Codable, Sendable, Equatable {
+    case light
+    case dark
+}
+
 /// A complete theme: identity plus one token set per appearance.
 public struct ThemeDescriptor: Sendable {
     public let id: ThemeID
@@ -155,5 +163,13 @@ public struct ThemeDescriptor: Sendable {
         self.displayName = displayName
         self.light = light
         self.dark = dark
+    }
+
+    /// The terminal color export for the given appearance.
+    public func terminal(for appearance: ThemeAppearance) -> GhosttyThemeExport {
+        switch appearance {
+        case .light: light.terminal
+        case .dark: dark.terminal
+        }
     }
 }

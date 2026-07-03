@@ -41,6 +41,10 @@
         private var lastRuntimeState: TerminalSessionRuntimeState?
         private var lastKnownChildPID: Int32?
         private var terminalSize: (columns: Int, rows: Int) = (80, 24)
+        // The Spaces theme appearance the vt session is currently themed for. The headless daemon
+        // cannot read the client's OS appearance, so it defaults to dark and adopts the attaching
+        // client's appearance on attach.
+        private var currentAppearance: ThemeAppearance = .dark
         private var ownerEpoch: UInt64 = 0
         private var screenStateRevision: UInt64 = 0
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
@@ -205,6 +209,9 @@
             guard let client = request.client else { return TerminalControlResponse(ok: false, message: "Missing client payload.") }
             let mode = request.attachmentMode ?? .viewer
             do {
+                // Adopt the attaching client's light/dark appearance before broadcasting, so the
+                // state the client receives on attach already carries the matching theme variant.
+                if let appearance = request.appearance { applyThemeAppearance(appearance) }
                 let previousOwner = activeOwnerClientID()
                 try TerminalSessionPersistence.attachClient(
                     sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths, attachedAt: nowISO8601())
@@ -387,14 +394,28 @@
         /// Creates a headless vt session themed with the Spaces terminal colors, so the render
         /// frames this daemon streams to the client match the app instead of libghostty-vt's default
         /// palette. The daemon resolves the palette itself from the shared theme registry (it links
-        /// `spacesterminalcore`); the client only needs to convey which theme/appearance applies.
-        // TODO(remote-theme-appearance): resolve light vs dark from the attaching client's OS
-        // appearance (plumbed over the attach request) instead of always using the dark variant.
+        /// `spacesterminalcore`); the attaching client conveys only its light/dark appearance
+        /// (`applyThemeAppearance(_:)`), since the headless daemon cannot read the client's OS
+        /// appearance. Until a client attaches, the session uses the default (dark) appearance.
         private func makeVTSession(columns: Int, rows: Int) -> OpaquePointer? {
-            var theme = Self.vtTheme(export: ActiveTheme.descriptor.dark.terminal)
+            var theme = Self.vtTheme(export: ActiveTheme.descriptor.terminal(for: currentAppearance))
             return withUnsafePointer(to: &theme) { themePointer in
                 spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), Self.maxScrollbackBytes, themePointer)
             }
+        }
+
+        /// Re-themes the live session to the attaching client's appearance and forces the next
+        /// broadcast to send a full frame so the recolored screen reaches the client immediately.
+        /// A no-op when the appearance is unchanged, so repeated attaches do not churn full frames.
+        private func applyThemeAppearance(_ appearance: ThemeAppearance) {
+            guard appearance != currentAppearance else { return }
+            currentAppearance = appearance
+            guard let vtSession else { return }
+            var theme = Self.vtTheme(export: ActiveTheme.descriptor.terminal(for: appearance))
+            let applied = withUnsafePointer(to: &theme) { spaces_ghostty_vt_session_set_theme(vtSession, $0) }
+            guard applied else { return }
+            screenStateRevision &+= 1
+            forceNextBroadcastFullRenderUpdate = true
         }
 
         /// Packs a theme's terminal export into the C shim's theme struct (default fg/bg/cursor plus

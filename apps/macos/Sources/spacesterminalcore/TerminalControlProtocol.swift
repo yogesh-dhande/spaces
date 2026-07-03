@@ -18,12 +18,15 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollVertical: Double?
     public let scrollMods: Int32?
     public let appendNewline: Bool
+    /// The attaching client's OS appearance (light/dark). Carried on `attach` so a remote daemon can
+    /// render its headless terminal session with the matching Spaces theme variant.
+    public let appearance: ThemeAppearance?
 
     public init(
         command: String, authToken: String? = nil, text: String? = nil, bytes: Data? = nil, key: String? = nil, clientID: String? = nil,
         client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
-        scrollMods: Int32? = nil, appendNewline: Bool = false
+        scrollMods: Int32? = nil, appendNewline: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -42,6 +45,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
         self.appendNewline = appendNewline
+        self.appearance = appearance
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -62,6 +66,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case scrollVertical
         case scrollMods
         case appendNewline
+        case appearance
     }
 
     public init(from decoder: any Decoder) throws {
@@ -83,6 +88,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
         scrollMods = try container.decodeIfPresent(Int32.self, forKey: .scrollMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
+        appearance = try container.decodeIfPresent(ThemeAppearance.self, forKey: .appearance)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -104,6 +110,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(scrollVertical, forKey: .scrollVertical)
         try container.encodeIfPresent(scrollMods, forKey: .scrollMods)
         try container.encode(appendNewline, forKey: .appendNewline)
+        try container.encodeIfPresent(appearance, forKey: .appearance)
     }
 }
 

@@ -54,6 +54,11 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
 
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session);
 
+// Re-applies a theme to an existing session (e.g. when an attaching client's light/dark appearance
+// differs from the one the session was created with). Returns false when the library predates the
+// color-configuration API, in which case the session keeps its current colors.
+bool spaces_ghostty_vt_session_set_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme);
+
 bool spaces_ghostty_vt_session_write(
     SpacesGhosttyVtSession *session,
     const uint8_t *input,

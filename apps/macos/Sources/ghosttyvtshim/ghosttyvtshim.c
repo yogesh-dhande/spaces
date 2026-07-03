@@ -510,6 +510,12 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
     return session;
 }
 
+bool spaces_ghostty_vt_session_set_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
+    if (session == NULL || theme == NULL || session->symbols.terminal_set == NULL) return false;
+    spaces_ghostty_vt_apply_theme(session, theme);
+    return true;
+}
+
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session) {
     if (session == NULL) return;
 

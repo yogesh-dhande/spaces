@@ -1321,10 +1321,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return self.applyRemoteAgentSignals(events)
             }
             let remoteClientStore = RemoteTerminalWindowClientStore()
+            // Resolved once here (this runs on the main actor); the attach closure is @Sendable and
+            // may run off-main, so it cannot read NSApp. A remote daemon renders its terminal with
+            // this appearance's theme variant; like local terminals, a mid-session OS appearance
+            // change takes effect on the next pane open / relaunch.
+            let themeAppearance: ThemeAppearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
                 remoteClientStore.set(client.id)
                 let response = try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                    sessionID: sessionID,
+                    request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode, appearance: themeAppearance),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
@@ -6503,9 +6509,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// Whether the project is a git repo (vs a non-git project standing in for its single
     /// workspace). Unknown project ids default to git so the workspace-sync prompt is preserved.
-    private func isGitProject(_ projectID: String) -> Bool {
-        projects.first { $0.id == projectID }?.isGitRepo ?? true
-    }
+    private func isGitProject(_ projectID: String) -> Bool { projects.first { $0.id == projectID }?.isGitRepo ?? true }
 
     private func confirmProjectImportWorkspaceSyncIfNeeded(_ refs: ProjectFieldRefs) -> Bool {
         guard refs.hasPendingImportedConfig else { return true }
@@ -9195,8 +9199,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let updateAllWorkspaces = Self.projectSaveSyncsAllWorkspaces(
                 isGitRepo: isGitProject(refs.projectID), pendingImportUpdateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces)
             let response = try SpacesDeviceClient.updateProjectConfig(
-                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: updateAllWorkspaces,
-                device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: updateAllWorkspaces, device: device,
+                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
             refs.discardImportedConfigButton.isHidden = true
