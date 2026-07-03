@@ -1148,6 +1148,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.spacing = 6
         row.translatesAutoresizingMaskIntoConstraints = false
 
+        // The ⌘-number chip leads the row (left of the kind icon), matching the
+        // command palette's chip-icon-title ordering.
+        if host.selectedWorkspaceID == workspace.id, let index = item.shortcutIndex {
+            row.addArrangedSubview(RowPrimitives.shortcutChip(host.windowShortcutBadgeText(index: index)))
+        }
+
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?.withSymbolConfiguration(
             .init(pointSize: 10, weight: .medium))
@@ -1186,9 +1192,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
 
         row.addArrangedSubview(NSView())
-        if host.selectedWorkspaceID == workspace.id, let index = item.shortcutIndex {
-            row.addArrangedSubview(RowPrimitives.shortcutChip(host.windowShortcutBadgeText(index: index)))
-        }
 
         cell.addSubview(row)
         NSLayoutConstraint.activate([

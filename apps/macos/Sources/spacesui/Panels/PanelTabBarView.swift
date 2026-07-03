@@ -218,6 +218,14 @@ import systembridge
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
+    /// The whole tab surface acts as one control: the title label would otherwise
+    /// claim (and swallow) mouse events, leaving click-to-select and the context menu
+    /// dead over the text. Only the close button keeps its own hits.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        return hit is NSButton ? hit : self
+    }
+
     override func mouseDown(with event: NSEvent) { onSelect(tabID) }
 
     override func menu(for event: NSEvent) -> NSMenu? {

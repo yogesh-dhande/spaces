@@ -9472,6 +9472,21 @@ extension AppKitController {
         return rankedIDs.compactMap { itemsByID[$0] }
     }
 
+    /// Session-picker visibility: the rows are host-ordered ("New terminal session"
+    /// first, then the sessions in scope) and each row is a distinct choice, so an
+    /// empty query shows the list head directly. The normal palette's recency ranking
+    /// and focus-identity dedup would collapse picker rows, which are all built
+    /// around the same placeholder focus request.
+    nonisolated static func visibleSessionPickerItems(
+        allItems: [CommandPaletteItem], query: String, maxEmptyQueryItems: Int = 10
+    ) -> [CommandPaletteItem] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedQuery.isEmpty { return Array(allItems.prefix(maxEmptyQueryItems)) }
+        let rankedIDs = CommandPaletteFuzzySearch.rank(query: trimmedQuery, candidates: allItems.map(\.searchCandidate)).map(\.id)
+        let itemsByID = Dictionary(uniqueKeysWithValues: allItems.map { ($0.id, $0) })
+        return rankedIDs.compactMap { itemsByID[$0] }
+    }
+
     nonisolated private static func commandPaletteKind(
         focusRequest: WindowFocusRequest?, fallbackIcon: String, processStatus: RunningProcessState?, agentStatus: AgentWindowStatus?
     ) -> WorkspaceRunShortcutTarget.Kind {
