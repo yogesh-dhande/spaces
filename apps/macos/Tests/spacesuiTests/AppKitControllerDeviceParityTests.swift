@@ -478,24 +478,24 @@ import workspacecore
         let plan = try #require(
             BrowserSSHForwardManager.routePlan(
                 targetURL: "http://localhost:32001/docs/?tab=api#readme",
-                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391")]))
 
         #expect(plan.serviceName == "web")
         #expect(plan.remotePort == 32001)
         #expect(plan.routeHost == "web.feature-123.localhost")
-        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/docs/?tab=api#readme")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:7391/docs/?tab=api#readme")
     }
 
     @Test func remoteBrowserRoutePlanKeepsConfiguredCaddyServiceURL() throws {
         let plan = try #require(
             BrowserSSHForwardManager.routePlan(
-                targetURL: "http://web.feature-123.localhost:8088/admin/",
-                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
+                targetURL: "http://web.feature-123.localhost:7391/admin/",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391")]))
 
         #expect(plan.serviceName == "web")
         #expect(plan.remotePort == 32001)
         #expect(plan.routeHost == "web.feature-123.localhost")
-        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:7391/admin/")
     }
 
     @Test func remoteBrowserRoutePlanUsesLocalCaddyRouterPort() throws {
@@ -503,15 +503,15 @@ import workspacecore
             BrowserSSHForwardManager.routePlan(
                 targetURL: "http://web.feature-123.localhost:9000/admin/",
                 assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")],
-                localRouterPort: 8088))
+                localRouterPort: 7391))
 
-        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:7391/admin/")
     }
 
     @Test func remoteBrowserRoutePlanLeavesExternalURLsUnchanged() {
         let plan = BrowserSSHForwardManager.routePlan(
             targetURL: "https://example.com/docs",
-            assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")])
+            assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391")])
 
         #expect(plan == nil)
     }

@@ -14,13 +14,13 @@ Native macOS app and CLI for orchestrating parallel coding sessions, plus a pair
 A workspace is one feature, branch, or experiment with:
 
 - a directory (Git worktree or separate clone)
-- named services routed through a bundled Caddy reverse proxy, each reachable at a stable per-workspace URL like `http://api.my-branch.localhost:8088`
+- named services routed through a bundled Caddy reverse proxy, each reachable at a stable per-workspace URL like `http://api.my-branch.localhost:7391`
 - configured processes, browser URLs, and coding-agent terminals
 - a tracked set of dedicated windows for its processes, browser sessions, and coding agents
 
 Launching a workspace starts its processes, opens its windows, and tracks them. Keyboard shortcuts focus or cycle windows scoped to the current workspace. Stopping shuts down processes and closes windows. Reopening restores state.
 
-Worktrees, clones, and concurrent process trees stay isolated — each service gets a dynamically assigned port (exposed to processes as `$SPACES_<SERVICE>_PORT`) and a predictable per-workspace URL through Caddy on `http://<service>.<workspace>.localhost:8088`. Per-workspace hostnames keep cookies and local storage from colliding across branches, so you can run several workspaces of the same app side by side without remembering which port each service holds.
+Worktrees, clones, and concurrent process trees stay isolated — each service gets a dynamically assigned port (exposed to processes as `$SPACES_<SERVICE>_PORT`) and a predictable per-workspace URL through Caddy on `http://<service>.<workspace>.localhost:7391`. Per-workspace hostnames keep cookies and local storage from colliding across branches, so you can run several workspaces of the same app side by side without remembering which port each service holds.
 
 ![Workspace detail](apps/web/public/media/demo_setup.gif)
 

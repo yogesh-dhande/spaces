@@ -22,18 +22,18 @@ import workspacecore
     }
 
     @Test func collapsedServiceRowPrefersServiceURLOverPort() {
-        let row = PortRowView(port: ServiceDefinition(name: "web"), reservedPort: 21001, displayURL: "http://web.demo.localhost:8088")
+        let row = PortRowView(port: ServiceDefinition(name: "web"), reservedPort: 21001, displayURL: "http://web.demo.localhost:7391")
 
         #expect(row.collapsedPrimaryTextForTesting == "web")
-        #expect(row.collapsedDetailTextForTesting == "http://web.demo.localhost:8088")
+        #expect(row.collapsedDetailTextForTesting == "http://web.demo.localhost:7391")
     }
 
     @Test func sectionPassesServiceURLsByIndex() {
         let section = PortsSection(
             ports: [ServiceDefinition(name: "web"), ServiceDefinition(name: "backend")], collapsedDisplayPorts: [21001, 21002],
-            collapsedDisplayURLs: ["http://web.demo.localhost:8088", nil])
+            collapsedDisplayURLs: ["http://web.demo.localhost:7391", nil])
 
-        #expect(section.row(at: 0)?.collapsedDetailTextForTesting == "http://web.demo.localhost:8088")
+        #expect(section.row(at: 0)?.collapsedDetailTextForTesting == "http://web.demo.localhost:7391")
         // Falls back to the bare port when no URL is provided for that index.
         #expect(section.row(at: 1)?.collapsedDetailTextForTesting == "21002")
     }
