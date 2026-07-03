@@ -407,12 +407,17 @@
                 updateSurfaceFocus()
                 return
             }
-            if window.firstResponder !== self { window.makeFirstResponder(self) }
-            updateSurfaceFocus()
-            if window.firstResponder !== self {
-                window.makeFirstResponder(self)
+            // Reclaim focus only when it fell back to the window itself (mirror
+            // re-parenting resigns it during structural updates). This runs on every
+            // render frame for every attached owner pane, so grabbing focus
+            // unconditionally would continuously steal it from sibling panes and from
+            // other controls in the window (the tab rename editor, sidebar editors).
+            guard window.firstResponder === window else {
                 updateSurfaceFocus()
+                return
             }
+            window.makeFirstResponder(self)
+            updateSurfaceFocus()
             if deferIfNeeded { scheduleDeferredFirstResponderRestore() }
         }
 

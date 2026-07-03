@@ -210,6 +210,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var openSettingsShortcutSpec: HotkeySpec?
     private var nextShortcutSpec: HotkeySpec?
     private var previousShortcutSpec: HotkeySpec?
+    private var sidebarNextShortcutSpec: HotkeySpec?
+    private var sidebarPreviousShortcutSpec: HotkeySpec?
+    /// The main window's titlebar accessory hosting the visible workspace panel's
+    /// tab strip (hidden while the detail area shows anything but a workspace panel).
+    let panelTabStripAccessory = NSTitlebarAccessoryViewController()
+    let panelTabStripView = PanelTabStripAccessoryView()
     private var windowShortcutSpec: HotkeySpec?
     var shortcutButtonsBySetting: [String: NSButton] = [:]
     var activeShortcutCaptureSetting: ShortcutSetting?
@@ -3069,17 +3075,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let rect = NSRect(x: 200, y: 200, width: 1100, height: 700)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
         window.title = "Spaces"
-        // A hidden, transparent titlebar that content does NOT extend under (same
-        // shell as panel windows): the strip above the content shows the window
-        // background and hosts the traffic lights and window dragging. Content must
-        // stay out of the titlebar region — NSTitlebarContainerView intercepts
-        // mouse events there, which leaves chrome like the tab strip unclickable.
+        // No window title or titlebar chrome: the titlebar strip keeps its native
+        // behavior (traffic lights, dragging, double-click zoom) and the panel tab
+        // strip joins it as a titlebar accessory — the supported way to put
+        // interactive views in that row. Content placed under the titlebar with a
+        // full-size content view never reliably receives left-clicks there (the
+        // titlebar's own event handling wins), so content stays below it.
         window.titleVisibility = .hidden
         window.setAccessibilityIdentifier("spaces-main-window")
         window.backgroundColor = sidebarPanelBackgroundColor()
         window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
+        panelTabStripAccessory.layoutAttribute = .left
+        panelTabStripAccessory.view = panelTabStripView
+        window.addTitlebarAccessoryViewController(panelTabStripAccessory)
+        panelTabStripAccessory.isHidden = true
         presentWindowIfAllowed(window)
     }
 
@@ -4796,6 +4807,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         workspaceSetupLogTextView = nil
+        // Only the workspace-panel detail shows the titlebar tab strip; the panel
+        // branch of `showWorkspaceDetail` re-reveals it.
+        panelTabStripAccessory.isHidden = true
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
@@ -4839,13 +4853,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let panelView = panelCoordinator.panelView(for: scope)
         // Overview ticks land here every few seconds. When this workspace's panel is
         // already the visible detail, tearing it down and re-adding it would dismiss
-        // transient chrome hanging off it (the tab rename popover) and churn layout —
+        // transient chrome hanging off it (the tab rename editor) and churn layout —
         // only the footer's status needs refreshing.
         if panelView.superview === detailContainer, visibleDetailWorkspaceID == workspace.id {
             populateWorkspaceDetailFooter(workspace: workspace)
             return
         }
         prepareWorkspaceDetailContainer(workspaceID: workspace.id)
+        panelView.adoptExternalTabBar(panelTabStripView.tabBar)
+        panelTabStripAccessory.isHidden = false
+        panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
         panelView.removeFromSuperview()
         detailContainer.addSubview(panelView)
         NSLayoutConstraint.activate([
@@ -7799,6 +7816,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
             if self.handleSidebarArrowNavigation(event: event) { return nil }
+            if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
                 // In a global panel window the new tab opens there, targeting the
                 // focused pane's workspace; otherwise it lands in the selected
@@ -8070,6 +8088,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return false
     }
 
+    /// Leader+↑/↓ moves the sidebar selection (Alerts and workspaces) from anywhere
+    /// in the main window — including while a terminal pane owns the plain arrow
+    /// keys. A matched chord is always consumed, so hitting a list edge doesn't leak
+    /// the keystroke into the terminal.
+    private func handleSidebarNavigationShortcut(event: NSEvent) -> Bool {
+        if let sidebarPreviousShortcutSpec, matches(event: event, spec: sidebarPreviousShortcutSpec) {
+            _ = sidebar.navigateSidebarSelection(direction: -1)
+            return true
+        }
+        if let sidebarNextShortcutSpec, matches(event: event, spec: sidebarNextShortcutSpec) {
+            _ = sidebar.navigateSidebarSelection(direction: 1)
+            return true
+        }
+        return false
+    }
+
     private func handleFocusedTextInputShortcut(event: NSEvent) -> Bool {
         guard isTextInputFocused() else { return false }
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
@@ -8180,6 +8214,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         reloadShortcutSpec = loadShortcutSpec(setting: .guiReloadShortcut)
         nextShortcutSpec = loadShortcutSpec(setting: .guiNextShortcut)
         previousShortcutSpec = loadShortcutSpec(setting: .guiPreviousShortcut)
+        sidebarNextShortcutSpec = loadShortcutSpec(setting: .guiSidebarNextShortcut)
+        sidebarPreviousShortcutSpec = loadShortcutSpec(setting: .guiSidebarPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
@@ -8213,6 +8249,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiReloadShortcut: return reloadShortcutSpec
         case .guiNextShortcut: return nextShortcutSpec
         case .guiPreviousShortcut: return previousShortcutSpec
+        case .guiSidebarNextShortcut: return sidebarNextShortcutSpec
+        case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
@@ -8933,7 +8971,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showProjectSettingsDialog(project: project)
     }
 
-    public func splitViewDidResizeSubviews(_ notification: Notification) {}
+    public func splitViewDidResizeSubviews(_ notification: Notification) {
+        // The titlebar tab strip starts at the right pane's leading edge; keep it in
+        // step with divider drags.
+        if let sidebarWidth = splitView?.arrangedSubviews.first?.frame.width, sidebarWidth > 0 {
+            panelTabStripView.sidebarWidth = sidebarWidth
+        }
+    }
 
     public func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
         guard let first = splitView.subviews.first else { return true }

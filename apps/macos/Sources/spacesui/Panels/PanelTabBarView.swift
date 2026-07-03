@@ -6,11 +6,15 @@ import systembridge
 /// on the right. Splits act on the selected tab's focused pane, so panes carry no
 /// header of their own until a tab actually holds more than one. Custom chrome instead
 /// of NSTabView so tabs stay compact and the strip can later host drag-out.
-@MainActor final class PanelTabBarView: NSView, NSPopoverDelegate {
+@MainActor final class PanelTabBarView: NSView {
+    /// When this strip is shared chrome (the main window's titlebar accessory), the
+    /// workspace panel currently driving it; background panels leave it alone.
+    weak var hostingOwner: AnyObject?
+
     var onSelectTab: ((String) -> Void)?
     var onCloseTab: ((String) -> Void)?
     var onNewTab: (() -> Void)?
-    /// Rename commit from the tab context menu's editor; nil title clears the custom
+    /// Rename commit from the tab's inline editor; nil title clears the custom
     /// name back to the derived one.
     var onRenameTab: ((_ tabID: String, _ title: String?) -> Void)?
     /// Split request for the selected tab's focused pane.
@@ -21,8 +25,9 @@ import systembridge
     private var titlesByTabID: [String: String] = [:]
     private var selectedTabID: String?
     private var tabIDs: [String] = []
-    private var renamePopover: NSPopover?
-    /// A rebuild requested while the rename popover was open, replayed on close.
+    /// The tab whose title currently renders as an inline editor.
+    private var renamingTabID: String?
+    /// A rebuild requested while the rename editor was open, replayed when it ends.
     private var rebuildDeferredForRename = false
 
     init() {
@@ -62,13 +67,25 @@ import systembridge
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor), row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 30),
+            heightAnchor.constraint(equalToConstant: 28),
             scrollView.heightAnchor.constraint(equalTo: row.heightAnchor, constant: -6),
             tabsStack.heightAnchor.constraint(equalTo: scrollView.heightAnchor),
         ])
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
+
+    /// Clicks on the strip's empty areas (not claimed by a tab, editor, or button)
+    /// bubble here. In the main window the strip covers the titlebar's row as an
+    /// accessory, so it forwards the titlebar's own gestures: drag moves the window
+    /// and double-click zooms it.
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            window?.zoom(nil)
+            return
+        }
+        window?.performDrag(with: event)
+    }
 
     private func actionButton(symbol: String, tooltip: String, identifier: String, action: Selector) -> NSButton {
         let button = NSButton(
@@ -90,22 +107,26 @@ import systembridge
         self.tabIDs = tabIDs
         self.titlesByTabID = titlesByTabID
         self.selectedTabID = selectedTabID
-        rebuildTabs()
+        requestRebuild()
     }
 
     func updateTitle(_ title: String, forTabID tabID: String) {
         guard titlesByTabID[tabID] != title else { return }
         titlesByTabID[tabID] = title
+        requestRebuild()
+    }
+
+    /// Rebuilding while the rename editor is up would tear the editor out mid-edit;
+    /// apply the pending state when the rename ends instead.
+    private func requestRebuild() {
+        if renamingTabID != nil {
+            rebuildDeferredForRename = true
+            return
+        }
         rebuildTabs()
     }
 
     private func rebuildTabs() {
-        // Rebuilding while the rename editor is up would remove its anchor tab and
-        // dismiss the popover mid-edit; apply the pending state when it closes.
-        if renamePopover?.isShown == true {
-            rebuildDeferredForRename = true
-            return
-        }
         for view in tabsStack.arrangedSubviews {
             tabsStack.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -114,59 +135,45 @@ import systembridge
             tabsStack.addArrangedSubview(
                 PanelTabItemView(
                     tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID,
+                    isRenaming: tabID == renamingTabID,
                     onSelect: { [weak self] id in self?.onSelectTab?(id) }, onClose: { [weak self] id in self?.onCloseTab?(id) },
-                    onRenameRequest: { [weak self] id, anchor in self?.presentRenameEditor(tabID: id, anchor: anchor) }))
+                    onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
+                    onRenameCommit: { [weak self] id, text in self?.endRename(tabID: id, committedTitle: text) },
+                    onRenameCancel: { [weak self] _ in self?.endRename(tabID: nil, committedTitle: nil) }))
         }
     }
 
-    /// A small transient popover with a single name field; Return commits, Esc or a
-    /// click outside dismisses without saving. Clearing the field restores the tab's
-    /// derived title.
-    private func presentRenameEditor(tabID: String, anchor: NSView) {
-        renamePopover?.close()
-        let field = NSTextField(string: titlesByTabID[tabID] ?? "")
-        field.placeholderString = "Tab name"
-        field.font = .systemFont(ofSize: 12)
-        field.translatesAutoresizingMaskIntoConstraints = false
-        field.setAccessibilityIdentifier("panel-tab-rename-input")
-        field.target = self
-        field.action = #selector(renameFieldCommitted(_:))
-        field.identifier = NSUserInterfaceItemIdentifier(tabID)
-
-        let content = NSViewController()
-        let container = NSView()
-        container.addSubview(field)
-        NSLayoutConstraint.activate([
-            field.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-            field.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            field.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            field.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
-            field.widthAnchor.constraint(equalToConstant: 200),
-        ])
-        content.view = container
-
-        let popover = NSPopover()
-        popover.contentViewController = content
-        popover.behavior = .transient
-        popover.delegate = self
-        renamePopover = popover
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
-        field.window?.makeFirstResponder(field)
-    }
-
-    @objc private func renameFieldCommitted(_ sender: NSTextField) {
-        guard let tabID = sender.identifier?.rawValue else { return }
-        renamePopover?.close()
-        renamePopover = nil
-        onRenameTab?(tabID, sender.stringValue)
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        renamePopover = nil
-        if rebuildDeferredForRename {
-            rebuildDeferredForRename = false
-            rebuildTabs()
+    /// Swaps the tab's title for an inline editor (the same in-place rename the
+    /// sidebar rows use) and focuses it on the next runloop turn, after the context
+    /// menu that invoked it has fully torn down.
+    private func beginRename(tabID: String) {
+        renamingTabID = tabID
+        rebuildTabs()
+        Task { @MainActor [weak self] in
+            guard let self, let editor = self.renameEditorField() else { return }
+            editor.window?.makeFirstResponder(editor)
+            // Select via the field editor: `selectText(_:)` would end the editing
+            // session it just started, which the commit-on-blur delegate treats as
+            // a blur and instantly closes the editor.
+            editor.currentEditor()?.selectAll(nil)
         }
+    }
+
+    /// Ends rename mode; a non-nil `tabID` commits `committedTitle` as the custom
+    /// name (the engine clears it when the trimmed title is empty).
+    private func endRename(tabID: String?, committedTitle: String?) {
+        guard renamingTabID != nil else { return }
+        renamingTabID = nil
+        rebuildDeferredForRename = false
+        if let tabID { onRenameTab?(tabID, committedTitle) }
+        rebuildTabs()
+    }
+
+    private func renameEditorField() -> NSTextField? {
+        for case let item as PanelTabItemView in tabsStack.arrangedSubviews {
+            if let editor = item.renameEditor { return editor }
+        }
+        return nil
     }
 
     @objc private func newTabClicked() { onNewTab?() }
@@ -177,31 +184,55 @@ import systembridge
 }
 
 /// A single flat tab: title plus a close glyph; the selected tab reads from full-color
-/// text and an accent underline instead of a filled chip.
-@MainActor private final class PanelTabItemView: NSView {
+/// text and an accent underline instead of a filled chip. In rename mode the title is
+/// an inline editor: Return or focus loss commits, Esc cancels.
+@MainActor private final class PanelTabItemView: NSView, NSTextFieldDelegate {
     private let tabID: String
     private let onSelect: (String) -> Void
     private let onClose: (String) -> Void
-    private let onRenameRequest: (String, NSView) -> Void
+    private let onRenameRequest: (String) -> Void
+    private let onRenameCommit: (String, String) -> Void
+    private let onRenameCancel: (String) -> Void
+    /// One rename outcome per editor: Esc sets it before the blur that follows, and
+    /// removal from the hierarchy can end editing a second time.
+    private var renameResolved = false
+    private(set) weak var renameEditor: NSTextField?
 
     init(
-        tabID: String, title: String, isSelected: Bool, onSelect: @escaping (String) -> Void, onClose: @escaping (String) -> Void,
-        onRenameRequest: @escaping (String, NSView) -> Void
+        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void,
+        onClose: @escaping (String) -> Void, onRenameRequest: @escaping (String) -> Void,
+        onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
     ) {
         self.tabID = tabID
         self.onSelect = onSelect
         self.onClose = onClose
         self.onRenameRequest = onRenameRequest
+        self.onRenameCommit = onRenameCommit
+        self.onRenameCancel = onRenameCancel
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         setAccessibilityIdentifier("panel-tab-\(tabID)")
 
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 11, weight: isSelected ? .semibold : .regular)
-        titleLabel.textColor = isSelected ? Theme.text : Theme.muted
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+        let titleView: NSView
+        if isRenaming {
+            let editor = NSTextField(string: title)
+            editor.placeholderString = "Tab name"
+            editor.font = .systemFont(ofSize: 11)
+            editor.delegate = self
+            editor.setAccessibilityIdentifier("panel-tab-rename-input")
+            editor.widthAnchor.constraint(greaterThanOrEqualToConstant: 90).isActive = true
+            editor.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+            renameEditor = editor
+            titleView = editor
+        } else {
+            let titleLabel = NSTextField(labelWithString: title)
+            titleLabel.font = .systemFont(ofSize: 11, weight: isSelected ? .semibold : .regular)
+            titleLabel.textColor = isSelected ? Theme.text : Theme.muted
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+            titleView = titleLabel
+        }
 
         let closeButton = NSButton(
             image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?
@@ -213,7 +244,7 @@ import systembridge
         closeButton.setContentHuggingPriority(.required, for: .horizontal)
         closeButton.setAccessibilityIdentifier("panel-tab-close-\(tabID)")
 
-        let stack = NSStackView(views: [titleLabel, closeButton])
+        let stack = NSStackView(views: [titleView, closeButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 4
@@ -240,13 +271,16 @@ import systembridge
 
     /// The whole tab surface acts as one control: the title label would otherwise
     /// claim (and swallow) mouse events, leaving click-to-select and the context menu
-    /// dead over the text. Only the close button keeps its own hits.
+    /// dead over the text. The close button and the inline rename editor (and its
+    /// field-editor text view) keep their own hits.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
-        return hit is NSButton ? hit : self
+        if hit is NSButton || hit is NSTextView { return hit }
+        if let field = hit as? NSTextField, field.isEditable { return field }
+        return self
     }
 
-    /// The main window's tab strip sits inside the (hidden) titlebar region, where a
+    /// In the main window the tab strip lives in the titlebar row, where a
     /// non-opaque view defaults to acting as a window-drag area — clicks would move
     /// the window instead of reaching `mouseDown`. The strip's empty trailing space
     /// stays draggable; the tabs themselves must not be.
@@ -263,7 +297,23 @@ import systembridge
         return menu
     }
 
-    @objc private func renameClicked() { onRenameRequest(tabID, self) }
+    // MARK: - Rename editor delegate
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        guard !renameResolved else { return true }
+        renameResolved = true
+        onRenameCancel(tabID)
+        return true
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard !renameResolved, let editor = notification.object as? NSTextField else { return }
+        renameResolved = true
+        onRenameCommit(tabID, editor.stringValue)
+    }
+
+    @objc private func renameClicked() { onRenameRequest(tabID) }
 
     @objc private func closeClicked() { onClose(tabID) }
 }
