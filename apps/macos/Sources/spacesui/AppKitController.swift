@@ -7874,13 +7874,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }
-            // A focused terminal pane owns every non-⌘ key (the pane translation
-            // replaces the old terminal window's sendEvent hook); ⌘ chords run the app
-            // shortcuts below and fall through to the pane's command handling at the end.
+            // A focused terminal pane owns ordinary terminal input; app shortcut
+            // chords run first so leader-backed shortcuts still work inside panes.
             let focusedPaneContent = self.panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder)
+            var focusedTerminalDisposition: ShortcutMonitorDisposition?
             if let focusedPaneContent {
                 self.panelCoordinator.noteContentFocused(focusedPaneContent)
-                if Self.shortcutMonitorDisposition(eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true) == .passEventToTerminal {
+                let disposition = Self.shortcutMonitorDisposition(
+                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true,
+                    shortcutLeaderModifiers: self.shortcutLeaderModifiers)
+                focusedTerminalDisposition = disposition
+                if disposition == .passEventToTerminal {
                     return focusedPaneContent.handleKeyEvent(event) ? nil : event
                 }
             }
@@ -7926,9 +7930,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 return nil
             }
-            // App shortcuts didn't claim this ⌘ chord; give the focused pane's terminal
-            // command handling a chance (the old terminal window's performKeyEquivalent).
+            // App shortcuts did not claim the chord. Command shortcuts fall through
+            // to terminal command-equivalent handling; non-Command leader chords
+            // fall through to the pane's normal key handling, including image paste.
             if let focusedPaneContent, focusedPaneContent.handleCommandKeyEquivalent(event) { return nil }
+            if focusedTerminalDisposition == .runAppShortcutsThenTerminal, let focusedPaneContent {
+                return focusedPaneContent.handleKeyEvent(event) ? nil : event
+            }
             return event
         }
     }
@@ -7969,22 +7977,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     enum ShortcutMonitorDisposition: Equatable, Sendable {
-        /// Return the event untouched so the focused terminal pane receives it (plain
-        /// keys, ctrl chords, arrows — anything without ⌘).
+        /// Send the event directly to the focused terminal pane before the shortcut
+        /// chain handles it.
         case passEventToTerminal
         /// Run the app-shortcut chain; unhandled events still fall through to the
         /// window, whose key routing forwards them to the focused pane.
         case runAppShortcuts
+        /// Run the app-shortcut chain first, then send an unclaimed event directly
+        /// to the focused terminal pane.
+        case runAppShortcutsThenTerminal
     }
 
     /// Keyboard routing for the local shortcut monitor once terminals live inside app
-    /// windows as panes: a focused terminal owns every non-⌘ key, while ⌘ chords run
-    /// the app shortcuts first. With no terminal focused, all shortcuts run as before.
-    nonisolated static func shortcutMonitorDisposition(eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool)
-        -> ShortcutMonitorDisposition
+    /// windows as panes: a focused terminal owns ordinary input, while ⌘ chords and
+    /// configured leader chords run app shortcuts first. With no terminal focused,
+    /// all shortcuts run as before.
+    nonisolated static func shortcutMonitorDisposition(
+        eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool, shortcutLeaderModifiers: Set<HotkeyModifier> = []
+    ) -> ShortcutMonitorDisposition
     {
         guard firstResponderIsTerminalPane else { return .runAppShortcuts }
-        return eventModifiers.contains(.command) ? .runAppShortcuts : .passEventToTerminal
+        let modifiers = eventShortcutModifiers(from: eventModifiers)
+        if modifiers.contains(.cmd) { return .runAppShortcuts }
+        if !shortcutLeaderModifiers.isEmpty, modifiers.isSuperset(of: shortcutLeaderModifiers) { return .runAppShortcutsThenTerminal }
+        return .passEventToTerminal
     }
 
     /// ⌘W closes the active panel's focused pane — the last pane of a tab takes the
@@ -8124,6 +8140,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func shortcutCaptureKey(for keyCode: UInt16) -> String? { AppKitController.shortcutCaptureKeyMap[keyCode] }
 
     func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
+        Self.eventShortcutModifiers(from: flags)
+    }
+
+    nonisolated static func eventShortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
         let filtered = flags.intersection([.command, .shift, .option, .control])
         var modifiers = Set<HotkeyModifier>()
         if filtered.contains(.command) { modifiers.insert(.cmd) }

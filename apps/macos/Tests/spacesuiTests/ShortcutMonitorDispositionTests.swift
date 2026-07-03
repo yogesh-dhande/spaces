@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import workspacecore
 
 @testable import spacesui
 
@@ -15,6 +16,22 @@ import Testing
         #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.control], firstResponderIsTerminalPane: true) == .passEventToTerminal)
         #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.option], firstResponderIsTerminalPane: true) == .passEventToTerminal)
         #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.shift], firstResponderIsTerminalPane: true) == .passEventToTerminal)
+    }
+
+    @Test func focusedTerminalRunsAppShortcutsThenPaneHandlingForConfiguredNonCommandLeader() {
+        let leaderModifiers: Set<HotkeyModifier> = [.ctrl, .alt]
+        #expect(
+            AppKitController.shortcutMonitorDisposition(
+                eventModifiers: [.control, .option], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers)
+                == .runAppShortcutsThenTerminal)
+        #expect(
+            AppKitController.shortcutMonitorDisposition(
+                eventModifiers: [.control, .option, .shift], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers)
+                == .runAppShortcutsThenTerminal)
+        #expect(
+            AppKitController.shortcutMonitorDisposition(
+                eventModifiers: [.control], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers)
+                == .passEventToTerminal)
     }
 
     @Test func commandChordsRunAppShortcutsEvenWithTerminalFocus() {

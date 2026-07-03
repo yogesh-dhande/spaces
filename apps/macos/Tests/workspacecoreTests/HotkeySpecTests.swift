@@ -32,6 +32,12 @@ final class HotkeySpecTests: XCTestCase {
         }
     }
 
+    func testParseModifierSetRejectsSingleModifierLeader() {
+        XCTAssertThrowsError(try HotkeySpec.parseModifierSet("control")) { error in
+            XCTAssertEqual(error.localizedDescription, "Hotkey leader must contain at least two modifiers")
+        }
+    }
+
     // Tests parse supports punctuation keys by arranging representative inputs and asserting the expected result.
     func testParseSupportsPunctuationKeys() throws {
         let spec = try HotkeySpec.parse("cmd+shift+=")

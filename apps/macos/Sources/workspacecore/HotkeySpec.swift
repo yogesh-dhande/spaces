@@ -88,7 +88,7 @@ public struct HotkeySpec: Sendable, Equatable {
             modifiers.insert(modifier)
         }
 
-        guard !modifiers.isEmpty else { throw HotkeySpecError("Hotkey leader must contain at least one modifier") }
+        guard modifiers.count >= 2 else { throw HotkeySpecError("Hotkey leader must contain at least two modifiers") }
         return modifiers
     }
 
