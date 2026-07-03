@@ -118,9 +118,9 @@ import workspacecore
                 guard let service = forward.service(matching: plan) else {
                     throw WorkspaceError.invalidArgument(message: "Browser session URL no longer matches a workspace service.")
                 }
-                let caddyWaitStartedAt = Date()
-                let configJSON = try waitForCaddyConfig(routeHost: service.descriptor.routeHost, upstream: service.upstream, timeout: timeout)
-                timings.caddyWaitMS = TerminalPerformance.elapsedMS(since: caddyWaitStartedAt)
+                let configJSON = try timedCaddyWait(into: &timings) {
+                    try waitForCaddyConfig(routeHost: service.descriptor.routeHost, upstream: service.upstream, timeout: timeout)
+                }
                 let localRouterPort = try Self.routerPort(configJSON: configJSON)
                 guard let routedPlan = Self.routePlan(
                     targetURL: targetURL, assignedPorts: workspace.assignedPorts, localRouterPort: localRouterPort)
@@ -151,9 +151,7 @@ import workspacecore
                 do {
                     let forward = try ensureWorkspaceForward(
                         workspace: workspace, device: device, timeout: timeout, revision: revision, timings: &timings)
-                    let caddyWaitStartedAt = Date()
-                    _ = try waitForCaddyConfig(routes: forward.caddyRoutes, timeout: timeout)
-                    timings.caddyWaitMS = TerminalPerformance.elapsedMS(since: caddyWaitStartedAt)
+                    _ = try timedCaddyWait(into: &timings) { try waitForCaddyConfig(routes: forward.caddyRoutes, timeout: timeout) }
                     logReconcileMetric(workspace: workspace, device: device, startedAt: workspaceStartedAt, success: true, timings: timings)
                 } catch is CancellationError { return } catch {
                     logReconcileMetric(workspace: workspace, device: device, startedAt: workspaceStartedAt, success: false, timings: timings)
@@ -339,10 +337,12 @@ import workspacecore
         }
 
         /// Publishes the forward's routes to the client-owned registry and notifies the daemon,
-        /// returning true when a notification was posted. The daemon is only kicked when the
-        /// registry actually changed or the live router config does not carry the routes yet
-        /// (e.g. the daemon restarted after an earlier publish); a warm re-open of an
-        /// already-routed forward skips both the registry write and the daemon's Caddy reload.
+        /// returning true when a notification was posted. The daemon is only skipped on a warm
+        /// re-open where the registry is unchanged AND a live Caddy is already serving the routes:
+        /// both `CaddyService.isRunning()` (a real connect to the admin socket) and
+        /// `configContainsRoutes` must hold. Checking the generated config file alone is unsafe —
+        /// it survives a Caddy crash or `stop()`, so a stale file must still kick the daemon to
+        /// restart/reload Caddy rather than let browser focus open a route nothing is serving.
         private func publishCaddyRoutes(forward: WorkspaceForward) throws -> Bool {
             let registryPath = try CaddyService.routeRegistryPath()
             let entries = forward.services.values.sorted { lhs, rhs in
@@ -350,7 +350,7 @@ import workspacecore
                 return lhs.descriptor.remotePort < rhs.descriptor.remotePort
             }.map { CaddyRouteRegistryEntry(key: $0.registryKey, route: $0.caddyRoute) }
             let registryChanged = try CaddyRouteRegistry.replace(path: registryPath, removingKeys: [], upserting: entries)
-            guard registryChanged || !configContainsRoutes(forward.caddyRoutes) else { return false }
+            if !registryChanged, CaddyService.isRunning(), configContainsRoutes(forward.caddyRoutes) { return false }
             try IPCNotification.post(IPCNotification.caddyRouteRegistryDidChange)
             return true
         }
@@ -398,6 +398,15 @@ import workspacecore
             }
         }
 
+        /// Records the wall-clock spent waiting for the local Caddy config into `timings.caddyWaitMS`
+        /// via `defer`, so the duration is reported even when the wait times out and throws (otherwise
+        /// failure metrics would log `caddy_wait_ms=0` while `elapsed_ms` includes the full timeout).
+        private func timedCaddyWait(into timings: inout ForwardTimings, _ body: () throws -> Data) rethrows -> Data {
+            let startedAt = Date()
+            defer { timings.caddyWaitMS = TerminalPerformance.elapsedMS(since: startedAt) }
+            return try body()
+        }
+
         private func waitForCaddyConfig(routes: [CaddyRoute], timeout: TimeInterval) throws -> Data {
             guard !routes.isEmpty else { return Data() }
             return try waitForCaddyConfig(
@@ -411,14 +420,20 @@ import workspacecore
                 timeoutMessage: "Timed out waiting for the local Caddy router to load \(routeHost).")
         }
 
+        /// Waits until the routes are both present in the generated config *and* served by a live Caddy.
+        /// The liveness probe (`CaddyService.isRunning()`) is essential, not redundant: after a stale
+        /// route publish kicks the daemon to recover a crashed/stopped Caddy, the on-disk config file
+        /// already lists the routes, so a config-only wait would return before the daemon has restarted
+        /// Caddy and let browser focus open a route nothing is serving. Requiring liveness makes the
+        /// caller block through the daemon's restart/reload.
         private func waitForCaddyConfig(routeMatches: [(host: String, upstream: String)], timeout: TimeInterval, timeoutMessage: String) throws
             -> Data
         {
             let configPath = try CaddyService.configFilePath()
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
-                if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)), let config = String(data: data, encoding: .utf8),
-                    Self.configContains(config, routeMatches: routeMatches)
+                if CaddyService.isRunning(), let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+                    let config = String(data: data, encoding: .utf8), Self.configContains(config, routeMatches: routeMatches)
                 {
                     return data
                 }

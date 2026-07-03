@@ -1,6 +1,8 @@
 import Foundation
 
 #if os(macOS)
+    import Darwin
+
     /// Manages the bundled Caddy binary that reverse-proxies `<service>.<workspace-slug>.localhost`
     /// hosts to each workspace's dynamically assigned local port. Mirrors `TerminalService`: locate
     /// the binary, spawn it detached, reload its config gracefully, and stop it on the SIGTERM→SIGKILL
@@ -146,6 +148,29 @@ import Foundation
         }
 
         private static func adminSocketHasOwner(_ socketPath: String) -> Bool { !serviceProcessIDsOwningSocket(socketPath).isEmpty }
+
+        /// True when a live Caddy owns the profile's admin socket. Unlike checking for the generated
+        /// config file or the socket file on disk (both of which survive a crash or `stop()`), this
+        /// connects to the admin socket: a graceful `stop()` removes the socket so `connect` fails with
+        /// ENOENT, and a crash leaves an unowned socket whose `connect` fails with ECONNREFUSED. Callers
+        /// use this to distinguish a Caddy that is actually serving routes from a stale on-disk config.
+        public static func isRunning() -> Bool {
+            guard let socketPath = try? adminSocketPath() else { return false }
+            let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard descriptor >= 0 else { return false }
+            defer { close(descriptor) }
+
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            let utf8Path = socketPath.utf8CString
+            guard utf8Path.count <= MemoryLayout.size(ofValue: address.sun_path) else { return false }
+            withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
+            }
+            return withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            } == 0
+        }
 
         static func resolveExecutableURL(environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default)
             throws -> URL
