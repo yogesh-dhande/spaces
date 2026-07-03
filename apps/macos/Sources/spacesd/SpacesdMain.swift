@@ -269,7 +269,7 @@ import workspacecore
             writeStandardError("spacesd: terminal service shutdown requested\n")
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(100))
-                Self.terminateProcess()
+                self.shutdownAndExit()
             }
             return TerminalServiceResponse(ok: true, message: "spacesd is shutting down.", servicePID: getpid())
         case .create(let payload): return createSession(payload)
@@ -309,8 +309,7 @@ import workspacecore
         writeStandardError("spacesd: daemon restart requested\n")
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(150))
-            shutdown()
-            Self.terminateProcess()
+            shutdownAndExit()
         }
     }
 
@@ -322,9 +321,19 @@ import workspacecore
         }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(100))
-            Self.terminateProcess()
+            self.shutdownAndExit()
         }
         return TerminalServiceResponse(ok: true, message: "spacesd is shutting down.", servicePID: getpid(), daemonStatus: status)
+    }
+
+    /// Explicit exit for daemon-initiated termination (shutdown commands, restart requests).
+    /// Runs cleanup directly and exits rather than routing through `NSApp.terminate`, so the
+    /// exit does not depend on AppKit termination machinery and the shutdown command reaps
+    /// children identically on macOS and Linux. External NSApp-driven termination (e.g. logout)
+    /// still reaches `shutdown()` through the app delegate.
+    private func shutdownAndExit() -> Never {
+        shutdown()
+        exit(0)
     }
 
     private func authorizeRemoteRequest(_ request: TerminalServiceRequest) -> TerminalServiceResponse? {
@@ -1183,14 +1192,6 @@ import workspacecore
             Darwin.shutdown(fileDescriptor, SHUT_RDWR)
         #elseif canImport(Glibc)
             Glibc.shutdown(fileDescriptor, Int32(SHUT_RDWR))
-        #endif
-    }
-
-    private static func terminateProcess() {
-        #if canImport(AppKit)
-            NSApp.terminate(nil)
-        #else
-            exit(0)
         #endif
     }
 

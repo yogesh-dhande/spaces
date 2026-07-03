@@ -74,9 +74,9 @@ enum E2ELane: String, ExpressibleByArgument {
         case .app: return ["full", "smoke", "window-cycle"]
         case .terminal:
             return [
-                "cli", "edit-shortcuts", "mac-input-latency", "mac-scrollback-latency", "mac-scrollback-partial-latency",
-                "mac-command-output-catchup", "built-in-terminal-profile", "workspace-terminal-open", "workspace-process-terminal",
-                "spaces-terminal-hotkeys", "spaces-terminal-palette", "stress", "soak", "device-api-profile",
+                "cli", "daemon-idle-shutdown", "edit-shortcuts", "mac-input-latency", "mac-scrollback-latency",
+                "mac-scrollback-partial-latency", "mac-command-output-catchup", "built-in-terminal-profile", "workspace-terminal-open",
+                "workspace-process-terminal", "spaces-terminal-hotkeys", "spaces-terminal-palette", "stress", "soak", "device-api-profile",
             ]
         case .mobile:
             return [
@@ -193,6 +193,7 @@ private struct E2ERunner {
         for scenario in selected {
             switch scenario {
             case "cli": try runScript("e2e_terminal_cli_commands.sh", environment: remoteEnvironment(enabled: false))
+            case "daemon-idle-shutdown": try runScript("e2e_daemon_idle_shutdown.sh", environment: remoteEnvironment(enabled: false))
             case "edit-shortcuts": try runScript("e2e_terminal_edit_shortcuts.sh", environment: remoteEnvironment(enabled: false))
             case "mac-input-latency", "mac-scrollback-latency", "mac-scrollback-partial-latency", "mac-command-output-catchup":
                 latencyScenarios.append(scenario)

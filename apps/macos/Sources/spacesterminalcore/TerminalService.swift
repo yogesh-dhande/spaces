@@ -179,11 +179,11 @@ import Foundation
             let output = Pipe()
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-                process.waitUntilExit()
-            } catch { return [] }
+            do { try process.run() } catch { return [] }
+            // Drain stdout before waiting: lsof output can exceed the pipe buffer, and a full
+            // pipe blocks lsof from exiting, deadlocking waitUntilExit.
             let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             guard process.terminationStatus == 0 else { return [] }
             return parseSocketOwnerProcessIDs(String(decoding: data, as: UTF8.self), socketPath: socketPath)
         }

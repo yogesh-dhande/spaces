@@ -138,7 +138,7 @@ if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   fi
 fi
 spaces_profile_stop_running_app "$CLI"
-spaces_profile_stop_terminal_service "$CLI"
+spaces_profile_stop_terminal_service_if_idle "$CLI"
 
 # Relaunch detached and keep logs so launch failures are visible.
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
