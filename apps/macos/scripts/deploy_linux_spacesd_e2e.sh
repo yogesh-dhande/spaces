@@ -52,6 +52,12 @@ cache_file_digest() {
   printf 'file\t%s\t%s\n' "$label" "$digest"
 }
 
+ghostty_submodule_is_initialized() {
+  local ghostty_root="$1"
+  [[ -e "$ghostty_root/.git" ]] || return 1
+  git -C "$ghostty_root" rev-parse --git-dir >/dev/null 2>&1
+}
+
 source_cache_key() {
   local path ghostty_root repo_status_sha ghostty_status_text ghostty_status_sha
   ghostty_root="$repo_root/apps/macos/vendor/ghostty"
@@ -79,7 +85,7 @@ source_cache_key() {
         apps/macos/scripts/build_linux_spacesd_artifact.sh
     )
 
-    if git -C "$ghostty_root" rev-parse --git-dir >/dev/null 2>&1; then
+    if ghostty_submodule_is_initialized "$ghostty_root"; then
       printf 'ghostty_head=%s\n' "$(git -C "$ghostty_root" rev-parse HEAD)"
       ghostty_status_text="$(git -C "$ghostty_root" status --porcelain=v1 --untracked-files=all)"
       if [[ -n "$ghostty_status_text" && "${SPACES_LINUX_ALLOW_DIRTY_GHOSTTY:-0}" != "1" ]]; then

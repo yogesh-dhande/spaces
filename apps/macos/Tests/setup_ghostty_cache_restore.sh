@@ -15,7 +15,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 
 fail() {
     echo "setup_ghostty cache restore test failed: $*" >&2
-    for log in seed.out restore.out dirty-build.out; do
+    for log in seed.out empty-submodule.out restore.out dirty-build.out; do
         if [[ -f "$TMP_ROOT/$log" ]]; then
             echo "--- $log ---" >&2
             cat "$TMP_ROOT/$log" >&2
@@ -270,6 +270,44 @@ grep -q "Saving Ghostty artifacts to cache" "$TMP_ROOT/seed.out" || fail "seed r
 [[ -f "$CACHE_ENTRY/ghostty-artifacts/manifest.json" ]] || fail "cache entry missing manifest"
 # The heavy Zig toolchain must not be cached.
 [[ ! -d "$CACHE_ENTRY/ghosttyvt/toolchain" ]] || fail "cache entry should not contain the Zig toolchain"
+
+# --- 1b. Empty submodule directories resolve the gitlink SHA, not the parent repo HEAD. ---
+EMPTY_REPO="$TMP_ROOT/empty-submodule-repo"
+EMPTY_APP_ROOT="$EMPTY_REPO/apps/macos"
+EMPTY_GHOSTTY_ROOT="$EMPTY_APP_ROOT/vendor/ghostty"
+mkdir -p "$EMPTY_APP_ROOT/scripts" "$EMPTY_GHOSTTY_ROOT"
+cp "$SOURCE_SETUP_SCRIPT" "$EMPTY_APP_ROOT/scripts/setup_ghostty.sh"
+chmod +x "$EMPTY_APP_ROOT/scripts/setup_ghostty.sh"
+
+git -C "$EMPTY_REPO" init -q
+git -C "$EMPTY_REPO" config user.email "spaces-test@example.com"
+git -C "$EMPTY_REPO" config user.name "Spaces Test"
+git -C "$EMPTY_REPO" config commit.gpgsign false
+: > "$EMPTY_REPO/README.md"
+git -C "$EMPTY_REPO" add README.md
+git -C "$EMPTY_REPO" -c commit.gpgsign=false commit -q -m "Create parent fixture"
+PARENT_SHA="$(git -C "$EMPTY_REPO" rev-parse HEAD)"
+[[ "$PARENT_SHA" != "$GHOSTTY_SHA" ]] || fail "parent fixture SHA unexpectedly matched Ghostty SHA"
+git -C "$EMPTY_REPO" update-index --add --cacheinfo 160000 "$GHOSTTY_SHA" apps/macos/vendor/ghostty
+
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "SPACES_TEST_GH_FAIL=1" \
+    "$EMPTY_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/empty-submodule.out" 2>&1; then
+    fail "empty-submodule setup failed (should have used the gitlink SHA cache entry)"
+fi
+
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/empty-submodule.out" \
+    || fail "empty-submodule run did not report a cache restore"
+grep -q "ghostty sha: $GHOSTTY_SHA" "$TMP_ROOT/empty-submodule.out" \
+    || fail "empty-submodule run did not resolve the Ghostty gitlink SHA"
+if grep -q "$PARENT_SHA" "$TMP_ROOT/empty-submodule.out"; then
+    fail "empty-submodule run used the parent repo HEAD as the Ghostty SHA"
+fi
+if [[ -s "$GH_LOG" ]]; then
+    fail "empty-submodule run invoked gh despite a valid cache entry"
+fi
+[[ -d "$EMPTY_APP_ROOT/.local/ghosttykit/GhosttyKit.xcframework" ]] || fail "empty-submodule restore did not install GhosttyKit"
+[[ -f "$EMPTY_APP_ROOT/.local/ghosttyvt/include/ghostty/vt.h" ]] || fail "empty-submodule restore did not install libghostty-vt header"
 
 # --- 2. Restore: a fresh, empty .local restores from cache without the network. ---
 rm -rf "$TEMP_APP_ROOT/.local"
