@@ -17,6 +17,7 @@ typedef void (*GhosttyTerminalFreeFn)(GhosttyTerminal);
 typedef void (*GhosttyTerminalVtWriteFn)(GhosttyTerminal, const uint8_t *, size_t);
 typedef void (*GhosttyTerminalScrollViewportFn)(GhosttyTerminal, GhosttyTerminalScrollViewport);
 typedef GhosttyResult (*GhosttyTerminalGetFn)(GhosttyTerminal, GhosttyTerminalData, void *);
+typedef GhosttyResult (*GhosttyTerminalSetFn)(GhosttyTerminal, GhosttyTerminalOption, const void *);
 typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
     const GhosttyAllocator *,
     GhosttyFormatter *,
@@ -48,6 +49,7 @@ typedef struct {
     GhosttyTerminalVtWriteFn terminal_vt_write;
     GhosttyTerminalScrollViewportFn terminal_scroll_viewport;
     GhosttyTerminalGetFn terminal_get;
+    GhosttyTerminalSetFn terminal_set;
     GhosttyFormatterTerminalNewFn formatter_terminal_new;
     GhosttyFormatterFormatAllocFn formatter_format_alloc;
     GhosttyFormatterFreeFn formatter_free;
@@ -272,6 +274,9 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->terminal_vt_write = (GhosttyTerminalVtWriteFn)dlsym(handle, "ghostty_terminal_vt_write");
     symbols->terminal_scroll_viewport = (GhosttyTerminalScrollViewportFn)dlsym(handle, "ghostty_terminal_scroll_viewport");
     symbols->terminal_get = (GhosttyTerminalGetFn)dlsym(handle, "ghostty_terminal_get");
+    // Optional: present in libghostty-vt builds that expose default-color configuration. Kept out
+    // of the required-symbol check below so an older library still loads (theming is skipped).
+    symbols->terminal_set = (GhosttyTerminalSetFn)dlsym(handle, "ghostty_terminal_set");
     symbols->formatter_terminal_new = (GhosttyFormatterTerminalNewFn)dlsym(handle, "ghostty_formatter_terminal_new");
     symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
     symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
@@ -332,6 +337,51 @@ static void spaces_ghostty_vt_unload_symbols(SpacesGhosttyVtSymbols *symbols) {
 
 static uint32_t spaces_ghostty_vt_pack_rgb(GhosttyColorRgb color) {
     return ((uint32_t)color.r << 16) | ((uint32_t)color.g << 8) | (uint32_t)color.b;
+}
+
+static GhosttyColorRgb spaces_ghostty_vt_unpack_rgb(uint32_t packed) {
+    GhosttyColorRgb color = {
+        .r = (uint8_t)((packed >> 16) & 0xFF),
+        .g = (uint8_t)((packed >> 8) & 0xFF),
+        .b = (uint8_t)(packed & 0xFF),
+    };
+    return color;
+}
+
+// Builds a full 256-color palette from the theme's 16 ANSI colors: indices 0-15 come from the
+// theme, and 16-255 use the standard xterm 6x6x6 color cube (16-231) and 24-step grayscale ramp
+// (232-255), so themed ANSI output and default 256-color output stay consistent.
+static void spaces_ghostty_vt_build_palette_256(GhosttyColorRgb out[256], const uint32_t ansi16[16]) {
+    for (size_t i = 0; i < 16; i++) out[i] = spaces_ghostty_vt_unpack_rgb(ansi16[i]);
+    for (size_t i = 0; i < 216; i++) {
+        size_t r = i / 36;
+        size_t g = (i / 6) % 6;
+        size_t b = i % 6;
+        out[16 + i].r = (uint8_t)(r == 0 ? 0 : 55 + r * 40);
+        out[16 + i].g = (uint8_t)(g == 0 ? 0 : 55 + g * 40);
+        out[16 + i].b = (uint8_t)(b == 0 ? 0 : 55 + b * 40);
+    }
+    for (size_t i = 0; i < 24; i++) {
+        uint8_t level = (uint8_t)(8 + i * 10);
+        out[232 + i].r = level;
+        out[232 + i].g = level;
+        out[232 + i].b = level;
+    }
+}
+
+// Applies the Spaces theme to a freshly created terminal's default colors via ghostty_terminal_set.
+// A no-op when the library predates the color-configuration API (terminal_set unresolved).
+static void spaces_ghostty_vt_apply_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
+    if (session == NULL || theme == NULL || session->symbols.terminal_set == NULL) return;
+    GhosttyColorRgb foreground = spaces_ghostty_vt_unpack_rgb(theme->foreground_rgb);
+    GhosttyColorRgb background = spaces_ghostty_vt_unpack_rgb(theme->background_rgb);
+    GhosttyColorRgb cursor = spaces_ghostty_vt_unpack_rgb(theme->cursor_rgb);
+    GhosttyColorRgb palette[256];
+    spaces_ghostty_vt_build_palette_256(palette, theme->palette_rgb);
+    session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &foreground);
+    session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &background);
+    session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, &cursor);
+    session->symbols.terminal_set(session->terminal, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette);
 }
 
 static void spaces_ghostty_vt_snapshot_reset(SpacesGhosttyVtSnapshot *snapshot) {
@@ -417,7 +467,9 @@ static void spaces_ghostty_vt_fill_default_cells(
     }
 }
 
-SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(uint16_t columns, uint16_t rows, size_t max_scrollback) {
+SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(
+    uint16_t columns, uint16_t rows, size_t max_scrollback, const SpacesGhosttyVtTheme *theme
+) {
     if (columns == 0 || rows == 0) return NULL;
 
     SpacesGhosttyVtSession *session = (SpacesGhosttyVtSession *)calloc(1, sizeof(SpacesGhosttyVtSession));
@@ -453,7 +505,15 @@ SpacesGhosttyVtSession *spaces_ghostty_vt_session_new(uint16_t columns, uint16_t
         return NULL;
     }
 
+    spaces_ghostty_vt_apply_theme(session, theme);
+
     return session;
+}
+
+bool spaces_ghostty_vt_session_set_theme(SpacesGhosttyVtSession *session, const SpacesGhosttyVtTheme *theme) {
+    if (session == NULL || theme == NULL || session->symbols.terminal_set == NULL) return false;
+    spaces_ghostty_vt_apply_theme(session, theme);
+    return true;
 }
 
 void spaces_ghostty_vt_session_free(SpacesGhosttyVtSession *session) {
@@ -692,7 +752,8 @@ bool spaces_ghostty_vt_render_plain(
     *out_ptr = NULL;
     *out_len = 0;
 
-    SpacesGhosttyVtSession *session = spaces_ghostty_vt_session_new(columns, rows, max_scrollback);
+    // Plain-text rendering produces no colors, so it needs no theme.
+    SpacesGhosttyVtSession *session = spaces_ghostty_vt_session_new(columns, rows, max_scrollback, NULL);
     if (session == NULL) return false;
 
     if (!spaces_ghostty_vt_session_write(session, input, input_len)) {

@@ -12,11 +12,20 @@ final class TerminalControlProtocolTests: XCTestCase {
         let request = TerminalControlRequest(
             command: "attach", authToken: "SECRET", text: "hello", bytes: Data([0, 10, 255]), clientID: "client-1", client: client,
             attachmentMode: .viewer, lineCount: 20, columns: 80, rows: 24, ownerEpoch: 7, resizeSerial: 3, scrollHorizontal: 1.5,
-            scrollVertical: -2.5, scrollMods: 7, appendNewline: true)
+            scrollVertical: -2.5, scrollMods: 7, appendNewline: true, appearance: .light)
         let response = TerminalControlResponse(ok: true, message: "ok")
 
-        XCTAssertEqual(try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request)), request)
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+        XCTAssertEqual(decoded, request)
+        // The attaching client's appearance must survive the wire so a remote daemon can pick the
+        // matching theme variant.
+        XCTAssertEqual(decoded.appearance, .light)
         XCTAssertEqual(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(response)), response)
+    }
+
+    func testAttachRequestWithoutAppearanceDecodesToNil() throws {
+        let payload = #"{"command":"attach","clientID":"remote-client"}"#.data(using: .utf8)!
+        XCTAssertNil(try TerminalControlCodec.decodeRequest(payload).appearance)
     }
 
     func testRequestDecodeDefaultsMissingOptionalFields() throws {

@@ -1231,12 +1231,16 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollVertical: Double?
     public let scrollMods: Int32?
     public let appendNewline: Bool
+    /// The attaching client's OS appearance (light/dark), carried on `attach` so a remote daemon can render
+    /// its terminal with the client's theme variant. Mirrors `TerminalControlRequest.appearance`; without it
+    /// the daemon keeps its default theme on the device-API attach path.
+    public let appearance: ThemeAppearance?
 
     public init(
         action: SpacesDeviceTerminalControlAction, sessionID: String, clientID: String? = nil, client: TerminalClient? = nil,
         attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
-        scrollMods: Int32? = nil, appendNewline: Bool = false
+        scrollMods: Int32? = nil, appendNewline: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1253,6 +1257,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
         self.appendNewline = appendNewline
+        self.appearance = appearance
     }
 }
 
