@@ -28,6 +28,12 @@ import spacesterminalui
 
     func activate(focus: Bool) { pane.showEmbedded(focus: focus) }
 
+    /// Reclaims owner attachment for the session, preempting a different active owner
+    /// (e.g. a mobile client that took the session over) when the runtime is interactive.
+    /// The `openTerminalSessionWindow` (owner) IPC calls this after opening the pane;
+    /// without it an owner-mode `terminal show` would only attach as a viewer.
+    func requestOwnershipIfNeeded() { pane.requestOwnershipIfNeeded() }
+
     func deactivate() { pane.hideEmbedded() }
 
     func close() { pane.closeEmbedded() }

@@ -1011,7 +1011,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
-            await self.openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
+            await self.openTerminalSessionPane(sessionID: sessionID, mode: mode, requestID: requestID)
         }
     }
 
@@ -1252,9 +1252,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Opens (or focuses) a session's pane for the open/focus IPC surfaces. Emits the
-    /// `terminal_window_summon` perf metric the E2E harness parses; panes always attach
-    /// as owner, so the detail reports `mode=owner`.
-    @discardableResult private func openTerminalSessionPane(sessionID: String, requestID: String? = nil) async -> Bool {
+    /// Opens (or focuses) the session's pane and, for an owner-mode open, reclaims owner
+    /// attachment. `mode` carries the intent of the `openTerminalSessionWindow` IPC: an
+    /// owner open (e.g. `spaces terminal show`) must preempt a different active owner (a
+    /// mobile client that took the session over), so it calls `requestOwnershipIfNeeded()`
+    /// after the pane opens. The pane's own attach otherwise stays a viewer when another
+    /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
+    /// perf metric the E2E harness parses.
+    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool
+    {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1263,12 +1269,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "mode=owner route=pane\(requestDetail)")
+                detail: "mode=\(mode.rawValue) route=pane\(requestDetail)")
             return false
         }
+        if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }
         logPerfMetric(
             "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "mode=owner reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
+            detail: "mode=\(mode.rawValue) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
         return true
     }
 
@@ -1277,7 +1284,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func focusTerminalSessionPane(sessionID: String, requestID: String?) async {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        let focused = await openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
+        // Focus must not preempt a different active owner (matching the pre-rework focus
+        // path); only the owner-mode open IPC reclaims ownership.
+        let focused = await openTerminalSessionPane(sessionID: sessionID, mode: .viewer, requestID: requestID)
         logPerfMetric(
             "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: focused,
             detail: "route=pane\(requestDetail)")
