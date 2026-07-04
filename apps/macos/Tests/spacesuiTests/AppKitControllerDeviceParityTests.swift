@@ -474,6 +474,17 @@ import workspacecore
         #expect(request.resizeSerial == 3)
     }
 
+    @Test func deviceTerminalControlRequestCarriesAttachAppearanceToTheDaemon() throws {
+        // The attaching client's OS appearance must survive the device-API conversion; otherwise the remote
+        // Linux daemon never learns the client's light/dark preference and keeps its default theme.
+        let control = TerminalControlRequest(command: "attach", attachmentMode: .owner, appearance: .light)
+
+        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .attach)
+        #expect(request.appearance == .light)
+    }
+
     @Test func remoteBrowserRoutePlanMapsLoopbackServicePortToCaddyURL() throws {
         let plan = try #require(
             BrowserSSHForwardManager.routePlan(

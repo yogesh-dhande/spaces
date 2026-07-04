@@ -1437,7 +1437,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
-            scrollMods: request.scrollMods, appendNewline: request.appendNewline)
+            scrollMods: request.scrollMods, appendNewline: request.appendNewline, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns

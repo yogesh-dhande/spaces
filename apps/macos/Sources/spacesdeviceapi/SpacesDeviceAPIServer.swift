@@ -1121,7 +1121,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             command: payload.action.rawValue, text: payload.text, key: payload.key, clientID: clientID, client: payload.client,
             attachmentMode: payload.attachmentMode, columns: payload.columns, rows: payload.rows, ownerEpoch: payload.ownerEpoch,
             resizeSerial: payload.resizeSerial, scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical,
-            scrollMods: payload.scrollMods, appendNewline: payload.appendNewline)
+            scrollMods: payload.scrollMods, appendNewline: payload.appendNewline, appearance: payload.appearance)
         let dispatchStartedAt = Date()
         logDeviceAPIPerformance(sessionID: sessionID, name: "terminal_control_dispatch_begin", attributes: attributes)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
