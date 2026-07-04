@@ -30,7 +30,7 @@
         private let sessionID: String
         private let clientApp: SpacesDeviceClientApp
         private let authToken: String?
-        private let transportKey: String
+        private let certificateFingerprint: String
         private let requestClient: SpacesDeviceAPIRequestSessionClient
 
         // Cached device-owned state. Synchronous reads keep the window controller's
@@ -70,18 +70,18 @@
         ) throws {
             // This model opens its own pinned-TLS Device API connections directly instead of going
             // through SpacesDeviceClient.request, so it must apply the same local-credential recovery
-            // that request does: a local device whose stored transport key/token went missing (e.g. an
-            // earlier bootstrap failed while the daemon was down) is re-bootstrapped here rather than
-            // dead-ending the pane on "Missing secure transport key". A remote device cannot self-heal,
-            // so a missing remote transport key still surfaces as missingTransportKey.
-            let (transportKey, resolvedAuthToken) = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(
+            // that request does: a local device whose stored auth token went missing (e.g. an earlier
+            // bootstrap failed while the daemon was down) is re-bootstrapped here — refreshing its
+            // pinned certificate fingerprint — rather than dead-ending the pane. A remote device cannot
+            // self-heal, so a missing remote fingerprint still surfaces as missingCertificateFingerprint.
+            let (certificateFingerprint, resolvedAuthToken) = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(
                 device: device, clientApp: clientApp, profile: profile)
             self.device = device
             self.sessionID = sessionID
             self.clientApp = clientApp
-            self.transportKey = transportKey
+            self.certificateFingerprint = certificateFingerprint
             authToken = resolvedAuthToken
-            requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, transportKey: transportKey)
+            requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, certificateFingerprint: certificateFingerprint)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
             // Seed the owner from the overview so an owner-seeking open sees the existing
@@ -216,7 +216,7 @@
                 clientApp: clientApp)
             do {
                 let client = try SpacesDeviceAPIStateStreamClient(
-                    request: request, host: device.host, port: Int(device.port), transportKey: transportKey,
+                    request: request, host: device.host, port: Int(device.port), certificateFingerprint: certificateFingerprint,
                     onEvent: { [weak self] payload in Task { @MainActor [weak self] in self?.apply(payload) } },
                     onDisconnect: { [weak self] error in Task { @MainActor [weak self] in self?.handleStreamDisconnect(error) } })
                 try client.start()

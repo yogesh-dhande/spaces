@@ -135,7 +135,6 @@ public enum TerminalServiceCommand: Sendable, Equatable {
     case agentSignal(TerminalServiceAgentSignalRequest)
     case ackAgentSignals(TerminalServiceAgentSignalAcknowledgementRequest)
     case profileCommand(TerminalServiceProfileCommandRequest)
-    case mobileCredential(TerminalServiceMobileCredentialRequest)
     case resolveTerminalLink(TerminalServiceTerminalLinkResolveRequest)
     case readTerminalLinkChunk(TerminalServiceTerminalLinkChunkRequest)
 
@@ -155,7 +154,6 @@ public enum TerminalServiceCommand: Sendable, Equatable {
         case .agentSignal: "agentSignal"
         case .ackAgentSignals: "ackAgentSignals"
         case .profileCommand: "profileCommand"
-        case .mobileCredential: "mobileCredential"
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
         }
@@ -195,7 +193,6 @@ extension TerminalServiceCommand: Codable {
         case agentSignal
         case ackAgentSignals
         case profileCommand
-        case mobileCredential
         case resolveTerminalLink
         case readTerminalLinkChunk
     }
@@ -229,7 +226,6 @@ extension TerminalServiceCommand: Codable {
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceAgentSignalRequest.self, forKey: key))
         case .ackAgentSignals: self = .ackAgentSignals(try container.decode(TerminalServiceAgentSignalAcknowledgementRequest.self, forKey: key))
         case .profileCommand: self = .profileCommand(try container.decode(TerminalServiceProfileCommandRequest.self, forKey: key))
-        case .mobileCredential: self = .mobileCredential(try container.decode(TerminalServiceMobileCredentialRequest.self, forKey: key))
         case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(TerminalServiceTerminalLinkResolveRequest.self, forKey: key))
         case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(TerminalServiceTerminalLinkChunkRequest.self, forKey: key))
         }
@@ -252,57 +248,9 @@ extension TerminalServiceCommand: Codable {
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
         case .ackAgentSignals(let payload): try container.encode(payload, forKey: .ackAgentSignals)
         case .profileCommand(let payload): try container.encode(payload, forKey: .profileCommand)
-        case .mobileCredential(let payload): try container.encode(payload, forKey: .mobileCredential)
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
         }
-    }
-}
-
-public enum TerminalServiceMobileCredentialOperation: String, Codable, Sendable, Equatable {
-    case issue
-    case revoke
-    case list
-}
-
-public struct TerminalServiceMobileCredentialRequest: Codable, Sendable, Equatable {
-    public let operation: TerminalServiceMobileCredentialOperation
-    public let installationID: String?
-    public let deviceName: String?
-    public let platform: String?
-
-    public init(
-        operation: TerminalServiceMobileCredentialOperation, installationID: String? = nil, deviceName: String? = nil, platform: String? = nil
-    ) {
-        self.operation = operation
-        self.installationID = installationID
-        self.deviceName = deviceName
-        self.platform = platform
-    }
-}
-
-public struct TerminalServiceMobileCredential: Codable, Sendable, Equatable, Identifiable {
-    public let id: String
-    public let installationID: String
-    public let deviceName: String?
-    public let platform: String?
-    public let scopes: [String]
-    public let createdAt: String
-    public let lastUsedAt: String?
-    public let revokedAt: String?
-
-    public init(
-        id: String, installationID: String, deviceName: String?, platform: String?, scopes: [String], createdAt: String, lastUsedAt: String?,
-        revokedAt: String?
-    ) {
-        self.id = id
-        self.installationID = installationID
-        self.deviceName = deviceName
-        self.platform = platform
-        self.scopes = scopes
-        self.createdAt = createdAt
-        self.lastUsedAt = lastUsedAt
-        self.revokedAt = revokedAt
     }
 }
 
@@ -730,8 +678,6 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         case terminalLinkChunk
         case agentSignals
         case profile
-        case mobileCredentialToken
-        case mobileCredentials
         case daemonStatus
     }
 
@@ -747,8 +693,6 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     public let terminalLinkChunk: TerminalServiceTerminalLinkChunk?
     public let agentSignals: [TerminalServiceAgentSignalEvent]?
     public let profile: TerminalServiceProfileCommandResponse?
-    public let mobileCredentialToken: String?
-    public let mobileCredentials: [TerminalServiceMobileCredential]?
     public let daemonStatus: TerminalServiceDaemonStatus?
     let streamSocketPath: String?
 
@@ -757,8 +701,7 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
         controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
         terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil,
-        profile: TerminalServiceProfileCommandResponse? = nil, mobileCredentialToken: String? = nil,
-        mobileCredentials: [TerminalServiceMobileCredential]? = nil, daemonStatus: TerminalServiceDaemonStatus? = nil, streamSocketPath: String? = nil
+        profile: TerminalServiceProfileCommandResponse? = nil, daemonStatus: TerminalServiceDaemonStatus? = nil, streamSocketPath: String? = nil
     ) {
         self.ok = ok
         self.message = message
@@ -772,8 +715,6 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         self.terminalLinkChunk = terminalLinkChunk
         self.agentSignals = agentSignals
         self.profile = profile
-        self.mobileCredentialToken = mobileCredentialToken
-        self.mobileCredentials = mobileCredentials
         self.daemonStatus = daemonStatus
         self.streamSocketPath = streamSocketPath
     }
@@ -804,8 +745,6 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
             terminalLinkChunk: try container.decodeIfPresent(TerminalServiceTerminalLinkChunk.self, forKey: .terminalLinkChunk),
             agentSignals: try container.decodeIfPresent([TerminalServiceAgentSignalEvent].self, forKey: .agentSignals),
             profile: try container.decodeIfPresent(TerminalServiceProfileCommandResponse.self, forKey: .profile),
-            mobileCredentialToken: try container.decodeIfPresent(String.self, forKey: .mobileCredentialToken),
-            mobileCredentials: try container.decodeIfPresent([TerminalServiceMobileCredential].self, forKey: .mobileCredentials),
             daemonStatus: try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus))
     }
 }

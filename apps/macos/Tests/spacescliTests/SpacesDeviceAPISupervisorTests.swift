@@ -8,6 +8,15 @@ import workspacecore
 
 @testable import spacesdeviceapi
 
+private let supervisorTestTLSRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "spaces-device-api-supervisor-tests-tls-\(UUID().uuidString)", isDirectory: true)
+
+/// One pinned-TLS identity per test process: generation is expensive and every server/client pair
+/// only needs a stable certificate to pin.
+private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
+    try TerminalServiceTLSIdentityStore.loadOrCreate(root: supervisorTestTLSRoot)
+}
+
 @MainActor final class SpacesDeviceAPISupervisorTests: XCTestCase {
     func testControlStatusWaitsForControlEndpointBeforeRelaunchingTerminalService() throws {
         var ensureCount = 0
@@ -148,7 +157,6 @@ import workspacecore
 
             let environment = [
                 SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)",
-                SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable: SpacesDeviceAPISettings.generateTransportKey(),
             ]
             let supervisor = SpacesDeviceAPISupervisor(
                 settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
@@ -170,7 +178,6 @@ import workspacecore
 
             let environment = [
                 SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)",
-                SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable: SpacesDeviceAPISettings.generateTransportKey(),
             ]
             let supervisor = SpacesDeviceAPISupervisor(
                 settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
@@ -193,7 +200,6 @@ import workspacecore
         try await withTemporaryProfile { _ in
             let environment = [
                 SpacesDeviceAPIDefaults.hostEnvironmentVariable: "::", SpacesDeviceAPIDefaults.portEnvironmentVariable: "0",
-                SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable: SpacesDeviceAPISettings.generateTransportKey(),
             ]
             let supervisor = SpacesDeviceAPISupervisor(
                 settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
@@ -239,12 +245,12 @@ import workspacecore
             try controlServer.start()
             defer { controlServer.stop() }
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-OWNER-GATED", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
@@ -267,7 +273,7 @@ import workspacecore
 
             for request in rejectedRequests {
                 let response = try await Task.detached {
-                    try Self.sendDeviceAPIRequest(request, port: server.listeningPort, transportKey: transportKey)
+                    try Self.sendDeviceAPIRequest(request, port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
                 }.value
 
                 XCTAssertFalse(response.ok)
@@ -282,7 +288,7 @@ import workspacecore
                         command: .terminalControl(
                             .init(
                                 action: .resize, sessionID: sessionID, clientID: "ios-client", columns: 80, rows: 24, ownerEpoch: 11, resizeSerial: 5)
-                        ), authToken: authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                        ), authToken: authToken, clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(acceptedResponse.ok)
@@ -297,7 +303,7 @@ import workspacecore
                     SpacesDeviceAPIRequest(
                         command: .terminalControl(
                             .init(action: .scroll, sessionID: sessionID, clientID: "ios-client", ownerEpoch: 12, scrollVertical: 24, scrollMods: 7)),
-                        authToken: authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                        authToken: authToken, clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(acceptedScrollResponse.ok)
@@ -329,12 +335,12 @@ import workspacecore
             try controlServer.start()
             defer { controlServer.stop() }
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-TAKEOVER-STATE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
@@ -342,7 +348,7 @@ import workspacecore
                 try Self.sendDeviceAPIRequest(
                     SpacesDeviceAPIRequest(
                         command: .terminalControl(.init(action: .takeover, sessionID: sessionID, clientID: "ios-client")), authToken: authToken,
-                        clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                        clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(response.ok)
@@ -382,12 +388,12 @@ import workspacecore
                 survivorControlServer.stop()
             }
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-CTRL-C", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
                 appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
@@ -396,7 +402,7 @@ import workspacecore
                     SpacesDeviceAPIRequest(
                         command: .terminalControl(
                             .init(action: .key, sessionID: interruptSessionID, clientID: "ios-owner", key: "ctrl+c", ownerEpoch: 3)),
-                        authToken: authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                        authToken: authToken, clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(response.ok)
@@ -437,19 +443,19 @@ import workspacecore
                     terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running,
                     logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T12:00:00Z", exitedAt: nil))
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-DEAD-SERVICE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
             let response = try await Task.detached {
                 try Self.sendDeviceAPIRequest(
                     SpacesDeviceAPIRequest(command: .overview, authToken: authToken, clientApp: clientApp), port: server.listeningPort,
-                    transportKey: transportKey)
+                    certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(response.ok)
@@ -475,19 +481,19 @@ import workspacecore
             try subscriptionServer.start()
             defer { subscriptionServer.stop() }
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-LIVE-STATE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
             let response = try await Task.detached {
                 try Self.sendDeviceAPIRequest(
                     SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID)), authToken: authToken, clientApp: clientApp),
-                    port: server.listeningPort, transportKey: transportKey)
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertEqual(response.sessionState?.renderText, "LIVE-STATE")
@@ -504,11 +510,7 @@ import workspacecore
             try subscriptionServer.start()
             defer { subscriptionServer.stop() }
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
-            let environment = [
-                SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(try makeAvailablePort())",
-                SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable: transportKey,
-            ]
+            let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(try makeAvailablePort())"]
             let settingsStore = SpacesDeviceAPISettingsStore(environment: environment)
 
             let clientApp = SpacesDeviceClientApp(
@@ -522,7 +524,7 @@ import workspacecore
 
             let status = try supervisor.status()
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: status.port, transportKey: transportKey)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: status.port, certificateFingerprint: status.certificateFingerprint)
             defer { connection.cancel() }
 
             XCTAssertTrue(subscriptionServer.waitForAccepted(timeout: 5))
@@ -553,17 +555,17 @@ import workspacecore
             try subscriptionServer.start()
             defer { subscriptionServer.stop() }
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-FINAL-STREAM", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, transportKey: transportKey)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             defer { connection.cancel() }
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
@@ -594,14 +596,14 @@ import workspacecore
             try subscriptionServer.start()
             defer { subscriptionServer.stop() }
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-FINAL-STREAM-DELAYED-EOF", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let pairingStore = try SpacesDevicePairingStore()
             let authToken = try pairingStore.issueToken(for: clientApp)
             let server = SpacesDeviceAPIServer(
-                host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity, pairingStoreProtocol: pairingStore,
                 networkEnvironment: [
                     "SPACES_DEVICE_API_NETWORK_PROFILE": "test-delayed", "SPACES_DEVICE_API_NETWORK_RTT_MS": "1000",
                     "SPACES_DEVICE_API_NETWORK_BANDWIDTH_BPS": "0", "SPACES_DEVICE_API_NETWORK_CHUNK_BYTES": "0",
@@ -610,7 +612,7 @@ import workspacecore
             defer { server.stop() }
 
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, transportKey: transportKey)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             defer { connection.cancel() }
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
@@ -643,17 +645,17 @@ import workspacecore
             try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-ENDED-SUBSCRIBE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, transportKey: transportKey)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             defer { connection.cancel() }
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
@@ -686,19 +688,19 @@ import workspacecore
             try TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
             try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
 
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-ENDED-STATE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp)
-            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey)
+            let server = try SpacesDeviceAPIServer(host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
             let response = try await Task.detached {
                 try Self.sendDeviceAPIRequest(
                     SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID)), authToken: authToken, clientApp: clientApp),
-                    port: server.listeningPort, transportKey: transportKey)
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(response.ok)
@@ -708,13 +710,13 @@ import workspacecore
     }
 
     func testRevokePairingWaitsForInFlightDeviceAPIAuthorizationBeforeSaving() throws {
-        let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+        let identity = try supervisorTestTLSIdentity()
         let clientApp = SpacesDeviceClientApp(
             installationID: "INSTALLATION-REVOKE-RACE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
             appVersion: "1.0")
         let pairingStore = BlockingAuthorizePairingStore(clientApp: clientApp)
         let server = SpacesDeviceAPIServer(
-            host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity, pairingStoreProtocol: pairingStore)
         try server.start()
         defer { server.stop() }
 
@@ -724,7 +726,7 @@ import workspacecore
             do {
                 let response = try Self.sendDeviceAPIRequest(
                     SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
-                    transportKey: transportKey)
+                    certificateFingerprint: identity.certificateFingerprint)
                 requestResult.setResponse(response)
             } catch { requestResult.setError(error) }
             requestFinished.signal()
@@ -762,13 +764,13 @@ import workspacecore
     }
 
     func testResetPairingsWaitsForInFlightDeviceAPIAuthorizationBeforeSaving() throws {
-        let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+        let identity = try supervisorTestTLSIdentity()
         let clientApp = SpacesDeviceClientApp(
             installationID: "INSTALLATION-RESET-RACE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
             appVersion: "1.0")
         let pairingStore = BlockingAuthorizePairingStore(clientApp: clientApp)
         let server = SpacesDeviceAPIServer(
-            host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            host: SpacesDeviceAPIDefaults.loopbackHost, port: 0, identity: identity, pairingStoreProtocol: pairingStore)
         try server.start()
         defer { server.stop() }
 
@@ -778,7 +780,7 @@ import workspacecore
             do {
                 let response = try Self.sendDeviceAPIRequest(
                     SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
-                    transportKey: transportKey)
+                    certificateFingerprint: identity.certificateFingerprint)
                 requestResult.setResponse(response)
             } catch { requestResult.setError(error) }
             requestFinished.signal()
@@ -852,7 +854,7 @@ import workspacecore
         return socket.port
     }
 
-    private func startSubscribeConnection(sessionID: String, clientApp: SpacesDeviceClientApp, authToken: String, port: Int, transportKey: String)
+    private func startSubscribeConnection(sessionID: String, clientApp: SpacesDeviceClientApp, authToken: String, port: Int, certificateFingerprint: String)
         throws -> NWConnection
     {
         let ready = DispatchSemaphore(value: 0)
@@ -861,7 +863,7 @@ import workspacecore
         let resultBox = DeviceAPISupervisorTestResultBox()
         let connection = NWConnection(
             host: NWEndpoint.Host(SpacesDeviceAPIDefaults.loopbackHost), port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
-            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
 
         connection.stateUpdateHandler = { state in
             switch state {
@@ -958,7 +960,7 @@ import workspacecore
         return try GhosttyRemoteSessionStateCodec.decodeLine(resultBox.responseData())
     }
 
-    nonisolated private static func sendDeviceAPIRequest(_ request: SpacesDeviceAPIRequest, port: Int, transportKey: String) throws
+    nonisolated private static func sendDeviceAPIRequest(_ request: SpacesDeviceAPIRequest, port: Int, certificateFingerprint: String) throws
         -> SpacesDeviceAPIResponse
     {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw POSIXError(.EINVAL) }
@@ -969,7 +971,7 @@ import workspacecore
         let resultBox = DeviceAPISupervisorTestResultBox()
         let connection = NWConnection(
             host: NWEndpoint.Host(SpacesDeviceAPIDefaults.loopbackHost), port: nwPort,
-            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
         defer { connection.cancel() }
 
         connection.stateUpdateHandler = { state in

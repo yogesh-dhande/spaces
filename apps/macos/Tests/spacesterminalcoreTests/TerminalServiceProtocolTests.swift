@@ -42,8 +42,6 @@ final class TerminalServiceProtocolTests: XCTestCase {
             TerminalServiceRequest(command: .agentSignal(.init(event: agentSignal))),
             TerminalServiceRequest(command: .ackAgentSignals(.init(sessionID: "session-1", eventIDs: ["event-1"]))),
             TerminalServiceRequest(command: .profileCommand(profileCommand)),
-            TerminalServiceRequest(
-                command: .mobileCredential(.init(operation: .issue, installationID: "installation-1", deviceName: "iPhone", platform: "ios"))),
         ]
         let response = TerminalServiceResponse(
             ok: true, message: "Started.",
@@ -68,12 +66,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 workspace: TerminalServiceProfileWorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", dir: "/srv/work", runtimePath: "/srv/work", dirname: "feature", branch: "feature",
                     baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
-                terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
-            mobileCredentials: [
-                TerminalServiceMobileCredential(
-                    id: "credential-1", installationID: "installation-1", deviceName: "iPhone", platform: "ios", scopes: ["terminal"],
-                    createdAt: "2026-06-14T00:00:00Z", lastUsedAt: nil, revokedAt: nil)
-            ],
+                terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(
                 version: "1.2.3", artifactVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 

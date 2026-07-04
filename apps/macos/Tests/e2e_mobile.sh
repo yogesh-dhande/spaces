@@ -61,7 +61,6 @@ DEVICE_API_HOST=""
 DEVICE_API_PORT=""
 DEMO_REMOTE_HOST=""
 DEMO_REMOTE_PORT=""
-DEMO_REMOTE_TRANSPORT_KEY=""
 DEMO_REMOTE_CERTIFICATE_FINGERPRINT=""
 DEMO_REMOTE_PROJECT_DIR=""
 DEMO_REMOTE_WORKSPACE_ID=""
@@ -72,7 +71,6 @@ TARGET_DEVICE_NAME=""
 TARGET_DEVICE_API_HOST=""
 TARGET_DEVICE_API_PORT=""
 TARGET_DEVICE_AUTH_TOKEN=""
-TARGET_DEVICE_TRANSPORT_KEY=""
 TARGET_DEVICE_CERTIFICATE_FINGERPRINT=""
 TARGET_DEVICE_INSTALLATION_ID=""
 TARGET_WORKSPACE_ID=""
@@ -504,7 +502,7 @@ import json
 import sys
 payload = json.load(open(sys.argv[1]))
 required = [
-    "deviceID", "name", "remoteDaemonHost", "remoteDaemonPort", "authToken", "transportKey", "certificateFingerprint", "projectDir",
+    "deviceID", "name", "remoteDaemonHost", "remoteDaemonPort", "authToken", "certificateFingerprint", "projectDir",
     "workspaceID",
 ]
 missing = [name for name in required if not str(payload.get(name, "")).strip()]
@@ -542,7 +540,7 @@ run_local_device_api_parity() {
   local parity_result="$SUITE_ROOT/local-device-api-parity.json"
   local parity_stdout="$SUITE_ROOT/local-device-api-parity.stdout"
   local parity_log="$SUITE_ROOT/local-device-api-parity.log"
-  local parsed auth_token transport_key installation_id
+  local parsed auth_token certificate_fingerprint installation_id
   create_device_api_parity_fixture "$parity_project_dir"
   parsed="$(
     python3 - "$DEMO_ROOT/pairing.json" "$MOBILE_DEVICE_KEY" <<'PY'
@@ -550,7 +548,7 @@ import json
 import shlex
 import sys
 payload = json.load(open(sys.argv[1]))[sys.argv[2]]
-for key, name in (("authToken", "auth_token"), ("transportKey", "transport_key"), ("installationID", "installation_id")):
+for key, name in (("authToken", "auth_token"), ("certificateFingerprint", "certificate_fingerprint"), ("installationID", "installation_id")):
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise SystemExit(f"pairing payload missing {key}")
@@ -563,7 +561,7 @@ PY
     --spacese2e "$SPACES_E2E_BIN" \
     --host "$DEVICE_API_HOST" \
     --port "$DEVICE_API_PORT" \
-    --transport-key="$transport_key" \
+    --certificate-fingerprint="$certificate_fingerprint" \
     --auth-token "$auth_token" \
     --project-dir "$parity_project_dir" \
     --label "local-device" \
@@ -594,7 +592,6 @@ device = remote.get(device_key) or {}
 fields = {
     "DEMO_REMOTE_HOST": remote.get("host"),
     "DEMO_REMOTE_PORT": remote.get("port"),
-    "DEMO_REMOTE_TRANSPORT_KEY": remote.get("transportKey"),
     "DEMO_REMOTE_CERTIFICATE_FINGERPRINT": remote.get("certificateFingerprint"),
     "DEMO_REMOTE_PROJECT_DIR": remote.get("projectDir"),
     "DEMO_REMOTE_WORKSPACE_ID": remote.get("workspaceID"),
@@ -629,7 +626,6 @@ configure_target() {
       TARGET_DEVICE_API_HOST="$DEMO_REMOTE_HOST"
       TARGET_DEVICE_API_PORT="$DEMO_REMOTE_PORT"
       TARGET_DEVICE_AUTH_TOKEN="$DEMO_REMOTE_AUTH_TOKEN"
-      TARGET_DEVICE_TRANSPORT_KEY="$DEMO_REMOTE_TRANSPORT_KEY"
       TARGET_DEVICE_CERTIFICATE_FINGERPRINT="$DEMO_REMOTE_CERTIFICATE_FINGERPRINT"
       TARGET_DEVICE_INSTALLATION_ID="$DEMO_REMOTE_INSTALLATION_ID"
       TARGET_WORKSPACE_ID="$DEMO_REMOTE_WORKSPACE_ID"
@@ -735,9 +731,9 @@ record_profile_app_owner_pid() {
 
 remote_device_api_request() {
   local request_json="$1"
-  [[ -n "$DEMO_REMOTE_HOST" && -n "$DEMO_REMOTE_PORT" && -n "$DEMO_REMOTE_TRANSPORT_KEY" && -n "$DEMO_REMOTE_AUTH_TOKEN" ]] \
+  [[ -n "$DEMO_REMOTE_HOST" && -n "$DEMO_REMOTE_PORT" && -n "$DEMO_REMOTE_CERTIFICATE_FINGERPRINT" && -n "$DEMO_REMOTE_AUTH_TOKEN" ]] \
     || fail "remote Device API request attempted before the remote mobile demo target was loaded"
-  python3 - "$SPACES_E2E_BIN" "$BUNDLE_ID" "$DEMO_REMOTE_HOST" "$DEMO_REMOTE_PORT" "$DEMO_REMOTE_TRANSPORT_KEY" "$DEMO_REMOTE_AUTH_TOKEN" "$DEMO_REMOTE_INSTALLATION_ID" "$request_json" <<'PY'
+  python3 - "$SPACES_E2E_BIN" "$BUNDLE_ID" "$DEMO_REMOTE_HOST" "$DEMO_REMOTE_PORT" "$DEMO_REMOTE_CERTIFICATE_FINGERPRINT" "$DEMO_REMOTE_AUTH_TOKEN" "$DEMO_REMOTE_INSTALLATION_ID" "$request_json" <<'PY'
 import json
 import os
 import subprocess
@@ -748,7 +744,7 @@ spacese2e = Path(sys.argv[1])
 bundle_id = sys.argv[2]
 host = sys.argv[3]
 port = sys.argv[4]
-transport_key = sys.argv[5]
+certificate_fingerprint = sys.argv[5]
 auth_token = sys.argv[6]
 installation_id = sys.argv[7]
 request = json.loads(sys.argv[8])
@@ -781,7 +777,7 @@ try:
             host,
             "--port",
             str(port),
-            "--transport-key=" + transport_key,
+            "--certificate-fingerprint=" + certificate_fingerprint,
             "--request-json",
             json.dumps({"authToken": auth_token, "clientApp": client_app, **request}),
         ],
@@ -849,7 +845,7 @@ command = [
     config["host"],
     "--port",
     str(config["port"]),
-    "--transport-key=" + config["transportKey"],
+    "--certificate-fingerprint=" + config["certificateFingerprint"],
     "--request-json",
     json.dumps({"authToken": config["authToken"], "clientApp": client_app, "command": {"overview": {}}}),
 ]
@@ -890,24 +886,18 @@ while time.time() < deadline:
             collect_terminal_rows(((payload.get("result") or {}).get("overview") or {}), terminal_rows)
             visible_ids = {session_id_for_row(row) for row in terminal_rows}
             missing = [session_id for session_id in required_session_ids if session_id not in visible_ids]
-            missing_direct_credentials = []
-            for row in terminal_rows:
-                endpoint = row.get("daemonEndpoint")
-                if isinstance(endpoint, dict) and not str(endpoint.get("authToken") or "").strip():
-                    missing_direct_credentials.append(session_id_for_row(row))
             last_detail = json.dumps(
                 {
                     "attempt": attempt,
                     "requiredSessionIDs": required_session_ids,
                     "visibleSessionIDs": sorted(session_id for session_id in visible_ids if session_id),
                     "missingSessionIDs": missing,
-                    "missingDirectCredentialSessionIDs": missing_direct_credentials,
                     "ok": payload.get("ok"),
                 },
                 indent=2,
                 sort_keys=True,
             )
-            if payload.get("ok") and not missing and not missing_direct_credentials:
+            if payload.get("ok") and not missing:
                 log_path.write_text(last_detail + "\n")
                 raise SystemExit(0)
     else:
@@ -1237,7 +1227,6 @@ mapping = {
     "host": "SPACES_MOBILE_TEST_HOST",
     "port": "SPACES_MOBILE_TEST_PORT",
     "authToken": "SPACES_MOBILE_TEST_AUTH_TOKEN",
-    "transportKey": "SPACES_MOBILE_TEST_TRANSPORT_KEY",
     "certificateFingerprint": "SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT",
     "installationID": "SPACES_MOBILE_TEST_INSTALLATION_ID",
     "sessionID": "SPACES_MOBILE_E2E_TARGET_SESSION_ID",
@@ -1253,7 +1242,6 @@ required_seed_keys = [
     "host",
     "port",
     "authToken",
-    "transportKey",
     "certificateFingerprint",
 ]
 if all(str(payload.get(key, "")).strip() for key in required_seed_keys):
@@ -1264,7 +1252,6 @@ if all(str(payload.get(key, "")).strip() for key in required_seed_keys):
         "host": payload["host"],
         "port": int(payload["port"]),
         "authToken": payload["authToken"],
-        "transportKey": payload["transportKey"],
         "certificateFingerprint": payload["certificateFingerprint"],
     }
     if device_id:
@@ -1291,7 +1278,7 @@ write_ui_test_config() {
   local scenario="$1"
   local session_id="$2"
   local secondary_session_id="${3:-}"
-  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" "$CURRENT_TARGET" "$TARGET_DEVICE_ID" "$TARGET_DEVICE_NAME" "$TARGET_DEVICE_API_HOST" "$TARGET_DEVICE_API_PORT" "$TARGET_DEVICE_AUTH_TOKEN" "$TARGET_DEVICE_TRANSPORT_KEY" "$TARGET_DEVICE_CERTIFICATE_FINGERPRINT" "$TARGET_DEVICE_INSTALLATION_ID" <<'PY'
+  python3 - "$DEMO_ROOT" "$scenario" "$session_id" "$secondary_session_id" "$DEVICE_API_HOST" "$DEVICE_API_PORT" "$MOBILE_UDID" "$MOBILE_DEVICE_KEY" "$MOBILE_ARTIFACT_NAME" "$UI_TEST_CONFIG" "$DEFAULT_UI_TEST_CONFIG" "$BUNDLE_ID" "$SCROLLBACK_SWIPE_COUNT" "$TERMINAL_LINK_PREVIEW_IMAGE_NAME" "$TERMINAL_LINK_PREVIEW_PATH" "$CURRENT_TARGET" "$TARGET_DEVICE_ID" "$TARGET_DEVICE_NAME" "$TARGET_DEVICE_API_HOST" "$TARGET_DEVICE_API_PORT" "$TARGET_DEVICE_AUTH_TOKEN" "$TARGET_DEVICE_CERTIFICATE_FINGERPRINT" "$TARGET_DEVICE_INSTALLATION_ID" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1318,7 +1305,6 @@ from pathlib import Path
     target_device_api_host,
     target_device_api_port_raw,
     target_device_auth_token,
-    target_device_transport_key,
     target_device_certificate_fingerprint,
     target_device_installation_id,
 ) = sys.argv[1:]
@@ -1335,11 +1321,10 @@ if current_target == "remote":
     device_api_port = int(target_device_api_port_raw)
     mobile_pairing = {
         "authToken": target_device_auth_token,
-        "transportKey": target_device_transport_key,
         "certificateFingerprint": target_device_certificate_fingerprint,
         "installationID": target_device_installation_id,
     }
-    if not all(str(mobile_pairing.get(key, "")).strip() for key in ("authToken", "transportKey", "certificateFingerprint", "installationID")):
+    if not all(str(mobile_pairing.get(key, "")).strip() for key in ("authToken", "certificateFingerprint", "installationID")):
         raise SystemExit("remote UI test target credentials are incomplete")
 prefix = scenario
 artifact_prefix = f"{prefix}-{mobile_artifact_name}"
@@ -1352,7 +1337,6 @@ payload = {
     "host": device_api_host,
     "port": device_api_port,
     "authToken": mobile_pairing["authToken"],
-    "transportKey": mobile_pairing["transportKey"],
     "certificateFingerprint": mobile_pairing["certificateFingerprint"],
     "installationID": mobile_pairing["installationID"],
     "renderDumpPath": str(artifacts_dir / f"{artifact_prefix}-render.json"),
@@ -3254,7 +3238,7 @@ def send_mobile_request(request: dict, attempts: int = 3) -> dict:
         device_api_host,
         "--port",
         str(device_api_port),
-        "--transport-key=" + pairing["transportKey"],
+        "--certificate-fingerprint=" + pairing["certificateFingerprint"],
         "--request-json",
         json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
     ]
@@ -3546,7 +3530,7 @@ def send_mobile_request(request: dict) -> dict:
             device_api_host,
             "--port",
             str(device_api_port),
-            "--transport-key=" + pairing["transportKey"],
+            "--certificate-fingerprint=" + pairing["certificateFingerprint"],
             "--request-json",
             json.dumps({"authToken": pairing["authToken"], "clientApp": client_app, **request}),
         ],

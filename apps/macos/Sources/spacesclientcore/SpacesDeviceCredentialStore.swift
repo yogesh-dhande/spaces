@@ -19,65 +19,27 @@ public enum SpacesDeviceCredentialStore {
     public static let secretDirectoryEnvironmentVariable = "SPACES_CLIENT_SECRET_DIR"
     static let secretDirectoryName = "client-secrets"
 
-    private enum SecretKind {
-        case authToken
-        case transportKey
-
-        var filePrefix: String {
-            switch self {
-            case .authToken: "device-auth-token"
-            case .transportKey: "device-transport-key"
-            }
-        }
-    }
+    private static let tokenFilePrefix = "device-auth-token"
 
     public static func token(deviceID: String, profile: SpacesProfile? = nil) throws -> String? {
-        try secret(kind: .authToken, deviceID: deviceID, profile: profile)
-    }
-
-    public static func transportKey(deviceID: String, profile: SpacesProfile? = nil) throws -> String? {
-        try secret(kind: .transportKey, deviceID: deviceID, profile: profile)
+        try fileSecret(at: secretFileURL(deviceID: deviceID, profile: profile))
     }
 
     public static func hasToken(deviceID: String, profile: SpacesProfile? = nil) throws -> Bool {
-        try secret(kind: .authToken, deviceID: deviceID, profile: profile) != nil
-    }
-
-    public static func hasTransportKey(deviceID: String, profile: SpacesProfile? = nil) throws -> Bool {
-        try secret(kind: .transportKey, deviceID: deviceID, profile: profile) != nil
+        try token(deviceID: deviceID, profile: profile) != nil
     }
 
     public static func saveToken(_ token: String, deviceID: String, profile: SpacesProfile? = nil) throws {
-        try saveSecret(token, kind: .authToken, deviceID: deviceID, profile: profile)
-    }
-
-    public static func saveTransportKey(_ transportKey: String, deviceID: String, profile: SpacesProfile? = nil) throws {
-        try saveSecret(transportKey, kind: .transportKey, deviceID: deviceID, profile: profile)
+        try saveFileSecret(token, at: secretFileURL(deviceID: deviceID, profile: profile))
     }
 
     public static func deleteToken(deviceID: String, profile: SpacesProfile? = nil) throws {
-        try deleteSecret(kind: .authToken, deviceID: deviceID, profile: profile)
+        try deleteFileSecret(at: secretFileURL(deviceID: deviceID, profile: profile))
     }
 
-    public static func deleteTransportKey(deviceID: String, profile: SpacesProfile? = nil) throws {
-        try deleteSecret(kind: .transportKey, deviceID: deviceID, profile: profile)
-    }
-
-    private static func secret(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws -> String? {
-        try fileSecret(at: secretFileURL(kind: kind, deviceID: deviceID, profile: profile))
-    }
-
-    private static func saveSecret(_ value: String, kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws {
-        try saveFileSecret(value, at: secretFileURL(kind: kind, deviceID: deviceID, profile: profile))
-    }
-
-    private static func deleteSecret(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws {
-        try deleteFileSecret(at: secretFileURL(kind: kind, deviceID: deviceID, profile: profile))
-    }
-
-    private static func secretFileURL(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws -> URL {
+    private static func secretFileURL(deviceID: String, profile: SpacesProfile?) throws -> URL {
         try secretDirectoryURL(profile: profile)
-            .appendingPathComponent("\(kind.filePrefix)-\(sanitizeFileComponent(deviceID)).secret", isDirectory: false)
+            .appendingPathComponent("\(tokenFilePrefix)-\(sanitizeFileComponent(deviceID)).secret", isDirectory: false)
     }
 
     private static func secretDirectoryURL(profile: SpacesProfile?) throws -> URL {

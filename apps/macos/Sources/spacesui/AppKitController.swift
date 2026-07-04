@@ -3233,10 +3233,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return container
     }
 
-    nonisolated static func pairedDeviceHasRequiredCredentials(deviceID: String) -> Bool {
-        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: deviceID)) ?? false
-        let hasTransportKey = (try? SpacesDeviceCredentialStore.hasTransportKey(deviceID: deviceID)) ?? false
-        return hasToken && hasTransportKey
+    /// A paired device is usable when its auth token secret is present and its record carries the
+    /// daemon's pinned TLS certificate fingerprint (non-secret record data).
+    nonisolated static func pairedDeviceHasRequiredCredentials(device: SpacesPairedDeviceRecord) -> Bool {
+        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: device.id)) ?? false
+        return hasToken && !device.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @objc func alertsRowClicked() { alerts.showAlertsDetail() }

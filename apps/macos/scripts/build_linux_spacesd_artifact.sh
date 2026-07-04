@@ -577,6 +577,7 @@ smoke_artifact() {
         timeout 20s env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 bin/spacesd | grep -q '^SHA256:'
         mkdir -p "$smoke_root/profile/runtime" "$smoke_root/work"
         env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            SPACES_DEVICE_API_HOST=127.0.0.1 SPACES_DEVICE_API_PORT=0 \
             bin/spacesd >"$smoke_root/spacesd.log" 2>&1 </dev/null &
         local daemon_pid=$!
         trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
@@ -700,6 +701,72 @@ response = json.loads(data.decode("utf-8"))
 signals = response.get("agentSignals") or []
 if not response.get("ok") or not any(signal.get("type") == "waiting" for signal in signals):
     raise SystemExit(response)
+PY
+        # Pinned-TLS gate: open a pairing window through the shipped CLI, pair a loopback
+        # Device API client against the daemon's pinned certificate fingerprint, and issue one
+        # authed request over that channel. This is the only automated Linux TLS round-trip.
+        env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            SPACES_DEVICE_API_HOST=127.0.0.1 SPACES_DEVICE_API_PORT=0 \
+            bin/spaces pair --json >"$smoke_root/pairing-window.json"
+        python3 - "$smoke_root/pairing-window.json" <<'PY'
+import hashlib
+import json
+import socket
+import ssl
+import sys
+
+pairing = json.load(open(sys.argv[1]))
+host = pairing["host"]
+port = int(pairing["port"])
+fingerprint = pairing["certificateFingerprint"]
+if not fingerprint.startswith("SHA256:"):
+    raise SystemExit(f"unexpected certificate fingerprint format: {fingerprint!r}")
+expected = fingerprint.split(":", 1)[1].strip().lower()
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+def request(body):
+    with socket.create_connection((host, port), timeout=10) as raw:
+        with context.wrap_socket(raw, server_hostname=host) as tls:
+            # Pin before any application byte: the daemon's leaf certificate must match the
+            # fingerprint delivered in the pairing window.
+            actual = hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+            if actual != expected:
+                raise SystemExit(f"certificate fingerprint mismatch: expected {expected} got {actual}")
+            tls.sendall(json.dumps(body, separators=(",", ":")).encode("utf-8") + b"\n")
+            data = bytearray()
+            while b"\n" not in data:
+                chunk = tls.recv(65536)
+                if not chunk:
+                    break
+                data.extend(chunk)
+    return json.loads(bytes(data).split(b"\n", 1)[0].decode("utf-8"))
+
+client_app = {
+    "installationID": "linux-artifact-smoke",
+    "bundleID": "dev.usespaces.spacesmobile",
+    "platform": "ios",
+    "deviceName": "Linux Artifact Smoke",
+    "appVersion": "1.0",
+}
+paired = request({
+    "clientApp": client_app,
+    "command": {"pair": {"pairingCode": pairing["pairingCode"], "pairingNonce": pairing["pairingNonce"]}},
+})
+auth_token = ((paired.get("result") or {}).get("issuedAuthToken") or {}).get("authToken")
+if not paired.get("ok") or not auth_token:
+    raise SystemExit(paired)
+
+overview = request({
+    "authToken": auth_token,
+    "clientApp": client_app,
+    "command": {"overview": {}},
+})
+if not overview.get("ok") or "overview" not in (overview.get("result") or {}):
+    raise SystemExit(overview)
 PY
     )
     rm -rf "$smoke_root"

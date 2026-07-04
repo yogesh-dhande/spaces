@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spacese2e", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--transport-key", required=True)
+    parser.add_argument("--certificate-fingerprint", required=True)
     parser.add_argument("--auth-token", required=True)
     parser.add_argument("--project-dir", required=True)
     parser.add_argument("--label", required=True)
@@ -59,9 +59,7 @@ def send(command: str, payload: dict | None, args: argparse.Namespace, app: dict
         args.host,
         "--port",
         str(args.port),
-        # Equals form: transport keys are base64url and may start with "-", which argparse would
-        # otherwise treat as another option.
-        f"--transport-key={args.transport_key}",
+        f"--certificate-fingerprint={args.certificate_fingerprint}",
         "--request-json",
         json.dumps(typed_request(command, payload, args, app), separators=(",", ":")),
     ]

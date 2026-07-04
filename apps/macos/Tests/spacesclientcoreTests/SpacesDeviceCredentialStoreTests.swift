@@ -67,19 +67,14 @@ final class SpacesDeviceCredentialStoreTests: XCTestCase {
         }
 
         try SpacesDeviceCredentialStore.saveToken("TOKEN", deviceID: "device/one")
-        try SpacesDeviceCredentialStore.saveTransportKey("TRANSPORT", deviceID: "device/one")
 
         XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: "device/one"), "TOKEN")
-        XCTAssertEqual(try SpacesDeviceCredentialStore.transportKey(deviceID: "device/one"), "TRANSPORT")
         XCTAssertTrue(try SpacesDeviceCredentialStore.hasToken(deviceID: "device/one"))
-        XCTAssertTrue(try SpacesDeviceCredentialStore.hasTransportKey(deviceID: "device/one"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: secretDirectory.path))
 
         try SpacesDeviceCredentialStore.deleteToken(deviceID: "device/one")
-        try SpacesDeviceCredentialStore.deleteTransportKey(deviceID: "device/one")
 
         XCTAssertNil(try SpacesDeviceCredentialStore.token(deviceID: "device/one"))
-        XCTAssertNil(try SpacesDeviceCredentialStore.transportKey(deviceID: "device/one"))
     }
 
     func testSanitizeFileComponentKeepsSecretsInsideDirectory() {

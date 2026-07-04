@@ -147,77 +147,68 @@ public enum SpacesDevicePairingClient {
         """#
 
     public static func pairRemoteDevice(_ request: SpacesRemoteDevicePairingRequest) throws -> SpacesRemoteDevicePairingResult {
-        #if canImport(Network)
-            let sshHost = try normalizedSSHHost(request.sshHost)
-            let sshUser = normalized(request.sshUser)
-            try validateSSHPort(request.sshPort)
-            let destination = sshDestination(host: sshHost, user: sshUser)
-            openSSHControlMaster(destination: destination, port: request.sshPort)
-            defer { closeSSHControlMaster(destination: destination, port: request.sshPort) }
-            let deviceAPIHost = try sshPairingDeviceAPIHost(destination: destination, port: request.sshPort, sshHost: sshHost)
+        let sshHost = try normalizedSSHHost(request.sshHost)
+        let sshUser = normalized(request.sshUser)
+        try validateSSHPort(request.sshPort)
+        let destination = sshDestination(host: sshHost, user: sshUser)
+        openSSHControlMaster(destination: destination, port: request.sshPort)
+        defer { closeSSHControlMaster(destination: destination, port: request.sshPort) }
+        let deviceAPIHost = try sshPairingDeviceAPIHost(destination: destination, port: request.sshPort, sshHost: sshHost)
 
-            try validateRemoteDeviceSSH(destination: destination, port: request.sshPort)
-            let probe = try validateRemoteDeviceInstall(destination: destination, port: request.sshPort)
-            let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
-                destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion,
-                remoteArtifactPublicKey: request.remoteArtifactPublicKey)
+        try validateRemoteDeviceSSH(destination: destination, port: request.sshPort)
+        let probe = try validateRemoteDeviceInstall(destination: destination, port: request.sshPort)
+        let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
+            destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion,
+            remoteArtifactPublicKey: request.remoteArtifactPublicKey)
 
-            let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
-            let client = try SpacesDeviceAPIRequestClient(host: deviceAPIHost, port: metadata.port, transportKey: metadata.transportKey)
-            let response: SpacesDeviceAPIResponse
-            do {
-                response = try client.request(
-                    SpacesDeviceAPIRequest(
-                        command: .pair(.init(pairingCode: metadata.pairingCode, pairingNonce: metadata.pairingNonce)),
-                        clientApp: SpacesDeviceClientApp(
-                            installationID: request.clientInstallationID, bundleID: request.clientBundleID, platform: "macos",
-                            deviceName: request.clientDeviceName, appVersion: request.clientAppVersion)))
-            } catch {
-                throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(
-                    host: deviceAPIHost, port: metadata.port, message: error.localizedDescription)
-            }
-            guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
-            guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
+        let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
+        let client = try SpacesDeviceAPIRequestClient(host: deviceAPIHost, port: metadata.port, certificateFingerprint: metadata.certificateFingerprint)
+        let response: SpacesDeviceAPIResponse
+        do {
+            response = try client.request(
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: metadata.pairingCode, pairingNonce: metadata.pairingNonce)),
+                    clientApp: SpacesDeviceClientApp(
+                        installationID: request.clientInstallationID, bundleID: request.clientBundleID, platform: "macos",
+                        deviceName: request.clientDeviceName, appVersion: request.clientAppVersion)))
+        } catch {
+            throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(
+                host: deviceAPIHost, port: metadata.port, message: error.localizedDescription)
+        }
+        guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
+        guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
-            let now = ISO8601DateFormatter().string(from: Date())
-            let database = try SpacesClientDatabase.defaultDatabase()
-            try database.upsert(
-                device: SpacesPairedDeviceRecord(
-                    id: deviceID, name: metadata.name, platform: "remote", host: deviceAPIHost, port: metadata.port,
-                    certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort,
-                    createdAt: now, updatedAt: now, lastSelectedAt: now))
-            try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
-            try SpacesDeviceCredentialStore.saveTransportKey(metadata.transportKey, deviceID: deviceID, profile: request.profile)
-            return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)
-        #else
-            throw SpacesRemoteDevicePairingError.sshUnavailable("Remote device pairing requires Network.framework.")
-        #endif
+        let now = ISO8601DateFormatter().string(from: Date())
+        let database = try SpacesClientDatabase.defaultDatabase()
+        try database.upsert(
+            device: SpacesPairedDeviceRecord(
+                id: deviceID, name: metadata.name, platform: "remote", host: deviceAPIHost, port: metadata.port,
+                certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort,
+                createdAt: now, updatedAt: now, lastSelectedAt: now))
+        try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
+        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)
     }
 
     public static func openRemotePairingWindow(
         for device: SpacesPairedDeviceRecord, appVersion: String? = nil, remoteArtifactPublicKey: String? = nil
     ) throws -> SpacesRemoteDevicePairingWindowResult {
-        #if canImport(Network)
-            let sshHost = try normalizedSSHHost(device.sshHost ?? device.host)
-            let sshUser = normalized(device.sshUser)
-            try validateSSHPort(device.sshPort)
-            let destination = sshDestination(host: sshHost, user: sshUser)
-            openSSHControlMaster(destination: destination, port: device.sshPort)
-            defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
-            let deviceAPIHost = try remotePairingWindowDeviceAPIHost(destination: destination, port: device.sshPort, sshHost: sshHost)
-            try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
-            let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
-            let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
-                destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey
-            )
-            let link = SpacesDevicePairingLink(
-                host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
-                transportKey: metadata.transportKey, certificateFingerprint: metadata.certificateFingerprint, name: metadata.name)
-            return SpacesRemoteDevicePairingWindowResult(
-                name: metadata.name, host: deviceAPIHost, port: metadata.port, linkString: link.absoluteString, expiresAt: metadata.expiresAt)
-        #else
-            throw SpacesRemoteDevicePairingError.sshUnavailable("Remote device pairing requires Network.framework.")
-        #endif
+        let sshHost = try normalizedSSHHost(device.sshHost ?? device.host)
+        let sshUser = normalized(device.sshUser)
+        try validateSSHPort(device.sshPort)
+        let destination = sshDestination(host: sshHost, user: sshUser)
+        openSSHControlMaster(destination: destination, port: device.sshPort)
+        defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
+        let deviceAPIHost = try remotePairingWindowDeviceAPIHost(destination: destination, port: device.sshPort, sshHost: sshHost)
+        try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
+        let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
+        let metadata = try loadRemotePairingMetadataPreparingLinuxIfNeeded(
+            destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey
+        )
+        let link = SpacesDevicePairingLink(
+            host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
+            certificateFingerprint: metadata.certificateFingerprint, name: metadata.name)
+        return SpacesRemoteDevicePairingWindowResult(
+            name: metadata.name, host: deviceAPIHost, port: metadata.port, linkString: link.absoluteString, expiresAt: metadata.expiresAt)
     }
 
     /// Refreshes a remote **Linux** daemon's binary from the signed release artifact for `appVersion`,
@@ -230,24 +221,20 @@ public enum SpacesDevicePairingClient {
     @discardableResult public static func updateRemoteLinuxDaemon(
         for device: SpacesPairedDeviceRecord, appVersion: String? = nil, remoteArtifactPublicKey: String? = nil
     ) throws -> Bool {
-        #if canImport(Network)
-            guard let sshHostRaw = device.sshHost else { return false }
-            let sshHost = try normalizedSSHHost(sshHostRaw)
-            let sshUser = normalized(device.sshUser)
-            try validateSSHPort(device.sshPort)
-            let destination = sshDestination(host: sshHost, user: sshUser)
-            openSSHControlMaster(destination: destination, port: device.sshPort)
-            defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
-            try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
-            let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
-            guard probe.operatingSystem == "Linux" else { return false }
-            try installRemoteLinuxSpaces(
-                destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey
-            )
-            return true
-        #else
-            return false
-        #endif
+        guard let sshHostRaw = device.sshHost else { return false }
+        let sshHost = try normalizedSSHHost(sshHostRaw)
+        let sshUser = normalized(device.sshUser)
+        try validateSSHPort(device.sshPort)
+        let destination = sshDestination(host: sshHost, user: sshUser)
+        openSSHControlMaster(destination: destination, port: device.sshPort)
+        defer { closeSSHControlMaster(destination: destination, port: device.sshPort) }
+        try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
+        let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
+        guard probe.operatingSystem == "Linux" else { return false }
+        try installRemoteLinuxSpaces(
+            destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey
+        )
+        return true
     }
 
     public static func localMacClientInstallationID(profile: SpacesProfile? = nil) -> String {
@@ -981,7 +968,6 @@ private struct RemotePairingMetadata: Decodable, Sendable {
     let port: Int
     let pairingNonce: String
     let pairingCode: String
-    let transportKey: String
     let certificateFingerprint: String
     let expiresAt: String?
 
@@ -995,7 +981,7 @@ private struct RemotePairingMetadata: Decodable, Sendable {
         guard (1...65_535).contains(port) else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON contains an invalid Device API port.")
         }
-        guard trimmed(pairingNonce) != nil, trimmed(pairingCode) != nil, trimmed(transportKey) != nil, trimmed(certificateFingerprint) != nil else {
+        guard trimmed(pairingNonce) != nil, trimmed(pairingCode) != nil, trimmed(certificateFingerprint) != nil else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON is missing required pairing credentials.")
         }
         return self

@@ -158,7 +158,6 @@ struct PairingWindowPayload: Codable, Sendable, Equatable {
     let port: Int
     let pairingNonce: String
     let pairingCode: String
-    let transportKey: String
     let certificateFingerprint: String
     let expiresAt: String
     let pairingLink: String
@@ -196,7 +195,7 @@ func pairingWindowLines(_ window: SpacesDevicePairingWindowSnapshot) -> [String]
 func pairingWindowPayload(_ window: SpacesDevicePairingWindowSnapshot) throws -> PairingWindowPayload {
     let link = try SpacesDevicePairingLink.parse(window.linkString)
     return PairingWindowPayload(
-        name: link.name, host: link.host, port: link.port, pairingNonce: link.nonce, pairingCode: link.code, transportKey: link.transportKey,
+        name: link.name, host: link.host, port: link.port, pairingNonce: link.nonce, pairingCode: link.code,
         certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
         pairingLink: window.linkString)
 }

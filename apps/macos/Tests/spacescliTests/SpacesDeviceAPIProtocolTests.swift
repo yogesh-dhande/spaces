@@ -165,25 +165,22 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(overview.workspaces.first?.terminalRows, [])
     }
 
-    func testTerminalDaemonEndpointRoundTripsOnRuntimeRowsAndSessionSummary() throws {
-        let endpoint = SpacesDeviceTerminalDaemonEndpoint(
-            host: "builder.example.com", port: 7443, authToken: nil, certificateFingerprint: "SHA256:abcdef")
+    func testOverviewRoundTripsRuntimeRowsAndSessionSummary() throws {
         let processRow = SpacesDeviceWorkspaceProcessRow(
             id: "process-1", workspaceID: "workspace-1", name: "API", command: "npm run dev", processID: "runtime-1", sessionID: "session-1",
-            runState: .running, canRun: false, canStop: true, canRestart: true, daemonEndpoint: endpoint)
+            runState: .running, canRun: false, canStop: true, canRestart: true)
         let agentRow = SpacesDeviceWorkspaceCodingAgentRow(
             id: "agent-1", workspaceID: "workspace-1", name: "Codex", command: "codex", agentID: "agent-runtime-1", sessionID: "session-2",
-            isConfigured: true, runState: .running, activityState: .spinning, canRun: false, canStop: true, canRestart: true, daemonEndpoint: endpoint
-        )
+            isConfigured: true, runState: .running, activityState: .spinning, canRun: false, canStop: true, canRestart: true)
         let terminalRow = SpacesDeviceWorkspaceTerminalRow(
             id: "terminal-1", workspaceID: "workspace-1", title: "Shell", workingDirectory: "/repo", sessionID: "session-3", runState: .running,
-            canOpenTerminal: true, canStop: true, daemonEndpoint: endpoint)
+            canOpenTerminal: true, canStop: true)
         let session = SpacesDeviceTerminalSessionSummary(
             id: "session-1", title: "API", workingDirectory: "/repo", shell: "/bin/zsh", command: "npm run dev", state: .running,
             backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 123, childPID: 456, workspaceID: "workspace-1",
             workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z",
             updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), daemonEndpoint: endpoint)
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
@@ -194,48 +191,13 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(
             SpacesDeviceAPICodec.encodeResponse(SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))))
-        XCTAssertEqual(decoded.overview?.workspaces.first?.processRows.first?.daemonEndpoint, endpoint)
-        XCTAssertEqual(decoded.overview?.workspaces.first?.codingAgentRows.first?.daemonEndpoint, endpoint)
-        XCTAssertEqual(decoded.overview?.workspaces.first?.terminalRows.first?.daemonEndpoint, endpoint)
-        XCTAssertEqual(decoded.overview?.sessions.first?.daemonEndpoint, endpoint)
+        XCTAssertEqual(decoded.overview?.workspaces.first?.processRows.first, processRow)
+        XCTAssertEqual(decoded.overview?.workspaces.first?.codingAgentRows.first, agentRow)
+        XCTAssertEqual(decoded.overview?.workspaces.first?.terminalRows.first, terminalRow)
         XCTAssertEqual(decoded.overview?.sessions.first?.shell, "/bin/zsh")
         XCTAssertEqual(decoded.overview?.sessions.first?.command, "npm run dev")
         let encodedResponse = try SpacesDeviceAPICodec.encodeResponse(SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview)))
         XCTAssertFalse(String(data: encodedResponse, encoding: .utf8)?.contains("authToken") == true)
-    }
-
-    func testTerminalDaemonEndpointEncodesOnlyTokensPresentInPayload() throws {
-        let metadataOnlyEndpoint = SpacesDeviceTerminalDaemonEndpoint(
-            host: "builder.example.com", port: 7443, authToken: nil, certificateFingerprint: "SHA256:abcdef")
-        let clientEndpoint = SpacesDeviceTerminalDaemonEndpoint(
-            host: "builder.example.com", port: 7443, authToken: "CLIENT", certificateFingerprint: "SHA256:abcdef")
-
-        let encodedMetadataOnly = try JSONEncoder().encode(metadataOnlyEndpoint)
-        let encodedClient = try JSONEncoder().encode(clientEndpoint)
-
-        XCTAssertFalse(String(data: encodedMetadataOnly, encoding: .utf8)?.contains("authToken") == true)
-        XCTAssertTrue(String(data: encodedClient, encoding: .utf8)?.contains("CLIENT") == true)
-        XCTAssertNil(try JSONDecoder().decode(SpacesDeviceTerminalDaemonEndpoint.self, from: encodedMetadataOnly).authToken)
-        XCTAssertEqual(try JSONDecoder().decode(SpacesDeviceTerminalDaemonEndpoint.self, from: encodedClient).authToken, "CLIENT")
-    }
-
-    func testLegacyTerminalRowDecodesWithoutDaemonEndpoint() throws {
-        let payload = """
-            {
-              "id": "terminal-1",
-              "workspaceID": "workspace-1",
-              "title": "Shell",
-              "workingDirectory": "/repo",
-              "sessionID": "session-1",
-              "runState": "running",
-              "canOpenTerminal": true,
-              "canStop": true
-            }
-            """.data(using: .utf8)!
-
-        let row = try JSONDecoder().decode(SpacesDeviceWorkspaceTerminalRow.self, from: payload)
-
-        XCTAssertNil(row.daemonEndpoint)
     }
 
     func testResponseRoundTripsMutationOutputsAndCreateOptions() throws {

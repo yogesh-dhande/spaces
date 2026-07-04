@@ -124,12 +124,12 @@ payload = {
 }
 open(request_path, "w").write(json.dumps(payload, separators=(",", ":")))
 PY
-  local host port transport_key request_json response
+  local host port certificate_fingerprint request_json response
   host="127.0.0.1"
   port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$TMP_ROOT/pairing-window.json")"
-  transport_key="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["transportKey"])' "$TMP_ROOT/pairing-window.json")"
+  certificate_fingerprint="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["certificateFingerprint"])' "$TMP_ROOT/pairing-window.json")"
   request_json="$(cat "$TMP_ROOT/pair-request.json")"
-  response="$("$SPACES_E2E_BIN" mobile-request --host "$host" --port "$port" --transport-key="$transport_key" --request-json "$request_json")"
+  response="$("$SPACES_E2E_BIN" mobile-request --host "$host" --port "$port" --certificate-fingerprint="$certificate_fingerprint" --request-json "$request_json")"
   printf '%s' "$response" >"$TMP_ROOT/pair-response.json"
 }
 
@@ -159,10 +159,10 @@ YAML
 }
 
 local_device_parity() {
-  local host port transport_key auth_token project_dir
+  local host port certificate_fingerprint auth_token project_dir
   host="127.0.0.1"
   port="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$TMP_ROOT/pairing-window.json")"
-  transport_key="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["transportKey"])' "$TMP_ROOT/pairing-window.json")"
+  certificate_fingerprint="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["certificateFingerprint"])' "$TMP_ROOT/pairing-window.json")"
   auth_token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["issuedAuthToken"]["authToken"])' "$TMP_ROOT/pair-response.json")"
   project_dir="$(create_local_fixture_project)"
 
@@ -170,7 +170,7 @@ local_device_parity() {
     --spacese2e "$SPACES_E2E_BIN" \
     --host "$host" \
     --port "$port" \
-    --transport-key="$transport_key" \
+    --certificate-fingerprint="$certificate_fingerprint" \
     --auth-token "$auth_token" \
     --project-dir "$project_dir" \
     --label "local-device" \

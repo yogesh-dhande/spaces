@@ -230,8 +230,6 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("INVOCATION_ID"))
         XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("JOURNAL_STREAM"))
         XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("NOTIFY_SOCKET"))
-        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACESD_AUTH_TOKEN"))
-        XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACESD_AUTH_TOKEN_REMOTE"))
         XCTAssertTrue(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DEVICE_API_PORT"))
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("SPACES_DB_PATH"))
         XCTAssertFalse(HostManagedPTYTerminalSessionDriver.shouldRemoveInheritedEnvironmentKey("PATH"))

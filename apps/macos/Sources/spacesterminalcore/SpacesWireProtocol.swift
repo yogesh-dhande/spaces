@@ -15,7 +15,12 @@ public enum SpacesWireProtocol {
     //    payload to the owning daemon and injects the daemon-local temp path into the
     //    terminal). Both are new mutating wire operations a protocol-2 daemon cannot decode,
     //    so clients and daemons must update in lockstep.
-    public static let version = 3
+    // 4: Device API transport moves from TLS-PSK (transport key) to the daemon's pinned
+    //    self-signed TLS identity with pairing-issued bearer tokens; pairing links drop the
+    //    psk field (link v2) and overview rows drop the always-nil daemonEndpoint. A
+    //    protocol-3 client cannot even complete a TLS handshake with a protocol-4 daemon,
+    //    so devices must re-pair after updating both sides.
+    public static let version = 4
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

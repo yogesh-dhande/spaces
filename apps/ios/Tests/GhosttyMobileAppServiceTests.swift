@@ -128,7 +128,6 @@
             settings.host = "127.0.0.1"
             settings.port = 12345
             settings.authToken = "token"
-            settings.transportKey = "transport-key"
             settings.certificateFingerprint = "SHA256:test"
             return settings
         }

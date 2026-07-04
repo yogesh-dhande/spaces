@@ -8,7 +8,6 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
     var host: String = defaultHost
     var port: Int = defaultPort
     var authToken: String = ""
-    var transportKey: String = ""
     var certificateFingerprint: String = ""
     var installationID: String = UUID().uuidString.uppercased()
 
@@ -17,17 +16,13 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         let trimmed = authToken.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
-    var trimmedTransportKey: String? {
-        let trimmed = transportKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
     var trimmedCertificateFingerprint: String? {
         let trimmed = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
     var isValid: Bool { !trimmedHost.isEmpty && (1...65535).contains(port) }
-    var isPaired: Bool { trimmedAuthToken != nil && trimmedTransportKey != nil && trimmedCertificateFingerprint != nil }
+    var isPaired: Bool { trimmedAuthToken != nil && trimmedCertificateFingerprint != nil }
 
     static var defaultHost: String {
         SpacesDeviceAPIEndpointDefaults.loopbackHost
@@ -37,7 +32,6 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         case host
         case port
         case authToken
-        case transportKey
         case certificateFingerprint
         case installationID
     }
@@ -49,12 +43,8 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         if migrated.port == Self.legacyDefaultPort {
             migrated.port = Self.defaultPort
         }
-        if migrated.trimmedTransportKey == nil {
-            migrated.authToken = ""
-        }
         if migrated.trimmedCertificateFingerprint == nil {
             migrated.authToken = ""
-            migrated.transportKey = ""
         }
         return migrated
     }
@@ -64,7 +54,6 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? Self.defaultHost
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
         authToken = try container.decodeIfPresent(String.self, forKey: .authToken) ?? ""
-        transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
         certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint) ?? ""
         installationID = try container.decodeIfPresent(String.self, forKey: .installationID) ?? UUID().uuidString.uppercased()
     }
@@ -74,7 +63,6 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
         try container.encode(host, forKey: .host)
         try container.encode(port, forKey: .port)
         try container.encode(authToken, forKey: .authToken)
-        try container.encode(transportKey, forKey: .transportKey)
         try container.encode(certificateFingerprint, forKey: .certificateFingerprint)
         try container.encode(installationID, forKey: .installationID)
     }

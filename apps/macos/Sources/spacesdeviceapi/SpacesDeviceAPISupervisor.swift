@@ -1,5 +1,6 @@
 import Foundation
 import spacesdevicecore
+import spacesterminalcore
 import workspacecore
 
 @MainActor public final class SpacesDeviceAPISupervisor {
@@ -52,7 +53,13 @@ import workspacecore
     }
 
     public func status() throws -> SpacesDeviceAPIStatus {
-        let status = try settingsStore.status()
+        let certificateFingerprint: String
+        if let server {
+            certificateFingerprint = server.certificateFingerprint
+        } else {
+            certificateFingerprint = try TerminalServiceTLSIdentityStore.loadOrCreate().certificateFingerprint
+        }
+        let status = try settingsStore.status(certificateFingerprint: certificateFingerprint)
         return SpacesDeviceAPIStatus(
             host: status.host, port: server?.listeningPort ?? status.port, bonjourServiceName: status.bonjourServiceName,
             bonjourServiceType: status.bonjourServiceType, networkAddresses: status.networkAddresses,
@@ -100,15 +107,11 @@ import workspacecore
     }
 
     private func startDeviceAPIServer(settings: SpacesDeviceAPISettings) throws -> SpacesDeviceAPIServer {
-        try startDeviceAPIServer(
-            host: settings.host, port: settings.port, transportKey: settings.transportKey, certificateFingerprint: settings.certificateFingerprint)
-    }
-
-    private func startDeviceAPIServer(host: String, port: Int, transportKey: String, certificateFingerprint: String) throws -> SpacesDeviceAPIServer {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate()
         let createdServer = SpacesDeviceAPIServer(
-            host: host, port: port, transportKey: transportKey, certificateFingerprint: certificateFingerprint,
-            pairingStoreProtocol: try SpacesDevicePairingStore(), builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
-            builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, onRestartRequested: onRestartRequested)
+            host: settings.host, port: settings.port, identity: identity, pairingStoreProtocol: try SpacesDevicePairingStore(),
+            builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
+            onRestartRequested: onRestartRequested)
         do {
             try createdServer.start()
             return createdServer
@@ -167,7 +170,11 @@ import workspacecore
                 return SpacesDeviceAPIControlResponse(ok: true, message: "Revoked paired device.", result: .devices(devices))
             case .resetAllPairings:
                 try resetPairings()
-                _ = try settingsStore.rotateTransportKey()
+                // Regenerate the daemon TLS identity so every previously pinned client fails closed
+                // until it re-pairs against the new certificate fingerprint.
+                let identityRoot = try TerminalServiceTLSIdentityStore.rootDirectory()
+                if FileManager.default.fileExists(atPath: identityRoot.path) { try FileManager.default.removeItem(at: identityRoot) }
+                _ = try TerminalServiceTLSIdentityStore.loadOrCreate()
                 advertiser?.stop()
                 advertiser = nil
                 server = nil
@@ -183,13 +190,11 @@ import workspacecore
             return SpacesDeviceAPIControlResponse(
                 ok: false, message: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, result: .status(.init(status: try status())))
         }
-        let settings = try settingsStore.loadOrCreate()
         let currentStatus = try status()
         let authToken = try SpacesDevicePairingStore().issueToken(for: clientApp, presentedToken: request.presentedToken)
         let bootstrap = SpacesDeviceAPILocalClientBootstrap(
             deviceID: "local", name: currentStatus.bonjourServiceName, platform: "macos", host: SpacesDeviceAPIDefaults.loopbackHost,
-            port: currentStatus.port, certificateFingerprint: currentStatus.certificateFingerprint, authToken: authToken,
-            transportKey: settings.transportKey)
+            port: currentStatus.port, certificateFingerprint: currentStatus.certificateFingerprint, authToken: authToken)
         return SpacesDeviceAPIControlResponse(ok: true, message: "Bootstrapped local Device API client.", result: .localClientBootstrap(bootstrap))
     }
 

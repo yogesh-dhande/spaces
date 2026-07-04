@@ -283,7 +283,6 @@ struct TerminalDetailView: View {
     }
 
     private func refreshRuntimeRowsWhileVisible() async {
-        guard session.daemonEndpoint == nil else { return }
         await appModel.refresh()
         while !Task.isCancelled {
             do { try await Task.sleep(for: .seconds(2)) } catch { return }

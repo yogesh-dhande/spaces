@@ -78,6 +78,33 @@ public enum SpacesPinnedTLSConnector {
 }
 
 #if canImport(Network) && canImport(Security)
+    extension SpacesPinnedTLSConnector {
+        /// The same pin policy as `connect`, packaged as NWParameters for Apple-platform callers
+        /// that manage their own NWConnections (the iOS Device API client). A fingerprint mismatch
+        /// fails the handshake, surfacing as a connection failure on the caller's state handler.
+        public static func tlsParameters(certificateFingerprint: String) -> NWParameters {
+            let expectedFingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+            let tlsOptions = NWProtocolTLS.Options()
+            let securityOptions = tlsOptions.securityProtocolOptions
+            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
+            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
+            sec_protocol_options_set_verify_block(
+                securityOptions,
+                { _, trust, complete in
+                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                    let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
+                    guard let certificate = chain?.first, !expectedFingerprint.isEmpty else {
+                        complete(false)
+                        return
+                    }
+                    complete(
+                        TerminalServiceTLSFingerprint.matches(
+                            expectedFingerprint, TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)))
+                }, DispatchQueue.global(qos: .userInitiated))
+            return NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+        }
+    }
+
     private final class DarwinPinnedTLSConnection: SpacesPinnedTLSLineConnection, @unchecked Sendable {
         private let queue = DispatchQueue(label: "spaces.pinned.tls.connection")
         private let stateLock = NSLock()

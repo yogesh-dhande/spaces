@@ -34,7 +34,7 @@ struct SpacesE2ECommand: ParsableCommand {
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
             MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
-            TerminalServiceTLSRequestCommand.self, TerminalServiceTLSSessionCommand.self, RenderUpdateTextCommand.self,
+            RenderUpdateTextCommand.self,
             ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
@@ -370,8 +370,8 @@ private struct OpenDevicePairingWindowCommand: ParsableCommand {
         try emitJSON(
             DevicePairingWindowPayload(
                 host: status.host, port: status.port, bonjourServiceName: status.bonjourServiceName, pairingLink: window.linkString,
-                pairingCode: window.code, pairingNonce: window.nonce, transportKey: link.transportKey,
-                certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
+                pairingCode: window.code, pairingNonce: window.nonce, certificateFingerprint: link.certificateFingerprint,
+                expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
                 message: response.message))
     }
 }
@@ -417,7 +417,7 @@ private struct OpenRemoteDevicePairingWindowCommand: ParsableCommand {
         let link = try SpacesDevicePairingLink.parse(result.linkString)
         try emitJSON(
             RemoteDevicePairingWindowPayload(
-                name: result.name, host: result.host, port: result.port, pairingLink: result.linkString, transportKey: link.transportKey,
+                name: result.name, host: result.host, port: result.port, pairingLink: result.linkString,
                 certificateFingerprint: link.certificateFingerprint, expiresAt: result.expiresAt))
     }
 }
@@ -569,10 +569,10 @@ private struct MobileServeCommand: ParsableCommand {
             if let trimmedPairingCode, !trimmedPairingCode.isEmpty { trimmedPairingCode } else {
                 SpacesDevicePairingCoordinator.generatePairingCode()
             }
-        let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate()
         let pairingWindowEmitter = MobileServePairingWindowEmitter(
             bindHost: host, totalWindowCount: pairingWindowCount, firstPairingCode: resolvedPairingCode)
-        let server = try SpacesDeviceAPIServer(host: host, port: port, transportKey: transportKey) { _ in
+        let server = try SpacesDeviceAPIServer(host: host, port: port, identity: identity) { _ in
             pairingWindowEmitter.openNextWindow(label: "Spaces device pairing window")
         }
         pairingWindowEmitter.server = server
@@ -584,12 +584,12 @@ private struct MobileServeCommand: ParsableCommand {
 }
 
 private struct MobileRequestCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "mobile-request", abstract: "Send a TLS-PSK Device API JSON request.")
+    static let configuration = CommandConfiguration(commandName: "mobile-request", abstract: "Send a pinned-TLS Device API JSON request.")
 
-    @Option(help: "Full spaces:// pairing link. Supplies host, port, transport key, code, and nonce.") var pairingLink: String?
+    @Option(help: "Full spaces:// pairing link. Supplies host, port, certificate fingerprint, code, and nonce.") var pairingLink: String?
     @Option(help: "Device API host. Defaults to the pairing link host or 127.0.0.1.") var host: String?
     @Option(help: "Device API port. Defaults to the pairing link port.") var port: Int?
-    @Option(help: "Base64url Device API transport key. Defaults to the pairing link PSK.") var transportKey: String?
+    @Option(help: "Expected daemon certificate fingerprint. Defaults to the pairing link fingerprint.") var certificateFingerprint: String?
     @Option(help: "JSON Device API request. Reads stdin when omitted.") var requestJSON: String?
     @Flag(help: "Keep the connection open and print newline-delimited Device API messages.") var stream = false
     @Flag(help: "Read newline-delimited Device API requests from stdin and reuse one request connection.") var requestLines = false
@@ -599,21 +599,21 @@ private struct MobileRequestCommand: ParsableCommand {
         let resolvedHost = host ?? link?.host ?? "127.0.0.1"
         guard let resolvedPort = port ?? link?.port else { throw ValidationError("Provide --port or a pairing link.") }
         guard (1...65_535).contains(resolvedPort) else { throw ValidationError("Port must be between 1 and 65535.") }
-        guard let resolvedTransportKey = transportKey ?? link?.transportKey else {
-            throw ValidationError("Provide --transport-key or a pairing link.")
+        guard let resolvedFingerprint = certificateFingerprint ?? link?.certificateFingerprint else {
+            throw ValidationError("Provide --certificate-fingerprint or a pairing link.")
         }
 
         if requestLines {
             guard !stream else { throw ValidationError("--request-lines cannot be combined with --stream.") }
             guard requestJSON == nil else { throw ValidationError("--request-lines reads requests from stdin; omit --request-json.") }
-            try sendRequestLines(host: resolvedHost, port: resolvedPort, transportKey: resolvedTransportKey, pairingLink: link)
+            try sendRequestLines(host: resolvedHost, port: resolvedPort, certificateFingerprint: resolvedFingerprint, pairingLink: link)
             return
         }
 
         var requestData = try readRequestData()
         if let link { requestData = try requestDataByApplying(pairingLink: link, to: requestData) }
 
-        let client = DeviceAPIRequestClient(host: resolvedHost, port: UInt16(resolvedPort), transportKey: resolvedTransportKey)
+        let client = DeviceAPIRequestClient(host: resolvedHost, port: UInt16(resolvedPort), certificateFingerprint: resolvedFingerprint)
         if stream {
             try client.stream(requestData: requestData)
         } else {
@@ -641,8 +641,8 @@ private struct MobileRequestCommand: ParsableCommand {
         return try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
     }
 
-    private func sendRequestLines(host: String, port: Int, transportKey: String, pairingLink link: SpacesDevicePairingLink?) throws {
-        let client = try SpacesDeviceAPIRequestSessionClient(host: host, port: port, transportKey: transportKey)
+    private func sendRequestLines(host: String, port: Int, certificateFingerprint: String, pairingLink link: SpacesDevicePairingLink?) throws {
+        let client = try SpacesDeviceAPIRequestSessionClient(host: host, port: port, certificateFingerprint: certificateFingerprint)
         defer { client.cancel() }
         while let line = readLine(strippingNewline: true) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -719,229 +719,6 @@ private struct RenderUpdateTextLine: Encodable {
     let outputByteCount: Int?
     let screenStateRevision: UInt64?
     let error: String?
-}
-
-private struct TerminalServiceTLSRequestCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "terminal-service-tls-request", abstract: "Send a pinned-TLS terminal service JSON request.")
-
-    @Option(help: "Remote spacesd host.") var host: String
-    @Option(help: "Remote spacesd port.") var port: Int
-    @Option(help: "Terminal service auth token.") var authToken: String
-    @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
-    @Option(help: "JSON terminal service request. Reads stdin when omitted.") var requestJSON: String?
-    @Flag(help: "Keep the connection open and print newline-delimited terminal state messages.") var stream = false
-
-    func run() throws {
-        let request = try readRequest().withAuthToken(authToken)
-        if stream {
-            try TerminalServiceTLSStreamClient.stream(request: request, host: host, port: port, certificateFingerprint: certificateFingerprint)
-            return
-        }
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: request, host: host, port: port, authToken: authToken, certificateFingerprint: certificateFingerprint, timeout: 20)
-        try emitJSON(response)
-    }
-
-    private func readRequest() throws -> TerminalServiceRequest {
-        let data: Data
-        if let requestJSON { data = Data(requestJSON.utf8) } else { data = FileHandle.standardInput.readDataToEndOfFile() }
-        guard !data.isEmpty else { throw ValidationError("Provide --request-json or request JSON on stdin.") }
-        return try JSONDecoder().decode(TerminalServiceRequest.self, from: data)
-    }
-}
-
-private struct TerminalServiceTLSSessionCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "terminal-service-tls-session", abstract: "Send newline-delimited pinned-TLS terminal service JSON requests over one connection."
-    )
-
-    @Option(help: "Remote spacesd host.") var host: String
-    @Option(help: "Remote spacesd port.") var port: Int
-    @Option(help: "Terminal service auth token.") var authToken: String
-    @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
-
-    func run() throws {
-        let client = try TerminalServicePinnedTLSRequestSessionClient(
-            host: host, port: port, authToken: authToken, certificateFingerprint: certificateFingerprint)
-        defer { client.cancel() }
-
-        while let line = readLine(strippingNewline: true) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            do {
-                let request = try JSONDecoder().decode(TerminalServiceRequest.self, from: Data(trimmed.utf8))
-                let response = try client.send(request: request, timeout: 20)
-                var data = try JSONEncoder().encode(response)
-                data.append(0x0A)
-                FileHandle.standardOutput.write(data)
-            } catch {
-                var data = try JSONEncoder().encode(TerminalServiceResponse(ok: false, message: String(describing: error)))
-                data.append(0x0A)
-                FileHandle.standardOutput.write(data)
-                throw error
-            }
-        }
-    }
-}
-
-private enum TerminalServiceTLSStreamClient {
-    static func stream(request: TerminalServiceRequest, host: String, port: Int, certificateFingerprint: String) throws {
-        let expectedFingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !expectedFingerprint.isEmpty else { throw TerminalServiceTLSError.missingCertificateFingerprint }
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
-
-        let tlsOptions = NWProtocolTLS.Options()
-        let securityOptions = tlsOptions.securityProtocolOptions
-        sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-        sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
-        sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-        let ready = DispatchSemaphore(value: 0)
-        let completed = DispatchSemaphore(value: 0)
-        let errorBox = TerminalServiceTLSStreamErrorBox()
-
-        sec_protocol_options_set_verify_block(
-            securityOptions,
-            { _, trust, complete in
-                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                guard let certificate = chain?.first else {
-                    errorBox.set(TerminalServiceTLSError.peerCertificateUnavailable)
-                    ready.signal()
-                    complete(false)
-                    return
-                }
-                let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
-                guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
-                    errorBox.set(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
-                    ready.signal()
-                    complete(false)
-                    return
-                }
-                complete(true)
-            }, DispatchQueue.global(qos: .userInitiated))
-
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
-        let queue = DispatchQueue(label: "spaces.e2e.terminal-service-tls-stream")
-        let streamSession = TerminalServiceTLSStreamSession(connection: connection, completed: completed, errorBox: errorBox)
-
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                ready.signal()
-                do {
-                    var payload = try JSONEncoder().encode(request)
-                    payload.append(0x0A)
-                    connection.send(
-                        content: payload, contentContext: .defaultMessage, isComplete: false,
-                        completion: .contentProcessed { error in
-                            if let error {
-                                errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error)))
-                                completed.signal()
-                            } else {
-                                streamSession.receiveNext()
-                            }
-                        })
-                } catch {
-                    errorBox.set(error)
-                    completed.signal()
-                }
-            case .failed(let error):
-                errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error)))
-                ready.signal()
-                completed.signal()
-            case .cancelled: completed.signal()
-            default: break
-            }
-        }
-
-        connection.start(queue: queue)
-        guard ready.wait(timeout: .now() + 20) == .success else {
-            connection.cancel()
-            throw TerminalServiceTLSError.requestTimedOut
-        }
-        if let error = errorBox.error {
-            connection.cancel()
-            throw error
-        }
-        completed.wait()
-        connection.cancel()
-        if let error = errorBox.error { throw error }
-    }
-}
-
-private final class TerminalServiceTLSStreamSession: @unchecked Sendable {
-    private let connection: NWConnection
-    private let completed: DispatchSemaphore
-    private let errorBox: TerminalServiceTLSStreamErrorBox
-    private var buffer = Data()
-
-    init(connection: NWConnection, completed: DispatchSemaphore, errorBox: TerminalServiceTLSStreamErrorBox) {
-        self.connection = connection
-        self.completed = completed
-        self.errorBox = errorBox
-    }
-
-    func receiveNext() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
-            if let error {
-                errorBox.set(TerminalServiceTLSError.connectionFailed(String(describing: error)))
-                completed.signal()
-                return
-            }
-            if let content, !content.isEmpty {
-                buffer.append(content)
-                while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                    let line = Data(buffer.prefix(through: newlineIndex))
-                    FileHandle.standardOutput.write(line)
-                    buffer.removeSubrange(buffer.startIndex...newlineIndex)
-                }
-            }
-            if isComplete {
-                if !buffer.isEmpty {
-                    FileHandle.standardOutput.write(buffer)
-                    FileHandle.standardOutput.write(Data([0x0A]))
-                }
-                completed.signal()
-                return
-            }
-            receiveNext()
-        }
-    }
-}
-
-private final class TerminalServiceTLSStreamErrorBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedError: Error?
-
-    var error: Error? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedError
-    }
-
-    func set(_ error: Error) {
-        lock.lock()
-        if storedError == nil { storedError = error }
-        lock.unlock()
-    }
-}
-
-private final class TerminalServiceTLSLineResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedResult: Result<Data, Error> = .failure(TerminalServiceTLSError.requestTimedOut)
-
-    var value: Result<Data, Error> {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedResult
-    }
-
-    func set(_ result: Result<Data, Error>) {
-        lock.lock()
-        storedResult = result
-        lock.unlock()
-    }
 }
 
 private struct RunWorkspaceProcessCommand: ParsableCommand {
@@ -1832,7 +1609,6 @@ private struct DevicePairingWindowPayload: Codable {
     let pairingLink: String
     let pairingCode: String
     let pairingNonce: String
-    let transportKey: String
     let certificateFingerprint: String
     let expiresAt: String
     let message: String
@@ -1850,7 +1626,6 @@ private struct RemoteDevicePairingWindowPayload: Codable {
     let host: String
     let port: Int
     let pairingLink: String
-    let transportKey: String
     let certificateFingerprint: String
     let expiresAt: String?
 }
@@ -2280,16 +2055,16 @@ private final class MobileServePairingWindowEmitter: @unchecked Sendable {
 private final class DeviceAPIRequestClient: @unchecked Sendable {
     private let host: String
     private let port: UInt16
-    private let transportKey: String
+    private let certificateFingerprint: String
 
-    init(host: String, port: UInt16, transportKey: String) {
+    init(host: String, port: UInt16, certificateFingerprint: String) {
         self.host = host
         self.port = port
-        self.transportKey = transportKey
+        self.certificateFingerprint = certificateFingerprint
     }
 
     func request(requestData: Data) throws -> Data {
-        let connection = try makeConnection()
+        let connection = makeConnection()
         defer { connection.cancel() }
         try waitUntilReady(connection)
         try send(requestData: requestData, connection: connection)
@@ -2297,18 +2072,18 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
     }
 
     func stream(requestData: Data) throws -> Never {
-        let connection = try makeConnection()
+        let connection = makeConnection()
         try waitUntilReady(connection)
         try send(requestData: requestData, connection: connection)
         receiveStream(from: connection, buffered: Data())
         dispatchMain()
     }
 
-    private func makeConnection() throws -> NWConnection {
+    private func makeConnection() -> NWConnection {
         let endpointPort = NWEndpoint.Port(rawValue: port)!
         return NWConnection(
-            host: NWEndpoint.Host(host), port: endpointPort, using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client)
-        )
+            host: NWEndpoint.Host(host), port: endpointPort,
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
     }
 
     private func waitUntilReady(_ connection: NWConnection) throws {

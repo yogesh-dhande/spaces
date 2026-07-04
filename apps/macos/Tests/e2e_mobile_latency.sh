@@ -28,7 +28,6 @@ TERMINAL_TARGETS="${SPACES_MOBILE_LATENCY_TERMINAL_TARGETS:-auto}"
 REPORT_ONLY="${SPACES_MOBILE_LATENCY_REPORT_ONLY:-0}"
 KEEP_ROOT="${KEEP_ROOT:-0}"
 FIXTURE_TEMPLATE_DIR="$APP_ROOT/Tests/fixtures/e2e_demo"
-REMOTE_HOST_ID="${SPACES_E2E_REMOTE_HOST_ID:-mobile-latency-remote}"
 REMOTE_HOST_NAME="${SPACES_E2E_REMOTE_NAME:-Mobile Latency Remote}"
 REMOTE_SSH_HOST="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 REMOTE_SSH_USER="${SPACES_E2E_REMOTE_SSH_USER:-}"
@@ -36,11 +35,9 @@ REMOTE_SSH_PORT="${SPACES_E2E_REMOTE_SSH_PORT:-}"
 REMOTE_WORKSPACE_ROOT="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/workspaces}"
 REMOTE_DAEMON_HOST="${SPACES_E2E_REMOTE_DAEMON_HOST:-$REMOTE_SSH_HOST}"
 REMOTE_DAEMON_PORT="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
-REMOTE_AUTH_TOKEN="${SPACES_E2E_REMOTE_AUTH_TOKEN:-}"
 REMOTE_GIT_ROOT="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 LOCAL_PROJECT_DIR="$WORK_ROOT/local-project"
 REMOTE_PROJECT_DIR="$WORK_ROOT/remote-project"
-REMOTE_WORKSPACE_DIR=""
 REMOTE_RTT_MS=""
 
 SCENARIOS=(ios-input-latency ios-scrollback-latency)
@@ -211,30 +208,6 @@ remote_push_url_for_path() {
     port_part=":$REMOTE_SSH_PORT"
   fi
   printf 'ssh://%s%s%s%s\n' "$user_prefix" "$REMOTE_SSH_HOST" "$port_part" "$remote_path"
-}
-
-remote_auth_token_env_key() {
-  printf 'SPACESD_AUTH_TOKEN_%s\n' "$(printf '%s' "$REMOTE_HOST_ID" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')"
-}
-
-ensure_remote_auth_token() {
-  if [[ -n "$REMOTE_AUTH_TOKEN" ]]; then
-    return 0
-  fi
-  REMOTE_AUTH_TOKEN="$(python3 - <<'PY'
-import base64
-import os
-print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("="))
-PY
-)"
-  export SPACES_E2E_REMOTE_AUTH_TOKEN="$REMOTE_AUTH_TOKEN"
-}
-
-export_remote_auth_token() {
-  [[ -n "$REMOTE_AUTH_TOKEN" ]] || return 0
-  local key
-  key="$(remote_auth_token_env_key)"
-  export "$key=$REMOTE_AUTH_TOKEN"
 }
 
 prepare_remote_git_origin() {
@@ -414,7 +387,7 @@ link = link_match.group(1)
 values = parse_qs(urlparse(link).query)
 print(f"DEVICE_API_PORT={shlex.quote(port_match.group(1))}")
 print(f"PAIRING_LINK={shlex.quote(link)}")
-print(f"TRANSPORT_KEY={shlex.quote(values['psk'][0])}")
+print(f"CERTIFICATE_FINGERPRINT={shlex.quote(values['fp'][0])}")
 print(f"PAIRING_CODE={shlex.quote(values['code'][0])}")
 print(f"PAIRING_NONCE={shlex.quote(values['nonce'][0])}")
 PY
@@ -423,7 +396,7 @@ eval "$parsed_device_api"
 
 DEVICE_API_PORT="$DEVICE_API_PORT" \
 PAIRING_LINK="$PAIRING_LINK" \
-TRANSPORT_KEY="$TRANSPORT_KEY" \
+CERTIFICATE_FINGERPRINT="$CERTIFICATE_FINGERPRINT" \
 PAIRING_CODE="$PAIRING_CODE" \
 PAIRING_NONCE="$PAIRING_NONCE" \
 NETWORK_PROFILE="$NETWORK_PROFILE" \
@@ -432,7 +405,6 @@ REMOTE_RTT_MS="$REMOTE_RTT_MS" \
 NETWORK_BANDWIDTH_BPS="${NETWORK_BANDWIDTH_BPS:-$([[ "$NETWORK_PROFILE" == "ios-constrained" ]] && printf 8000000 || printf 0)}" \
 NETWORK_CHUNK_BYTES="${NETWORK_CHUNK_BYTES:-$([[ "$NETWORK_PROFILE" == "ios-constrained" ]] && printf 16384 || printf 0)}" \
 TERMINAL_TARGETS="$TERMINAL_TARGETS" \
-REMOTE_WORKSPACE_DIR="$REMOTE_WORKSPACE_DIR" \
 REPORT_ONLY="$REPORT_ONLY" \
 SAMPLES="$SAMPLES" \
 SUMMARY_JSON="$SUMMARY_JSON" \
@@ -442,13 +414,11 @@ SPACES_CLI="$SPACES_CLI" \
 SPACES_E2E="$SPACES_E2E" \
 python3 - "${SELECTED_SCENARIOS[@]}" <<'PY'
 import base64
-import atexit
 import json
 import math
 import os
 import queue
 import re
-import select
 import sqlite3
 import statistics
 import subprocess
@@ -461,7 +431,7 @@ from pathlib import Path
 scenarios = sys.argv[1:]
 host = "127.0.0.1"
 port = int(os.environ["DEVICE_API_PORT"])
-transport_key = os.environ["TRANSPORT_KEY"]
+certificate_fingerprint = os.environ["CERTIFICATE_FINGERPRINT"]
 pairing_code = os.environ["PAIRING_CODE"]
 pairing_nonce = os.environ["PAIRING_NONCE"]
 network_profile = os.environ["NETWORK_PROFILE"]
@@ -471,7 +441,6 @@ remote_rtt_ms = float(remote_rtt_ms_text) if remote_rtt_ms_text else None
 network_bandwidth_bps = int(os.environ.get("NETWORK_BANDWIDTH_BPS") or "0")
 network_chunk_bytes = int(os.environ.get("NETWORK_CHUNK_BYTES") or "0")
 terminal_targets = [item.strip() for item in os.environ["TERMINAL_TARGETS"].split(",") if item.strip()]
-remote_workspace_dir = os.environ.get("REMOTE_WORKSPACE_DIR", "").strip()
 report_only = os.environ.get("REPORT_ONLY", "0") == "1"
 sample_count = int(os.environ["SAMPLES"])
 summary_json = Path(os.environ["SUMMARY_JSON"])
@@ -485,7 +454,6 @@ events: list[dict] = []
 stream_records: list[dict] = []
 decode_failures = 0
 render_update_baselines: dict[str, dict] = {}
-remote_daemon_endpoints: dict[str, dict] = {}
 socket_path_cache: dict[str, Path] = {}
 
 budgets = {
@@ -493,10 +461,6 @@ budgets = {
     ("ios-scrollback-latency", "local", "local"): {"gross_p95_ms": 750, "target_p95_ms": 100},
     ("ios-input-latency", "ios-constrained", "local"): {"gross_p95_ms": 3000, "target_p95_ms": 600},
     ("ios-scrollback-latency", "ios-constrained", "local"): {"gross_p95_ms": 2500, "target_p95_ms": None},
-    ("ios-input-latency", "local", "remote"): {"gross_p95_ms": 3000, "target_p95_ms": None},
-    ("ios-scrollback-latency", "local", "remote"): {"gross_p95_ms": 3000, "target_p95_ms": None},
-    ("ios-input-latency", "ios-constrained", "remote"): {"gross_p95_ms": 5000, "target_p95_ms": None},
-    ("ios-scrollback-latency", "ios-constrained", "remote"): {"gross_p95_ms": 5000, "target_p95_ms": None},
 }
 
 
@@ -616,23 +580,6 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
 
 
 def start_terminal(title: str, command: str, terminal_target: str) -> str:
-    if terminal_target == "remote":
-        if not remote_workspace_dir:
-            raise RuntimeError("remote terminal target selected without REMOTE_WORKSPACE_DIR")
-        completed = run(
-            [
-                spacese2e,
-                "start-workspace-terminal-session",
-                "--workspace-dir",
-                remote_workspace_dir,
-                "--command",
-                command,
-                "--title",
-                title,
-            ],
-            timeout=30,
-        )
-        return json.loads(completed.stdout)["id"].upper()
     try:
         completed = run(
             [spaces_cli, "terminal", "command", "--backend", "ghostty-embedded", "--command", command, "--title", title],
@@ -691,7 +638,7 @@ def device_api_request(payload: dict) -> tuple[dict, float]:
             host,
             "--port",
             str(port),
-            "--transport-key=" + transport_key,
+            "--certificate-fingerprint=" + certificate_fingerprint,
             "--request-json",
             json.dumps(payload),
         ],
@@ -710,7 +657,7 @@ def device_api_connect_stream(payload: dict) -> subprocess.Popen:
             host,
             "--port",
             str(port),
-            "--transport-key=" + transport_key,
+            "--certificate-fingerprint=" + certificate_fingerprint,
             "--request-json",
             json.dumps(payload),
             "--stream",
@@ -722,244 +669,11 @@ def device_api_connect_stream(payload: dict) -> subprocess.Popen:
     )
 
 
-def terminal_service_payload(payload: dict, endpoint: dict) -> dict:
-    command = payload["command"]
-    if command == "state" or command == "subscribe":
-        return {
-            "authToken": endpoint["authToken"],
-            "command": {command: {"sessionID": payload.get("sessionID")}},
-        }
-    if command == "resolveTerminalLink":
-        return {
-            "authToken": endpoint["authToken"],
-            "command": {
-                "resolveTerminalLink": {
-                    "sessionID": payload.get("sessionID"),
-                    "terminalLink": payload.get("terminalLink"),
-                }
-            },
-        }
-    if command == "readTerminalLinkChunk":
-        return {
-            "authToken": endpoint["authToken"],
-            "command": {
-                "readTerminalLinkChunk": {
-                    "sessionID": payload.get("sessionID"),
-                    "terminalLinkID": payload.get("terminalLinkID"),
-                    "offset": payload.get("offset"),
-                    "limit": payload.get("limit"),
-                }
-            },
-        }
-    control_command = "clearScreen" if command == "clear" else command
-    control_request: dict = {"command": control_command}
-    for source_key, target_key in (
-        ("clientID", "clientID"),
-        ("client", "client"),
-        ("attachmentMode", "attachmentMode"),
-        ("text", "text"),
-        ("key", "key"),
-        ("appendNewline", "appendNewline"),
-        ("scrollHorizontal", "scrollHorizontal"),
-        ("scrollVertical", "scrollVertical"),
-        ("columns", "columns"),
-        ("rows", "rows"),
-        ("ownerEpoch", "ownerEpoch"),
-        ("resizeSerial", "resizeSerial"),
-    ):
-        if source_key in payload and payload[source_key] is not None:
-            control_request[target_key] = payload[source_key]
-    return {
-        "authToken": endpoint["authToken"],
-        "command": {
-            "control": {
-                "sessionID": payload.get("sessionID"),
-                "controlRequest": control_request,
-            }
-        },
-    }
-
-
-def direct_request(endpoint: dict, payload: dict, timeout: float = 20) -> tuple[dict, float]:
-    started = time.perf_counter()
-    response = direct_tls_session(endpoint).request(terminal_service_payload(payload, endpoint), timeout=timeout)
-    assert_direct_response_shape(payload, response)
-    return response, (time.perf_counter() - started) * 1000
-
-
-def assert_direct_response_shape(payload: dict, response: dict) -> None:
-    command = payload["command"]
-    if command in ("attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "resize", "scroll"):
-        assert "controlResponse" in response, {"command": command, "response": response}
-    if command == "state":
-        assert "sessionState" in response, {"command": command, "response": response}
-    if command == "resolveTerminalLink":
-        assert "terminalLinkMetadata" in response, {"command": command, "response": response}
-    if command == "readTerminalLinkChunk":
-        assert "terminalLinkChunk" in response, {"command": command, "response": response}
-
-
-class DirectTLSSession:
-    def __init__(self, endpoint: dict):
-        self.process = subprocess.Popen(
-            [
-                spacese2e,
-                "terminal-service-tls-session",
-                "--host",
-                endpoint["host"],
-                "--port",
-                str(endpoint["port"]),
-                "--auth-token",
-                endpoint["authToken"],
-                "--certificate-fingerprint",
-                endpoint["certificateFingerprint"],
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            env=base_env,
-            bufsize=1,
-        )
-
-    def request(self, payload: dict, timeout: float = 20) -> dict:
-        if self.process.poll() is not None:
-            raise RuntimeError(f"direct TLS session exited with status {self.process.returncode}")
-        assert self.process.stdin is not None
-        assert self.process.stdout is not None
-        self.process.stdin.write(json.dumps(payload) + "\n")
-        self.process.stdin.flush()
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            remaining = max(deadline - time.monotonic(), 0)
-            readable, _, _ = select.select([self.process.stdout], [], [], min(remaining, 0.25))
-            if not readable:
-                if self.process.poll() is not None:
-                    raise RuntimeError(f"direct TLS session exited with status {self.process.returncode}")
-                continue
-            line = self.process.stdout.readline()
-            if line:
-                return json.loads(line)
-            if self.process.poll() is not None:
-                raise RuntimeError(f"direct TLS session exited with status {self.process.returncode}")
-            time.sleep(0.01)
-        raise TimeoutError("timed out waiting for direct TLS session response")
-
-    def close(self):
-        if self.process.poll() is not None:
-            return
-        try:
-            if self.process.stdin:
-                self.process.stdin.close()
-        except BrokenPipeError:
-            pass
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=2)
-
-
-direct_tls_sessions: dict[tuple[str, int, str, str], DirectTLSSession] = {}
-
-
-def direct_tls_session(endpoint: dict) -> DirectTLSSession:
-    key = (endpoint["host"], int(endpoint["port"]), endpoint["certificateFingerprint"], endpoint["authToken"])
-    session = direct_tls_sessions.get(key)
-    if session is None or session.process.poll() is not None:
-        session = DirectTLSSession(endpoint)
-        direct_tls_sessions[key] = session
-    return session
-
-
-def close_direct_tls_sessions():
-    for session in list(direct_tls_sessions.values()):
-        session.close()
-
-
-atexit.register(close_direct_tls_sessions)
-
-
-def direct_connect_stream(endpoint: dict, payload: dict) -> subprocess.Popen:
-    return subprocess.Popen(
-        [
-            spacese2e,
-            "terminal-service-tls-request",
-            "--host",
-            endpoint["host"],
-            "--port",
-            str(endpoint["port"]),
-            "--auth-token",
-            endpoint["authToken"],
-            "--certificate-fingerprint",
-            endpoint["certificateFingerprint"],
-            "--request-json",
-            json.dumps(terminal_service_payload(payload, endpoint)),
-            "--stream",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=base_env,
-    )
-
-
-def overview_payload() -> dict:
-    response, _ = device_api_request(
-        {
-            "command": "overview",
-            "authToken": auth_token,
-            "clientApp": client_app,
-        }
-    )
-    assert response["ok"], response
-    return device_api_result(response, "overview")
-
-
-def find_daemon_endpoint(value: object, session_id: str) -> dict | None:
-    if isinstance(value, dict):
-        endpoint = value.get("daemonEndpoint")
-        row_session_id = (value.get("sessionID") or value.get("id") or "").upper()
-        if row_session_id == session_id.upper() and isinstance(endpoint, dict) and endpoint.get("authToken"):
-            return endpoint
-        for child in value.values():
-            found = find_daemon_endpoint(child, session_id)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = find_daemon_endpoint(child, session_id)
-            if found is not None:
-                return found
-    return None
-
-
-def remote_daemon_endpoint(session_id: str, timeout: float = 60) -> dict:
-    cached = remote_daemon_endpoints.get(session_id)
-    if cached is not None:
-        return cached
-    deadline = time.monotonic() + timeout
-    last_overview = None
-    while time.monotonic() < deadline:
-        last_overview = overview_payload()
-        endpoint = find_daemon_endpoint(last_overview, session_id)
-        if endpoint is not None:
-            remote_daemon_endpoints[session_id] = endpoint
-            return endpoint
-        time.sleep(0.25)
-    raise TimeoutError(f"timed out waiting for direct remote daemon endpoint for terminal {session_id}: {last_overview}")
-
-
 def request(payload: dict, terminal_target: str = "local") -> tuple[dict, float]:
-    if terminal_target == "remote":
-        return direct_request(remote_daemon_endpoint(payload["sessionID"]), payload)
     return device_api_request(payload)
 
 
 def connect_stream(payload: dict, terminal_target: str) -> subprocess.Popen:
-    if terminal_target == "remote":
-        return direct_connect_stream(remote_daemon_endpoint(payload["sessionID"]), payload)
     return device_api_connect_stream(payload)
 
 
@@ -1402,14 +1116,7 @@ assert pair_response["ok"], pair_response
 auth_token = device_api_result(pair_response, "issuedAuthToken")["authToken"]
 
 
-def wait_for_device_api_session_available(session_id: str, terminal_target: str, timeout: float = 60) -> None:
-    if terminal_target != "remote":
-        return
-    remote_daemon_endpoint(session_id, timeout=timeout)
-
-
 def attach_pair(session_id: str, terminal_target: str) -> tuple[str, str, subprocess.Popen | None]:
-    wait_for_device_api_session_available(session_id, terminal_target)
     desktop_client_id = str(uuid.uuid4()).upper()
     desktop_owner = {
         "id": desktop_client_id,
@@ -1781,7 +1488,7 @@ def run_ios_input_latency(terminal_target: str) -> dict:
                 "enqueue_to_rpc_begin_ms": ms_between(enqueue_ns, rpc_begin_ns),
                 "flush_to_rpc_begin_ms": ms_between(flush_ns, rpc_begin_ns),
                 "rpc_ms": round(rpc_ms, 3),
-                "direct_command_request_ms": (direct_command[0].get("elapsedMS") if direct_command else (round(rpc_ms, 3) if terminal_target == "remote" else None)),
+                "direct_command_request_ms": (direct_command[0].get("elapsedMS") if direct_command else None),
                 "direct_command_connection_reused": ((direct_command[0].get("attributes") or {}).get("connection_reused") if direct_command else None),
                 "rpc_end_to_render_visible_ms": ms_between(rpc_end_ns, visible_ns),
                 "event_to_frame_publish_ms": event_to_frame_publish_ms,
@@ -1935,7 +1642,7 @@ def run_ios_scrollback_latency(terminal_target: str) -> dict:
                 "host_publish_to_client_visible_ms": frame_publish_to_visible_ms,
                 "rendered_change_latency_ms": rendered_change_latency_ms,
                 "rpc_ms": round(rpc_ms, 3),
-                "direct_command_request_ms": (direct_command[0].get("elapsedMS") if direct_command else (round(rpc_ms, 3) if terminal_target == "remote" else None)),
+                "direct_command_request_ms": (direct_command[0].get("elapsedMS") if direct_command else None),
                 "direct_command_connection_reused": ((direct_command[0].get("attributes") or {}).get("connection_reused") if direct_command else None),
                 "scroll_vertical": scroll_delta,
                 "no_op": no_op,
@@ -2020,8 +1727,8 @@ def payload_rate_summary(records: list[dict]) -> dict:
 
 scenario_results: dict[str, dict] = {}
 for terminal_target in terminal_targets:
-    if terminal_target not in ("local", "remote"):
-        raise RuntimeError(f"unknown terminal target: {terminal_target}")
+    if terminal_target != "local":
+        raise RuntimeError(f"unsupported terminal target: {terminal_target}; remote terminal latency runs in the paired-device E2E harness")
     for scenario in scenarios:
         result_key = f"{scenario}:{terminal_target}"
         scenario_started_ns = now_ns()

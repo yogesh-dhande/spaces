@@ -23,7 +23,6 @@ RUN_ID="${SPACES_E2E_REMOTE_DEVICE_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"
 
 PAIRING_CODE=""
 PAIRING_NONCE=""
-TRANSPORT_KEY=""
 CERTIFICATE_FINGERPRINT=""
 AUTH_TOKEN=""
 MAC_AUTH_TOKEN=""
@@ -250,20 +249,18 @@ import json
 import shlex
 import sys
 payload = json.loads(sys.argv[1])
-for key in ("pairingCode", "pairingNonce", "transportKey", "certificateFingerprint"):
+for key in ("pairingCode", "pairingNonce", "certificateFingerprint"):
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise SystemExit(f"remote pairing JSON missing {key}")
 print(f"PAIRING_CODE={shlex.quote(payload['pairingCode'])}")
 print(f"PAIRING_NONCE={shlex.quote(payload['pairingNonce'])}")
-print(f"TRANSPORT_KEY={shlex.quote(payload['transportKey'])}")
 print(f"CERTIFICATE_FINGERPRINT={shlex.quote(payload['certificateFingerprint'])}")
 PY
   )"
   eval "$parsed"
   [[ -n "$PAIRING_CODE" ]] || fail "remote pairing JSON missing pairingCode"
   [[ -n "$PAIRING_NONCE" ]] || fail "remote pairing JSON missing pairingNonce"
-  [[ -n "$TRANSPORT_KEY" ]] || fail "remote pairing JSON missing transportKey"
   [[ -n "$CERTIFICATE_FINGERPRINT" ]] || fail "remote pairing JSON missing certificateFingerprint"
 }
 
@@ -277,7 +274,7 @@ device_request() {
   "$SPACES_E2E_BIN" mobile-request \
     --host "$REMOTE_DAEMON_HOST" \
     --port "$REMOTE_DAEMON_PORT" \
-    --transport-key="$TRANSPORT_KEY" \
+    --certificate-fingerprint="$CERTIFICATE_FINGERPRINT" \
     --request-json "$request_json" >"$response_file"
   python3 - "$response_file" <<'PY'
 import json
@@ -417,7 +414,7 @@ remote_device_parity() {
     --spacese2e "$SPACES_E2E_BIN" \
     --host "$REMOTE_DAEMON_HOST" \
     --port "$REMOTE_DAEMON_PORT" \
-    --transport-key="$TRANSPORT_KEY" \
+    --certificate-fingerprint="$CERTIFICATE_FINGERPRINT" \
     --auth-token "$AUTH_TOKEN" \
     --project-dir "$project_dir" \
     --label "remote-device" \
@@ -519,7 +516,7 @@ print("device-" + slug[:48])
 PY
   )"
   mkdir -p "$(dirname "$RESULT_JSON")"
-  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$device_id" "$AUTH_TOKEN" "$TRANSPORT_KEY" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url" <<'PY'
+  python3 - "$RESULT_JSON" "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$device_id" "$AUTH_TOKEN" "$CERTIFICATE_FINGERPRINT" "$REMOTE_MAC_CLIENT_INSTALLATION_ID" "$MAC_AUTH_TOKEN" "$(remote_expand_path "$REMOTE_PERFORMANCE_LOG")" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url" <<'PY'
 import json
 import sys
 (
@@ -533,7 +530,6 @@ import sys
     session_id,
     device_id,
     auth_token,
-    transport_key,
     certificate_fingerprint,
     mac_client_installation_id,
     mac_auth_token,
@@ -548,7 +544,6 @@ payload = {
     "remoteDaemonHost": host,
     "remoteDaemonPort": int(port),
     "authToken": auth_token,
-    "transportKey": transport_key,
     "certificateFingerprint": certificate_fingerprint,
     "macClientInstallationID": mac_client_installation_id,
     "macAuthToken": mac_auth_token,

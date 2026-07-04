@@ -1003,13 +1003,9 @@ def sanitize(value: str) -> str:
 secret_dir.mkdir(parents=True, exist_ok=True)
 os.chmod(secret_dir, 0o700)
 safe_id = sanitize(device_id)
-for prefix, value in (
-    ("device-auth-token", payload["macAuthToken"]),
-    ("device-transport-key", payload["transportKey"]),
-):
-    path = secret_dir / f"{prefix}-{safe_id}.secret"
-    path.write_text(str(value).strip())
-    os.chmod(path, 0o600)
+path = secret_dir / f"device-auth-token-{safe_id}.secret"
+path.write_text(str(payload["macAuthToken"]).strip())
+os.chmod(path, 0o600)
 PY
   REMOTE_DEVICE_PROJECT_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "projectID")"
   REMOTE_DEVICE_WORKSPACE_ID="$(json_get "$REMOTE_DEVICE_RESULT_JSON" "workspaceID")"
@@ -1046,7 +1042,7 @@ PY
   "$SPACES_E2E_CLI" mobile-request \
     --host "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonHost")" \
     --port "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "remoteDaemonPort")" \
-    --transport-key "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "transportKey")" \
+    --certificate-fingerprint "$(json_get "$REMOTE_DEVICE_RESULT_JSON" "certificateFingerprint")" \
     --request-json "$request_json"
 }
 
@@ -1202,7 +1198,7 @@ run_local_device_api_parity() {
   local parity_result="$TMP_ROOT/local-device-api-parity.json"
   local parity_stdout="$TMP_ROOT/local-device-api-parity.stdout"
   local parity_log="$TMP_ROOT/local-device-api-parity.log"
-  local parsed host port transport_key pairing_code pairing_nonce auth_token
+  local parsed host port certificate_fingerprint pairing_code pairing_nonce auth_token
   create_device_api_parity_fixture "$parity_project_dir"
   env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
     "$SPACES_E2E_CLI" open-device-pairing-window >"$pairing_window_json"
@@ -1212,7 +1208,7 @@ import json
 import shlex
 import sys
 payload = json.load(open(sys.argv[1]))
-for key, name in (("host", "host"), ("port", "port"), ("transportKey", "transport_key"), ("pairingCode", "pairing_code"), ("pairingNonce", "pairing_nonce")):
+for key, name in (("host", "host"), ("port", "port"), ("certificateFingerprint", "certificate_fingerprint"), ("pairingCode", "pairing_code"), ("pairingNonce", "pairing_nonce")):
     value = payload.get(key)
     if value is None or str(value).strip() == "":
         raise SystemExit(f"pairing window missing {key}")
@@ -1240,7 +1236,7 @@ PY
   "$SPACES_E2E_CLI" mobile-request \
     --host "$host" \
     --port "$port" \
-    --transport-key "$transport_key" \
+    --certificate-fingerprint "$certificate_fingerprint" \
     --request-json "$(cat "$pair_request_json")" >"$pair_response_json"
   auth_token="$(
     python3 - "$pair_response_json" <<'PY'
@@ -1257,7 +1253,7 @@ PY
     --spacese2e "$SPACES_E2E_CLI" \
     --host "$host" \
     --port "$port" \
-    --transport-key "$transport_key" \
+    --certificate-fingerprint "$certificate_fingerprint" \
     --auth-token "$auth_token" \
     --project-dir "$parity_project_dir" \
     --label "local-macos" \

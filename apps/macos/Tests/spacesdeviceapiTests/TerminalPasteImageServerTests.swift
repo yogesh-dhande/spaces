@@ -24,12 +24,13 @@
                 try controlServer.start()
                 defer { controlServer.stop() }
 
-                let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+                let identity = try pasteImageTestTLSIdentity()
                 let pairingStore = AlwaysAuthorizedPasteImagePairingStore()
-                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
                 try server.start()
                 defer { server.stop() }
-                let requestClient = try SpacesDeviceAPIRequestSessionClient(host: "127.0.0.1", port: server.listeningPort, transportKey: transportKey)
+                let requestClient = try SpacesDeviceAPIRequestSessionClient(
+                    host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
                 defer { requestClient.cancel() }
                 let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
                 let clientApp = SpacesDeviceClientApp(
@@ -76,12 +77,13 @@
                 try controlServer.start()
                 defer { controlServer.stop() }
 
-                let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+                let identity = try pasteImageTestTLSIdentity()
                 let pairingStore = AlwaysAuthorizedPasteImagePairingStore()
-                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+                let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
                 try server.start()
                 defer { server.stop() }
-                let requestClient = try SpacesDeviceAPIRequestSessionClient(host: "127.0.0.1", port: server.listeningPort, transportKey: transportKey)
+                let requestClient = try SpacesDeviceAPIRequestSessionClient(
+                    host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
                 defer { requestClient.cancel() }
                 let clientApp = SpacesDeviceClientApp(
                     installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
@@ -153,6 +155,15 @@
             }
             try body(root)
         }
+    }
+
+    private let pasteImageTestTLSRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "spaces-paste-image-tests-tls-\(UUID().uuidString)", isDirectory: true)
+
+    /// One pinned-TLS identity per test process: generation is expensive and every server/client pair
+    /// only needs a stable certificate to pin.
+    private func pasteImageTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
+        try TerminalServiceTLSIdentityStore.loadOrCreate(root: pasteImageTestTLSRoot)
     }
 
     private final class TerminalPasteImageControlRecorder: @unchecked Sendable {

@@ -92,7 +92,7 @@ link = link_match.group(1)
 values = parse_qs(urlparse(link).query)
 print(f"device_api_port={shlex.quote(port_match.group(1))}")
 print(f"pairing_link={shlex.quote(link)}")
-print(f"transport_key={shlex.quote(values['psk'][0])}")
+print(f"certificate_fingerprint={shlex.quote(values['fp'][0])}")
 print(f"pairing_code={shlex.quote(values['code'][0])}")
 print(f"pairing_nonce={shlex.quote(values['nonce'][0])}")
 PY
@@ -103,7 +103,7 @@ SESSION_ID="$session_id" \
 PAIRING_CODE="$pairing_code" \
 PAIRING_NONCE="$pairing_nonce" \
 DEVICE_API_PORT="$device_api_port" \
-TRANSPORT_KEY="$transport_key" \
+CERTIFICATE_FINGERPRINT="$certificate_fingerprint" \
 SPACES_E2E="$spacese2e" \
 METRICS_PATH="$metrics_path" \
 python3 - <<'PY'
@@ -121,7 +121,7 @@ PORT = int(os.environ["DEVICE_API_PORT"])
 SESSION_ID = os.environ["SESSION_ID"]
 PAIRING_CODE = os.environ["PAIRING_CODE"]
 PAIRING_NONCE = os.environ["PAIRING_NONCE"]
-TRANSPORT_KEY = os.environ["TRANSPORT_KEY"]
+CERTIFICATE_FINGERPRINT = os.environ["CERTIFICATE_FINGERPRINT"]
 SPACES_E2E = os.environ["SPACES_E2E"]
 SPACES_DB_PATH = Path(os.environ["SPACES_DB_PATH"])
 
@@ -160,7 +160,7 @@ def request(payload: dict) -> tuple[dict, float]:
         HOST,
         "--port",
         str(PORT),
-        f"--transport-key={TRANSPORT_KEY}",
+        f"--certificate-fingerprint={CERTIFICATE_FINGERPRINT}",
         "--request-json",
         json.dumps(payload),
     ]
@@ -179,7 +179,7 @@ def connect_stream(payload: dict) -> subprocess.Popen:
             HOST,
             "--port",
             str(PORT),
-            f"--transport-key={TRANSPORT_KEY}",
+            f"--certificate-fingerprint={CERTIFICATE_FINGERPRINT}",
             "--request-json",
             json.dumps(payload),
             "--stream",

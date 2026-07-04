@@ -594,7 +594,6 @@ import workspacecore
             let database = try host.clientDatabase()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
-            try SpacesDeviceCredentialStore.deleteTransportKey(deviceID: deviceID)
             refreshVisibleDeviceSettingsAfterClientDeviceChange()
             host.requestSidebarReload()
         } catch { host.showError(error) }
@@ -646,7 +645,7 @@ import workspacecore
             id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", host: localHost, port: localStatus?.port, sshHost: nil, sshUser: nil,
             sshPort: nil, isLocal: true, isAvailable: !requireLocalStatus || localStatus != nil, requiresReconnect: false)
         let remote = host.macPairedDevices().map {
-            let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(deviceID: $0.id)
+            let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
                 id: $0.id, name: $0.name, host: $0.host, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort, isLocal: false,
                 isAvailable: hasCredentials, requiresReconnect: !hasCredentials)
