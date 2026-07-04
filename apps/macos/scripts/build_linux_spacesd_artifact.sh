@@ -767,6 +767,32 @@ overview = request({
 })
 if not overview.get("ok") or "overview" not in (overview.get("result") or {}):
     raise SystemExit(overview)
+
+# Agent send/tail round trip against the smoke session: one-shot input needs no
+# attach/owner handshake, and the rendered tail shows both the session's startup
+# echo and the PTY echo of the sent text.
+sent = request({
+    "authToken": auth_token,
+    "clientApp": client_app,
+    "command": {"sendTerminalInput": {"sessionID": "linux-artifact-smoke", "text": "agent-roundtrip-marker", "appendNewline": True}},
+})
+if not sent.get("ok"):
+    raise SystemExit(sent)
+
+import time as _time
+deadline = _time.time() + 15
+while True:
+    tailed = request({
+        "authToken": auth_token,
+        "clientApp": client_app,
+        "command": {"tailTerminalOutput": {"sessionID": "linux-artifact-smoke", "lines": 50}},
+    })
+    text = ((tailed.get("result") or {}).get("terminalOutput") or {}).get("text") or ""
+    if tailed.get("ok") and "artifact-smoke" in text and "agent-roundtrip-marker" in text:
+        break
+    if _time.time() > deadline:
+        raise SystemExit(tailed)
+    _time.sleep(0.5)
 PY
     )
     rm -rf "$smoke_root"

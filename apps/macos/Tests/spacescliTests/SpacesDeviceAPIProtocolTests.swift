@@ -64,6 +64,34 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
+    func testSendTerminalInputRoundTripsAndIsNotReplaySafe() throws {
+        let textRequest = SpacesDeviceAPIRequest(
+            command: .sendTerminalInput(.init(sessionID: "session-1", text: "echo hello", appendNewline: true)), authToken: "SECRET")
+        let bytesRequest = SpacesDeviceAPIRequest(
+            command: .sendTerminalInput(.init(sessionID: "session-1", bytes: Data([0x03]))), authToken: "SECRET")
+
+        XCTAssertEqual(textRequest.commandName, "sendTerminalInput")
+        XCTAssertEqual(textRequest.sessionID, "session-1")
+        // A send that vanished into an ambiguous connection failure may already have reached the
+        // shell; replaying it could execute the command twice.
+        XCTAssertFalse(textRequest.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(textRequest)), textRequest)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(bytesRequest)), bytesRequest)
+    }
+
+    func testTailTerminalOutputRoundTripsAndIsReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .tailTerminalOutput(.init(sessionID: "session-1", lines: 40)), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "tailTerminalOutput")
+        XCTAssertEqual(request.sessionID, "session-1")
+        XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Read terminal output.", result: .terminalOutput(.init(text: "hello\n")))
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+        XCTAssertEqual(decoded.terminalOutput, "hello\n")
+    }
+
     func testRequestRoundTripsScrollModsThroughCodec() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(

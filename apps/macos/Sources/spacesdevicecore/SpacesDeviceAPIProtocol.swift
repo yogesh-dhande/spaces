@@ -1152,6 +1152,40 @@ public struct SpacesDeviceTerminalSessionRequest: Codable, Sendable, Equatable {
     public init(sessionID: String) { self.sessionID = sessionID }
 }
 
+/// One-shot agent input for a terminal session (`spaces terminal send --device`). Unlike
+/// `terminalControl`, this is not attachment- or owner-epoch-gated: orchestrator agents write into
+/// sessions they never render, so the bearer token is the whole authorization.
+public struct SpacesDeviceTerminalInputRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let text: String?
+    public let bytes: Data?
+    public let appendNewline: Bool
+
+    public init(sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false) {
+        self.sessionID = sessionID
+        self.text = text
+        self.bytes = bytes
+        self.appendNewline = appendNewline
+    }
+}
+
+/// Rendered plain-text tail of a terminal session's output (`spaces terminal tail --device`).
+public struct SpacesDeviceTerminalTailRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let lines: Int?
+
+    public init(sessionID: String, lines: Int? = nil) {
+        self.sessionID = sessionID
+        self.lines = lines
+    }
+}
+
+public struct SpacesDeviceTerminalOutputResult: Codable, Sendable, Equatable {
+    public let text: String
+
+    public init(text: String) { self.text = text }
+}
+
 public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equatable {
     case attach
     case detach
@@ -1297,6 +1331,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case state(SpacesDeviceTerminalSessionRequest)
     case terminalControl(SpacesDeviceTerminalControlRequest)
     case terminalPasteImage(SpacesDeviceTerminalPasteImageRequest)
+    case sendTerminalInput(SpacesDeviceTerminalInputRequest)
+    case tailTerminalOutput(SpacesDeviceTerminalTailRequest)
     case subscribe(SpacesDeviceTerminalSubscriptionRequest)
     case resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest)
     case readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest)
@@ -1342,6 +1378,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .state: "state"
         case .terminalControl(let payload): payload.action.rawValue
         case .terminalPasteImage: "terminalPasteImage"
+        case .sendTerminalInput: "sendTerminalInput"
+        case .tailTerminalOutput: "tailTerminalOutput"
         case .subscribe: "subscribe"
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
@@ -1356,6 +1394,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .state(let payload): payload.sessionID
         case .terminalControl(let payload): payload.sessionID
         case .terminalPasteImage(let payload): payload.sessionID
+        case .sendTerminalInput(let payload): payload.sessionID
+        case .tailTerminalOutput(let payload): payload.sessionID
         case .subscribe(let payload): payload.sessionID
         case .resolveTerminalLink(let payload): payload.sessionID
         case .readTerminalLinkChunk(let payload): payload.sessionID
@@ -1394,7 +1434,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .listDirectories, .workspaceCreateOptions, .state, .resolveTerminalLink,
-            .readTerminalLinkChunk:
+            .readTerminalLinkChunk, .tailTerminalOutput:
             true
         default: false
         }
@@ -1438,6 +1478,8 @@ extension SpacesDeviceAPICommand: Codable {
         case state
         case terminalControl
         case terminalPasteImage
+        case sendTerminalInput
+        case tailTerminalOutput
         case subscribe
         case resolveTerminalLink
         case readTerminalLinkChunk
@@ -1498,6 +1540,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .state: self = .state(try container.decode(SpacesDeviceTerminalSessionRequest.self, forKey: key))
         case .terminalControl: self = .terminalControl(try container.decode(SpacesDeviceTerminalControlRequest.self, forKey: key))
         case .terminalPasteImage: self = .terminalPasteImage(try container.decode(SpacesDeviceTerminalPasteImageRequest.self, forKey: key))
+        case .sendTerminalInput: self = .sendTerminalInput(try container.decode(SpacesDeviceTerminalInputRequest.self, forKey: key))
+        case .tailTerminalOutput: self = .tailTerminalOutput(try container.decode(SpacesDeviceTerminalTailRequest.self, forKey: key))
         case .subscribe: self = .subscribe(try container.decode(SpacesDeviceTerminalSubscriptionRequest.self, forKey: key))
         case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(SpacesDeviceTerminalLinkResolveRequest.self, forKey: key))
         case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunkRequest.self, forKey: key))
@@ -1545,6 +1589,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .state(let payload): try container.encode(payload, forKey: .state)
         case .terminalControl(let payload): try container.encode(payload, forKey: .terminalControl)
         case .terminalPasteImage(let payload): try container.encode(payload, forKey: .terminalPasteImage)
+        case .sendTerminalInput(let payload): try container.encode(payload, forKey: .sendTerminalInput)
+        case .tailTerminalOutput(let payload): try container.encode(payload, forKey: .tailTerminalOutput)
         case .subscribe(let payload): try container.encode(payload, forKey: .subscribe)
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
@@ -1602,6 +1648,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case mutation(SpacesDeviceMutationResult)
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
     case terminalLinkChunk(SpacesDeviceTerminalLinkChunk)
+    case terminalOutput(SpacesDeviceTerminalOutputResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -1617,6 +1664,7 @@ extension SpacesDeviceAPIResult: Codable {
         case mutation
         case terminalLinkMetadata
         case terminalLinkChunk
+        case terminalOutput
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1637,6 +1685,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .mutation: self = .mutation(try container.decode(SpacesDeviceMutationResult.self, forKey: key))
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
         case .terminalLinkChunk: self = .terminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunk.self, forKey: key))
+        case .terminalOutput: self = .terminalOutput(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
         }
     }
 
@@ -1654,6 +1703,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .mutation(let payload): try container.encode(payload, forKey: .mutation)
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
         case .terminalLinkChunk(let payload): try container.encode(payload, forKey: .terminalLinkChunk)
+        case .terminalOutput(let payload): try container.encode(payload, forKey: .terminalOutput)
         }
     }
 }
@@ -1708,6 +1758,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     }
 
     public var terminalLinkChunk: SpacesDeviceTerminalLinkChunk? { if case .terminalLinkChunk(let payload) = result { payload } else { nil } }
+
+    public var terminalOutput: String? { if case .terminalOutput(let payload) = result { payload.text } else { nil } }
 }
 
 public enum SpacesDeviceAPICodec {

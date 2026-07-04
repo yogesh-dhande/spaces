@@ -1085,6 +1085,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
+        case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
+        case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
@@ -1144,6 +1146,42 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: responseAttributes)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, result: sessionState.map(SpacesDeviceAPIResult.terminalState))
+    }
+
+    /// Agent-facing one-shot input: token-authorized like every command but deliberately not
+    /// attachment- or owner-epoch-gated, because orchestrator agents write into sessions they never
+    /// attach to or render. Mirrors the local profile `terminalSend` contract.
+    private func handleSendTerminalInputRequest(_ payload: SpacesDeviceTerminalInputRequest) throws -> SpacesDeviceAPIResponse {
+        let sessionID = payload.sessionID
+        let hasText = payload.text != nil
+        let hasBytes = payload.bytes != nil
+        guard hasText || hasBytes else { return SpacesDeviceAPIResponse(ok: false, message: "text or bytes is required.") }
+        guard !(hasText && hasBytes) else { return SpacesDeviceAPIResponse(ok: false, message: "Provide text or bytes, not both.") }
+
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.")
+        }
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
+        }
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: "send", text: payload.text, bytes: payload.bytes, appendNewline: payload.appendNewline),
+            socketPath: paths.controlSocketPath)
+        return SpacesDeviceAPIResponse(ok: response.ok, message: response.message)
+    }
+
+    /// Agent-facing rendered tail of the session's output log, mirroring the local profile
+    /// `terminalTail` contract (VT replay through `TerminalOutputTail`).
+    private func handleTailTerminalOutputRequest(_ payload: SpacesDeviceTerminalTailRequest) throws -> SpacesDeviceAPIResponse {
+        let sessionID = payload.sessionID
+        let lineCount = max(payload.lines ?? 20, 1)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.outputPath) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no output yet.")
+        }
+        let output = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lineCount)
+        return SpacesDeviceAPIResponse(ok: true, message: "Read terminal output.", result: .terminalOutput(.init(text: output)))
     }
 
     private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {

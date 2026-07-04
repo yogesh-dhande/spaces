@@ -19,7 +19,9 @@ public enum SpacesWireProtocol {
     //    self-signed TLS identity with pairing-issued bearer tokens; pairing links drop the
     //    psk field (link v2) and overview rows drop the always-nil daemonEndpoint. A
     //    protocol-3 client cannot even complete a TLS handshake with a protocol-4 daemon,
-    //    so devices must re-pair after updating both sides.
+    //    so devices must re-pair after updating both sides. Also adds the agent-facing
+    //    sendTerminalInput and tailTerminalOutput commands (one-shot terminal input and
+    //    rendered output tail, token-authorized without attachment/owner gating).
     public static let version = 4
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and

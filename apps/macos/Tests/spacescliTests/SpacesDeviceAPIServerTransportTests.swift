@@ -184,6 +184,70 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    func testSendTerminalInputValidatesPayloadAndSessionAvailability() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-AGENT-SEND", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            func send(_ payload: SpacesDeviceTerminalInputRequest) throws -> SpacesDeviceAPIResponse {
+                try sendTLSRequest(
+                    SpacesDeviceAPIRequest(command: .sendTerminalInput(payload), authToken: pairingStore.authToken, clientApp: clientApp),
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            }
+
+            let missingPayload = try send(.init(sessionID: "agent-send-session"))
+            XCTAssertFalse(missingPayload.ok)
+            XCTAssertTrue(missingPayload.message.localizedStandardContains("text or bytes"))
+
+            let bothPayloads = try send(.init(sessionID: "agent-send-session", text: "echo hi", bytes: Data([0x03])))
+            XCTAssertFalse(bothPayloads.ok)
+            XCTAssertTrue(bothPayloads.message.localizedStandardContains("not both"))
+
+            // Well-formed input against a session with no live control socket reports unavailability
+            // instead of hanging or succeeding silently.
+            let unavailableSession = try send(.init(sessionID: "agent-send-session", text: "echo hi", appendNewline: true))
+            XCTAssertFalse(unavailableSession.ok)
+            XCTAssertTrue(unavailableSession.message.localizedStandardContains("not available"))
+        }
+    }
+
+    func testTailTerminalOutputRendersSessionOutputLog() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-AGENT-TAIL", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            func tail(_ payload: SpacesDeviceTerminalTailRequest) throws -> SpacesDeviceAPIResponse {
+                try sendTLSRequest(
+                    SpacesDeviceAPIRequest(command: .tailTerminalOutput(payload), authToken: pairingStore.authToken, clientApp: clientApp),
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            }
+
+            let noOutput = try tail(.init(sessionID: "agent-tail-session"))
+            XCTAssertFalse(noOutput.ok)
+            XCTAssertTrue(noOutput.message.localizedStandardContains("no output"))
+
+            let paths = try TerminalSessionPaths.forSession(id: "agent-tail-session")
+            try FileManager.default.createDirectory(atPath: paths.rootDirectory, withIntermediateDirectories: true)
+            try Data("first line\nsecond line\nhello-agent\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let tailed = try tail(.init(sessionID: "agent-tail-session", lines: 2))
+            XCTAssertTrue(tailed.ok, tailed.message)
+            let text = try XCTUnwrap(tailed.terminalOutput)
+            XCTAssertTrue(text.contains("hello-agent"))
+            XCTAssertFalse(text.contains("first line"))
+        }
+    }
+
     func testCreateProjectImportsDaemonLocalDirectory() throws {
         try withTemporaryProfile { root in
             let identity = try testTLSIdentity()
