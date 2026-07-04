@@ -125,11 +125,21 @@ import spacesdevicecore
     /// numbered shortcuts, and cycling: focus the session's existing pane wherever it
     /// lives, else open it as a new tab in its workspace's panel.
     @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
+        // A standalone session (a `spaces terminal command` session with no workspace) has
+        // no workspace panel to live in: focus its existing pane wherever it is, else open
+        // it as the sole tab of a fresh global panel window.
+        guard let workspaceID = request.workspaceID else {
+            if let placement = placement(forSessionID: request.sessionID) {
+                focus(placement: placement)
+                return true
+            }
+            return openSessionInNewTab(request, in: .globalWindow(panelWindowID: UUID().uuidString))
+        }
         // Adopt the workspace's persisted layout first: on a fresh launch a session
         // opened before its panel was ever shown (command palette, focus IPC) is not
         // yet in an in-memory panel, so without this the placement search misses it and
         // openSessionInNewTab would overwrite the saved tabs/splits with a one-tab layout.
-        restoreLayoutIfNeeded(scope: workspaceScope(forWorkspaceID: request.workspaceID))
+        restoreLayoutIfNeeded(scope: workspaceScope(forWorkspaceID: workspaceID))
         if let placement = placement(forSessionID: request.sessionID) {
             focus(placement: placement)
             return true
@@ -141,12 +151,20 @@ import spacesdevicecore
     /// cmd+opt+t landing path for a freshly created session), or in an explicit scope
     /// (a global panel window's "+" button).
     @discardableResult func openSessionInNewTab(_ request: AppKitController.DeviceTerminalOpenRequest, in scope: PanelScope? = nil) -> Bool {
-        let scope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
+        let resolvedScope: PanelScope
+        if let scope {
+            resolvedScope = scope
+        } else if let workspaceID = request.workspaceID {
+            resolvedScope = workspaceScope(forWorkspaceID: workspaceID)
+        } else {
+            // A workspace-less request must name its scope (a global panel window).
+            return false
+        }
         guard let content = ensureContentController(request: request) else { return false }
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
-        mutateLayout(scope: scope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
-        host.showPanelScope(scope)
-        activateFocusedPane(scope: scope)
+        mutateLayout(scope: resolvedScope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
+        host.showPanelScope(resolvedScope)
+        activateFocusedPane(scope: resolvedScope)
         return true
     }
 
@@ -246,10 +264,14 @@ import spacesdevicecore
         guard panels[scope] == nil else { return }
         panels[scope] = PanelState(layout: layout, view: nil)
         for pane in PanelLayoutEngine.allPanes(in: layout) {
-            guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil,
-                let workspaceID = host.clientWorkspaceID(forTerminalSession: sessionID),
-                let request = host.paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
-            else { continue }
+            guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil else { continue }
+            // A workspace-backed session rebuilds from its workspace; a standalone session
+            // (no workspace, e.g. a `spaces terminal command` session) rebuilds directly from
+            // its overview summary so its global-window pane is not left empty on restore.
+            let request =
+                host.clientWorkspaceID(forTerminalSession: sessionID).flatMap { host.paneOpenRequest(workspaceID: $0, sessionID: sessionID) }
+                ?? host.standalonePaneOpenRequest(sessionID: sessionID)
+            guard let request else { continue }
             _ = ensureContentController(request: request)
         }
         showPanelWindow(panelWindowID: panelWindowID, frame: frame, makeKey: false)
@@ -511,7 +533,7 @@ import spacesdevicecore
     /// title.
     private func contentTitle(forSessionID sessionID: String) -> String {
         guard let content = contentControllers[sessionID] else { return "Terminal" }
-        return host.runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle
+        return content.workspaceID.flatMap { host.runtimeTargetTitle(forSessionID: sessionID, workspaceID: $0) } ?? content.displayTitle
     }
 
     // MARK: - Rendering / persistence

@@ -1244,14 +1244,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         {
             return request
         }
-        guard let summary = await resolveSessionSummaryMatch(sessionID: sessionID)?.summary, let workspaceID = summary.workspaceID else { return nil }
+        // A session with no workspace (a standalone `spaces terminal command` session) still
+        // opens — as a pane in a global panel window — so carry its owning device directly
+        // rather than deriving it from a workspace the session doesn't have.
+        guard let match = await resolveSessionSummaryMatch(sessionID: sessionID) else { return nil }
+        let summary = match.summary
         return DeviceTerminalOpenRequest(
-            workspaceID: workspaceID, sessionID: sessionID, title: summary.title, workingDirectory: summary.workingDirectory,
-            kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell, command: summary.command, initialState: summary.state,
-            servicePID: summary.servicePID, childPID: summary.childPID, createdAt: summary.createdAt, updatedAt: summary.updatedAt)
+            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: sessionID, title: summary.title,
+            workingDirectory: summary.workingDirectory, kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
+            command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
+            createdAt: summary.createdAt, updatedAt: summary.updatedAt)
     }
 
-    /// Opens (or focuses) a session's pane for the open/focus IPC surfaces. Emits the
+    /// The pane open request for a standalone (workspace-less) session already surfaced in a
+    /// loaded overview — the sync layout-restore path for a global panel window's tabs.
+    func standalonePaneOpenRequest(sessionID: String) -> DeviceTerminalOpenRequest? {
+        guard let match = terminalSessionSummaryMatch(sessionID: sessionID) else { return nil }
+        let summary = match.summary
+        return DeviceTerminalOpenRequest(
+            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: sessionID, title: summary.title,
+            workingDirectory: summary.workingDirectory, kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
+            command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
+            createdAt: summary.createdAt, updatedAt: summary.updatedAt)
+    }
+
     /// Opens (or focuses) the session's pane and, for an owner-mode open, reclaims owner
     /// attachment. `mode` carries the intent of the `openTerminalSessionWindow` IPC: an
     /// owner open (e.g. `spaces terminal show`) must preempt a different active owner (a
@@ -1300,7 +1316,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let sessionID = request.sessionID
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            let device = deviceForWorkspaceMutation(workspaceID: request.workspaceID)
+            // Standalone requests carry their device directly; workspace-backed requests
+            // derive it from the workspace (unchanged behavior for those).
+            let resolvedDeviceID =
+                request.deviceID ?? request.workspaceID.map { deviceID(forWorkspaceID: $0) } ?? SpacesPairedDeviceRecord.localDeviceID
+            let device = deviceForMutation(deviceID: resolvedDeviceID)
             let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
             let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
             // The seed launch configuration wins over the state model's own summary lookup,
@@ -1390,7 +1410,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
                 })
             return TerminalPaneContentController(
-                descriptor: .terminalSession(deviceID: deviceID(forWorkspaceID: request.workspaceID), sessionID: sessionID),
+                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID),
                 workspaceID: request.workspaceID, sessionID: sessionID, pane: pane)
         } catch {
             showError(error)
@@ -2487,7 +2507,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     struct DeviceTerminalOpenRequest: Sendable, Equatable {
-        let workspaceID: String
+        /// The workspace whose panel hosts this pane, or `nil` for a standalone session
+        /// (a `spaces terminal command` session not tied to any workspace) — those open
+        /// in a global panel window instead.
+        let workspaceID: String?
+        /// The owning device, set for standalone requests where it can't be derived from a
+        /// workspace. `nil` for workspace-backed requests, which resolve the device from
+        /// `workspaceID`.
+        let deviceID: String?
         let sessionID: String
         let title: String
         let workingDirectory: String
@@ -2505,11 +2532,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let updatedAt: String?
 
         init(
-            workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind, shell: String? = nil,
-            command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
+            workspaceID: String?, deviceID: String? = nil, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
+            shell: String? = nil, command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
             createdAt: String? = nil, updatedAt: String? = nil
         ) {
             self.workspaceID = workspaceID
+            self.deviceID = deviceID
             self.sessionID = sessionID
             self.title = title
             self.workingDirectory = workingDirectory
@@ -8588,11 +8616,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
         case .openTerminal(let request):
-            guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
+            // Window-focus terminal targets are always workspace-backed (they come from a
+            // workspace's run-target list), so a missing workspace/device is a not-loaded state.
+            guard let workspaceID = request.workspaceID, deviceForWorkspaceMutation(workspaceID: workspaceID) != nil else {
                 showDeviceNotLoadedError()
                 return nil
             }
-            Self.setClientActiveWorkspaceID(request.workspaceID)
+            Self.setClientActiveWorkspaceID(workspaceID)
             // A row-built resolution can predate the session's overview entry and lack the
             // real shell/command; recover them through the cold overview fetch so the pane's
             // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
