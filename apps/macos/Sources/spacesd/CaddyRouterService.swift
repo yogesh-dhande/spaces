@@ -48,8 +48,7 @@
                                 registryRoutes: try CaddyRouteRegistry.routes(path: try CaddyService.routeRegistryPath()))
                             let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
                             let adminSocketPath = try CaddyService.adminSocketPath()
-                            let configJSON = CaddyConfigBuilder.makeJSON(
-                                routes: routes, listenPort: routerPort, adminSocketPath: adminSocketPath)
+                            let configJSON = CaddyConfigBuilder.makeJSON(routes: routes, listenPort: routerPort, adminSocketPath: adminSocketPath)
                             try lifecycle.ensureRunning(configJSON: configJSON)
                         } catch { onError("\(error)") }
                     }.value

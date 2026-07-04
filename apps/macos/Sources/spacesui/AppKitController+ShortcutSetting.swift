@@ -11,6 +11,8 @@ extension AppKitController {
         case guiReloadShortcut
         case guiNextShortcut
         case guiPreviousShortcut
+        case guiSidebarNextShortcut
+        case guiSidebarPreviousShortcut
         case guiOpenEditorShortcut
         case guiOpenTerminalShortcut
         case guiOpenFinderShortcut
@@ -27,6 +29,8 @@ extension AppKitController {
             case .guiReloadShortcut: return "Reload data"
             case .guiNextShortcut: return "Next window"
             case .guiPreviousShortcut: return "Previous window"
+            case .guiSidebarNextShortcut: return "Next workspace"
+            case .guiSidebarPreviousShortcut: return "Previous workspace"
             case .guiOpenEditorShortcut: return "Open editor"
             case .guiOpenTerminalShortcut: return "New terminal"
             case .guiOpenFinderShortcut: return "Open Finder"
@@ -43,8 +47,8 @@ extension AppKitController {
 
         var usesLeader: Bool {
             switch self {
-            case .guiAlertsShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut,
-                .guiReloadShortcut:
+            case .guiAlertsShortcut, .guiNextShortcut, .guiPreviousShortcut, .guiSidebarNextShortcut, .guiSidebarPreviousShortcut,
+                .guiOpenEditorShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut, .guiReloadShortcut:
                 return true
             default: return false
             }
@@ -74,6 +78,8 @@ extension AppKitController {
             case .guiReloadShortcut: return SettingsKey.guiReloadShortcut
             case .guiNextShortcut: return SettingsKey.guiNextShortcut
             case .guiPreviousShortcut: return SettingsKey.guiPreviousShortcut
+            case .guiSidebarNextShortcut: return SettingsKey.guiSidebarNextShortcut
+            case .guiSidebarPreviousShortcut: return SettingsKey.guiSidebarPreviousShortcut
             case .guiOpenEditorShortcut: return SettingsKey.guiOpenEditorShortcut
             case .guiOpenTerminalShortcut: return SettingsKey.guiOpenTerminalShortcut
             case .guiOpenFinderShortcut: return SettingsKey.guiOpenFinderShortcut
@@ -92,6 +98,8 @@ extension AppKitController {
             case .guiReloadShortcut: return SettingsKey.defaultGUIReloadShortcut
             case .guiNextShortcut: return SettingsKey.defaultGUINextShortcut
             case .guiPreviousShortcut: return SettingsKey.defaultGUIPreviousShortcut
+            case .guiSidebarNextShortcut: return SettingsKey.defaultGUISidebarNextShortcut
+            case .guiSidebarPreviousShortcut: return SettingsKey.defaultGUISidebarPreviousShortcut
             case .guiOpenEditorShortcut: return SettingsKey.defaultGUIOpenEditorShortcut
             case .guiOpenTerminalShortcut: return SettingsKey.defaultGUIOpenTerminalShortcut
             case .guiOpenFinderShortcut: return SettingsKey.defaultGUIOpenFinderShortcut
@@ -110,6 +118,8 @@ extension AppKitController {
             case SettingsKey.guiReloadShortcut: self = .guiReloadShortcut
             case SettingsKey.guiNextShortcut: self = .guiNextShortcut
             case SettingsKey.guiPreviousShortcut: self = .guiPreviousShortcut
+            case SettingsKey.guiSidebarNextShortcut: self = .guiSidebarNextShortcut
+            case SettingsKey.guiSidebarPreviousShortcut: self = .guiSidebarPreviousShortcut
             case SettingsKey.guiOpenEditorShortcut: self = .guiOpenEditorShortcut
             case SettingsKey.guiOpenTerminalShortcut: self = .guiOpenTerminalShortcut
             case SettingsKey.guiOpenFinderShortcut: self = .guiOpenFinderShortcut
@@ -129,6 +139,7 @@ extension AppKitController {
         }
 
         func normalizedValue(for setting: ShortcutSetting, rawValue: String?) throws -> String? {
+            if setting == .guiLeaderHotkey { return try normalizedLeaderModifierSet(rawValue) }
             guard setting.usesLeader else { return rawValue }
             return try normalizedLeaderBackedShortcut(rawValue)
         }
@@ -159,6 +170,11 @@ extension AppKitController {
             let leaderModifiers = try leaderModifiers()
             if spec.modifiers.isSuperset(of: leaderModifiers) { return spec.removing(modifiers: leaderModifiers).normalized }
             return spec.normalized
+        }
+
+        private func normalizedLeaderModifierSet(_ raw: String?) throws -> String? {
+            guard let raw else { return nil }
+            return try HotkeySpec.normalizedModifierSet(HotkeySpec.parseModifierSet(raw))
         }
     }
 }

@@ -102,7 +102,7 @@ extension SQLiteStore {
         try upsert(
             window: WindowRecord(
                 id: targetID, workspaceID: process.workspaceID, app: process.terminalApp ?? TerminalHost.spaces.appName, name: process.templateName,
-                detail: process.command, targetURL: nil, windowID: nil, terminalTrackingID: terminalTarget.trackingID,
+                detail: process.command, targetURL: nil, terminalTrackingID: terminalTarget.trackingID,
                 terminalNativeID: terminalTarget.trackingID, role: "terminal",
                 orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 100),
                 lastSeenAt: now))

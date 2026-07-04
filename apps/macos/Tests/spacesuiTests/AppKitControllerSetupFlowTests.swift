@@ -17,7 +17,6 @@ import systembridge
         #expect(!AppKitController.requiresChromeAutomationSetup(.unavailable))
     }
 
-
     @Test func passiveDesktopControlRecoveryIgnoresUnrelatedTermination() {
         #expect(!AppKitController.shouldAttemptDesktopControlRecovery(passiveOwnerPID: 101, terminatedApplicationPID: 202))
     }
@@ -32,8 +31,7 @@ import systembridge
     }
 
     @MainActor @Test func backgroundRefreshFailuresAreLoggedOnly() {
-        let connectionError = NSError(
-            domain: "spaces.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "failed to connect to socket"])
+        let connectionError = NSError(domain: "spaces.tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "failed to connect to socket"])
         let decodeError = NSError(domain: "spaces.tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "remote state could not be decoded"])
 
         #expect(AppKitController.backgroundRefreshFailureAction(for: connectionError) == .logOnly)

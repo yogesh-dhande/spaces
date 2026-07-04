@@ -1070,6 +1070,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .updateWorkspaceMetadata(let payload): return try handleUpdateWorkspaceMetadataRequest(payload)
         case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload)
         case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload)
+        case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload)
         case .runWorkspaceProcess(let payload): return try handleRunWorkspaceProcessRequest(payload)
         case .stopWorkspaceProcess(let payload): return try handleStopWorkspaceProcessRequest(payload)
         case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload)
@@ -1161,11 +1162,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
             TerminalRemoteSessionStatePolicy.activeOwnerClientID(in: snapshot) == clientID
-        else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Only the active owner can paste images into the terminal.")
-        }
-        if let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch,
-            ownerEpoch != payload.ownerEpoch
+        else { return SpacesDeviceAPIResponse(ok: false, message: "Only the active owner can paste images into the terminal.") }
+        if let ownerEpoch = (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.renderOwnerEpoch, ownerEpoch != payload.ownerEpoch
         {
             return SpacesDeviceAPIResponse(
                 ok: false, message: "Ignoring stale owner epoch \(payload.ownerEpoch); current owner epoch is \(ownerEpoch).")
@@ -1175,17 +1173,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         try Self.writeUserOnlyPasteImage(payload.imageData, toPath: remotePath)
         let terminalRequest = TerminalControlRequest(command: "send", text: remotePath, clientID: clientID, ownerEpoch: payload.ownerEpoch)
         let response: TerminalControlResponse
-        do {
-            response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
-        } catch {
+        do { response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath) } catch {
             try? FileManager.default.removeItem(atPath: remotePath)
             throw error
         }
         if !response.ok { try? FileManager.default.removeItem(atPath: remotePath) }
         TerminalPerformance.logMetric(
             "device_api_terminalPasteImage", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-            success: response.ok,
-            detail: "bytes=\(payload.imageData.count) extension=\(fileExtension)")
+            success: response.ok, detail: "bytes=\(payload.imageData.count) extension=\(fileExtension)")
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.ok ? "Pasted image path." : response.message)
     }
 
@@ -1774,6 +1769,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return try refreshedMutationResponse(message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
         }
         return try refreshedMutationResponse(message: "Stopped workspace terminal.", workspaceID: workspaceID)
+    }
+
+    private func handleRenameTerminalSessionRequest(_ request: SpacesDeviceTerminalSessionRenameRequest) throws -> SpacesDeviceAPIResponse {
+        let workspaceID = request.workspaceID
+        let sessionID = request.sessionID
+        guard let title = normalizedString(request.title) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Provide a terminal session title.")
+        }
+        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        guard try deviceOrchestrator(store: store).renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title)
+        else { return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not a renamable workspace terminal.") }
+        return try refreshedMutationResponse(message: "Renamed terminal session.", workspaceID: workspaceID, sessionID: sessionID)
     }
 
     private func handleRunWorkspaceProcessRequest(_ request: SpacesDeviceRunWorkspaceProcessRequest) throws -> SpacesDeviceAPIResponse {

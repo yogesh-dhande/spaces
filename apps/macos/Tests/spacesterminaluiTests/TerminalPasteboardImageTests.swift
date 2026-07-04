@@ -13,11 +13,12 @@ final class TerminalPasteboardImageTests: XCTestCase {
     private func imageData(type: NSBitmapImageRep.FileType, width: Int = 4, height: Int = 4) throws -> Data {
         let bitmap = try XCTUnwrap(
             NSBitmapImageRep(
-                bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32))
+                bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32))
         for x in 0..<width {
             for y in 0..<height {
-                bitmap.setColor(NSColor(calibratedRed: CGFloat(x) / CGFloat(width), green: CGFloat(y) / CGFloat(height), blue: 0.5, alpha: 1), atX: x, y: y)
+                bitmap.setColor(
+                    NSColor(calibratedRed: CGFloat(x) / CGFloat(width), green: CGFloat(y) / CGFloat(height), blue: 0.5, alpha: 1), atX: x, y: y)
             }
         }
         return try XCTUnwrap(bitmap.representation(using: type, properties: [:]))

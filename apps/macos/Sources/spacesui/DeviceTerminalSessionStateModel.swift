@@ -68,15 +68,19 @@
             initialRuntimeState: TerminalSessionRuntimeState? = nil, initialAttachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil,
             clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil
         ) throws {
-            guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
-                throw SpacesDeviceClientError.missingTransportKey(
-                    deviceName: device.name, isLocal: device.id == SpacesPairedDeviceRecord.localDeviceID)
-            }
+            // This model opens its own pinned-TLS Device API connections directly instead of going
+            // through SpacesDeviceClient.request, so it must apply the same local-credential recovery
+            // that request does: a local device whose Keychain transport key/token went missing (e.g. an
+            // earlier bootstrap failed while the daemon was down) is re-bootstrapped here rather than
+            // dead-ending the pane on "Missing secure transport key". A remote device cannot self-heal,
+            // so a missing remote transport key still surfaces as missingTransportKey.
+            let (transportKey, resolvedAuthToken) = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(
+                device: device, clientApp: clientApp, profile: profile)
             self.device = device
             self.sessionID = sessionID
             self.clientApp = clientApp
             self.transportKey = transportKey
-            authToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile)
+            authToken = resolvedAuthToken
             requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, transportKey: transportKey)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
@@ -115,8 +119,7 @@
                     self.stateRefreshRetryTask?.cancel()
                     self.stateRefreshRetryTask = nil
                     self.apply(payload)
-                case .failure:
-                    self.scheduleStateRefreshRetry()
+                case .failure: self.scheduleStateRefreshRetry()
                 }
             }
         }
@@ -158,9 +161,7 @@
                 command: .terminalPasteImage(
                     SpacesDeviceTerminalPasteImageRequest(
                         sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: image.fileExtension,
-                        imageData: image.imageData)),
-                authToken: authToken,
-                clientApp: clientApp)
+                        imageData: image.imageData)), authToken: authToken, clientApp: clientApp)
             return try await Task.detached(priority: .userInitiated) {
                 let response = try requestClient.send(request)
                 return TerminalControlResponse(ok: response.ok, message: response.message)

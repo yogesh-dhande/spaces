@@ -17,7 +17,7 @@ import systembridge
     @Test func windowFocusIdentityPrefersNativeSessionID() {
         let record = WindowRecord(
             id: "window-1", workspaceID: "workspace-1", app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run dev", targetURL: nil,
-            windowID: 101, terminalTrackingID: nil, terminalNativeID: "native-session-2", role: "terminal", orderIndex: 0, lastSeenAt: "now")
+            terminalTrackingID: nil, terminalNativeID: "native-session-2", role: "terminal", orderIndex: 0, lastSeenAt: "now")
 
         #expect(record.terminalFocusIdentity == .session("native-session-2"))
         #expect(record.terminalTrackingIdentity == .session("native-session-2"))
@@ -26,8 +26,7 @@ import systembridge
     @Test func agentFocusIdentityPrefersNativeSessionID() {
         let record = AgentWindowRecord(
             id: "agent-1", workspaceID: "workspace-1", provider: .spaces, label: "Claude", terminalTrackingID: nil,
-            terminalNativeID: "native-session-3", codexThreadID: nil, status: .waiting, createdAt: "now",
-            updatedAt: "now")
+            terminalNativeID: "native-session-3", codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
 
         #expect(record.terminalFocusIdentity == TerminalTrackingIdentity.session("native-session-3"))
         #expect(record.terminalTrackingIdentity == TerminalTrackingIdentity.session("native-session-3"))

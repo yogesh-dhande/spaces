@@ -19,13 +19,13 @@ final class ProcessOnExitTests: XCTestCase {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "echo api", onExit: .none)])
         let runningProcess = RunningProcessRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, terminalTarget: nil, pid: 9000,
-            status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
+            id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, terminalTarget: nil,
+            pid: 9000, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 
         let updatedProcess = RunningProcessRecord(
-            id: runningProcess.id, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, terminalTarget: nil, pid: 9000,
-            status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now")
+            id: runningProcess.id, workspaceID: workspace.id, templateName: "api", command: "echo api", terminalApp: nil, terminalTarget: nil,
+            pid: 9000, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now")
         try store.upsert(runningProcess: updatedProcess)
 
         let currentProcess = try store.runningProcesses(workspaceID: workspace.id).first!

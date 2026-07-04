@@ -74,9 +74,9 @@ enum E2ELane: String, ExpressibleByArgument {
         case .app: return ["full", "smoke", "window-cycle"]
         case .terminal:
             return [
-                "cli", "daemon-idle-shutdown", "edit-shortcuts", "mac-input-latency", "mac-scrollback-latency",
-                "mac-scrollback-partial-latency", "mac-command-output-catchup", "built-in-terminal-profile", "workspace-terminal-open",
-                "workspace-process-terminal", "spaces-terminal-hotkeys", "spaces-terminal-palette", "stress", "soak", "device-api-profile",
+                "cli", "daemon-idle-shutdown", "edit-shortcuts", "mac-input-latency", "mac-scrollback-latency", "mac-scrollback-partial-latency",
+                "mac-command-output-catchup", "built-in-terminal-profile", "workspace-terminal-open", "workspace-process-terminal",
+                "spaces-terminal-hotkeys", "spaces-terminal-palette", "stress", "soak", "device-api-profile",
             ]
         case .mobile:
             return [

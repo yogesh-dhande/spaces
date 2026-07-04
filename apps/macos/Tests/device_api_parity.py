@@ -497,6 +497,21 @@ def run(args: argparse.Namespace) -> dict:
         latency_output_path = Path(args.terminal_latency_json)
         latency_output_path.parent.mkdir(parents=True, exist_ok=True)
         latency_output_path.write_text(json.dumps(terminal_latency_summary, indent=2, sort_keys=True) + "\n")
+    rename_title = "parity-renamed-shell"
+    renamed_overview = overview_from_mutation(
+        send(
+            "renameTerminalSession",
+            {"workspaceID": workspace_id, "sessionID": terminal_session_id, "title": rename_title},
+            args,
+            app,
+        ),
+        "renameTerminalSession",
+    )
+    renamed_workspace = find_workspace(renamed_overview, workspace_id)
+    if not renamed_workspace or not find_named_row(renamed_workspace, "terminalRows", rename_title):
+        raise AssertionError(
+            f"renameTerminalSession overview did not show renamed terminal row: {json.dumps(renamed_overview, indent=2, sort_keys=True)}"
+        )
     mutation(
         send("stopWorkspaceTerminal", {"workspaceID": workspace_id, "sessionID": terminal_session_id}, args, app),
         "stopWorkspaceTerminal",

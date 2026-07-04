@@ -9,9 +9,12 @@ import XCTest
             let app = URL(fileURLWithPath: "/Applications/Spaces.app", isDirectory: true)
             let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
 
-            XCTAssertEqual(SpacesBinaryLayout.appResourceURL(for: .spaces, appBundleURL: app).path, "/Applications/Spaces.app/Contents/Resources/spaces")
-            XCTAssertEqual(SpacesBinaryLayout.appResourceURL(for: .spacesd, appBundleURL: app).path, "/Applications/Spaces.app/Contents/Resources/spacesd")
-            XCTAssertEqual(SpacesBinaryLayout.appResourceURL(for: .spacesCaddy, appBundleURL: app).path, "/Applications/Spaces.app/Contents/Resources/caddy")
+            XCTAssertEqual(
+                SpacesBinaryLayout.appResourceURL(for: .spaces, appBundleURL: app).path, "/Applications/Spaces.app/Contents/Resources/spaces")
+            XCTAssertEqual(
+                SpacesBinaryLayout.appResourceURL(for: .spacesd, appBundleURL: app).path, "/Applications/Spaces.app/Contents/Resources/spacesd")
+            XCTAssertEqual(
+                SpacesBinaryLayout.appResourceURL(for: .spacesCaddy, appBundleURL: app).path, "/Applications/Spaces.app/Contents/Resources/caddy")
             XCTAssertEqual(SpacesBinaryLayout.systemLinkURL(for: .spaces).path, "/usr/local/bin/spaces")
             XCTAssertEqual(SpacesBinaryLayout.systemLinkURL(for: .spacesd).path, "/usr/local/bin/spacesd")
             XCTAssertEqual(SpacesBinaryLayout.systemLinkURL(for: .spacesCaddy).path, "/usr/local/bin/spaces-caddy")
@@ -19,8 +22,7 @@ import XCTest
             XCTAssertEqual(SpacesBinaryLayout.userHelperLinkURL(for: .spacesd, homeDirectoryURL: home)?.path, "/Users/test/.spaces/bin/spacesd")
             XCTAssertNil(SpacesBinaryLayout.userHelperLinkURL(for: .spacesCaddy, homeDirectoryURL: home))
             XCTAssertEqual(
-                SpacesBinaryLayout.launchAgentURL(homeDirectoryURL: home).path,
-                "/Users/test/Library/LaunchAgents/dev.usespaces.spacesd.plist")
+                SpacesBinaryLayout.launchAgentURL(homeDirectoryURL: home).path, "/Users/test/Library/LaunchAgents/dev.usespaces.spacesd.plist")
         }
 
         func testRepairReplacesStaleCopiesWithSymlinksAndUpdatesLaunchAgentPath() throws {
@@ -65,7 +67,9 @@ import XCTest
 
             XCTAssertTrue(result.failedPaths.isEmpty)
             XCTAssertTrue(result.repairedPaths.contains(launchAgent.path))
-            try assertSymlink(SpacesBinaryLayout.systemLinkURL(for: .spaces, systemBinDirectoryURL: systemBin), pointsTo: resources.appendingPathComponent("spaces"))
+            try assertSymlink(
+                SpacesBinaryLayout.systemLinkURL(for: .spaces, systemBinDirectoryURL: systemBin), pointsTo: resources.appendingPathComponent("spaces")
+            )
             try assertSymlink(
                 SpacesBinaryLayout.systemLinkURL(for: .spacesd, systemBinDirectoryURL: systemBin),
                 pointsTo: resources.appendingPathComponent("spacesd"))
@@ -73,11 +77,9 @@ import XCTest
                 SpacesBinaryLayout.systemLinkURL(for: .spacesCaddy, systemBinDirectoryURL: systemBin),
                 pointsTo: resources.appendingPathComponent("caddy"))
             try assertSymlink(
-                SpacesBinaryLayout.userHelperLinkURL(for: .spaces, homeDirectoryURL: home)!,
-                pointsTo: resources.appendingPathComponent("spaces"))
+                SpacesBinaryLayout.userHelperLinkURL(for: .spaces, homeDirectoryURL: home)!, pointsTo: resources.appendingPathComponent("spaces"))
             try assertSymlink(
-                SpacesBinaryLayout.userHelperLinkURL(for: .spacesd, homeDirectoryURL: home)!,
-                pointsTo: resources.appendingPathComponent("spacesd"))
+                SpacesBinaryLayout.userHelperLinkURL(for: .spacesd, homeDirectoryURL: home)!, pointsTo: resources.appendingPathComponent("spacesd"))
 
             let data = try Data(contentsOf: launchAgent)
             XCTAssertEqual(

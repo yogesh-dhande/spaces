@@ -111,12 +111,17 @@ require_linux_supported_arch() {
     esac
 }
 
+ghostty_submodule_is_initialized() {
+    [[ -e "$GHOSTTY_SOURCE_ROOT/.git" ]] || return 1
+    git -C "$GHOSTTY_SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1
+}
+
 resolve_ghostty_sha() {
     if [[ -n "${SPACES_GHOSTTY_SHA:-}" ]]; then
         echo "$SPACES_GHOSTTY_SHA"
         return
     fi
-    if git -C "$GHOSTTY_SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if ghostty_submodule_is_initialized; then
         git -C "$GHOSTTY_SOURCE_ROOT" rev-parse HEAD
         return
     fi
@@ -131,7 +136,7 @@ ensure_ghostty_submodule() {
     if [[ -f "$GHOSTTY_SOURCE_ROOT/build.zig.zon" ]]; then
         return
     fi
-    if git -C "$GHOSTTY_SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if ghostty_submodule_is_initialized; then
         return
     fi
     echo "==> Initializing Ghostty submodule"
@@ -139,7 +144,7 @@ ensure_ghostty_submodule() {
 }
 
 ghostty_dirty_state() {
-    if ! git -C "$GHOSTTY_SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if ! ghostty_submodule_is_initialized; then
         echo "false"
         return
     fi

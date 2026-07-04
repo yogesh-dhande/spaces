@@ -14,9 +14,7 @@ public struct MissingTrackedWindowContext: Sendable {
     public let processID: String?
     public let title: String
 
-    public init(
-        kind: MissingTrackedWindowKind, workspaceID: String, targetURL: String? = nil, processID: String? = nil, title: String
-    ) {
+    public init(kind: MissingTrackedWindowKind, workspaceID: String, targetURL: String? = nil, processID: String? = nil, title: String) {
         self.kind = kind
         self.workspaceID = workspaceID
         self.targetURL = targetURL

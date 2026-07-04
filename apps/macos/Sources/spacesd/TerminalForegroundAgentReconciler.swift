@@ -13,8 +13,7 @@ import workspacecore
 ///
 /// Foreground changes can arrive faster than a reconcile completes, so events that
 /// land mid-flight collapse into a single trailing re-run.
-@MainActor
-final class TerminalForegroundAgentReconciler {
+@MainActor final class TerminalForegroundAgentReconciler {
     private let databasePath: String
     private let onError: (@Sendable (any Error) -> Void)?
     private var observer: NSObjectProtocol?
@@ -28,9 +27,7 @@ final class TerminalForegroundAgentReconciler {
 
     func start() {
         guard observer == nil else { return }
-        observer = NotificationCenter.default.addObserver(
-            forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main
-        ) { [weak self] _ in
+        observer = NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.reconcile() }
         }
     }
@@ -58,9 +55,7 @@ final class TerminalForegroundAgentReconciler {
                     do {
                         let store = try SQLiteStore(path: databasePath)
                         _ = try WorkspaceOrchestrator(store: store).reconcileTerminalForegroundAgentClassifications()
-                    } catch {
-                        onError?(error)
-                    }
+                    } catch { onError?(error) }
                 }.value
             } while self.pending
             self.inFlight = false

@@ -42,11 +42,8 @@ public enum SpacesBinaryLayout {
     }
 
     public static func systemLinkURL(
-        for binary: SpacesOwnedBinary,
-        systemBinDirectoryURL: URL = URL(fileURLWithPath: "/usr/local/bin", isDirectory: true)
-    ) -> URL {
-        systemBinDirectoryURL.appendingPathComponent(binary.systemLinkName, isDirectory: false)
-    }
+        for binary: SpacesOwnedBinary, systemBinDirectoryURL: URL = URL(fileURLWithPath: "/usr/local/bin", isDirectory: true)
+    ) -> URL { systemBinDirectoryURL.appendingPathComponent(binary.systemLinkName, isDirectory: false) }
 
     public static func userHelperLinkURL(for binary: SpacesOwnedBinary, homeDirectoryURL: URL = defaultHomeDirectoryURL()) -> URL? {
         guard let name = binary.userHelperName else { return nil }
@@ -57,9 +54,7 @@ public enum SpacesBinaryLayout {
         homeDirectoryURL.appendingPathComponent("Library/LaunchAgents/\(launchAgentLabel).plist", isDirectory: false)
     }
 
-    public static func defaultHomeDirectoryURL() -> URL {
-        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-    }
+    public static func defaultHomeDirectoryURL() -> URL { URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true) }
 }
 
 #if os(macOS)
@@ -73,10 +68,8 @@ public enum SpacesBinaryLayout {
 
     public enum SpacesMacInstallationRepair {
         @discardableResult public static func repairCurrentAppInstallation(
-            appBundleURL: URL = Bundle.main.bundleURL,
-            systemBinDirectoryURL: URL = URL(fileURLWithPath: "/usr/local/bin", isDirectory: true),
-            homeDirectoryURL: URL = SpacesBinaryLayout.defaultHomeDirectoryURL(),
-            fileManager: FileManager = .default,
+            appBundleURL: URL = Bundle.main.bundleURL, systemBinDirectoryURL: URL = URL(fileURLWithPath: "/usr/local/bin", isDirectory: true),
+            homeDirectoryURL: URL = SpacesBinaryLayout.defaultHomeDirectoryURL(), fileManager: FileManager = .default,
             requireInstalledBundle: Bool = true
         ) -> SpacesMacInstallationRepairResult {
             guard appBundleURL.pathExtension == "app" else { return SpacesMacInstallationRepairResult(repairedPaths: [], failedPaths: [:]) }
@@ -98,8 +91,8 @@ public enum SpacesBinaryLayout {
                 guard fileManager.isExecutableFile(atPath: sourceURL.path) else { continue }
 
                 repairLink(
-                    at: SpacesBinaryLayout.systemLinkURL(for: binary, systemBinDirectoryURL: systemBinDirectoryURL),
-                    target: sourceURL, fileManager: fileManager, repairedPaths: &repairedPaths, failedPaths: &failedPaths)
+                    at: SpacesBinaryLayout.systemLinkURL(for: binary, systemBinDirectoryURL: systemBinDirectoryURL), target: sourceURL,
+                    fileManager: fileManager, repairedPaths: &repairedPaths, failedPaths: &failedPaths)
 
                 if let helperURL = SpacesBinaryLayout.userHelperLinkURL(for: binary, homeDirectoryURL: homeDirectoryURL) {
                     repairLink(at: helperURL, target: sourceURL, fileManager: fileManager, repairedPaths: &repairedPaths, failedPaths: &failedPaths)
@@ -116,13 +109,11 @@ public enum SpacesBinaryLayout {
 
         static func desiredLaunchAgentPlist(homeDirectoryURL: URL) -> [String: Any] {
             let runtimeDirectory = homeDirectoryURL.appendingPathComponent(".spaces/runtime", isDirectory: true)
-            let daemonPath = SpacesBinaryLayout.userHelperLinkURL(for: .spacesd, homeDirectoryURL: homeDirectoryURL)?.path
+            let daemonPath =
+                SpacesBinaryLayout.userHelperLinkURL(for: .spacesd, homeDirectoryURL: homeDirectoryURL)?.path
                 ?? homeDirectoryURL.appendingPathComponent(".spaces/bin/spacesd", isDirectory: false).path
             return [
-                "Label": SpacesBinaryLayout.launchAgentLabel,
-                "ProgramArguments": [daemonPath],
-                "RunAtLoad": true,
-                "KeepAlive": true,
+                "Label": SpacesBinaryLayout.launchAgentLabel, "ProgramArguments": [daemonPath], "RunAtLoad": true, "KeepAlive": true,
                 "WorkingDirectory": homeDirectoryURL.path,
                 "StandardOutPath": runtimeDirectory.appendingPathComponent("spacesd.launchd.out.log", isDirectory: false).path,
                 "StandardErrorPath": runtimeDirectory.appendingPathComponent("spacesd.launchd.err.log", isDirectory: false).path,
@@ -130,33 +121,23 @@ public enum SpacesBinaryLayout {
         }
 
         static func launchAgentProgramArguments(from data: Data) -> [String]? {
-            guard
-                let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+            guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                 let arguments = plist["ProgramArguments"] as? [String]
             else { return nil }
             return arguments
         }
 
         private static func repairLink(
-            at linkURL: URL,
-            target targetURL: URL,
-            fileManager: FileManager,
-            repairedPaths: inout [String],
-            failedPaths: inout [String: String]
+            at linkURL: URL, target targetURL: URL, fileManager: FileManager, repairedPaths: inout [String], failedPaths: inout [String: String]
         ) {
             do {
                 guard try replaceSymbolicLinkIfNeeded(at: linkURL, target: targetURL, fileManager: fileManager) else { return }
                 repairedPaths.append(linkURL.path)
-            } catch {
-                failedPaths[linkURL.path] = error.localizedDescription
-            }
+            } catch { failedPaths[linkURL.path] = error.localizedDescription }
         }
 
         private static func repairLaunchAgent(
-            homeDirectoryURL: URL,
-            fileManager: FileManager,
-            repairedPaths: inout [String],
-            failedPaths: inout [String: String]
+            homeDirectoryURL: URL, fileManager: FileManager, repairedPaths: inout [String], failedPaths: inout [String: String]
         ) {
             let plistURL = SpacesBinaryLayout.launchAgentURL(homeDirectoryURL: homeDirectoryURL)
             let desiredPlist = desiredLaunchAgentPlist(homeDirectoryURL: homeDirectoryURL)
@@ -166,8 +147,7 @@ public enum SpacesBinaryLayout {
 
             do {
                 try fileManager.createDirectory(
-                    at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o755])
+                    at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
                 try fileManager.createDirectory(
                     at: homeDirectoryURL.appendingPathComponent(".spaces/runtime", isDirectory: true), withIntermediateDirectories: true,
                     attributes: [.posixPermissions: 0o755])
@@ -175,9 +155,7 @@ public enum SpacesBinaryLayout {
                 try data.write(to: plistURL, options: .atomic)
                 try? fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: plistURL.path)
                 repairedPaths.append(plistURL.path)
-            } catch {
-                failedPaths[plistURL.path] = error.localizedDescription
-            }
+            } catch { failedPaths[plistURL.path] = error.localizedDescription }
         }
 
         private static func replaceSymbolicLinkIfNeeded(at linkURL: URL, target targetURL: URL, fileManager: FileManager) throws -> Bool {
@@ -188,12 +166,8 @@ public enum SpacesBinaryLayout {
 
             var isDirectory: ObjCBool = false
             let exists = fileManager.fileExists(atPath: linkURL.path, isDirectory: &isDirectory)
-            if exists && isDirectory.boolValue {
-                throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: linkURL.path])
-            }
-            if exists || (try? fileManager.destinationOfSymbolicLink(atPath: linkURL.path)) != nil {
-                try fileManager.removeItem(at: linkURL)
-            }
+            if exists && isDirectory.boolValue { throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: linkURL.path]) }
+            if exists || (try? fileManager.destinationOfSymbolicLink(atPath: linkURL.path)) != nil { try fileManager.removeItem(at: linkURL) }
 
             try fileManager.createDirectory(
                 at: linkURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])

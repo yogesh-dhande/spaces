@@ -274,7 +274,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             terminalApp: "Spaces", terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil,
             lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         let processWindow = WindowRecord(
-            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", windowID: nil, terminalTrackingID: "session-api",
+            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", terminalTrackingID: "session-api",
             terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
@@ -373,10 +373,10 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: nil)
         let terminalWindow = WindowRecord(
-            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", windowID: nil, terminalTrackingID: "session-shell",
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-shell",
             terminalNativeID: "session-shell", role: "terminal", orderIndex: 0, lastSeenAt: "now")
         let processWindow = WindowRecord(
-            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "api", windowID: nil, terminalTrackingID: "session-api",
+            id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "api", terminalTrackingID: "session-api",
             terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
@@ -392,13 +392,30 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(overview.workspaces.first?.processRows.first?.canRun, false)
     }
 
+    func testRenamedSessionUserTitleWinsOverRuntimeTitleInSummariesAndTerminalRows() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        // The runtime title mimics a Ghostty set_title update that arrived after the manual rename.
+        let session = makeSessionCatalogEntry(
+            sessionID: "session-renamed", title: "shell-1", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init(),
+            userTitle: "build watcher", runtimeTitle: "vim main.swift")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace)], sessions: [session])
+
+        XCTAssertEqual(overview.sessions.first?.title, "build watcher")
+        XCTAssertEqual(overview.workspaces.first?.terminalRows.first?.title, "build watcher")
+    }
+
     func testTrackedWorkspaceTerminalRequiresLiveSessionIDBeforeStopIsAvailable() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
             isRunning: true, lastLaunchedAt: nil)
         let terminalWindow = WindowRecord(
-            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", windowID: nil, terminalTrackingID: nil,
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: nil,
             terminalNativeID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
@@ -495,14 +512,14 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
     private func makeSessionCatalogEntry(
         sessionID: String, title: String, workingDirectory: String, state: TerminalSessionState = .running, workspaceID: String? = nil,
         kind: TerminalSessionKind = .shell, attachmentSnapshot: TerminalSessionAttachmentSnapshot, isControlAvailable: Bool = true,
-        isSubscriptionAvailable: Bool = true
+        isSubscriptionAvailable: Bool = true, userTitle: String? = nil, runtimeTitle: String? = nil
     ) -> TerminalSessionCatalogEntry {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title, workingDirectory: workingDirectory,
-            shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T08:00:00Z", workspaceID: workspaceID, kind: kind)
+            shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T08:00:00Z", workspaceID: workspaceID, kind: kind, userTitle: userTitle)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 123, childPID: 456, state: state, updatedAt: "2026-05-18T08:00:05Z",
-            title: title, workingDirectory: workingDirectory)
+            title: runtimeTitle ?? title, workingDirectory: workingDirectory)
         return TerminalSessionCatalogEntry(
             launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: attachmentSnapshot,
             paths: TerminalSessionPaths(rootDirectory: "/tmp/\(sessionID)"), isControlAvailable: isControlAvailable,

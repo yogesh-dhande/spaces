@@ -1133,6 +1133,18 @@ public struct SpacesDeviceWorkspaceTerminalRequest: Codable, Sendable, Equatable
     }
 }
 
+public struct SpacesDeviceTerminalSessionRenameRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let sessionID: String
+    public let title: String
+
+    public init(workspaceID: String, sessionID: String, title: String) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+        self.title = title
+    }
+}
+
 public struct SpacesDeviceRunWorkspaceProcessRequest: Codable, Sendable, Equatable {
     public let workspaceID: String
     public let processKey: String
@@ -1326,6 +1338,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case updateWorkspaceMetadata(SpacesDeviceWorkspaceMetadataUpdateRequest)
     case openWorkspaceTerminal(SpacesDeviceWorkspaceReference)
     case stopWorkspaceTerminal(SpacesDeviceWorkspaceTerminalRequest)
+    case renameTerminalSession(SpacesDeviceTerminalSessionRenameRequest)
     case runWorkspaceProcess(SpacesDeviceRunWorkspaceProcessRequest)
     case stopWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest)
     case restartWorkspaceProcess(SpacesDeviceWorkspaceProcessMutationRequest)
@@ -1370,6 +1383,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .updateWorkspaceMetadata: "updateWorkspaceMetadata"
         case .openWorkspaceTerminal: "openWorkspaceTerminal"
         case .stopWorkspaceTerminal: "stopWorkspaceTerminal"
+        case .renameTerminalSession: "renameTerminalSession"
         case .runWorkspaceProcess: "runWorkspaceProcess"
         case .stopWorkspaceProcess: "stopWorkspaceProcess"
         case .restartWorkspaceProcess: "restartWorkspaceProcess"
@@ -1389,6 +1403,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     public var terminalSessionID: String? {
         switch self {
         case .stopWorkspaceTerminal(let payload): payload.sessionID
+        case .renameTerminalSession(let payload): payload.sessionID
         case .state(let payload): payload.sessionID
         case .terminalControl(let payload): payload.sessionID
         case .terminalPasteImage(let payload): payload.sessionID
@@ -1464,6 +1479,7 @@ extension SpacesDeviceAPICommand: Codable {
         case updateWorkspaceMetadata
         case openWorkspaceTerminal
         case stopWorkspaceTerminal
+        case renameTerminalSession
         case runWorkspaceProcess
         case stopWorkspaceProcess
         case restartWorkspaceProcess
@@ -1522,6 +1538,7 @@ extension SpacesDeviceAPICommand: Codable {
             self = .updateWorkspaceMetadata(try container.decode(SpacesDeviceWorkspaceMetadataUpdateRequest.self, forKey: key))
         case .openWorkspaceTerminal: self = .openWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceReference.self, forKey: key))
         case .stopWorkspaceTerminal: self = .stopWorkspaceTerminal(try container.decode(SpacesDeviceWorkspaceTerminalRequest.self, forKey: key))
+        case .renameTerminalSession: self = .renameTerminalSession(try container.decode(SpacesDeviceTerminalSessionRenameRequest.self, forKey: key))
         case .runWorkspaceProcess: self = .runWorkspaceProcess(try container.decode(SpacesDeviceRunWorkspaceProcessRequest.self, forKey: key))
         case .stopWorkspaceProcess: self = .stopWorkspaceProcess(try container.decode(SpacesDeviceWorkspaceProcessMutationRequest.self, forKey: key))
         case .restartWorkspaceProcess:
@@ -1569,6 +1586,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .updateWorkspaceMetadata(let payload): try container.encode(payload, forKey: .updateWorkspaceMetadata)
         case .openWorkspaceTerminal(let payload): try container.encode(payload, forKey: .openWorkspaceTerminal)
         case .stopWorkspaceTerminal(let payload): try container.encode(payload, forKey: .stopWorkspaceTerminal)
+        case .renameTerminalSession(let payload): try container.encode(payload, forKey: .renameTerminalSession)
         case .runWorkspaceProcess(let payload): try container.encode(payload, forKey: .runWorkspaceProcess)
         case .stopWorkspaceProcess(let payload): try container.encode(payload, forKey: .stopWorkspaceProcess)
         case .restartWorkspaceProcess(let payload): try container.encode(payload, forKey: .restartWorkspaceProcess)

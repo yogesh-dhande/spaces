@@ -169,6 +169,20 @@ import Testing
         #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .abort) == .cancel)
     }
 
+    @MainActor @Test func nonGitProjectSaveAlwaysSyncsItsWorkspace() {
+        // A non-git project stands in for its single workspace, so saving its settings must sync to
+        // that workspace regardless of any pending-import choice — the edits are the config that runs.
+        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: false))
+        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: true))
+    }
+
+    @MainActor @Test func gitProjectSaveSyncsOnlyWhenImportChoseUpdateAll() {
+        // A git project keeps the template/per-workspace split: a plain save leaves existing
+        // workspaces untouched, and only a pending import that chose Update All Workspaces syncs.
+        #expect(!AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: false))
+        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: true))
+    }
+
     @MainActor @Test func managedDirectoryReplacementDecisionMapsAlertResponses() {
         #expect(AppKitController.managedDirectoryReplacementDecision(for: .alertFirstButtonReturn) == .replace)
         #expect(AppKitController.managedDirectoryReplacementDecision(for: .alertSecondButtonReturn) == .cancel)

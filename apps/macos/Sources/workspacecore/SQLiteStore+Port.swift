@@ -69,9 +69,7 @@ extension SQLiteStore {
 
     func validatedServiceDefinitions(_ definitions: [ServiceDefinition]) throws -> [ServiceDefinition] {
         let names = try ServiceName.validatedUnique(definitions.map(\.name))
-        return zip(definitions, names).map { definition, name in
-            ServiceDefinition(id: definition.id, name: name)
-        }
+        return zip(definitions, names).map { definition, name in ServiceDefinition(id: definition.id, name: name) }
     }
 
     func validatedServiceNames(_ names: [String], expectedCount: Int) throws -> [String] {

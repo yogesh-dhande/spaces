@@ -3,7 +3,7 @@ import Foundation
 import spacesterminalcore
 import spacesterminalghostty
 
-extension TerminalSessionWindowController {
+extension TerminalSessionPaneViewController {
     @objc public func find(_ sender: Any?) {
         if visibleRenderer == .ghosttyOwner {
             _ = performLiveTerminalBindingAction("start_search")

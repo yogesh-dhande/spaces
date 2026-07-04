@@ -21,13 +21,10 @@ final class CommandPalettePanel: NSPanel {
 /// Owns the Command Palette's state and behavior. `AppKitController` holds a single
 /// instance and delegates palette interactions to it. The controller reaches back
 /// into the host for shared window/hotkey/orchestration services via `host`.
-@MainActor
-final class CommandPaletteController {
+@MainActor final class CommandPaletteController {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
-    }
+    init(host: AppKitController) { self.host = host }
 
     var commandPalettePanel: NSPanel?
     var commandPaletteSearchField: NSSearchField?
@@ -47,6 +44,19 @@ final class CommandPaletteController {
     var recentCommandPaletteFocusIdentities: [String] = []
     var commandPaletteReturnTerminalSessionID: String?
     var commandPaletteReturnApplicationProcessID: pid_t?
+
+    /// Non-nil while the palette runs in session-picker mode (filling a pane split):
+    /// the rows are "New terminal session" plus existing sessions in scope, Enter
+    /// resolves the choice through `completion` instead of focusing a window, and
+    /// dismissal reports nil. Normal palette items reload on the next presentation.
+    struct SessionPickerContext {
+        let scope: PanelScope
+        let newTerminalWorkspaceID: String
+        let choicesByItemID: [String: AppKitController.SessionPickerChoice]
+        let completion: (AppKitController.SessionPickerChoice?) -> Void
+    }
+
+    var sessionPickerContext: SessionPickerContext?
 
     func filteredCommandPaletteItems(_ items: [CommandPaletteItem]) -> [CommandPaletteItem] {
         items.filter { item in
@@ -127,7 +137,7 @@ final class CommandPaletteController {
 
     func commandPaletteDefaultWorkspaceID() -> String? {
         let focusedTerminalWorkspaceID: String?
-        if let terminalSessionID = host.focusedTerminalSessionIDForToggle() {
+        if let terminalSessionID = host.panelCoordinator.focusedSessionID() {
             let lookupStartedAt = Date()
             focusedTerminalWorkspaceID = host.clientWorkspaceID(forTerminalSession: terminalSessionID)
             host.logPerfMetric(
@@ -234,7 +244,7 @@ final class CommandPaletteController {
         let panel = ensureCommandPalettePanel()
         let mainWindowWasVisible = host.rawMainWindowVisibility()
         host.logHotkeyDebug("present_palette begin \(host.hotkeyWindowStateSummary())")
-        let focusedTerminalSessionID = host.focusedTerminalSessionIDForToggle()
+        let focusedTerminalSessionID = host.panelCoordinator.focusedSessionID()
         let returnApplicationProcessID = AppKitController.returnApplicationProcessIDForAppToggle(
             frontmostApplicationProcessID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             currentProcessID: ProcessInfo.processInfo.processIdentifier)
@@ -248,7 +258,8 @@ final class CommandPaletteController {
         panel.center()
         let revealStartedAt = Date()
         host.revealTargetedHotkeyWindow(panel)
-        host.logPerfMetric("toggle_palette_reveal_target", target: "palette", elapsedMS: host.windowShortcutElapsedMS(since: revealStartedAt), success: true)
+        host.logPerfMetric(
+            "toggle_palette_reveal_target", target: "palette", elapsedMS: host.windowShortcutElapsedMS(since: revealStartedAt), success: true)
         commandPaletteSearchField?.stringValue = ""
         commandPaletteSelectedIndex = 0
         if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
@@ -261,7 +272,8 @@ final class CommandPaletteController {
         } else if commandPaletteNeedsReload, commandPaletteLoadTask == nil {
             reloadCommandPaletteItems()
         }
-        pendingCommandPalettePresentation = AppKitController.PendingCommandPalettePresentation(perfContext: perfContext, mainWindowWasVisible: mainWindowWasVisible)
+        pendingCommandPalettePresentation = AppKitController.PendingCommandPalettePresentation(
+            perfContext: perfContext, mainWindowWasVisible: mainWindowWasVisible)
         completePendingCommandPalettePresentationIfNeeded()
         Task { @MainActor [weak self] in
             await Task.yield()
@@ -273,14 +285,15 @@ final class CommandPaletteController {
         guard let panel = commandPalettePanel else { return }
         guard !isDismissingCommandPalette else { return }
         isDismissingCommandPalette = true
-        host.logHotkeyDebug("dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(host.hotkeyWindowStateSummary())")
+        host.logHotkeyDebug(
+            "dismiss_palette begin visible=\(panel.isVisible ? 1 : 0) key=\(panel.isKeyWindow ? 1 : 0) \(host.hotkeyWindowStateSummary())")
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
         commandPaletteContextWorkspaceID = nil
         if AppKitController.shouldRestoreTerminalFocusAfterPaletteHide(returnTerminalSessionID: commandPaletteReturnTerminalSessionID),
             let returnTerminalSessionID = commandPaletteReturnTerminalSessionID
         {
-            host.focusTerminalSessionWindow(sessionID: returnTerminalSessionID)
+            host.panelCoordinator.focusPane(forSessionID: returnTerminalSessionID)
         } else if AppKitController.shouldRestoreReturnApplicationAfterPaletteHide(
             returnTerminalSessionID: commandPaletteReturnTerminalSessionID, returnApplicationProcessID: commandPaletteReturnApplicationProcessID),
             let returnApplicationProcessID = commandPaletteReturnApplicationProcessID
@@ -295,6 +308,9 @@ final class CommandPaletteController {
         commandPaletteReturnTerminalSessionID = nil
         commandPaletteReturnApplicationProcessID = nil
         if let perfContext { host.logHotkeyPerfMetric("toggle_palette", action: "hide", context: perfContext) }
+        // Dismissing while picking (esc, click-away) resolves the picker as cancelled;
+        // Enter takes the context before dismissing, so this only fires for real cancels.
+        takeSessionPickerContext()?.completion(nil)
     }
 
     func ensureCommandPalettePanel() -> NSPanel {
@@ -527,7 +543,46 @@ final class CommandPaletteController {
         return panel
     }
 
+    /// Presents the palette in session-picker mode for filling a pane split. The items
+    /// and their choice mapping are built by the host from the scope's overviews.
+    func presentSessionPicker(
+        scope: PanelScope, newTerminalWorkspaceID: String, items: [CommandPaletteItem],
+        choicesByItemID: [String: AppKitController.SessionPickerChoice], completion: @escaping (AppKitController.SessionPickerChoice?) -> Void
+    ) {
+        // A picker opening over a live normal palette cancels it cleanly first.
+        if sessionPickerContext != nil { dismissCommandPalette() }
+        commandPaletteLoadTask?.cancel()
+        commandPaletteLoadTask = nil
+        sessionPickerContext = SessionPickerContext(
+            scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, choicesByItemID: choicesByItemID, completion: completion)
+        let panel = ensureCommandPalettePanel()
+        commandPaletteItems = items
+        commandPaletteContextWorkspaceID = newTerminalWorkspaceID
+        commandPaletteReturnTerminalSessionID = nil
+        commandPaletteReturnApplicationProcessID = nil
+        setCommandPaletteLoading(false)
+        panel.center()
+        host.revealTargetedHotkeyWindow(panel)
+        commandPaletteSearchField?.stringValue = ""
+        commandPaletteSelectedIndex = 0
+        if let commandPaletteSearchField { panel.makeFirstResponder(commandPaletteSearchField) }
+        applyCommandPaletteFilter()
+    }
+
+    /// Ends picker mode and returns its context (nil when not picking), restoring the
+    /// palette to normal mode for its next presentation. Callers deliver the completion
+    /// exactly once with their outcome.
+    private func takeSessionPickerContext() -> SessionPickerContext? {
+        guard let context = sessionPickerContext else { return nil }
+        sessionPickerContext = nil
+        commandPaletteItems = []
+        commandPaletteNeedsReload = true
+        return context
+    }
+
     func reloadCommandPaletteItems() {
+        // Picker rows are host-provided; a background overview reload must not replace them.
+        guard sessionPickerContext == nil else { return }
         commandPaletteLoadTask?.cancel()
         setCommandPaletteLoading(true)
         host.logHotkeyDebug("reload_palette_items begin")
@@ -563,9 +618,12 @@ final class CommandPaletteController {
 
     func applyCommandPaletteFilter() {
         let query = commandPaletteSearchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        commandPaletteFilteredItems = AppKitController.visibleCommandPaletteItems(
-            allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
-            recentFocusIdentities: recentCommandPaletteFocusIdentities)
+        commandPaletteFilteredItems =
+            sessionPickerContext != nil
+            ? AppKitController.visibleSessionPickerItems(allItems: commandPaletteItems, query: query)
+            : AppKitController.visibleCommandPaletteItems(
+                allItems: commandPaletteItems, query: query, currentWorkspaceID: commandPaletteContextWorkspaceID,
+                recentFocusIdentities: recentCommandPaletteFocusIdentities)
         commandPaletteSelectedIndex = commandPaletteFilteredItems.isEmpty ? 0 : 0
         host.logHotkeyDebug(
             "apply_palette_filter query=\(query.isEmpty ? "<empty>" : query) all=\(commandPaletteItems.count) filtered=\(commandPaletteFilteredItems.count) context_workspace=\(commandPaletteContextWorkspaceID ?? "nil")"
@@ -609,6 +667,18 @@ final class CommandPaletteController {
             return
         }
         let item = commandPaletteFilteredItems[commandPaletteSelectedIndex]
+        if let picker = sessionPickerContext {
+            guard let choice = picker.choicesByItemID[item.id] else {
+                NSSound.beep()
+                return
+            }
+            // Take the context before dismissing so the dismissal path cannot resolve
+            // this pick as a cancel.
+            let context = takeSessionPickerContext()
+            dismissCommandPalette()
+            context?.completion(choice)
+            return
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard let action = await self.host.executeWindowFocus(item.focusRequest) else { return }

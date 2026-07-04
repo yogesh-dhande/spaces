@@ -130,21 +130,7 @@ import Foundation
         }
 
         private static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
-            let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
-            guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executablePath)
-            process.arguments = ["-nP", "-U"]
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
-            do { try process.run() } catch { return [] }
-            // Drain stdout before waiting: lsof output can exceed the pipe buffer, and a full
-            // pipe blocks lsof from exiting, deadlocking waitUntilExit.
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return [] }
-            return TerminalService.parseSocketOwnerProcessIDs(String(decoding: data, as: UTF8.self), socketPath: socketPath)
+            TerminalService.serviceProcessIDsOwningSocket(socketPath)
         }
 
         private static func adminSocketHasOwner(_ socketPath: String) -> Bool { !serviceProcessIDsOwningSocket(socketPath).isEmpty }

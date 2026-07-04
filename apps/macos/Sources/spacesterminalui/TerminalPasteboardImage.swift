@@ -27,9 +27,7 @@ public enum TerminalPasteboardImageReadResult: Equatable {
 public enum TerminalPasteboardImageReader {
     private static let oversizedImageMessage = "Image paste is limited to 10 MiB."
     private static let jpegType = NSPasteboard.PasteboardType("public.jpeg")
-    private static let supportedFileExtensions: Set<String> = [
-        "avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp",
-    ]
+    private static let supportedFileExtensions: Set<String> = ["avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp"]
 
     public static func readImage(from pasteboard: NSPasteboard = .general) -> TerminalPasteboardImageReadResult {
         if let pngData = pasteboard.data(forType: .png) { return validatedImage(data: pngData, fileExtension: "png") }
@@ -39,9 +37,7 @@ public enum TerminalPasteboardImageReader {
     }
 
     private static func readImageFileURL(from pasteboard: NSPasteboard) -> TerminalPasteboardImageReadResult {
-        guard
-            let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-            let url = urls.first
+        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], let url = urls.first
         else { return .noImage }
         let fileExtension = url.pathExtension.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines)).lowercased()
         guard supportedFileExtensions.contains(fileExtension) else { return .noImage }
@@ -66,9 +62,7 @@ public enum TerminalPasteboardImageReader {
         return .image(TerminalPasteboardImage(fileExtension: fileExtension, imageData: data))
     }
 
-    private static func imageFileSize(at url: URL) -> Int? {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
-    }
+    private static func imageFileSize(at url: URL) -> Int? { (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize }
 
     private static func pngData(fromTIFFData data: Data) -> Data? {
         guard let image = NSImage(data: data), let tiffRepresentation = image.tiffRepresentation,

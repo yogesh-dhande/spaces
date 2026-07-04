@@ -33,8 +33,8 @@
                 defer { requestClient.cancel() }
                 let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
                 let clientApp = SpacesDeviceClientApp(
-                    installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
-                    deviceName: "Mac", appVersion: "1.0")
+                    installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                    appVersion: "1.0")
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
@@ -84,16 +84,15 @@
                 let requestClient = try SpacesDeviceAPIRequestSessionClient(host: "127.0.0.1", port: server.listeningPort, transportKey: transportKey)
                 defer { requestClient.cancel() }
                 let clientApp = SpacesDeviceClientApp(
-                    installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
-                    deviceName: "Mac", appVersion: "1.0")
+                    installationID: "paste-image-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                    appVersion: "1.0")
 
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
                         command: .terminalPasteImage(
                             SpacesDeviceTerminalPasteImageRequest(
                                 sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: "png",
-                                imageData: Data([0x89, 0x50, 0x4E, 0x47]))),
-                        authToken: pairingStore.authToken, clientApp: clientApp))
+                                imageData: Data([0x89, 0x50, 0x4E, 0x47]))), authToken: pairingStore.authToken, clientApp: clientApp))
 
                 XCTAssertFalse(response.ok)
                 let remotePath = try XCTUnwrap(recorder.waitForRequest(timeout: 5)?.text)
@@ -106,15 +105,15 @@
             try paths.ensureDirectories()
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "cat", workingDirectory: "/tmp", shell: "/bin/zsh",
-                    command: "cat", createdAt: "2026-07-02T00:00:00Z"), paths: paths)
+                    sessionID: sessionID, backend: .ghosttyEmbedded, title: "cat", workingDirectory: "/tmp", shell: "/bin/zsh", command: "cat",
+                    createdAt: "2026-07-02T00:00:00Z"), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(
-                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
-                    childPID: 123, state: .running, updatedAt: "2026-07-02T00:00:01Z"), paths: paths)
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 123,
+                    state: .running, updatedAt: "2026-07-02T00:00:01Z"), paths: paths)
             let terminalClient = TerminalClient(
-                id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "Remote Mac"),
-                connectedAt: "2026-07-02T00:00:01Z", leaseRefreshedAt: "2026-07-02T00:00:01Z")
+                id: clientID, kind: .remoteViewer, identity: TerminalClientIdentity(label: "Remote Mac"), connectedAt: "2026-07-02T00:00:01Z",
+                leaseRefreshedAt: "2026-07-02T00:00:01Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: sessionID, client: terminalClient, mode: .owner, paths: paths, attachedAt: "2026-07-02T00:00:01Z")
             try TerminalSessionPersistence.writeRemoteSessionState(remoteStatePayload(sessionID: sessionID, ownerEpoch: ownerEpoch), paths: paths)
@@ -123,13 +122,13 @@
 
         private func remoteStatePayload(sessionID: String, ownerEpoch: UInt64) throws -> GhosttyRemoteSessionStatePayload {
             let snapshot = GhosttyTerminalSnapshot(
-                columns: 1, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xFFFFFF,
-                defaultBackgroundRGB: 0, cells: [GhosttyTerminalSnapshot.Cell(codepoint: 32, foregroundRGB: 0xFFFFFF, backgroundRGB: 0, flags: 0)])
+                columns: 1, rows: 1, cursorColumn: 0, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xFFFFFF, defaultBackgroundRGB: 0,
+                cells: [GhosttyTerminalSnapshot.Cell(codepoint: 32, foregroundRGB: 0xFFFFFF, backgroundRGB: 0, flags: 0)])
             let frame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: ownerEpoch, snapshot: snapshot)
             return GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-07-02T00:00:01Z",
-                sessionStateRevision: 1, sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "cat",
-                workingDirectory: "/tmp", outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-07-02T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: nil, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "cat", workingDirectory: "/tmp",
+                outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(frame)))
         }
 
         private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {
@@ -140,10 +139,16 @@
             setenv(SpacesProfile.databasePathEnvironmentVariable, root.appendingPathComponent("spaces.db").path, 1)
             unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
             defer {
-                if let originalDatabasePath { setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1) }
-                else { unsetenv(SpacesProfile.databasePathEnvironmentVariable) }
-                if let originalRuntimePath { setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimePath, 1) }
-                else { unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable) }
+                if let originalDatabasePath {
+                    setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+                } else {
+                    unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+                }
+                if let originalRuntimePath {
+                    setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimePath, 1)
+                } else {
+                    unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+                }
                 try? FileManager.default.removeItem(at: root)
             }
             try body(root)

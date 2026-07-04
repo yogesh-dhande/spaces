@@ -8,6 +8,10 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let workspaceID: String?
     public let kind: TerminalSessionKind
     public let title: String
+    /// Manual rename applied by the user via `renameTerminalSession`. Kept separate from
+    /// `title` (the launch-time title) because the runtime title is continuously rewritten
+    /// from Ghostty set_title events; a set user title must win over both.
+    public let userTitle: String?
     public let workingDirectory: String
     public let shell: String
     public let command: String?
@@ -24,7 +28,8 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
 
     public init(
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent,
-        title: String, workingDirectory: String, shell: String, command: String?, createdAt: String, workspaceID: String?, kind: TerminalSessionKind
+        title: String, workingDirectory: String, shell: String, command: String?, createdAt: String, workspaceID: String?, kind: TerminalSessionKind,
+        userTitle: String? = nil
     ) {
         self.sessionID = sessionID
         self.backend = backend
@@ -32,6 +37,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         self.workspaceID = workspaceID
         self.kind = kind
         self.title = title
+        self.userTitle = userTitle
         self.workingDirectory = workingDirectory
         self.shell = shell
         self.command = command
@@ -45,6 +51,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         case workspaceID
         case kind
         case title
+        case userTitle
         case workingDirectory
         case shell
         case command
@@ -59,6 +66,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
         kind = try container.decodeIfPresent(TerminalSessionKind.self, forKey: .kind) ?? .shell
         title = try container.decode(String.self, forKey: .title)
+        userTitle = try container.decodeIfPresent(String.self, forKey: .userTitle)
         workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
         shell = try container.decode(String.self, forKey: .shell)
         command = try container.decodeIfPresent(String.self, forKey: .command)
@@ -190,6 +198,9 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
 public enum TerminalSessionPersistence {
     public static let remoteClientLeaseInterval: TimeInterval = 60
 
+    /// Writes the launch-time configuration. `user_title` is intentionally excluded: it is owned
+    /// by `writeUserTitle` (the rename command), so launch-config rewrites can never clobber a
+    /// manual rename.
     public static func writeLaunchConfiguration(_ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
@@ -220,6 +231,20 @@ public enum TerminalSessionPersistence {
                         configuration.workspaceID ?? "", configuration.kind.rawValue, configuration.title, configuration.workingDirectory,
                         configuration.shell, configuration.command ?? "", configuration.createdAt,
                     ])
+            }
+        }
+    }
+
+    /// Persists a manual rename for the session. The stored user title takes precedence over
+    /// the auto-updated runtime title when the session's effective title is computed.
+    public static func writeUserTitle(_ userTitle: String, sessionID: String, paths: TerminalSessionPaths) throws {
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+                try database.execute(
+                    sql: "UPDATE terminal_sessions SET user_title = NULLIF(?, '') WHERE root_directory = ?", bindings: [userTitle, root])
             }
         }
     }
@@ -346,7 +371,7 @@ public enum TerminalSessionPersistence {
             let row = try database.queryRow(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell, COALESCE(command, ''),
-                           created_at
+                           created_at, COALESCE(user_title, '')
                     FROM terminal_sessions
                     WHERE root_directory = ?
                     """, bindings: [root])
@@ -695,51 +720,11 @@ public enum TerminalSessionPersistence {
             try database.queryRows(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell, COALESCE(command, ''),
-                           created_at
+                           created_at, COALESCE(user_title, '')
                     FROM terminal_sessions
                     ORDER BY created_at, session_id
                     """
             ).map(decodeLaunchConfiguration(row:))
-        }
-    }
-
-    public static func writeWindowFrame(_ frame: TerminalSessionWindowFrame, mode: TerminalAttachmentMode, paths: TerminalSessionPaths) throws {
-        let root = normalizedRootDirectory(paths.rootDirectory)
-        try paths.ensureDirectories()
-        try withDatabase(paths: paths) { database in
-            try database.withImmediateTransaction {
-                let sessionID = try existingSessionID(rootDirectory: root, database: database)
-                try database.execute(
-                    sql: """
-                        INSERT INTO terminal_window_frames(root_directory, session_id, mode, x, y, width, height, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(root_directory, mode) DO UPDATE SET
-                          session_id = excluded.session_id,
-                          x = excluded.x,
-                          y = excluded.y,
-                          width = excluded.width,
-                          height = excluded.height,
-                          updated_at = excluded.updated_at
-                        """,
-                    bindings: [
-                        root, sessionID, mode.rawValue, frame.x, frame.y, frame.width, frame.height, ISO8601DateFormatter().string(from: Date()),
-                    ])
-            }
-        }
-    }
-
-    public static func readWindowFrame(mode: TerminalAttachmentMode, paths: TerminalSessionPaths) throws -> TerminalSessionWindowFrame? {
-        let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
-            guard
-                let row = try database.queryRow(
-                    sql: """
-                        SELECT x, y, width, height
-                        FROM terminal_window_frames
-                        WHERE root_directory = ? AND mode = ?
-                        """, bindings: [root, mode.rawValue])
-            else { return nil }
-            return try decodeWindowFrame(row: row)
         }
     }
 
@@ -788,7 +773,8 @@ public enum TerminalSessionPersistence {
         guard let kind = TerminalSessionKind(rawValue: row[4]) else { throw TerminalSessionPersistenceError.invalidValue("kind", row[4]) }
         return TerminalSessionLaunchConfiguration(
             sessionID: row[0], backend: backend, lifetimePolicy: lifetimePolicy, title: row[5], workingDirectory: row[6], shell: row[7],
-            command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3].isEmpty ? nil : row[3], kind: kind)
+            command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3].isEmpty ? nil : row[3], kind: kind,
+            userTitle: row.count > 10 && !row[10].isEmpty ? row[10] : nil)
     }
 
     private static func encodeForegroundArgv(_ argv: [String]?) throws -> String? {
@@ -872,14 +858,6 @@ public enum TerminalSessionPersistence {
         guard let mode = TerminalAttachmentMode(rawValue: row[3]) else { throw TerminalSessionPersistenceError.invalidValue("mode", row[3]) }
         return TerminalAttachment(
             id: row[0], sessionID: row[1], clientID: row[2], mode: mode, attachedAt: row[4], detachedAt: row[5].isEmpty ? nil : row[5])
-    }
-
-    private static func decodeWindowFrame(row: [String]) throws -> TerminalSessionWindowFrame {
-        guard row.count >= 4 else { throw TerminalSessionPersistenceError.invalidRow("terminal_window_frames") }
-        guard let x = Double(row[0]), let y = Double(row[1]), let width = Double(row[2]), let height = Double(row[3]) else {
-            throw TerminalSessionPersistenceError.invalidValue("window_frame", row.joined(separator: ","))
-        }
-        return TerminalSessionWindowFrame(x: x, y: y, width: width, height: height)
     }
 
     private static func withDatabase<T>(paths: TerminalSessionPaths, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {

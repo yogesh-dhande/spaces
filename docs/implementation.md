@@ -9,7 +9,7 @@ Core invariants:
 - SQLite is the single source of truth for persisted model data and global preferences.
 - The macOS client tracks and focuses windows itself: its own AppKit windows for Spaces terminals, Chrome AppleScript window IDs for browser sessions, Spaces terminal session IDs for processes and coding agents, and process IDs for cleaning up non-terminal processes.
 - Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
-- Store startup accepts only the current app schema and fails closed for unsupported schema versions.
+- Store startup migrates older databases serially through every intermediate schema version and fails closed for versions it has no migration step for.
 - GUI and CLI both call the same orchestration layer instead of re-implementing behavior independently.
 
 ## Module Map
@@ -111,7 +111,7 @@ flowchart TD
 ## Module Responsibilities
 - `SpacesApp`: minimal app entry point that boots AppKit.
 - `spacesd`: per-device background executable for the Device API, daemon-owned project/workspace state, built-in terminal sessions, process and agent runtimes, pairing, and paired-client control; terminal behavior lives in [terminal.md](terminal.md).
-- `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon/text tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The workspace detail pane is a single scrollable `NSStackView`; it stacks the header, directory meta row, inline notes editor, and five configuration sections (Processes, Browser sessions, Coding agents, Services, Stop script) in order. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure that the host bridges to `orchestrator.updateWorkspaceSettings`. Service rows render the DNS-label service name plus a monospaced port text and the derived routed URL from `workspace_ports`, mirroring how browser-session rows separate configured input from resolved display output. For a remote workspace with a live SSH forward the port text is `<remote>:<local>` (the device's assigned port and the Mac-local forwarded port, read from a lock-guarded `BrowserSSHForwardManager` snapshot); a local workspace, or a remote service without a live forward, shows the bare assigned port. Forward start/stop refreshes the visible Services rows in place through `refreshVisibleServicePortDisplays` (a `reload` that preserves open row editors) rather than rebuilding the detail pane. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
+- `spacesui`: AppKit UI layer that renders state and dispatches actions into `workspacecore`. Shared visual language lives in `Theme.swift` (brand color tokens mirroring `apps/web/app/globals.css`) and `RowPrimitives.swift` (status dot, type icon/text tile, shortcut/project/branch chips, `ColoredBackgroundView` helper). The right pane's footer strip carries the selected workspace's identity and actions (status dot, name, branch, selectable path, focused-pane title, notes popover, launch/restart/stop/overflow), while the sidebar footer holds the app identity row (logo, name, devices/settings/reload); pane and derived tab titles resolve through the sidebar's runtime-target names, and ⌘W closes the focused pane through the panel coordinator. Workspace configuration editing lives in the workspace settings dialog (`AppKitController+WorkspaceSettingsDialog.swift`), a free-standing form window presented through the same `presentFormWindow` chrome as project settings; it stacks the five configuration sections (Browser sessions, Processes, Coding agents, Services, Stop script) with runtime controls disabled, and each section edit commits immediately through `updateDeviceWorkspaceConfig`. Each section is a self-contained class (e.g. `ProcessesSection.swift`) that owns its transient form state, swaps each row between collapsed and editing subviews via `NSAnimationContext`, and publishes commits through an `onCommit` closure. Service rows render the DNS-label service name plus the currently assigned port number and derived routed URL from `workspace_service_ports`, mirroring how browser-session rows separate configured input from resolved display output. For a remote workspace with a live SSH forward the assigned-port text is `<remote>:<local>` (the device's assigned port and the Mac-local forwarded port, read from a lock-guarded `BrowserSSHForwardManager` snapshot); a local workspace, or a remote service without a live forward, shows the bare assigned port. Starting or stopping a forward while the workspace settings dialog is open refreshes its Services rows in place through `refreshVisibleServicePortDisplays` (a `reload` that preserves open row editors). Runtime targets render as compact rows under every visible workspace row in the sidebar: `SidebarRuntimeTargetItem.swift` derives them from the same `workspaceShortcutTargets` ordering the numbered shortcuts and window cycling use, identified by the cycle-cursor key scheme; `SidebarController` exposes them as an `OutlineItem.runtimeTarget` child level (memoized per workspace, auto-expanded, non-selectable, with `⌘<number>` chips only on the selected workspace); left click routes through the shared `executeWindowFocusResolution` dispatcher so sidebar clicks, the command palette, numbered shortcuts, and cycling behave identically; right click builds a Start/Stop/Restart/Rename context menu calling the same Device API mutations the old detail sections used. Inline target rename follows the device-rename pattern (editor swapped into the row, commit/cancel routed through `control(_:textView:doCommandBy:)`); ad hoc terminals rename through the `renameTerminalSession` Device API command, while configured processes, coding agents, and browser sessions rename their workspace-config entry. The `⋯` overflow menu is built by the static `AppKitController.makeWorkspaceOverflowMenu(workspaceID:path:target:)`, which emits a stock `NSMenu` whose path-based items forward to `copyDirectoryPath(_:)` and `revealDirectoryInFinder(_:)`, while workspace actions use the same shared `senderIdentifier(_:)` helper for `NSMenuItem` and `NSControl` senders. Update delivery also lives here: `AppKitController` owns a programmatic `SPUStandardUpdaterController` from Sparkle, wires the application menu’s `Check for Updates...` item directly to Sparkle, and relies on one stable appcast feed configured in the app bundle metadata. That stable feed serves one universal Sparkle archive and one manual-download DMG rather than arch-specific release artifacts.
 - `spaces`: executable shim that boots the declarative CLI parser.
 - `spacescli`: declarative `swift-argument-parser` command tree for `spaces`, including command help, leaf validation, translation from CLI inputs into orchestration calls, terminal and mobile subcommands, and profile or desktop-control inspection helpers used by dev and real-system workflows.
 - `spacesterminalcore`: shared terminal runtime primitives and protocols; the built-in terminal control, persistence, rendering, and CLI-tail details live in [terminal.md](terminal.md).
@@ -148,11 +148,15 @@ flowchart TD
 - Mac file serving for iOS previews is limited after symlink resolution. User home paths, workspace paths, `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, `/opt`, and `/usr/local` are allowed; system and protected roots such as `/System`, `/Applications`, `/Library`, `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/etc`, `/dev`, `/cores`, `/Network`, `/Volumes`, `/private/etc`, `/private/var/db`, and `/private/var/root` are rejected.
 - The iOS client sends preview metadata and chunk requests over a preview-specific command connection so file transfer cannot interleave with terminal input RPCs. Each preview request carries a generation token so overlapping taps cannot present stale metadata, downloads, or errors. Downloaded preview files are stored in a temporary cache keyed by a SHA-256 digest of the session and link metadata, direct HTTPS media URLs are downloaded to disk before being moved into that cache, stale direct-media downloads are cancelled on preview invalidation, and stale preview files are removed opportunistically. Preview files are presented with Quick Look. Direct non-media web URLs and cleartext HTTP URLs bypass the preview cache and open through UIKit.
 - The recovery launch environment overwrites `SPACES_DB_PATH`, `SPACES_RUNTIME_DIR`, and `SPACESD_EXECUTABLE` with the current profile database path, runtime directory, and service executable path. This binds the relaunched app to the same profile and keeps app-side terminal prewarm pointed at the still-running service binary instead of deriving a different profile or service path from the app process environment.
-- Native built-in terminal windows receive a workspace runtime-control provider from `spacesui`. The native window title owns the runtime name and the terminal UI owns the compact right-aligned action strip; `AppKitController` resolves the session back to a process, coding-agent, or ad hoc terminal row, preferring stable process template and coding-agent launcher IDs over user-editable names. Runtime controls are cached on the terminal controller and refreshed on creation, runtime metadata notifications, and lifecycle mutations so window focus can reuse the current descriptor.
-- Window focus and cycling are client concerns, reconstructed from the overview rather than an in-process orchestrator (a "window" is per-client state). One device-agnostic dispatcher resolves a focus target — a browser URL, a terminal session, or a run-process/run-agent action — from the selected workspace's overview, shared by numbered shortcuts, the command palette, and attention-item focus. Only two leaves depend on where the workspace's daemon runs: a browser session focuses its dedicated local Chrome window — opened once and tracked client-side by resolved URL, then re-focused by window id — or, for a remote daemon, opens the URL; a terminal session focuses the client's window for that session id, opening a native window for a local session or a Device API mirror for a remote one (the session-window registry is keyed by session id and shared by both). A missing window is simply reopened by the dispatcher, so there is no separate "recover this window" prompt.
-- Window cycling rebuilds the same ordered focusable targets client-side and tracks an in-memory cursor and short-lived cycle session per workspace (no database persistence). The current target is resolved from the focused built-in terminal session, then the frontmost Chrome tab URL, then the remembered cursor; the cursor and a per-burst rotation order keep rapid presses stable.
-- Global window cycling resolves a focused Spaces terminal window to its terminal session workspace before consulting the focused external window. Non-terminal focused windows still resolve through the window-system path first, then remembered terminal focus and active-workspace fallback.
-- User window close detaches process and coding-agent terminal windows while ad hoc terminal window close uses the ad hoc session stop path. Terminal-toolbar stop uses the process, coding-agent, or ad hoc lifecycle path for the selected runtime. Programmatic closes produced by stop or restart carry a termination marker through IPC so AppKit window cleanup does not recursively run close cleanup.
+- Terminal sessions present as panes inside tabbed panels, not as standalone windows. The panel machinery lives in `spacesui/Panels/`: `PanelLayout`/`PanelLayoutEngine` are pure value types and mutations (splits, closes with collapse, pruning, focus fallback) serialized as versioned JSON into the client database (`workspace_panel_layouts`, `panel_windows`); `PanelCoordinator` (an `AppKitController` sub-controller) owns per-scope layouts, views, and one `TerminalPaneContentController` per open session — enforcing at most one pane per session across all panels — and `WorkspacePanelView`/`PanelTabBarView`/`PaneTreeView`/`PaneView` render tabs and nested `NSSplitView` pane trees with stable, re-parented leaf containers so a Ghostty surface is never recreated by structural changes. The selected workspace's panel fills the main window's right pane edge to edge — workspace identity and actions live in the right pane's footer strip (status dot, name, branch, directory, notes popover, launch/restart/stop/overflow), populated by the shared detail-container preparation so the panel, loading, and setup views all carry it, while the sidebar's own footer holds the app identity row; the panel view instance survives workspace switching so reselecting restores the remembered tab and focused pane instantly, and persisted layouts reattach at first display after pruning dead sessions against the overview's session catalog. Pane splitting opens the command palette in a session-picker mode ("New terminal session" plus the sessions in scope — every loaded device's sessions for a panel window); picker rows are built around a placeholder focus request, so picker visibility bypasses the normal palette's focus-identity dedup and shows the ordered list head (`visibleSessionPickerItems`). A picked session that is already open moves to the new pane.
+- The main window's tab strip is an `NSTitlebarAccessoryViewController` (`PanelTabStripAccessoryView`), not content under a hidden titlebar: AppKit's titlebar left-click handling intercepts events aimed at ordinary content in that region below anything a view can override, while accessories are the supported host for interactive titlebar chrome. The accessory's private clip view sizes a `.left` accessory to its fitting size (collapsing a plain container to zero width), so the view pins the clip to span to the titlebar's trailing edge once it lands right of the traffic lights; the strip inside starts at the sidebar divider and tracks it via `splitViewDidResizeSubviews`. The visible workspace panel adopts the shared strip (`WorkspacePanelView.adoptExternalTabBar`, ownership-checked so background panels never stomp it) and collapses its built-in strip; panel windows keep the built-in strip below their titlebars. Overview ticks that land on the already-visible workspace panel refresh only the footer instead of re-embedding the panel view, so transient chrome anchored inside it (the tab rename editor) survives; the tab strip also skips rebuilds while a rename is in progress and replays the pending state when it ends, and the rename editor selects its text through the field editor (`currentEditor()?.selectAll`) because `selectText(_:)` would end the just-started editing session and instantly commit.
+- Global panel windows are the second `PanelScope` (`.globalWindow(panelWindowID:)`): `PanelWindowController` is only the NSWindow shell (frame, title synced to the selected tab, close routing) while all layout state stays in `PanelCoordinator`, which owns the shells keyed by panel window id. "Open in New Window" moves a pane through the same remove-then-insert mutation splitting uses, so the live content controller — and its Ghostty surface — re-parents into the new window instead of being recreated; a session already alone in a panel window just fronts that window. A window shell exists only while its layout has content: every path that empties a global layout (closing the last tab, `⌘W` on it, moving the last pane away, the red close button, a daemon-terminated last session) funnels through one dismissal that persists the deletion and closes the window. Persistence rides the same layout-write hook as workspace panels, adding the live window frame to the `panel_windows` row.
+- Panel-window startup reopen is decided per persisted row by a pure function over (row JSON, loaded device ids, live session ids): rows wait while any device their panes reference lacks a loaded overview (an offline or wire-incompatible device therefore never causes a false prune of its persisted windows), prune dead sessions once all devices are ready, delete the row when nothing survives, and otherwise reopen the window at its saved frame without stealing focus. The attempt runs after every device-section load and drains a pending list read once per launch.
+- `TerminalSessionPaneViewController` (`spacesterminalui`) owns all window-independent terminal content — renderer switching, attachment lifecycle, Ghostty key translation, find, and the debug-state dump — with an embedded-hosting facade (`showEmbedded`/`hideEmbedded`/`closeEmbedded`/`focusEmbeddedTerminalInput`) that reduces the old window controller's show/close flows to their content parts. Panes render the terminal surface only: runtime lifecycle actions live on the sidebar target rows, and the embedded Ghostty config pins `font-size` to the app's text scale (overriding personal Ghostty config inside Spaces). Keyboard routing runs through the app's local event monitor: a focused pane owns every non-⌘ key via the pane's key translation, ⌘ chords run app shortcuts first, and unclaimed ⌘ chords fall through to the pane's terminal command handling. The Ghostty mirror view reclaims first responder only when focus has fallen back to the window itself (re-parenting during mirror updates resigns it) — the reclaim runs on every render frame for every attached owner pane, so grabbing unconditionally would continuously steal focus from sibling panes and from other controls in the window (tab rename editor, sidebar editors).
+- Window focus and cycling are client concerns, reconstructed from the overview rather than an in-process orchestrator (a "window" is per-client state). One device-agnostic dispatcher resolves a focus target — a browser URL, a terminal session, or a run-process/run-agent action — from the selected workspace's overview, shared by sidebar target rows, numbered shortcuts, the command palette, and attention-item focus. Only two leaves depend on where the workspace's daemon runs: a browser session focuses its dedicated local Chrome window — opened once and tracked client-side by resolved URL, then re-focused by window id — with a remote daemon's service URL first routed through the workspace's SSH forward and the Mac Caddy router before that local Chrome focus; a terminal session opens or focuses its pane through the panel coordinator, and local and remote panes share one device-backed state path through the owning device's Device API instead of the local daemon database. A missing pane is simply reopened by the dispatcher, so there is no separate "recover this window" prompt.
+- Window cycling rebuilds the same ordered focusable targets client-side and tracks an in-memory cursor and short-lived cycle session per workspace (no database persistence). The current target is resolved from the focused built-in terminal session, then the frontmost Chrome tab URL when Chrome is focused, then the remembered cursor; the cursor and a per-burst rotation order keep rapid presses stable.
+- Global window cycling resolves a focused Spaces terminal window to its terminal session workspace before consulting the focused external window. External focus resolves only through a frontmost Chrome active-tab URL that maps to a configured browser session. Remembered terminal focus and active-workspace fallback are used only while Spaces is active, so unrelated external apps and unmapped Chrome tabs leave focus unchanged.
+- Explicit pane close detaches process and coding-agent sessions while an ad hoc terminal's pane close uses the ad hoc session stop path. Lifecycle actions never remove panes — the pane keeps showing the session's final render.
 - Runtime-target refresh preserves live process-owned and agent-owned Spaces terminal sessions by service runtime state after their native window detaches. Preserved agent sessions clear dead native window IDs during refresh and rebind to the replacement native window when focused. Ad hoc terminal rows require an active or pending attachment and are pruned when their final local or remote attachment is gone.
 
 ### Device API and Remote Access
@@ -166,6 +170,7 @@ flowchart TD
 - Git-import preview is daemon-hosted over the Device API so it works on the device that will own the project. `prepareGitProject` clones to the final managed path on the target daemon and returns the detected `spaces.yaml` config (to pre-fill the add-project form) plus an opaque handle to the clone; if managed directories already exist it returns replacement candidates instead of cloning so the GUI can confirm first. Create passes that handle to `createProject`, which adopts the existing clone instead of re-cloning; canceling sends `discardPreparedGitProject` to delete it. The client holds and returns the handle without interpreting it (it references the daemon's on-disk clone), so the GUI never opens `spaces.db` for the import.
 - Workspace planning is local to the owning daemon. Runtime manifests carry workspace ID, project ID, daemon-local path, branch, base branch, service port assignments, process environment, and allowed file roots.
 - Workspace setup scripts, configured processes, coding-agent launchers, ad hoc terminals, and stop scripts execute on the owning daemon. Synchronous workspace command logs are allocated under the daemon runtime root, and daemon listener token environment keys are scrubbed from launched child commands.
+- `renameTerminalSession` renames an ad hoc workspace terminal on the owning daemon. The trimmed title is written to two places: the `name` of the session's `runtime_targets` window rows (which workspace terminal rows prefer) and a dedicated `user_title` column on the daemon's `terminal_sessions` record. `user_title` is separate from the launch-time `title` because the runtime title is continuously rewritten from Ghostty set_title events; a session's effective title resolves `user_title` → runtime title → launch title, so a manual rename survives later shell title changes and session relaunches (launch-config rewrites never touch `user_title`). Configured process- and agent-owned sessions are refused — their names belong to workspace config.
 - `spaces agent signal` writes agent lifecycle events to the daemon database for the workspace that owns the terminal session.
 - Worktree refresh is modeled as a fast-forward-only preflight. `RemoteWorkspaceGitClient.refreshWorktreeFastForwardOnly` fetches the workspace branch, checks for tracked dirty state and untracked overwrite risks, requires `HEAD` to be an ancestor of `origin/<branch>`, and advances with `merge --ff-only`. `RemoteWorkspaceRefreshBlock` reports dirty worktrees, overwrite risks, divergent histories, missing branches, fetch failures, and checkout failures with path, branch, and guidance. Destructive repair paths such as reset, stash, forced checkout, or cleanup are outside the launch path.
 - The Device API overview builder attaches terminal ownership metadata to process rows, coding-agent rows, workspace terminal rows, and terminal session summaries. Project, workspace, terminal, process, and agent mutations all enter the owning daemon through authenticated Device API requests.
@@ -196,10 +201,10 @@ flowchart TD
 ### Database
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, terminal window frames, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
+- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, panel layouts and panel-window frames, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens and transport keys to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and Keychain-backed secrets.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
-- `migration_state.current_version` records the canonical schema version. The active daemon schema is version `3`.
+- `migration_state.current_version` records the canonical schema version; `DatabaseSchema.currentVersion` (daemon) and `SpacesClientDatabase.currentVersion` (client) are the source of truth for the active version numbers.
 - `PRAGMA user_version` is not used by Spaces for migration control; if present, treat it as informational only and keep it aligned with `migration_state` when inspecting or repairing a database manually.
 
 ### Profile Resolution
@@ -226,10 +231,11 @@ flowchart TD
 
 ### Migration Rules
 - Fresh installs create the latest schema directly and record the current schema version.
-- Store startup validates `migration_state.current_version` against the canonical schema version and fails closed when they do not match.
-- There is no compatibility migration ladder for retired schema versions.
+- Databases behind the current version upgrade serially through every intermediate version at startup: each migration step moves exactly one version forward (vN to vN+1), and a database several versions behind applies each step in order. There are no version-skipping steps or jump paths.
+- Startup fails closed when the recorded version has no migration step (a pre-ladder or corrupted marker) or is newer than the running binary supports.
+- Migrations carry existing user data forward; tables and columns nothing reads or writes anymore are dropped by a migration step and removed from the schema definitions.
 - Startup runs `PRAGMA integrity_check` and fails if validation does not return `ok`.
-- Client database migrations create a timestamped backup before applying schema steps. A failed migration restores the latest backup and reports a startup error. Client backups contain metadata only; paired-device tokens stay in Keychain.
+- Daemon migrations create a pre-migration backup for steps that require one. Client database migrations create a timestamped backup before applying schema steps; a failed migration restores the latest backup and reports a startup error. Client backups contain metadata only; paired-device tokens stay in Keychain.
 
 ## Data Model
 
@@ -395,16 +401,6 @@ erDiagram
     TEXT updated_at
   }
 
-  runtime_target_events {
-    TEXT id PK
-    TEXT runtime_target_id FK
-    TEXT event_type
-    TEXT source
-    TEXT message
-    INTEGER window_id
-    TEXT created_at
-  }
-
   agent_session_events {
     TEXT id PK
     TEXT agent_session_id FK
@@ -423,6 +419,7 @@ erDiagram
     TEXT workspace_id
     TEXT kind
     TEXT title
+    TEXT user_title
     TEXT working_directory
     TEXT shell
     TEXT command
@@ -473,17 +470,6 @@ erDiagram
     TEXT mode
     TEXT attached_at
     TEXT detached_at
-  }
-
-  terminal_window_frames {
-    TEXT root_directory PK
-    TEXT session_id
-    TEXT mode PK
-    REAL x
-    REAL y
-    REAL width
-    REAL height
-    TEXT updated_at
   }
 
   terminal_remote_session_states {
@@ -543,7 +529,6 @@ erDiagram
   workspaces ||--o{ agent_sessions : tracks
   workspaces ||--o{ terminal_sessions : logical_owner
   runtime_targets ||--o| browser_targets : extends
-  runtime_targets ||--o{ runtime_target_events : records
   runtime_targets ||--o{ running_processes : focus_target
   runtime_targets ||--o{ agent_sessions : focus_target
   runtime_targets ||--o{ agent_session_events : referenced_by
@@ -551,7 +536,6 @@ erDiagram
   terminal_sessions ||--o| terminal_runtime_states : state
   terminal_sessions ||--o{ terminal_clients : clients
   terminal_sessions ||--o{ terminal_attachments : attachments
-  terminal_sessions ||--o{ terminal_window_frames : frames
   terminal_sessions ||--o| terminal_remote_session_states : final_render
   terminal_sessions ||--o{ terminal_agent_signal_events : pending_signals
 ```
@@ -592,46 +576,6 @@ erDiagram
     INTEGER is_collapsed
   }
 
-  terminal_window_frames {
-    TEXT root_directory PK
-    TEXT mode PK
-    TEXT session_id
-    REAL x
-    REAL y
-    REAL width
-    REAL height
-  }
-
-  runtime_targets {
-    TEXT id PK
-    TEXT device_id
-    TEXT workspace_id
-    TEXT type
-    TEXT app
-    INTEGER window_id
-    TEXT tracking_id
-    INTEGER order_index
-  }
-
-  browser_targets {
-    TEXT runtime_target_id PK
-    TEXT target_url
-    TEXT resolved_url
-  }
-
-  runtime_target_events {
-    TEXT id PK
-    TEXT runtime_target_id FK
-    TEXT event_type
-    INTEGER window_id
-  }
-
-  local_window_focus_state {
-    TEXT key PK
-    TEXT workspace_id
-    INTEGER window_id
-  }
-
   browser_session_window_ids {
     TEXT device_id PK
     TEXT workspace_id PK
@@ -639,17 +583,27 @@ erDiagram
     INTEGER window_id
   }
 
+  workspace_panel_layouts {
+    TEXT device_id PK
+    TEXT workspace_id PK
+    TEXT layout_json
+  }
+
+  panel_windows {
+    TEXT id PK
+    TEXT layout_json
+    REAL x
+    REAL y
+    REAL width
+    REAL height
+  }
+
   migration_state {
     INTEGER current_version
   }
-
-  runtime_targets ||--o| browser_targets : extends
-  runtime_targets ||--o{ runtime_target_events : records
 ```
 
-Wired client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `terminal_window_frames` (terminal window geometry, keyed by `root_directory`+`mode`), and `browser_session_window_ids` (the dedicated Chrome window opened for a browser session, keyed by `device_id`+`workspace_id`+resolved `target_url`).
-
-`runtime_targets`, `browser_targets`, `runtime_target_events`, and `local_window_focus_state` are defined in the client schema but are not read or written. They were scaffolded for the thin-client split and are inert.
+Client tables: `paired_devices`, `client_settings`, `project_sidebar_state`, `workspace_panel_layouts` (one versioned JSON layout document per workspace panel), `panel_windows` (extra panel windows: layout document plus window frame), and `browser_session_window_ids` (the dedicated Chrome window opened for a browser session, keyed by `device_id`+`workspace_id`+resolved `target_url`).
 
 ### Window-ID ownership
 
@@ -682,6 +636,8 @@ The YAML schema contains:
 - `agent_launchers[].name`, `agent_launchers[].command`
 
 Service names are validated as unique DNS-1123 labels at the import and store boundary, so an invalid name (for example `Web`, `web_1`, `web.api`, `-web`, or `web-`) or duplicate name is rejected before it reaches persistence rather than surfacing later as an invalid route.
+
+A non-git project owns exactly one workspace and can never create more, so its project template and that single workspace's settings are treated as one. The core `updateProjectConfig` stays a mechanical primitive that honors its `updateAllWorkspaces` flag (its template/per-workspace isolation is intentional for git projects and covered by tests); the "non-git always syncs" decision is a GUI policy: the project settings save and spaces.yaml import paths force `updateAllWorkspaces` for a non-git project so the edits apply to that workspace through the same snapshot/rollback machinery, and skip the `Update All Workspaces` / `Project Only` prompt (there is no isolation choice to make). This is why the sidebar's flat non-git row opens ordinary project settings — the edits reach the running config — while project-level Delete and spaces.yaml import/export stay available from the same dialog. Git projects keep the template-vs-per-workspace split and honor the flag as the user chooses.
 
 Import uses the same project/workspace normalization paths as GUI saves so existing service, process, and coding-agent launcher IDs are preserved by name or command where possible. GUI project creation previews a directory through the owning daemon's `previewProject` command, which loads `spaces.yaml` into a project-config payload before persistence; the form then saves the reviewed settings into the project and default workspace from the visible form snapshot without re-reading `spaces.yaml`. Because the preview runs on the daemon, folder-based creation works for both the local Mac and selected remote devices, and the New Project form opens in a standalone dialog window. The folder source is a path text field with daemon-backed directory autocomplete; the preview runs when the path is committed, and creation stays disabled until the committed path is validated. Git project creation prepares an app-managed bare clone plus default worktree before persistence, loads `spaces.yaml` from that worktree into the reviewed settings, and persists the prepared project only after the user saves; save-time validation failures keep the prepared source staged for retry, while explicit cancel, replacing the prepared source, or quitting with the form active removes the unmanaged clone and worktree. Async cleanup tasks are registered by trimmed Git URL, and preparation awaits any registered cleanup for that URL before touching the deterministic managed paths. If an unmanaged prepared clone or worktree is still present for the same Git URL, preparation treats it as abandoned state, removes the replaceable managed directories, and clones again so retrying the URL refreshes the loaded settings instead of failing on existing paths. Local and Git preparation results are accepted only while the originating add-project form and source segment remain active, and source hydration replaces open script editors and row section drafts so the visible settings match the selected source. Existing-project GUI import validates `spaces.yaml`, projects it through the normal configuration normalization path, and hydrates the visible project-settings sections without writing to SQLite; hydration uses the row-section replace path so import and discard clear stale inline editors and pending drafts before rendering the imported or saved rows. The imported state is tracked on the project form refs, and Save prompts for whether to apply the visible template to every workspace before calling the normal project update path. The workspace-sync save choice uses the same snapshot/rollback path as direct import when applying the visible template to every workspace. The direct core import API keeps `spaces.yaml` authoritative for compatibility, and invalid YAML still uses the managed-project rollback path. Export encodes the saved project template with Yams' Codable encoder and overwrites `spaces.yaml`.
 
@@ -815,7 +771,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - The Spaces app owns window identity and cross-app focusing itself: it tracks and focuses its own AppKit terminal windows and activates Chrome for browser sessions.
 - Chrome integration adds browser-specific behavior for selecting the intended browser target.
 - Browser sessions are stored as workspace configuration and only become tracked windows after an explicit focus action opens them.
-- Browser-session focus targets Chrome directly: `WindowRecord.windowID` stores the Chrome window ID for the session's dedicated window, and Chrome tab targeting uses that window ID plus a tab index gathered from a live tab scan.
+- Browser-session focus targets Chrome directly: the client `browser_session_window_ids` table stores the Chrome window ID for the session's dedicated window, and Chrome tab targeting uses that window ID plus a tab index gathered from a live tab scan.
 - Browser-session matching is URL-based and tolerant of equivalent host forms. Focus, recovery, and browser-row naming all normalize scheme, host, port, and path so `google.com` and `www.google.com` resolve to the same configured session while still preferring the most specific matching session prefix.
 - For remote runtime plans, configured browser URLs that resolve to a service's localhost port are opened through that service's Caddy URL, backed by a Mac-owned SSH local forward. Configured browser URLs that already use `SPACES_<SERVICE>_URL` keep that browser-facing URL while the upstream is rewritten to the forward. `BrowserSSHForwardManager` owns one `ssh -L` process per remote workspace, keyed by device and workspace, with one binding per assigned service; unrelated URLs and unmatched ports keep their configured address. Remote overview updates preload forwards for running workspaces, stop forwards for stopped/offline workspaces, and let focus fall back to opening the forward on demand. Opening a missing forward blocks (spawns `ssh`, polls the local ports, and waits for the route to be both present in the daemon-published Caddy config *and* served by a live Caddy — the wait probes the admin socket rather than trusting the config file alone, so a stale-config recovery blocks through the daemon's Caddy restart instead of returning to an unserved route), so the focus path runs `routedURL` on a detached task off the main actor; the manager guards its forward map with a lock and is `Sendable` so that offload is safe alongside the synchronous `stopAll` at app termination. Route publication is change-detected: the registry write is skipped when the stored entries are unchanged, and the daemon reconcile is skipped only when the registry was unchanged *and* a live Caddy (probed by connecting to its admin socket, not by trusting the generated config file, which survives a crash or stop) is already serving the forward's routes. A stale on-disk config with a dead Caddy still notifies the daemon so it can restart/reload Caddy, so re-opening an already-served session triggers no registry write and no Caddy reload while a crashed router is still recovered. The route and focus paths log per-stage perf metrics (`browser_route` with warm/cold branch and ssh/port-wait/publish/caddy-wait stage durations, `browser_forward_reconcile` for eager preloads, and `browser_focus` for the Chrome scripting step) through the `DEBUG=1`-gated perf log. The macOS daemon remains the only component that reloads Caddy after merging daemon-owned local routes with client-owned remote-forward routes.
 - The client-owned route registry keeps at most one entry per route host. `CaddyRouteRegistry.upsert` evicts any prior entry with the same registry key *or* the same route host, because the key embeds the daemon-local remote port: a service re-forwarded on a changed port would otherwise leave a stale entry that `mergedRoutes` (first route per host) would keep in front of the fresh one. Registry read-modify-write mutations are serialized in-process, and workspace forward reconciliation publishes all service route updates for a workspace in one batch. Remote-browser route cleanup prunes persisted `remote-browser:<device id>:` entries by device/workspace prefix while holding the forward-manager lock and after the revision check, so force-quit leftovers are removed and older reconcile tasks cannot delete routes published by newer revisions.
@@ -855,6 +811,13 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - `blocked` and `done` agent events both contribute alerts and dock attention until the user dismisses that specific attention event; the workspace row still renders the underlying agent status independently.
 - Alerts dismissals are stored as a persisted set of attention-event IDs in SQLite global settings, then filtered in the GUI so workspace detail panes keep showing the underlying runtime rows.
 
+## Theming
+- A Spaces-owned theme model is the single source of truth for app and terminal colors. `spacesterminalcore/Theming/` holds the pure value types — `ThemeID`, `ThemeColor`, `ThemeAppearanceTokens` (one semantic token set per appearance), `GhosttyThemeExport` (terminal colors plus the 16-entry ANSI palette), and `ThemeDescriptor` — and `ThemeRegistry`, seeded with the single shipped `spaces-brand` theme. The module is UI-free: adapters convert raw color data to platform types (`spacesui/Theme.swift` for AppKit; terminal-native chrome uses the `NSColor` helpers in `spacesterminalghostty`).
+- Theme selection is internal-only. `ActiveTheme` is the process-wide binding: the GUI resolves the client setting `app_theme_id` (client database, `SettingsKey.appThemeID`) once at launch and binds it before any token or terminal is touched; a missing or unknown id resolves to `spaces-brand`. There is no settings-panel control, CLI surface, or change notification — a different stored id takes effect on relaunch.
+- Embedded Ghostty terminals load only a Spaces-generated config, never the user's `~/.config/ghostty` files, so the default look is owned by the active theme and stays predictable. `GhosttyThemeConfigGenerator` regenerates `<profile-root>/ghostty/` at every embedded-app start: a root `config` (theme variant references plus the embedded settings `window-vsync = false` and `font-size = 12`) and one generated theme file per appearance under `themes/`. Both the macOS embedded service and the iOS app service load this root config.
+- The root config references the generated files with Ghostty's `theme = light:<path>,dark:<path>` syntax; each Ghostty-hosting process pushes its scheme once at start through `ghostty_app_set_color_scheme` to select the variant. Terminal cell colors are rendered by the long-lived terminal service, so a mid-session OS appearance change fully applies at relaunch; dynamic app-chrome colors adapt live.
+- Future public theming builds selection UI and import/export on top of this model; raw Ghostty theme files never become the app's source of truth.
+
 ## Lifecycle and Health
 - Workspace lifecycle state is explicit and persisted on the workspace record.
 - Runtime health is derived from runtime records, configured browser/process expectations, and agent waiting state.
@@ -865,7 +828,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - Global shortcuts use Carbon hotkey registration for actions that must work while Spaces is not frontmost.
 - Carbon hotkeys are registered only while the running app owns the desktop-control lease for its user account.
 - The command palette is implemented as a separate AppKit panel instead of reusing the main split-view window, so the hotkey can surface a focused search field without depending on the full app shell staying visible.
-- `AppKitController` treats the main Spaces window as the primary UI surface and built-in terminal windows plus the command palette as auxiliary windows. Global toggle behavior depends only on the main window's visible state and hides or summons only that window instead of app-wide unhiding or fronting every Spaces-owned window. Command-palette presentation similarly depends only on the palette panel's visible state and shows or hides only that panel without ordering the main window out. When the focused auxiliary window is a built-in terminal, the app resolves that terminal session back to its tracked workspace row before restoring the main window or choosing the command-palette context. Those hotkey paths skip the generic focused-window workspace lookup whenever the terminal session already resolves to a workspace, which keeps built-in terminal toggles from paying unnecessary focused-window tracking work. When the main window or command palette is later hidden through the same hotkey path, the controller explicitly restores focus either to the remembered built-in terminal session or to the previously frontmost non-Spaces app instead of leaving the return leg to AppKit window ordering.
+- `AppKitController` treats the main Spaces window as the primary UI surface and the command palette plus global panel windows as auxiliary windows. Global toggle behavior depends only on the main window's visible state and orders only that window explicitly; the hide leg hides the whole app, which takes panel windows along, and unhiding brings them back without per-window bookkeeping. Command-palette presentation similarly depends only on the palette panel's visible state and shows or hides only that panel without ordering the main window out. When a terminal pane holds keyboard focus (in the main window or a panel window), hotkey paths resolve that session back to its workspace before consulting the generic focused-window lookup, which keeps terminal-focused toggles from paying unnecessary focused-window tracking work. When the main window or command palette is later hidden through the same hotkey path, the controller explicitly restores focus either to the remembered focused pane or to the previously frontmost non-Spaces app instead of leaving the return leg to AppKit window ordering.
 - Command-palette items are built from two sources: Alerts attention entries and the same ordered workspace run-target model that powers workspace-detail numbered shortcuts. With an empty query, the panel shows Alerts attention first and then only the current workspace's run targets. Once the user types, the fuzzy matcher ranks across the full combined item set.
 - Palette search uses a local multi-field fuzzy matcher over the workspace display name (branch or folder name), target label, and detail text, then maps the selected row back onto the existing target-level focus/open request path.
 - In-app shortcuts use an AppKit event monitor so they can respect focused text inputs and support digit-family shortcuts such as window `1` through `9`.

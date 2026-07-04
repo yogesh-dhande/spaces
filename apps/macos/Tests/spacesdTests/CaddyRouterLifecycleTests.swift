@@ -52,9 +52,7 @@ import XCTest
             defer {
                 try? Data().write(to: releaseRun)
                 try? FileManager.default.removeItem(at: socket)
-                for (name, value) in originalEnvironment {
-                    if let value { setenv(name, value, 1) } else { unsetenv(name) }
-                }
+                for (name, value) in originalEnvironment { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
                 SpacesProfile.resetCacheForTesting()
             }
             setenv(SpacesProfile.databasePathEnvironmentVariable, directory.appendingPathComponent("spaces.db").path, 1)
@@ -72,9 +70,7 @@ import XCTest
                 do {
                     try lifecycle.ensureRunning(configJSON: Data("{}".utf8))
                     ensureResult.set(.success(()))
-                } catch {
-                    ensureResult.set(.failure(error))
-                }
+                } catch { ensureResult.set(.failure(error)) }
             }
             ensureThread.start()
             XCTAssertTrue(waitForFile(at: runStarted.path, timeout: 2))
@@ -106,9 +102,7 @@ import XCTest
             waitUntil(timeout: timeout) { FileManager.default.fileExists(atPath: path) }
         }
 
-        private func waitForThreadToFinish(_ thread: Thread, timeout: TimeInterval) -> Bool {
-            waitUntil(timeout: timeout) { thread.isFinished }
-        }
+        private func waitForThreadToFinish(_ thread: Thread, timeout: TimeInterval) -> Bool { waitUntil(timeout: timeout) { thread.isFinished } }
 
         private func waitUntil(timeout: TimeInterval, condition: () -> Bool) -> Bool {
             let deadline = Date().addingTimeInterval(timeout)
@@ -119,11 +113,7 @@ import XCTest
             return condition()
         }
 
-        private func readEvents(at url: URL) -> [String] {
-            ((try? String(contentsOf: url)) ?? "")
-                .split(separator: "\n")
-                .map(String.init)
-        }
+        private func readEvents(at url: URL) -> [String] { ((try? String(contentsOf: url)) ?? "").split(separator: "\n").map(String.init) }
     }
 
     private final class LockedFlag: @unchecked Sendable {

@@ -7,6 +7,7 @@ extension AppKitController {
         case project(ProjectSummary)
         case workspace(ProjectSummary, WorkspaceSummary)
         case emptyProject(ProjectSummary)
+        case runtimeTarget(ProjectSummary, WorkspaceSummary, SidebarRuntimeTargetItem)
 
         static func == (lhs: OutlineItem, rhs: OutlineItem) -> Bool {
             switch (lhs, rhs) {
@@ -14,6 +15,7 @@ extension AppKitController {
             case (.project(let a), .project(let b)): return a.id == b.id
             case (.workspace(_, let a), .workspace(_, let b)): return a.id == b.id
             case (.emptyProject(let a), .emptyProject(let b)): return a.id == b.id
+            case (.runtimeTarget(_, let wa, let ia), .runtimeTarget(_, let wb, let ib)): return wa.id == wb.id && ia.key == ib.key
             default: return false
             }
         }
@@ -32,6 +34,10 @@ extension AppKitController {
             case .emptyProject(let project):
                 hasher.combine(1)
                 hasher.combine(project.id)
+            case .runtimeTarget(_, let workspace, let item):
+                hasher.combine(4)
+                hasher.combine(workspace.id)
+                hasher.combine(item.key)
             }
         }
     }
@@ -54,6 +60,7 @@ extension AppKitController.OutlineItem {
         case .project(let project): return "p:\(project.id)"
         case .workspace(_, let workspace): return "w:\(workspace.id)"
         case .emptyProject(let project): return "e:\(project.id)"
+        case .runtimeTarget(_, let workspace, let item): return "rt:\(workspace.id):\(item.key)"
         }
     }
 }

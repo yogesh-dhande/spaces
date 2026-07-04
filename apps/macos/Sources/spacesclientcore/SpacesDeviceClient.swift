@@ -457,6 +457,15 @@ public enum SpacesDeviceClient {
             profile: profile)
     }
 
+    public static func renameTerminalSession(
+        workspaceID: String, sessionID: String, title: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .renameTerminalSession(.init(workspaceID: workspaceID, sessionID: sessionID, title: title))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
     public static func runWorkspaceProcess(
         workspaceID: String, processKey: String, processTemplateID: String?, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -524,8 +533,8 @@ public enum SpacesDeviceClient {
     /// rejected with a 401 while the transport key looked healthy. A remote device cannot regenerate its
     /// own credentials, so a missing remote transport key surfaces as `missingTransportKey` (the client
     /// must re-pair); a remote token is returned as-is (possibly nil, the pre-existing behavior).
-    static func credentialsEnsuringLocalRecovery(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?) throws
-        -> (transportKey: String, authToken: String?)
+    public static func credentialsEnsuringLocalRecovery(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?)
+        throws -> (transportKey: String, authToken: String?)
     {
         if device.id == SpacesPairedDeviceRecord.localDeviceID {
             let hasTransportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) != nil
@@ -603,8 +612,8 @@ public enum SpacesDeviceClient {
             .restartCodingAgent:
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
-            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .state, .terminalControl, .terminalPasteImage, .resolveTerminalLink,
-            .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:
+            .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
+            .terminalPasteImage, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:
             defaultRequestTimeoutSeconds
         }
     }

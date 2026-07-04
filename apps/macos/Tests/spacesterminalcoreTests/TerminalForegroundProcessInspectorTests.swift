@@ -61,10 +61,8 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
     }
 
     func testClassifiesLinuxClaudeVersionedBinaryFromProcArguments() {
-        let argv = TerminalForegroundProcessInspector.procCmdlineArguments(
-            from: Data("claude\0--dangerously-skip-permissions\0".utf8))
-        let process = TerminalForegroundProcessSnapshot(
-            pid: 104, executablePath: "/home/user/.local/share/claude/versions/2.1.168", argv: argv)
+        let argv = TerminalForegroundProcessInspector.procCmdlineArguments(from: Data("claude\0--dangerously-skip-permissions\0".utf8))
+        let process = TerminalForegroundProcessSnapshot(pid: 104, executablePath: "/home/user/.local/share/claude/versions/2.1.168", argv: argv)
 
         let detected = TerminalForegroundProcessInspector.classify(process)
 
@@ -77,8 +75,7 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
             TerminalForegroundProcessInspector.procCmdlineArguments(from: Data("node\0/usr/lib/node_modules/@openai/codex/bin/codex.js\0".utf8)),
             ["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"])
         XCTAssertEqual(
-            TerminalForegroundProcessInspector.procCmdlineArguments(from: Data("opencode\0run\0fix lint".utf8)),
-            ["opencode", "run", "fix lint"])
+            TerminalForegroundProcessInspector.procCmdlineArguments(from: Data("opencode\0run\0fix lint".utf8)), ["opencode", "run", "fix lint"])
     }
 
     func testClassifiesOpencodeCommands() {

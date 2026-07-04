@@ -118,6 +118,7 @@ command_exists() {
 }
 
 submodule_is_initialized() {
+    [[ -e "$GHOSTTY_SOURCE_ROOT/.git" ]] || return 1
     git -C "$GHOSTTY_SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1
 }
 

@@ -6,12 +6,21 @@ final class SidebarOutlineView: NSOutlineView {
     var onRowMouseDown: ((Int) -> Bool)?
     /// Return `true` to indicate the arrow key navigation was fully handled.
     var onArrowNavigation: ((Int) -> Bool)?
+    /// Context menu provider for the right-clicked row; nil falls back to the view's menu.
+    var onRowMenu: ((Int) -> NSMenu?)?
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let clicked = row(at: point)
         if clicked >= 0, onRowMouseDown?(clicked) == true { return }
         super.mouseDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let clicked = row(at: point)
+        if clicked >= 0, let menu = onRowMenu?(clicked) { return menu }
+        return super.menu(for: event)
     }
 
     override func keyDown(with event: NSEvent) {

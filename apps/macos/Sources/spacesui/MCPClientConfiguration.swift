@@ -14,8 +14,7 @@ enum MCPClientConfiguration {
     /// order and the first existing executable wins; the helper path is also the
     /// fallback so the snippet stays copyable before the CLI is installed.
     static func resolvedCLIPath(
-        fileManager: FileManager = .default,
-        bundleResourceCLIPath: String? = defaultBundleResourceCLIPath(),
+        fileManager: FileManager = .default, bundleResourceCLIPath: String? = defaultBundleResourceCLIPath(),
         homeDirectoryPath: String = NSHomeDirectory()
     ) -> String {
         let helperPath =
@@ -28,9 +27,7 @@ enum MCPClientConfiguration {
     }
 
     /// One-shot command that registers the stdio server with Claude Code.
-    static func claudeCodeAddCommand(cliPath: String) -> String {
-        "claude mcp add \(serverName) -- \(cliPath) mcp"
-    }
+    static func claudeCodeAddCommand(cliPath: String) -> String { "claude mcp add \(serverName) -- \(cliPath) mcp" }
 
     /// `mcp_servers` table for the Codex CLI `~/.codex/config.toml`.
     static func codexConfigTOML(cliPath: String) -> String {

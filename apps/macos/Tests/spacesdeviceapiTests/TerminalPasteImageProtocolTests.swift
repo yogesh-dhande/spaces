@@ -26,7 +26,5 @@ final class TerminalPasteImageProtocolTests: XCTestCase {
         XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
     }
 
-    func testWireProtocolVersionIncludesTerminalPasteImageCommand() {
-        XCTAssertEqual(SpacesWireProtocol.version, 3)
-    }
+    func testWireProtocolVersionIncludesTerminalPasteImageCommand() { XCTAssertEqual(SpacesWireProtocol.version, 3) }
 }
