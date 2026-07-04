@@ -1,6 +1,22 @@
 #include <openssl/err.h>
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <string.h>
+
+// SHA-256 of the peer's DER-encoded leaf certificate — the same bytes Security's
+// SecCertificateCopyData digest sees on Darwin, so fingerprints pin identically on
+// both platforms. Returns 1 and fills out32 on success.
+static inline int spaces_SSL_peer_certificate_sha256(SSL *ssl, unsigned char *out32) {
+    X509 *cert = SSL_get1_peer_certificate(ssl);
+    if (cert == NULL) {
+        return 0;
+    }
+    unsigned int len = 0;
+    int ok = X509_digest(cert, EVP_sha256(), out32, &len);
+    X509_free(cert);
+    return ok == 1 && len == 32;
+}
 
 static inline long spaces_SSL_CTX_set_min_proto_version(SSL_CTX *ctx, int version) {
     return SSL_CTX_set_min_proto_version(ctx, version);
