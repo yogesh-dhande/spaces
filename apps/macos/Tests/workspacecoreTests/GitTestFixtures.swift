@@ -7,9 +7,23 @@ import Foundation
 // and the orchestrator's `GitClient` alike — independent of ambient `HOME`/config. The values are constant,
 // so applying them once, idempotently, is race-free and never needs restoring, and they never escape the
 // test process into the developer's shell.
+//
+// The `GIT_CONFIG_*` triple disables git's background auto-maintenance (and the legacy `gc.auto` path) for
+// every git invocation in the process. Object-adding commands like `git commit` otherwise kick off
+// `git maintenance run --auto` in the background, which transiently creates and deletes
+// `.git/objects/maintenance.lock`. The cached template repo is built once and then copied with a plain
+// filesystem `copyItem`; when a copy enumerates the tree while that lock is momentarily present and git
+// deletes it before the copy reaches that entry, the copy fails with ENOENT. Disabling maintenance means no
+// such lock file is ever created, so template copies are race-free. Applied via `GIT_CONFIG_COUNT` so it
+// layers on top of the `/dev/null` global/system config above.
 let installHermeticGitEnvironment: Void = {
     setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1)
     setenv("GIT_CONFIG_SYSTEM", "/dev/null", 1)
+    setenv("GIT_CONFIG_COUNT", "2", 1)
+    setenv("GIT_CONFIG_KEY_0", "maintenance.auto", 1)
+    setenv("GIT_CONFIG_VALUE_0", "false", 1)
+    setenv("GIT_CONFIG_KEY_1", "gc.auto", 1)
+    setenv("GIT_CONFIG_VALUE_1", "0", 1)
     setenv("GIT_AUTHOR_NAME", "spaces-test", 1)
     setenv("GIT_AUTHOR_EMAIL", "test@example.com", 1)
     setenv("GIT_COMMITTER_NAME", "spaces-test", 1)
