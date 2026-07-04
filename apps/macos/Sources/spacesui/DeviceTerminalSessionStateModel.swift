@@ -70,7 +70,7 @@
         ) throws {
             // This model opens its own pinned-TLS Device API connections directly instead of going
             // through SpacesDeviceClient.request, so it must apply the same local-credential recovery
-            // that request does: a local device whose Keychain transport key/token went missing (e.g. an
+            // that request does: a local device whose stored transport key/token went missing (e.g. an
             // earlier bootstrap failed while the daemon was down) is re-bootstrapped here rather than
             // dead-ending the pane on "Missing secure transport key". A remote device cannot self-heal,
             // so a missing remote transport key still surfaces as missingTransportKey.

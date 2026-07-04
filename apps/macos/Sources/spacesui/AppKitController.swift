@@ -2141,7 +2141,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // record so "This Mac" still has an identity to render; with no stored record (a first launch
                 // while the daemon is down) there is no device to show, so it stays a genuine snapshot failure.
                 // Only reachability failures degrade to offline: a bootstrap that reaches the daemon but then
-                // fails writing the paired-device record or saving Keychain credentials is a real error, not
+                // fails writing the paired-device record or saving stored credentials is a real error, not
                 // an offline state, so it must surface rather than be hidden behind an empty offline sidebar.
                 let localDevice: SpacesPairedDeviceRecord
                 let bootstrapOfflineMessage: String?

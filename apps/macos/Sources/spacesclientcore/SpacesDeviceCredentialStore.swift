@@ -1,52 +1,27 @@
 import Foundation
 import spacesterminalcore
 
-#if canImport(Security)
-    @preconcurrency import Security
-    private let spacesErrSecInteractionNotAllowed = errSecInteractionNotAllowed
-#else
-    public typealias OSStatus = Int32
-    private let spacesErrSecInteractionNotAllowed: OSStatus = -25308
-#endif
-
-#if canImport(LocalAuthentication)
-    import LocalAuthentication
-#endif
-
 public enum SpacesDeviceCredentialStoreError: LocalizedError, Equatable {
-    case keychainReadFailed(OSStatus)
-    case keychainWriteFailed(OSStatus)
-    case keychainDeleteFailed(OSStatus)
     case invalidStoredToken
 
     public var errorDescription: String? {
         switch self {
-        case .keychainReadFailed(let status):
-            if status == spacesErrSecInteractionNotAllowed {
-                "Keychain access to the paired-device credentials requires approval. Remove and reconnect this device from Spaces."
-            } else {
-                "Failed to read the paired-device token from Keychain. Security status: \(status)."
-            }
-        case .keychainWriteFailed(let status): "Failed to save the paired-device token in Keychain. Security status: \(status)."
-        case .keychainDeleteFailed(let status): "Failed to delete the paired-device token from Keychain. Security status: \(status)."
-        case .invalidStoredToken: "The stored paired-device token is not valid UTF-8."
+        case .invalidStoredToken: "The stored paired-device token is not valid UTF-8. Remove and reconnect this device from Spaces."
         }
     }
 }
 
+/// Owner-only file storage for paired-device secrets. Secrets live in a 0700 directory of 0600
+/// files so every client process on this machine that shares the profile — the GUI app, the
+/// `spaces` CLI, and the MCP server — can read them headlessly. Keychain is deliberately not used:
+/// its per-binary ACLs cannot be shared with CLI/agent processes without interactive prompts.
 public enum SpacesDeviceCredentialStore {
     public static let secretDirectoryEnvironmentVariable = "SPACES_CLIENT_SECRET_DIR"
+    static let secretDirectoryName = "client-secrets"
 
     private enum SecretKind {
         case authToken
         case transportKey
-
-        var service: String {
-            switch self {
-            case .authToken: "dev.usespaces.Spaces.device-auth-token"
-            case .transportKey: "dev.usespaces.Spaces.device-transport-key"
-            }
-        }
 
         var filePrefix: String {
             switch self {
@@ -65,11 +40,11 @@ public enum SpacesDeviceCredentialStore {
     }
 
     public static func hasToken(deviceID: String, profile: SpacesProfile? = nil) throws -> Bool {
-        try hasSecret(kind: .authToken, deviceID: deviceID, profile: profile)
+        try secret(kind: .authToken, deviceID: deviceID, profile: profile) != nil
     }
 
     public static func hasTransportKey(deviceID: String, profile: SpacesProfile? = nil) throws -> Bool {
-        try hasSecret(kind: .transportKey, deviceID: deviceID, profile: profile)
+        try secret(kind: .transportKey, deviceID: deviceID, profile: profile) != nil
     }
 
     public static func saveToken(_ token: String, deviceID: String, profile: SpacesProfile? = nil) throws {
@@ -89,85 +64,32 @@ public enum SpacesDeviceCredentialStore {
     }
 
     private static func secret(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws -> String? {
-        if let fileURL = secretFileURL(kind: kind, deviceID: deviceID) { return try fileSecret(at: fileURL) }
-        #if canImport(Security)
-            let query = try baseQuery(kind: kind, deviceID: deviceID, profile: profile).merging(
-                [kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne], uniquingKeysWith: { _, new in new }
-            ).merging(nonInteractiveKeychainQueryAttributes(), uniquingKeysWith: { _, new in new })
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching(query as CFDictionary, &result)
-            if status == errSecItemNotFound { return nil }
-            guard status == errSecSuccess else { throw SpacesDeviceCredentialStoreError.keychainReadFailed(status) }
-            guard let data = result as? Data, let token = String(data: data, encoding: .utf8) else {
-                throw SpacesDeviceCredentialStoreError.invalidStoredToken
-            }
-            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        #else
-            return nil
-        #endif
-    }
-
-    private static func hasSecret(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws -> Bool {
-        if let fileURL = secretFileURL(kind: kind, deviceID: deviceID) { return try fileSecret(at: fileURL) != nil }
-        #if canImport(Security)
-            let query = try baseQuery(kind: kind, deviceID: deviceID, profile: profile).merging(
-                [kSecReturnData as String: false, kSecMatchLimit as String: kSecMatchLimitOne], uniquingKeysWith: { _, new in new }
-            ).merging(nonInteractiveKeychainQueryAttributes(), uniquingKeysWith: { _, new in new })
-            let status = SecItemCopyMatching(query as CFDictionary, nil)
-            if status == errSecItemNotFound { return false }
-            guard status == errSecSuccess else { throw SpacesDeviceCredentialStoreError.keychainReadFailed(status) }
-            return true
-        #else
-            return false
-        #endif
+        try fileSecret(at: secretFileURL(kind: kind, deviceID: deviceID, profile: profile))
     }
 
     private static func saveSecret(_ value: String, kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws {
-        if let fileURL = secretFileURL(kind: kind, deviceID: deviceID) {
-            try saveFileSecret(value, at: fileURL)
-            return
-        }
-        #if canImport(Security)
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                try deleteSecret(kind: kind, deviceID: deviceID, profile: profile)
-                return
-            }
-            let tokenData = Data(trimmed.utf8)
-            let query = try baseQuery(kind: kind, deviceID: deviceID, profile: profile)
-            let deleteStatus = SecItemDelete(query as CFDictionary)
-            guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
-                throw SpacesDeviceCredentialStoreError.keychainDeleteFailed(deleteStatus)
-            }
-            var addQuery = query
-            addQuery[kSecValueData as String] = tokenData
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw SpacesDeviceCredentialStoreError.keychainWriteFailed(addStatus) }
-        #endif
+        try saveFileSecret(value, at: secretFileURL(kind: kind, deviceID: deviceID, profile: profile))
     }
 
     private static func deleteSecret(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws {
-        if let fileURL = secretFileURL(kind: kind, deviceID: deviceID) {
-            try deleteFileSecret(at: fileURL)
-            return
+        try deleteFileSecret(at: secretFileURL(kind: kind, deviceID: deviceID, profile: profile))
+    }
+
+    private static func secretFileURL(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws -> URL {
+        try secretDirectoryURL(profile: profile)
+            .appendingPathComponent("\(kind.filePrefix)-\(sanitizeFileComponent(deviceID)).secret", isDirectory: false)
+    }
+
+    private static func secretDirectoryURL(profile: SpacesProfile?) throws -> URL {
+        if let rawValue = ProcessInfo.processInfo.environment[secretDirectoryEnvironmentVariable] {
+            let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+            }
         }
-        #if canImport(Security)
-            let status = SecItemDelete(try baseQuery(kind: kind, deviceID: deviceID, profile: profile) as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else { throw SpacesDeviceCredentialStoreError.keychainDeleteFailed(status) }
-        #endif
-    }
-
-    private static func secretFileURL(kind: SecretKind, deviceID: String) -> URL? {
-        guard let directory = fileSecretDirectoryURL() else { return nil }
-        return directory.appendingPathComponent("\(kind.filePrefix)-\(sanitizeFileComponent(deviceID)).secret", isDirectory: false)
-    }
-
-    private static func fileSecretDirectoryURL() -> URL? {
-        guard let rawValue = ProcessInfo.processInfo.environment[secretDirectoryEnvironmentVariable] else { return nil }
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+        let resolvedProfile = try profile ?? SpacesProfile.current()
+        return URL(fileURLWithPath: resolvedProfile.rootDirectory, isDirectory: true)
+            .appendingPathComponent(secretDirectoryName, isDirectory: true)
     }
 
     private static func fileSecret(at url: URL) throws -> String? {
@@ -202,24 +124,4 @@ public enum SpacesDeviceCredentialStore {
         let sanitized = scalars.joined().trimmingCharacters(in: CharacterSet(charactersIn: "._-"))
         return sanitized.isEmpty ? SpacesProfile.shortStableHash(value) : sanitized
     }
-
-    #if canImport(Security)
-        private static func baseQuery(kind: SecretKind, deviceID: String, profile: SpacesProfile?) throws -> [String: Any] {
-            let resolvedProfile = try profile ?? SpacesProfile.current()
-            return [
-                kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: kind.service,
-                kSecAttrAccount as String: "\(resolvedProfile.rootDirectory)#\(deviceID)",
-            ]
-        }
-
-        private static func nonInteractiveKeychainQueryAttributes() -> [String: Any] {
-            #if canImport(LocalAuthentication)
-                let context = LAContext()
-                context.interactionNotAllowed = true
-                return [kSecUseAuthenticationContext as String: context]
-            #else
-                return [kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
-            #endif
-        }
-    #endif
 }

@@ -108,7 +108,7 @@ public enum SpacesDeviceClient {
     /// this way: it is bootstrapped, not paired through a one-time window, so a fresh bootstrap
     /// re-establishes its credentials. A remote device with missing credentials genuinely needs to be
     /// removed and re-paired, so callers must not route remote devices here. Cheap when the credentials
-    /// already exist (two keychain existence checks, no daemon round-trip).
+    /// already exist (two secret-file existence checks, no daemon round-trip).
     @discardableResult public static func ensureLocalDeviceCredentials(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
