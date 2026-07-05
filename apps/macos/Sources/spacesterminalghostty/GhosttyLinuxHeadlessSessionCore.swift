@@ -330,7 +330,12 @@
         }
 
         private func ownerRequestIsCurrent(_ request: TerminalControlRequest) -> Bool {
-            guard let clientID = request.clientID, activeOwnerClientID() == clientID else { return false }
+            // Requests without a client ID are daemon-local trusted callers — the profile terminal
+            // commands and the agent-facing Device API send path — which are deliberately not
+            // attachment-gated. This matches the macOS host's ownerRequestRejection semantics; the
+            // owner gate exists to arbitrate between attached rendering clients, not to block agents.
+            guard let clientID = request.clientID else { return true }
+            guard activeOwnerClientID() == clientID else { return false }
             guard let requestedOwnerEpoch = request.ownerEpoch else { return true }
             return requestedOwnerEpoch == ownerEpoch
         }
