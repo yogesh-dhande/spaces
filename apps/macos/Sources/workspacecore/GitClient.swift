@@ -7,6 +7,16 @@ public final class GitClient {
         case missing
     }
 
+    public struct RemoteDefaultBranchFile: Sendable {
+        public let defaultBranch: String
+        public let contents: String?
+
+        public init(defaultBranch: String, contents: String?) {
+            self.defaultBranch = defaultBranch
+            self.contents = contents
+        }
+    }
+
     private let gitExecutable: String
     private let environmentOverrides: [String: String]
     private let metadataCommandTimeout: TimeInterval
@@ -173,6 +183,45 @@ public final class GitClient {
             return
         }
         try runGitOrThrow(["clone", url, destination])
+    }
+
+    /// Resolves the repository's declared default branch from its symbolic HEAD.
+    ///
+    /// Git imports should follow the repository owner-selected default branch, not infer a branch
+    /// by name. A symbolic HEAD that does not point at an existing branch is treated as unresolved.
+    public func repositoryDefaultBranch(path repoPath: String) throws -> String {
+        let branch: String
+        do {
+            branch = try runGitAndCapture(["-C", repoPath, "symbolic-ref", "--short", "HEAD"], timeout: metadataCommandTimeout).trimmingCharacters(
+                in: .whitespacesAndNewlines)
+        } catch { throw WorkspaceError.invalidArgument(message: "Could not determine the repository's default branch.") }
+        guard !branch.isEmpty, branchExists(path: repoPath, branch: branch) else {
+            throw WorkspaceError.invalidArgument(message: "Could not determine the repository's default branch.")
+        }
+        return branch
+    }
+
+    /// Reads a single file from the default branch of a remote repository without a full clone.
+    ///
+    /// Used to load `spaces.yaml` for the add-project preview: a blobless, no-checkout, shallow
+    /// clone follows the repository's HEAD and downloads the tip commit and its trees but no file
+    /// contents, so only the requested blob is fetched on demand by `git show`. Returns `nil` when
+    /// the file is absent on the default branch; throws when the repository itself cannot be reached
+    /// or does not declare a usable default branch.
+    public func readRemoteDefaultBranchFile(gitURL: String, path: String) throws -> RemoteDefaultBranchFile {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "spaces-remote-file-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        try runGitOrThrow(["clone", "--filter=blob:none", "--no-checkout", "--depth", "1", gitURL, tempDirectory.path])
+        let defaultBranch = try repositoryDefaultBranch(path: tempDirectory.path)
+        // `ls-tree` reads local tree objects (already fetched by the blobless clone), so it tells
+        // us whether the file exists on the default branch without a second network round trip.
+        let listing = try runGitAndCapture(["-C", tempDirectory.path, "ls-tree", "--name-only", defaultBranch, path])
+        guard listing.split(whereSeparator: \.isNewline).contains(where: { $0 == path }) else {
+            return RemoteDefaultBranchFile(defaultBranch: defaultBranch, contents: nil)
+        }
+        let contents = try runGitAndCapture(["-C", tempDirectory.path, "show", "\(defaultBranch):\(path)"])
+        return RemoteDefaultBranchFile(defaultBranch: defaultBranch, contents: contents)
     }
 
     @discardableResult public func deleteBranch(path repoPath: String, branch: String) throws -> Bool {

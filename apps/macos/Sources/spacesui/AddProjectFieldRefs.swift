@@ -1,54 +1,66 @@
 import AppKit
 import workspacecore
 
+/// The kind of source a new project is created from, chosen on the source step.
+enum AddProjectSourceKind {
+    case folder
+    case git
+}
+
 @MainActor final class AddProjectFieldRefs {
-    let sourceSegmented: NSSegmentedControl
-    let localSourceSection: NSStackView
-    let cloneSourceSection: NSStackView
+    // MARK: Source step
+    /// The two clickable source rows; the selected one is highlighted and reveals its input.
+    let folderRow: ClickableRowView
+    let gitRow: ClickableRowView
+    /// Containers holding the folder-path and git-URL inputs, shown per selected source.
+    let folderInputRow: NSView
+    let gitInputRow: NSView
     let dirField: NSTextField
     let repoURLField: NSTextField
-    let prepareButton: NSButton
-    let progressiveInputViews: [NSView]
-    let createButton: NSButton
+    let continueButton: NSButton
+    /// The chosen source kind, or `nil` until the user picks a row.
+    var selectedSourceKind: AddProjectSourceKind?
+
+    // MARK: Config step
     let setupScriptSection: ScriptSection
     let stopScriptSection: ScriptSection
     let portsSection: PortsSection
     let processesSection: ProcessesSection
     let browserSessionsSection: BrowserSessionsSection
     let agentLaunchersSection: AgentLaunchersSection
-    var preparedLocalDirectoryPath: String?
-    var preparedGitURL: String?
-    /// Opaque handle to the repository cloned by the daemon's prepareGitProject command, held so
-    /// Create can adopt that clone (no re-clone) and Cancel can discard it.
-    var preparedGitProjectHandle: String?
-    var preparedGitDeviceID: String?
-    var gitPreparationID: UUID?
-    var directorySuggestionTask: Task<Void, Never>?
-    var directoryPreviewTask: Task<Void, Never>?
-    var directoryCompletions: [String] = []
-    /// The device the project will be created on. Defaults to the local Mac; the
-    /// New Project form lets the user pick another paired device.
+    let createButton: NSButton
+    /// Gentle note shown on the config step when a git repo has no `spaces.yaml`.
+    let spacesYAMLMissingLabel: NSTextField
+    /// Whether the loaded git source had no `spaces.yaml`, driving the note above.
+    var spacesYAMLMissing = false
+
+    // MARK: Shared
+    /// The device the project will be created on, chosen in the device step (or the local Mac when it
+    /// is the only device). Fixed for the lifetime of this flow.
     var selectedDeviceID: String = SpacesDeviceRecord.localDeviceID
+    var directorySuggestionTask: Task<Void, Never>?
+    var directoryCompletions: [String] = []
 
     init(
-        sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
-        repoURLField: NSTextField, prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton,
-        setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection, processesSection: ProcessesSection,
-        browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection
+        folderRow: ClickableRowView, gitRow: ClickableRowView, folderInputRow: NSView, gitInputRow: NSView, dirField: NSTextField,
+        repoURLField: NSTextField, continueButton: NSButton, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection,
+        portsSection: PortsSection, processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection,
+        agentLaunchersSection: AgentLaunchersSection, createButton: NSButton, spacesYAMLMissingLabel: NSTextField
     ) {
-        self.sourceSegmented = sourceSegmented
-        self.localSourceSection = localSourceSection
-        self.cloneSourceSection = cloneSourceSection
+        self.folderRow = folderRow
+        self.gitRow = gitRow
+        self.folderInputRow = folderInputRow
+        self.gitInputRow = gitInputRow
         self.dirField = dirField
         self.repoURLField = repoURLField
-        self.prepareButton = prepareButton
-        self.progressiveInputViews = progressiveInputViews
-        self.createButton = createButton
+        self.continueButton = continueButton
         self.setupScriptSection = setupScriptSection
         self.stopScriptSection = stopScriptSection
         self.portsSection = portsSection
         self.processesSection = processesSection
         self.browserSessionsSection = browserSessionsSection
         self.agentLaunchersSection = agentLaunchersSection
+        self.createButton = createButton
+        self.spacesYAMLMissingLabel = spacesYAMLMissingLabel
     }
 }

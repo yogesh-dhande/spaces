@@ -83,7 +83,7 @@ extension WorkspaceOrchestrator {
 
         var shouldCleanupDestination = true
         do {
-            let defaultBranch = try preferredImportedDefaultBranch(path: plan.destination.path)
+            let defaultBranch = try importedRepositoryDefaultBranch(path: plan.destination.path)
             let baseRecord = ProjectRecord(
                 id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: defaultBranch)
             var record = try configuredProjectRecord(baseRecord: baseRecord) { _ in }
@@ -102,6 +102,21 @@ extension WorkspaceOrchestrator {
             }
             throw error
         }
+    }
+
+    /// Loads a git repository's `spaces.yaml` for the add-project preview without cloning into the
+    /// managed repo root. The full clone is deferred to Create, so this only fetches the single file
+    /// from the repository's declared default branch and reports managed-directory collisions from
+    /// the local filesystem.
+    public func previewGitProject(gitURL: String) throws -> GitProjectPreview {
+        let plan = try gitProjectImportPlan(gitURL: gitURL)
+        let replacementCandidates = try managedGitProjectImportReplacementCandidates(plan: plan)
+        let file = try git.readRemoteDefaultBranchFile(gitURL: plan.gitURL, path: SpacesYAMLService.fileName)
+        let importedDocument = try file.contents.map { try SpacesYAMLService.decode($0) }
+        let baseRecord = ProjectRecord(
+            id: plan.project.id, name: plan.project.name, dir: plan.project.dir, isGitRepo: true, defaultBranch: file.defaultBranch)
+        let record = try configuredProjectRecord(baseRecord: baseRecord) { project in importedDocument?.applying(to: &project) }
+        return GitProjectPreview(project: record, replacementCandidates: replacementCandidates, spacesYAMLFound: importedDocument != nil)
     }
 
     public func managedGitProjectImportReplacementCandidates(gitURL: String) throws -> [ManagedDirectoryReplacementCandidate] {

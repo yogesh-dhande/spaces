@@ -129,6 +129,24 @@ public final class WorkspaceOrchestrator {
         }
     }
 
+    /// The result of loading `spaces.yaml` for the add-project preview without cloning the repo.
+    /// `project` carries the imported config applied onto a base record; `replacementCandidates`
+    /// reports managed directories that a later Create would replace, detected from the local
+    /// filesystem (no clone required).
+    public struct GitProjectPreview: Sendable {
+        public let project: ProjectRecord
+        public let replacementCandidates: [ManagedDirectoryReplacementCandidate]
+        /// Whether a `spaces.yaml` was found on the repository's default branch. `false` means the
+        /// returned config is empty because the repo has no `spaces.yaml`, not because it was empty.
+        public let spacesYAMLFound: Bool
+
+        public init(project: ProjectRecord, replacementCandidates: [ManagedDirectoryReplacementCandidate], spacesYAMLFound: Bool) {
+            self.project = project
+            self.replacementCandidates = replacementCandidates
+            self.spacesYAMLFound = spacesYAMLFound
+        }
+    }
+
     public struct ManagedDirectoryReplacementCandidate: Equatable, Sendable {
         public enum Kind: String, Hashable, Sendable {
             case projectRepository
@@ -2251,11 +2269,7 @@ public final class WorkspaceOrchestrator {
         try store.workspaces(projectID: projectID, includeArchived: true).first(where: \.isDefault)
     }
 
-    func preferredImportedDefaultBranch(path: String) throws -> String {
-        if git.branchExists(path: path, branch: "main") { return "main" }
-        if git.branchExists(path: path, branch: "master") { return "master" }
-        throw WorkspaceError.invalidArgument(message: "Imported git repository must contain a main or master branch.")
-    }
+    func importedRepositoryDefaultBranch(path: String) throws -> String { try git.repositoryDefaultBranch(path: path) }
 
     func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)
