@@ -1283,11 +1283,15 @@ run_remote_device_ui_parity() {
   wait_for_ui_identifier "workspace-detail-launch-restart" "remote workspace lifecycle action"
   wait_for_ui_identifier "workspace-detail-stop" "remote workspace stop action"
   wait_for_ui_identifier "workspace-detail-overflow" "remote workspace overflow action"
-  wait_for_ui_identifier "browser-session-row-remote-web" "remote browser session row"
+  # The panel rework (#109) moved workspace browser sessions out of the detail view and into the
+  # sidebar as runtime-target rows: sidebar-target-<workspaceID>-browser:<resolved service URL>.
+  # Discover the full id by prefix rather than reconstructing the resolved URL.
+  local remote_web_target_id
+  remote_web_target_id="$(wait_for_ui_identifier_with_prefix "sidebar-target-${REMOTE_DEVICE_WORKSPACE_ID}-browser:" "remote browser session row")"
   remote_device_wait_service_port_state "bindable"
   remote_device_run_workspace_process "remote-web-server"
   remote_device_wait_service_port_state "open"
-  ui_click_identifier "browser-session-row-remote-web"
+  ui_click_identifier "$remote_web_target_id"
   wait_for_http_body_contains "$REMOTE_DEVICE_WEB_BROWSER_URL" "remote device api sentinel"
   wait_for_condition "chrome_front_url" "$REMOTE_DEVICE_WEB_BROWSER_URL"
   pass_case
@@ -1781,6 +1785,68 @@ wait_for_ui_identifier() {
     sleep 0.2
   done
   fail "timed out waiting for UI identifier: $description ($identifier)"
+}
+
+# Echoes the first AXIdentifier under the app's windows whose value starts with the given
+# prefix (empty when none). Resolves a sidebar runtime-target row whose id embeds a runtime
+# value — a browser session's row is sidebar-target-<workspaceID>-browser:<resolved
+# service-substituted URL> — without hard-coding that resolved URL.
+find_ui_identifier_with_prefix() {
+  local prefix="$1"
+  osascript - "$SPACES_PID" "$prefix" <<'APPLESCRIPT'
+on firstMatchingIdentifier(targetElement, targetPrefix)
+  tell application "System Events"
+    try
+      set idVal to (value of attribute "AXIdentifier" of targetElement) as text
+      if idVal starts with targetPrefix then return idVal
+    end try
+    try
+      repeat with childElement in UI elements of targetElement
+        set foundID to my firstMatchingIdentifier(childElement, targetPrefix)
+        if foundID is not "" then return foundID
+      end repeat
+    end try
+    try
+      repeat with childElement in rows of targetElement
+        set foundID to my firstMatchingIdentifier(childElement, targetPrefix)
+        if foundID is not "" then return foundID
+      end repeat
+    end try
+  end tell
+  return ""
+end firstMatchingIdentifier
+
+on run argv
+  set targetPID to (item 1 of argv) as integer
+  set targetPrefix to item 2 of argv
+  tell application "System Events"
+    repeat with proc in every process whose unix id is targetPID
+      repeat with targetWindow in windows of proc
+        set foundID to my firstMatchingIdentifier(targetWindow, targetPrefix)
+        if foundID is not "" then return foundID
+      end repeat
+    end repeat
+  end tell
+  return ""
+end run
+APPLESCRIPT
+}
+
+# Polls until a UI identifier with the given prefix appears, echoing the full identifier.
+wait_for_ui_identifier_with_prefix() {
+  local prefix="$1"
+  local description="${2:-$prefix}"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  local found=""
+  while (( SECONDS < deadline )); do
+    found="$(find_ui_identifier_with_prefix "$prefix")"
+    if [[ -n "$found" ]]; then
+      printf '%s' "$found"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for UI identifier with prefix: $description ($prefix)"
 }
 
 ui_select_outline_row_containing_identifier() {

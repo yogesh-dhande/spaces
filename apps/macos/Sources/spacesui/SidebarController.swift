@@ -1199,6 +1199,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         } else {
             let isPendingLaunchAction = item.kind == .missingConfiguredProcess || item.kind == .agentLauncher
             let titleLabel = NSTextField(labelWithString: item.title)
+            // Mirror the row identifier onto the title label. AppKit does not expose an
+            // NSTableCellView's own accessibility identifier as a queryable element (only its
+            // text/interactive subviews are), so the cell-level id on line ~1147 is invisible to
+            // VoiceOver and UI automation; the label carries a findable copy.
+            titleLabel.setAccessibilityIdentifier("sidebar-target-\(workspace.id)-\(item.key)")
             titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
             titleLabel.textColor =
                 isPendingLaunchAction ? sidebarMetadataTextColor(isSelected: false) : sidebarPrimaryTextColor(isSelected: false, isArchived: false)
