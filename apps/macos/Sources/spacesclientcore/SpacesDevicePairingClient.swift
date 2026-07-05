@@ -169,7 +169,7 @@ public enum SpacesDevicePairingClient {
                 SpacesDeviceAPIRequest(
                     command: .pair(.init(pairingCode: metadata.pairingCode, pairingNonce: metadata.pairingNonce)),
                     clientApp: SpacesDeviceClientApp(
-                        installationID: request.clientInstallationID, bundleID: request.clientBundleID, platform: "macos",
+                        installationID: request.clientInstallationID, bundleID: request.clientBundleID, platform: clientPlatform,
                         deviceName: request.clientDeviceName, appVersion: request.clientAppVersion)))
         } catch {
             throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(
@@ -187,6 +187,50 @@ public enum SpacesDevicePairingClient {
                 createdAt: now, updatedAt: now, lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
         return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)
+    }
+
+    /// Pairs this client with a daemon from a `spaces://pair` link — code and nonce redeemed over
+    /// the fingerprint-pinned Device API — persisting the paired-device record and issued token.
+    /// This is the no-SSH pairing path (`spaces device pair --link`); the resulting record carries
+    /// no SSH metadata, so SSH-backed features (remote update, pairing-window reopen) stay
+    /// unavailable for it until the device is re-paired over SSH.
+    public static func pairDevice(
+        link: SpacesDevicePairingLink, clientInstallationID: String, clientBundleID: String, clientDeviceName: String, clientAppVersion: String?,
+        profile: SpacesProfile? = nil
+    ) throws -> SpacesRemoteDevicePairingResult {
+        let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, host: link.host, port: link.port)
+        let client = try SpacesDeviceAPIRequestClient(host: link.host, port: link.port, certificateFingerprint: link.certificateFingerprint)
+        let response: SpacesDeviceAPIResponse
+        do {
+            response = try client.request(
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: link.code, pairingNonce: link.nonce)),
+                    clientApp: SpacesDeviceClientApp(
+                        installationID: clientInstallationID, bundleID: clientBundleID, platform: clientPlatform, deviceName: clientDeviceName,
+                        appVersion: clientAppVersion)))
+        } catch {
+            throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: link.host, port: link.port, message: error.localizedDescription)
+        }
+        guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
+        guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
+
+        let now = ISO8601DateFormatter().string(from: Date())
+        let database = try SpacesClientDatabase.defaultDatabase()
+        try database.upsert(
+            device: SpacesPairedDeviceRecord(
+                id: deviceID, name: link.name, platform: "remote", host: link.host, port: link.port,
+                certificateFingerprint: link.certificateFingerprint, sshHost: nil, sshUser: nil, sshPort: nil, createdAt: now, updatedAt: now,
+                lastSelectedAt: now))
+        try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: profile)
+        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: link.host, port: link.port)
+    }
+
+    private static var clientPlatform: String {
+        #if os(Linux)
+            "linux"
+        #else
+            "macos"
+        #endif
     }
 
     public static func openRemotePairingWindow(

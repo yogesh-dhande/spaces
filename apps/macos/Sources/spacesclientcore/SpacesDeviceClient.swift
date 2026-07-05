@@ -523,6 +523,34 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
+    /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send --device`).
+    @discardableResult public static func sendTerminalInput(
+        sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .sendTerminalInput(.init(sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
+    /// Rendered plain-text tail of a terminal session on a paired device (`spaces terminal tail --device`).
+    public static func tailTerminalOutput(
+        sessionID: String, lines: Int? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> String {
+        let response = try request(
+            .init(command: .tailTerminalOutput(.init(sessionID: sessionID, lines: lines))), device: device, clientApp: clientApp, profile: profile)
+        guard let output = response.terminalOutput else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return output
+    }
+
+    /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
+    public static func terminalSessions(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceTerminalSessionSummary] {
+        try overview(device: device, clientApp: clientApp, profile: profile).overview.sessions
+    }
+
     /// Reads a device's Device API credentials (pinned TLS certificate fingerprint and auth token),
     /// transparently re-bootstrapping the local device when its token is missing; the re-bootstrap also
     /// refreshes the local record's fingerprint, so a rotated daemon identity is picked up in the same

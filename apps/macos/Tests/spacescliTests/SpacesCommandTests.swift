@@ -51,6 +51,35 @@ final class SpacesCommandTests: XCTestCase {
 
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
 
+    func testTerminalCommandsParseDeviceSelector() throws {
+        XCTAssertEqual(try TerminalListCommand.parse(["--device", "linux-box"]).device, "linux-box")
+        let send = try TerminalSendCommand.parse(["session-1", "echo hi", "--newline", "--device", "linux-box"])
+        XCTAssertEqual(send.sessionID, "session-1")
+        XCTAssertEqual(send.text, "echo hi")
+        XCTAssertTrue(send.newline)
+        XCTAssertEqual(send.device, "linux-box")
+        let tail = try TerminalTailCommand.parse(["session-1", "--lines", "40", "--device", "linux-box"])
+        XCTAssertEqual(tail.lines, 40)
+        XCTAssertEqual(tail.device, "linux-box")
+    }
+
+    func testDevicePairRequiresExactlyOneSource() throws {
+        XCTAssertThrowsError(try DevicePairCommand.parse([]))
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--ssh", "user@host", "--link", "spaces://pair?v=2"]))
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--link", "spaces://pair?v=2", "--ssh-port", "2222"]))
+        XCTAssertNoThrow(try DevicePairCommand.parse(["--ssh", "user@host", "--ssh-port", "2222"]))
+        XCTAssertNoThrow(try DevicePairCommand.parse(["--link", "spaces://pair?v=2"]))
+    }
+
+    func testDevicePairParsesSSHDestination() {
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("yogesh@build-box").user, "yogesh")
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("yogesh@build-box").host, "build-box")
+        XCTAssertNil(DevicePairCommand.parsedSSHDestination("build-box").user)
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("build-box").host, "build-box")
+    }
+
+    func testDeviceRemoveParsesSelector() throws { XCTAssertEqual(try DeviceRemoveCommand.parse(["linux-box"]).device, "linux-box") }
+
     func testTerminalSessionRowsReturnsEmptyListWhenNoSessionsExist() { XCTAssertEqual(terminalSessionRows([]), []) }
 
     func testAvailableTerminalSessionRowsSkipsMetadataOnlySessions() throws {
@@ -217,7 +246,8 @@ final class SpacesCommandTests: XCTestCase {
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
-            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "PairCommand", "MobileCommand", "MCPCommand"])
+            subcommands,
+            ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "PairCommand", "MobileCommand", "MCPCommand"])
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {
@@ -228,7 +258,7 @@ final class SpacesCommandTests: XCTestCase {
             names,
             [
                 "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
-                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send",
+                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_device_list",
             ])
         XCTAssertFalse(names.contains("spaces_agent_signal"))
 

@@ -175,9 +175,11 @@ Each `apps/macos/Tests/e2e.sh` invocation writes an ignored Markdown report unde
 
 `apps/macos/Tests/e2e.sh all` is the shared-setup smoke lane for app, terminal, mobile, and paired-device coverage. `apps/macos/Tests/e2e.sh exhaustive` is the full manual lane: app full coverage, every terminal scenario, every mobile scenario, local and constrained iOS latency profiles, local and remote Device API parity, and Device API profiling.
 
-Remote mobile terminal latency sweeps use `spacese2e terminal-service-tls-session` for direct daemon commands so input and scroll samples reuse one pinned-TLS command connection while a separate direct subscribe stream observes render visibility. The sweep reports `direct_command_request` for the direct daemon round trip and validates that each direct command receives the expected response shape before recording the sample.
+Mobile terminal latency sweeps target the local paired daemon over the Device API; remote terminal latency runs through the paired-device parity harness instead of a separate direct-daemon channel.
 
 The daemon-hosted Device API is a paired Spaces-only transport rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone Device API process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same pinned-TLS transport as the iOS app.
+
+`apps/macos/Tests/e2e_remote_terminal_send.sh` verifies the orchestrator agent path end to end against the configured remote host: it pairs the CLI over SSH with `spaces device pair`, creates a remote terminal session, and drives it from the Mac with `spaces terminal list/send/tail --device`, using an isolated client database and secret directory. The remote daemon must be on the same wire-protocol version as the local build (redeploy with `apps/macos/scripts/deploy_linux_spacesd_e2e.sh` first).
 
 Focused paired-device parity checks use one shared Device API flow for local and remote daemons:
 

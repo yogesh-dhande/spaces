@@ -67,7 +67,7 @@ flowchart TD
     iosContainer[("client DB in app container")]
   end
 
-  cli["spaces CLI\nsame-machine only"]
+  cli["spaces CLI / MCP server"]
   bonjour["Bonjour / NetService"]
 
   spacesd --> core
@@ -86,7 +86,10 @@ flowchart TD
   iosApp --> iosContainer
   iosApp --> iosKeychain
   iosApp -->|Device API JSON\nTLS pinned daemon identity + paired-client token| spacesd
-  cli -->|TerminalService/profile JSON\nlocal Unix socket, same-machine daemon only| spacesd
+  cli -->|TerminalService/profile JSON\nlocal Unix socket| spacesd
+  cli --> clientDB
+  cli --> clientSecrets
+  cli -->|Device API JSON\nTLS pinned daemon identity + paired-client token| spacesd
   spacesd -->|publishes endpoint metadata only| bonjour
   app -->|discovers host and port| bonjour
   iosApp -->|discovers host and port| bonjour
@@ -101,6 +104,7 @@ flowchart TD
 - Device API transport uses two authentication layers: clients pin the daemon's self-signed TLS identity from pairing metadata, then include a per-client token issued during the short-lived pairing window. Tokens are stored only as hashes by the daemon. The macOS client stores its issued secrets as owner-only files under `<profile-root>/client-secrets` (0700 directory, 0600 files) so every client process sharing the profile — the app, the `spaces` CLI, and the MCP server — can read them headlessly; `SPACES_CLIENT_SECRET_DIR` overrides the directory for test isolation. The iOS client stores its secrets in Keychain.
 - macOS and iOS clients keep only client-local metadata in SQLite: paired device list, local device label, editor preference, keyboard bindings, local window IDs, browser window mappings, and focus history; the iOS client also stores its active-device selection. Editor windows are not tracked here; the client re-focuses an open editor by re-launching the folder (see editor integration below).
 - Before a client database migration, the client creates a timestamped metadata-only backup. If migration fails, it restores the latest backup and surfaces a startup error. Pairing tokens stay in the client secret store and are not copied into SQLite backups.
+- The `spaces` CLI and its MCP server are Device API clients with the same per-profile identity, paired-device records, and credential files as the Mac app: `spaces device pair/list/remove` manage pairings, and `terminal list/send/tail --device` (plus the MCP `device` arguments) ride the Device API `overview`, `sendTerminalInput`, and `tailTerminalOutput` commands. Local terminal commands without a device selector keep using the profile Unix socket and session files. The client SQLite connection sets a busy timeout because the app, CLI, and MCP server write pairing records from separate processes.
 - Direct Device API reachability is required through LAN, VPN, Tailscale, or equivalent network configuration. There is no relay transport.
 - macOS remote-device pairing, terminal attach, browser forwarding, and editor opening require SSH to the same device. Remote pairing validates SSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, requires Darwin hosts to expose the DMG install markers (`/Applications/Spaces.app`, app-resource executables, `/usr/local/bin` symlinks, `~/.spaces/bin` helper symlinks, and a LaunchAgent pointed at `~/.spaces/bin/spacesd`), and probes Linux hosts for Ubuntu 24.04 on `x86_64` or `arm64`. When the Linux pairing command is missing or not responding, the client downloads the signed release manifest for the running app version, verifies it with the bundled remote-artifact Ed25519 public key, downloads and checks the matching archive, copies it over SSH, runs the included installer as the target user, and retries `~/.spaces/bin/spaces pair --json`. The Linux installer enables systemd user lingering before restarting the user service so Spaces stays available after the setup SSH command exits. Pairing then uses the Device API at the effective OpenSSH `HostName` and returned API port, so SSH aliases resolve to direct LAN, VPN, or Tailscale endpoints without using daemon-advertised interface metadata.
 - iOS direct terminal control uses one serialized pinned-TLS command channel per daemon endpoint. TerminalService requests carry an optional top-level auth token and exactly one tagged command payload, so each command owns only its request-specific fields. Non-stream requests are newline-framed on that channel and must receive the expected response shape, such as `controlResponse` for control commands or `sessionState` for explicit state reads. Live render and ownership updates are delivered by the separate direct `subscribe` stream, so input, key, resize, and scroll control responses do not carry session snapshots.

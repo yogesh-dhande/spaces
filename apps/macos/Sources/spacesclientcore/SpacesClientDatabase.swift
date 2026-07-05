@@ -467,6 +467,9 @@ public final class SpacesClientDatabase {
         try executeBatch(sql: "PRAGMA journal_mode=WAL;")
         try executeBatch(sql: "PRAGMA synchronous=NORMAL;")
         try executeBatch(sql: "PRAGMA foreign_keys=ON;")
+        // The GUI app, spaces CLI, and MCP server write this database from separate processes
+        // (pairing records); WAL alone still surfaces SQLITE_BUSY on write contention.
+        try executeBatch(sql: "PRAGMA busy_timeout=5000;")
     }
 
     private func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
