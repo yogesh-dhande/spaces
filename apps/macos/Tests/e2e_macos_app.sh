@@ -1292,9 +1292,47 @@ run_remote_device_ui_parity() {
   remote_device_run_workspace_process "remote-web-server"
   remote_device_wait_service_port_state "open"
   ui_click_identifier "$remote_web_target_id"
-  wait_for_http_body_contains "$REMOTE_DEVICE_WEB_BROWSER_URL" "remote device api sentinel"
-  wait_for_condition "chrome_front_url" "$REMOTE_DEVICE_WEB_BROWSER_URL"
+  # The local Caddy router port is profile-scoped (dev/worktree profiles no longer share the
+  # well-known 7391), and a remote browser session is served by the LOCAL router. The result JSON's
+  # browser URL carries the remote daemon's port, so translate it to the local router's actual port
+  # (read from this profile's Caddy config) for the HTTP/Chrome assertions — matching the routed URL
+  # the app opens.
+  local local_browser_url
+  local_browser_url="$(remote_device_local_browser_url "$REMOTE_DEVICE_WEB_BROWSER_URL")"
+  wait_for_http_body_contains "$local_browser_url" "remote device api sentinel"
+  wait_for_condition "chrome_front_url" "$local_browser_url"
   pass_case
+}
+
+# Rewrites a remote browser URL's port to the local Caddy router's actual listen port (from this
+# app profile's runtime caddy.json), polling briefly for the config to appear.
+remote_device_local_browser_url() {
+  local remote_url="$1"
+  local caddy_config="$TMP_RUNTIME_DIR/caddy.json"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if [[ -s "$caddy_config" ]]; then
+      local rewritten
+      rewritten="$(python3 - "$caddy_config" "$remote_url" <<'PY'
+import json, sys
+from urllib.parse import urlsplit, urlunsplit
+config_path, remote_url = sys.argv[1:3]
+try:
+    with open(config_path) as handle:
+        listen = json.load(handle)["apps"]["http"]["servers"]["spaces"]["listen"]
+except (OSError, KeyError, ValueError):
+    raise SystemExit(1)
+port = next((entry.rsplit(":", 1)[1] for entry in listen if entry.startswith("127.0.0.1:")), "")
+if not port:
+    raise SystemExit(1)
+parts = urlsplit(remote_url)
+print(urlunsplit((parts.scheme, f"{parts.hostname}:{port}", parts.path, parts.query, parts.fragment)))
+PY
+)" && [[ -n "$rewritten" ]] && { printf '%s' "$rewritten"; return 0; }
+    fi
+    sleep 0.2
+  done
+  fail "timed out reading local Caddy router port from $caddy_config"
 }
 
 relaunch_spaces_after_remote_device_parity() {

@@ -147,6 +147,7 @@ import workspacecore
             writeStandardError("spacesd device_runtime_error error=could not resolve database path\n")
             return
         }
+        seedProfileRouterPortIfNeeded(databasePath: databasePath)
         let worktreeService = WorktreeDiscoveryService(databasePath: databasePath) { error in
             writeStandardError("spacesd worktree_discovery_error error=\(error)\n")
         }
@@ -647,6 +648,24 @@ import workspacecore
         }
         let output = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lineCount)
         return TerminalServiceProfileCommandResponse(message: "Read terminal output.", terminalOutput: output)
+    }
+
+    /// Pins this profile's Caddy router port on first daemon start. The installed/production
+    /// profile keeps the well-known 7391; dev/worktree profiles derive a distinct deterministic
+    /// port so concurrent Spaces instances (multiple worktrees, or the installed app plus a dev
+    /// build) don't all try to bind one port — where only the first wins and every other instance's
+    /// Caddy silently fails to start, breaking its workspace-service routing. Seeds only when unset,
+    /// so an explicit override still wins, and service URLs then read the pinned port.
+    private func seedProfileRouterPortIfNeeded(databasePath: String) {
+        do {
+            let store = try SQLiteStore(path: databasePath)
+            guard try store.storedRouterPort() == nil else { return }
+            var config = try store.appConfig()
+            config.routerPort = try SpacesProfile.current().defaultRouterPort
+            try store.setAppConfig(config)
+        } catch {
+            writeStandardError("spacesd router_port_seed_error error=\(error)\n")
+        }
     }
 
     private func makeProfileOrchestrator() throws -> WorkspaceOrchestrator {
