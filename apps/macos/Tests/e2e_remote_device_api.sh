@@ -179,7 +179,7 @@ remote_spaces_mobile_status() {
 }
 
 remote_spaces_pair_json() {
-  remote_ssh "$(remote_profile_env_prefix) ~/.spaces/bin/spaces pair --json"
+  remote_ssh "$(remote_profile_env_prefix) ~/.spaces/bin/spaces device pair --json"
 }
 
 wait_for_remote_daemon() {
@@ -253,15 +253,19 @@ for key in ("pairingCode", "pairingNonce", "certificateFingerprint"):
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise SystemExit(f"remote pairing JSON missing {key}")
+if not isinstance(payload.get("protocolVersion"), int):
+    raise SystemExit("remote pairing JSON missing protocolVersion")
 print(f"PAIRING_CODE={shlex.quote(payload['pairingCode'])}")
 print(f"PAIRING_NONCE={shlex.quote(payload['pairingNonce'])}")
 print(f"CERTIFICATE_FINGERPRINT={shlex.quote(payload['certificateFingerprint'])}")
+print(f"PROTOCOL_VERSION={payload['protocolVersion']}")
 PY
   )"
   eval "$parsed"
   [[ -n "$PAIRING_CODE" ]] || fail "remote pairing JSON missing pairingCode"
   [[ -n "$PAIRING_NONCE" ]] || fail "remote pairing JSON missing pairingNonce"
   [[ -n "$CERTIFICATE_FINGERPRINT" ]] || fail "remote pairing JSON missing certificateFingerprint"
+  [[ -n "$PROTOCOL_VERSION" ]] || fail "remote pairing JSON missing protocolVersion"
 }
 
 device_request() {
@@ -294,12 +298,12 @@ pair_remote_client() {
   local app_version="$5"
   local response request_json
   request_json="$(
-    python3 - "$PAIRING_CODE" "$PAIRING_NONCE" "$installation_id" "$bundle_id" "$platform" "$device_name" "$app_version" <<'PY'
+    python3 - "$PAIRING_CODE" "$PAIRING_NONCE" "$installation_id" "$bundle_id" "$platform" "$device_name" "$app_version" "$PROTOCOL_VERSION" <<'PY'
 import json
 import sys
-code, nonce, installation_id, bundle_id, platform, device_name, app_version = sys.argv[1:8]
+code, nonce, installation_id, bundle_id, platform, device_name, app_version, protocol_version = sys.argv[1:9]
 print(json.dumps({
-    "command": {"pair": {"pairingCode": code, "pairingNonce": nonce}},
+    "command": {"pair": {"pairingCode": code, "pairingNonce": nonce, "clientProtocolVersion": int(protocol_version)}},
     "clientApp": {
         "installationID": installation_id,
         "bundleID": bundle_id,

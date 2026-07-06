@@ -707,7 +707,7 @@ PY
         # authed request over that channel. This is the only automated Linux TLS round-trip.
         env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
             SPACES_DEVICE_API_HOST=127.0.0.1 SPACES_DEVICE_API_PORT=0 \
-            bin/spaces pair --json >"$smoke_root/pairing-window.json"
+            bin/spaces device pair --json >"$smoke_root/pairing-window.json"
         python3 - "$smoke_root/pairing-window.json" <<'PY'
 import hashlib
 import json
@@ -754,7 +754,15 @@ client_app = {
 }
 paired = request({
     "clientApp": client_app,
-    "command": {"pair": {"pairingCode": pairing["pairingCode"], "pairingNonce": pairing["pairingNonce"]}},
+    "command": {
+        "pair": {
+            "pairingCode": pairing["pairingCode"],
+            "pairingNonce": pairing["pairingNonce"],
+            # Version-gated pairing: echo the daemon's advertised wire-protocol version so the pair
+            # request matches and is not rejected before the code is validated.
+            "clientProtocolVersion": pairing["protocolVersion"],
+        }
+    },
 })
 auth_token = ((paired.get("result") or {}).get("issuedAuthToken") or {}).get("authToken")
 if not paired.get("ok") or not auth_token:

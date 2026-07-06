@@ -93,7 +93,7 @@ REMOTE_ENV_PREFIX="SPACES_DB_PATH=$(shell_quote "$remote_db_path") SPACES_RUNTIM
 remote_ssh "rm -rf $(shell_quote "$REMOTE_INSTALL") && mkdir -p $(shell_quote "$REMOTE_INSTALL") && tar -xzf $(shell_quote "$archive_path") -C $(shell_quote "$REMOTE_INSTALL") --strip-components=1 && $REMOTE_ENV_PREFIX SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$REMOTE_DAEMON_PORT $(shell_quote "$REMOTE_INSTALL/install.sh")" >/dev/null
 
 echo "== opening a pairing window on the remote E2E daemon =="
-PAIR_JSON="$(remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces pair --json")"
+PAIR_JSON="$(remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces device pair --json")"
 PAIR_LINK="$(SPACES_E2E_PAIR_JSON="$PAIR_JSON" python3 - "$REMOTE_DAEMON_HOST" "$REMOTE_DAEMON_PORT" <<'PY'
 import json
 import os
@@ -102,15 +102,18 @@ import urllib.parse
 
 payload = json.loads(os.environ["SPACES_E2E_PAIR_JSON"])
 # The daemon advertises its own interface address, which may not be reachable from this machine;
-# rebuild the link against the configured daemon host/port from .env.
+# rebuild the v3 link against the configured daemon host/port from .env, carrying the
+# daemon-advertised wire-protocol (pv) and app version (av) so the pairing-time compatibility gate passes.
 query = urllib.parse.urlencode({
-    "v": "2",
+    "v": "3",
     "host": sys.argv[1],
     "port": sys.argv[2],
     "nonce": payload["pairingNonce"],
     "code": payload["pairingCode"],
     "fp": payload["certificateFingerprint"],
     "name": payload["name"],
+    "pv": payload["protocolVersion"],
+    "av": payload["appVersion"],
 })
 print(f"spaces://pair?{query}")
 PY

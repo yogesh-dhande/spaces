@@ -110,10 +110,22 @@ pair_local_device() {
 import json
 import sys
 
+import urllib.parse
+
 window_path, request_path = sys.argv[1:3]
 window = json.load(open(window_path))
+# Pairing is version-gated: send the daemon's advertised wire-protocol version (pv from the v3
+# pairing link) as clientProtocolVersion so the daemon accepts a matching client.
+link_query = urllib.parse.parse_qs(urllib.parse.urlparse(window["pairingLink"]).query)
+client_protocol_version = int(link_query["pv"][0])
 payload = {
-    "command": {"pair": {"pairingCode": window["pairingCode"], "pairingNonce": window["pairingNonce"]}},
+    "command": {
+        "pair": {
+            "pairingCode": window["pairingCode"],
+            "pairingNonce": window["pairingNonce"],
+            "clientProtocolVersion": client_protocol_version,
+        }
+    },
     "clientApp": {
         "installationID": "LOCAL-DEVICE-E2E",
         "bundleID": "dev.usespaces.spacesmobile",

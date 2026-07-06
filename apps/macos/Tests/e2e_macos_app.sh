@@ -1208,7 +1208,7 @@ import json
 import shlex
 import sys
 payload = json.load(open(sys.argv[1]))
-for key, name in (("host", "host"), ("port", "port"), ("certificateFingerprint", "certificate_fingerprint"), ("pairingCode", "pairing_code"), ("pairingNonce", "pairing_nonce")):
+for key, name in (("host", "host"), ("port", "port"), ("certificateFingerprint", "certificate_fingerprint"), ("pairingCode", "pairing_code"), ("pairingNonce", "pairing_nonce"), ("pairingLink", "pairing_link")):
     value = payload.get(key)
     if value is None or str(value).strip() == "":
         raise SystemExit(f"pairing window missing {key}")
@@ -1217,12 +1217,15 @@ PY
   )"
   eval "$parsed"
   host="$(device_api_connect_host "$host")"
-  python3 - "$pair_request_json" "$pairing_code" "$pairing_nonce" <<'PY'
+  python3 - "$pair_request_json" "$pairing_code" "$pairing_nonce" "$pairing_link" <<'PY'
 import json
 import sys
-path, pairing_code, pairing_nonce = sys.argv[1:4]
+import urllib.parse
+path, pairing_code, pairing_nonce, pairing_link = sys.argv[1:5]
+# Version-gated pairing: send the daemon's advertised wire-protocol version (pv from the v3 link).
+client_protocol_version = int(urllib.parse.parse_qs(urllib.parse.urlparse(pairing_link).query)["pv"][0])
 payload = {
-    "command": {"pair": {"pairingCode": pairing_code, "pairingNonce": pairing_nonce}},
+    "command": {"pair": {"pairingCode": pairing_code, "pairingNonce": pairing_nonce, "clientProtocolVersion": client_protocol_version}},
     "clientApp": {
         "installationID": "MACOS-LOCAL-DEVICE-E2E",
         "bundleID": "dev.usespaces.spacesmobile",

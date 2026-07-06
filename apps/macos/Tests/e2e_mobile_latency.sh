@@ -434,6 +434,8 @@ port = int(os.environ["DEVICE_API_PORT"])
 certificate_fingerprint = os.environ["CERTIFICATE_FINGERPRINT"]
 pairing_code = os.environ["PAIRING_CODE"]
 pairing_nonce = os.environ["PAIRING_NONCE"]
+# Version-gated pairing: read the daemon's advertised wire-protocol version (pv) from the v3 link.
+client_protocol_version = int(re.search(r"[?&]pv=(\d+)", os.environ["PAIRING_LINK"]).group(1))
 network_profile = os.environ["NETWORK_PROFILE"]
 network_rtt_ms = int(os.environ.get("NETWORK_RTT_MS") or "0")
 remote_rtt_ms_text = os.environ.get("REMOTE_RTT_MS") or ""
@@ -1109,6 +1111,7 @@ pair_response, _ = device_api_request(
         "command": "pair",
         "pairingCode": pairing_code,
         "pairingNonce": pairing_nonce,
+        "clientProtocolVersion": client_protocol_version,
         "clientApp": client_app,
     }
 )

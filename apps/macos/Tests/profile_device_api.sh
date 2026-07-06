@@ -95,6 +95,7 @@ print(f"pairing_link={shlex.quote(link)}")
 print(f"certificate_fingerprint={shlex.quote(values['fp'][0])}")
 print(f"pairing_code={shlex.quote(values['code'][0])}")
 print(f"pairing_nonce={shlex.quote(values['nonce'][0])}")
+print(f"protocol_version={shlex.quote(values['pv'][0])}")
 PY
 )"
 eval "$parsed_device_api"
@@ -102,6 +103,7 @@ eval "$parsed_device_api"
 SESSION_ID="$session_id" \
 PAIRING_CODE="$pairing_code" \
 PAIRING_NONCE="$pairing_nonce" \
+PROTOCOL_VERSION="$protocol_version" \
 DEVICE_API_PORT="$device_api_port" \
 CERTIFICATE_FINGERPRINT="$certificate_fingerprint" \
 SPACES_E2E="$spacese2e" \
@@ -121,6 +123,7 @@ PORT = int(os.environ["DEVICE_API_PORT"])
 SESSION_ID = os.environ["SESSION_ID"]
 PAIRING_CODE = os.environ["PAIRING_CODE"]
 PAIRING_NONCE = os.environ["PAIRING_NONCE"]
+PROTOCOL_VERSION = int(os.environ["PROTOCOL_VERSION"])
 CERTIFICATE_FINGERPRINT = os.environ["CERTIFICATE_FINGERPRINT"]
 SPACES_E2E = os.environ["SPACES_E2E"]
 SPACES_DB_PATH = Path(os.environ["SPACES_DB_PATH"])
@@ -479,6 +482,7 @@ pair_response, pair_ms = request({
     "command": "pair",
     "pairingCode": PAIRING_CODE,
     "pairingNonce": PAIRING_NONCE,
+    "clientProtocolVersion": PROTOCOL_VERSION,
     "clientApp": client_app,
 })
 assert pair_response["ok"], pair_response

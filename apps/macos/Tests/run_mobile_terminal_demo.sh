@@ -1119,10 +1119,12 @@ def pair(pairing_link, installation_id, device_name):
     query = parse_qs(urlparse(pairing_link).query)
     pairing_code = query.get("code", [""])[0]
     pairing_nonce = query.get("nonce", [""])[0]
-    if not pairing_code or not pairing_nonce:
-        raise SystemExit(f"pairing link missing code or nonce: {pairing_link}")
+    protocol_version = query.get("pv", [""])[0]
+    if not pairing_code or not pairing_nonce or not protocol_version:
+        raise SystemExit(f"pairing link missing code, nonce, or pv: {pairing_link}")
     response = send(pairing_link, {
-        "command": {"pair": {"pairingCode": pairing_code, "pairingNonce": pairing_nonce}},
+        # Version-gated pairing: echo the daemon's advertised wire-protocol version (pv from the v3 link).
+        "command": {"pair": {"pairingCode": pairing_code, "pairingNonce": pairing_nonce, "clientProtocolVersion": int(protocol_version)}},
         "clientApp": {
             "installationID": installation_id,
             "bundleID": bundle_id,
