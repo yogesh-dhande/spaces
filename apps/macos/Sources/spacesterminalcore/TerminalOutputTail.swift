@@ -20,8 +20,15 @@ public enum TerminalOutputTail {
     private static let defaultColumns = 120
     private static let defaultRows = 40
     fileprivate static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
+    // A transcript boundary is a full-screen repaint after which earlier output is no longer part of
+    // the current screen: erase-entire-display (CSI 2J) and erase-scrollback (CSI 3J). A bare
+    // erase-below (CSI J / CSI 0J) is deliberately NOT here — shells emit it on every prompt redraw
+    // to clear anything under the prompt, without wiping the lines above, so treating it as a
+    // boundary would drop all output that scrolled above the current prompt. A genuine clear that
+    // pairs cursor-home with erase-below is still caught by the home-cursor path in
+    // `latestRenderedTranscriptBoundaryOffset` (`immediateClearBoundaryOffset`).
     private static let clearScreenBoundaryPatterns: [Data] = [
-        Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A]), Data([0x1B, 0x5B, 0x4A]),
+        Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A]),
     ]
 
     public static func tail(path: String, lineCount: Int) throws -> String {
@@ -48,15 +55,23 @@ public enum TerminalOutputTail {
                 "bytes=\(fileSize) lines=\(lineCount) mode=ghostty_vt_partial scanned_bytes=\(vtTailResult.scannedBytes) "
                 + "rendered_bytes=\(vtTailResult.renderedByteCount) boundary_offset=\(vtTailResult.boundaryOffset)"
         } else {
-            try fileHandle.seek(toOffset: 0)
+            // No transcript boundary anywhere in the scanned windows — a plain scrolling session whose
+            // prompt redraws erase-below rather than clearing the screen. Render only the most recent
+            // window instead of the whole file: `output.log` is append-only and unbounded, so a
+            // whole-file render would grow the tail cost without limit over a session's lifetime.
+            // Taking the last `lineCount` rendered lines discards any partial first line left by
+            // starting mid-transcript.
+            let window = renderedSuffixScanWindows.last ?? (512 * 1024)
+            let startOffset = fileSize > window ? fileSize - window : 0
+            try fileHandle.seek(toOffset: startOffset)
             let data = try fileHandle.readToEnd() ?? Data()
             guard !data.isEmpty else { return "" }
             let terminalSize = resolvedTerminalSize(forOutputPath: path)
             let rendered = try TerminalOutputVTRenderer.renderPlain(data, columns: terminalSize.columns, rows: terminalSize.rows)
             result = tailRenderedText(rendered, lineCount: lineCount)
             detail =
-                "bytes=\(data.count) lines=\(lineCount) mode=ghostty_vt scanned_bytes=\(data.count) "
-                + "columns=\(terminalSize.columns) rows=\(terminalSize.rows) rendered_chars=\(rendered.count)"
+                "bytes=\(data.count) lines=\(lineCount) mode=ghostty_vt_window scanned_bytes=\(data.count) "
+                + "window_start=\(startOffset) columns=\(terminalSize.columns) rows=\(terminalSize.rows) rendered_chars=\(rendered.count)"
         }
 
         TerminalPerformance.logMetric(
