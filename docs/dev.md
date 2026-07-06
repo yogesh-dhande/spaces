@@ -75,6 +75,8 @@ That installs `GhosttyKit.xcframework`, Ghostty resources, `libghostty-vt` heade
 - `apps/macos/.local/ghosttyvt/include`
 - `apps/macos/.local/ghosttyvt/lib`
 
+`GhosttyKit.xcframework` includes a universal macOS slice, an `arm64` iOS device slice, and an `arm64` + `x86_64` iOS simulator slice so simulator verification works on Apple Silicon and Intel hosts.
+
 Artifact validation requires the platform dynamic `libghostty-vt` runtime library (`libghostty-vt.dylib` on macOS, `libghostty-vt.so` on Linux). A static `libghostty-vt.a` alone is not a complete install because terminal transcript rendering loads the dynamic library at runtime.
 
 The service router also needs a bundled Caddy binary. For branch-local setup, run:
