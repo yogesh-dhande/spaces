@@ -263,8 +263,7 @@ struct DevicePairCommand: ParsableCommand {
             result = try SpacesDevicePairingClient.pairRemoteDevice(
                 SpacesRemoteDevicePairingRequest(
                     sshHost: sshHost, sshUser: sshUser, sshPort: sshPort, clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
-                    clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short,
-                    remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey))
+                    clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short))
         } else {
             let parsedLink = try SpacesDevicePairingLink.parse(link ?? "")
             result = try SpacesDevicePairingClient.pairDevice(

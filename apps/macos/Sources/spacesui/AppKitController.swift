@@ -3757,9 +3757,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    /// Confirms the restart-impact with the user, then restarts the device's daemon. A remote Linux
-    /// daemon is updated from the signed artifact over SSH (which restarts it); every other device
-    /// restarts through the `requestDaemonRestart` RPC, after which launchd/systemd respawns it.
+    /// Confirms the restart-impact with the user, then restarts the device's daemon through the
+    /// `requestDaemonRestart` RPC, after which launchd/systemd respawns it (applying any update already
+    /// staged on disk). A remote Linux daemon that is too old for this app is not updated over SSH: the
+    /// user re-runs the version-pinned installer on the Linux device — surfaced in the compatibility
+    /// block — which replaces the binary and restarts the service.
     private func confirmDaemonRestart(deviceID: String) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let alert = NSAlert()
@@ -3772,32 +3774,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showDeviceNotLoadedError()
             return
         }
-        // The daemon reports its own OS, so route on that rather than probing SSH: a non-Linux daemon
-        // must not run the Linux SSH preflight, or a stale/unavailable SSH path would block restarting a
-        // remote Mac whose Device API is still reachable.
-        let isLinuxDaemon = status?.isLinuxDaemon ?? false
         Task { @MainActor [weak self] in
             let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
                 do {
-                    if isLinuxDaemon {
-                        // A remote Linux daemon must be reinstalled from the signed artifact to actually
-                        // update (a plain restart respawns the same old binary); the installer restarts it.
-                        // `false` means the SSH path could not confirm a Linux host, so nothing happened —
-                        // surface that instead of reloading as if it succeeded.
-                        let updated = try SpacesDevicePairingClient.updateRemoteLinuxDaemon(
-                            for: device, appVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey)
-                        guard updated else {
-                            throw NSError(
-                                domain: "SpacesCompatibility", code: 1,
-                                userInfo: [
-                                    NSLocalizedDescriptionKey:
-                                        "Couldn't update this device's daemon over SSH. Check the SSH connection to the device and try again."
-                                ])
-                        }
-                    } else {
-                        // Local or remote Mac: restart through the RPC, applying any update already staged on disk.
-                        try SpacesDeviceClient.requestDaemonRestart(device: device)
-                    }
+                    try SpacesDeviceClient.requestDaemonRestart(device: device)
                     return .success(())
                 } catch { return .failure(error) }
             }.value
