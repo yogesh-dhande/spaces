@@ -172,6 +172,23 @@ current_swift_version() {
     xcrun swift --version 2>/dev/null | head -n 1
 }
 
+require_metal_toolchain() {
+    [[ "$(uname -s)" == "Darwin" ]] || return 0
+    command_exists xcrun || die "Xcode command-line tool 'xcrun' is required to build Ghostty artifacts"
+
+    local tmp_dir output
+    tmp_dir="$(mktemp -d)"
+    printf 'kernel void spaces_metal_toolchain_probe() {}\n' > "$tmp_dir/probe.metal"
+    if output="$(xcrun -sdk macosx metal -c "$tmp_dir/probe.metal" -o "$tmp_dir/probe.ir" 2>&1)"; then
+        rm -rf "$tmp_dir"
+        return
+    fi
+    rm -rf "$tmp_dir"
+
+    printf '%s\n' "$output" >&2
+    die "Xcode's Metal Toolchain component is required to build Ghostty artifacts. Run 'xcodebuild -downloadComponent MetalToolchain' and retry. If Xcode reports that first-launch packages need authorization, run 'sudo xcodebuild -runFirstLaunch' first."
+}
+
 artifact_release_tag() {
     printf "%s%s\n" "$ARTIFACT_RELEASE_PREFIX" "$GHOSTTY_SHA"
 }
@@ -629,6 +646,8 @@ build_from_source() {
     if [[ "$dirty" == "true" && "$ALLOW_DIRTY" -ne 1 ]]; then
         die "Ghostty submodule has local modifications; commit them before building artifacts or use --build --allow-dirty for local experiments"
     fi
+
+    require_metal_toolchain
 
     local zig_bin
     zig_bin="$(ensure_zig)"
