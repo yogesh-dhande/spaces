@@ -78,6 +78,7 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
     case remotePairCommandFailed(String)
     case invalidRemotePairingOutput(String)
     case deviceAPIUnreachable(host: String, port: Int, message: String)
+    case pairingVersionIncompatible(String)
     case pairingRejected(String)
     case missingAuthToken
 
@@ -102,6 +103,7 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
         case .invalidRemotePairingOutput(let message): message
         case .deviceAPIUnreachable(let host, let port, let message):
             "SSH succeeded, but the remote Device API is not reachable at \(host):\(port). Confirm LAN/VPN/Tailscale/firewall access to that address and port. \(message)"
+        case .pairingVersionIncompatible(let message): message
         case .pairingRejected(let message): "The remote device rejected pairing. \(message)"
         case .missingAuthToken: "The remote device accepted pairing but did not issue an auth token."
         }
@@ -113,7 +115,7 @@ public enum SpacesDevicePairingClient {
     private static let scpPath = "/usr/bin/scp"
     private static let curlPath = "/usr/bin/curl"
     private static let remoteArtifactManifestBaseURL = "https://github.com/yogesh-dhande/spaces/releases/download"
-    private static let remotePairCommand = "~/.spaces/bin/spaces pair --json"
+    private static let remotePairCommand = "~/.spaces/bin/spaces device pair --json"
     private static let remoteInstallProbeCommand = #"""
         os="$(uname -s 2>/dev/null || true)"
         arch="$(uname -m 2>/dev/null || true)"
@@ -161,13 +163,15 @@ public enum SpacesDevicePairingClient {
             destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion,
             remoteArtifactPublicKey: request.remoteArtifactPublicKey)
 
+        try assertPairingCompatible(
+            deviceProtocolVersion: metadata.protocolVersion, deviceAppVersion: metadata.appVersion, deviceName: metadata.name)
         let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
         let client = try SpacesDeviceAPIRequestClient(host: deviceAPIHost, port: metadata.port, certificateFingerprint: metadata.certificateFingerprint)
         let response: SpacesDeviceAPIResponse
         do {
             response = try client.request(
                 SpacesDeviceAPIRequest(
-                    command: .pair(.init(pairingCode: metadata.pairingCode, pairingNonce: metadata.pairingNonce)),
+                    command: .pair(.init(pairingCode: metadata.pairingCode, pairingNonce: metadata.pairingNonce, clientProtocolVersion: SpacesWireProtocol.version)),
                     clientApp: SpacesDeviceClientApp(
                         installationID: request.clientInstallationID, bundleID: request.clientBundleID, platform: clientPlatform,
                         deviceName: request.clientDeviceName, appVersion: request.clientAppVersion)))
@@ -198,13 +202,14 @@ public enum SpacesDevicePairingClient {
         link: SpacesDevicePairingLink, clientInstallationID: String, clientBundleID: String, clientDeviceName: String, clientAppVersion: String?,
         profile: SpacesProfile? = nil
     ) throws -> SpacesRemoteDevicePairingResult {
+        try assertPairingCompatible(deviceProtocolVersion: link.protocolVersion, deviceAppVersion: link.appVersion, deviceName: link.name)
         let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, host: link.host, port: link.port)
         let client = try SpacesDeviceAPIRequestClient(host: link.host, port: link.port, certificateFingerprint: link.certificateFingerprint)
         let response: SpacesDeviceAPIResponse
         do {
             response = try client.request(
                 SpacesDeviceAPIRequest(
-                    command: .pair(.init(pairingCode: link.code, pairingNonce: link.nonce)),
+                    command: .pair(.init(pairingCode: link.code, pairingNonce: link.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
                     clientApp: SpacesDeviceClientApp(
                         installationID: clientInstallationID, bundleID: clientBundleID, platform: clientPlatform, deviceName: clientDeviceName,
                         appVersion: clientAppVersion)))
@@ -233,6 +238,24 @@ public enum SpacesDevicePairingClient {
         #endif
     }
 
+    /// Refuses to redeem against a daemon whose wire-protocol version does not match this client's,
+    /// failing fast before the one-time pairing window is consumed. Symmetric with the daemon's
+    /// redemption gate: whichever side is older is told to update.
+    private static func assertPairingCompatible(deviceProtocolVersion: Int, deviceAppVersion: String?, deviceName: String) throws {
+        switch SpacesWireCompatibility.evaluate(daemonProtocolVersion: deviceProtocolVersion, localVersion: SpacesWireProtocol.version) {
+        case .compatible:
+            return
+        case .daemonTooOld:
+            let version = normalized(deviceAppVersion).map { "Spaces \($0)" } ?? "an older version of Spaces"
+            throw SpacesRemoteDevicePairingError.pairingVersionIncompatible(
+                "\(deviceName) is running \(version), which is older than this app. Update Spaces on \(deviceName), then pair again.")
+        case .clientTooOld:
+            let version = normalized(deviceAppVersion).map { "Spaces \($0)" } ?? "a newer version of Spaces"
+            throw SpacesRemoteDevicePairingError.pairingVersionIncompatible(
+                "\(deviceName) is running \(version), which is newer than this app. Update Spaces on this Mac, then pair again.")
+        }
+    }
+
     public static func openRemotePairingWindow(
         for device: SpacesPairedDeviceRecord, appVersion: String? = nil, remoteArtifactPublicKey: String? = nil
     ) throws -> SpacesRemoteDevicePairingWindowResult {
@@ -250,7 +273,8 @@ public enum SpacesDevicePairingClient {
         )
         let link = SpacesDevicePairingLink(
             host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
-            certificateFingerprint: metadata.certificateFingerprint, name: metadata.name)
+            certificateFingerprint: metadata.certificateFingerprint, name: metadata.name, protocolVersion: metadata.protocolVersion,
+            appVersion: metadata.appVersion)
         return SpacesRemoteDevicePairingWindowResult(
             name: metadata.name, host: deviceAPIHost, port: metadata.port, linkString: link.absoluteString, expiresAt: metadata.expiresAt)
     }
@@ -1014,6 +1038,10 @@ private struct RemotePairingMetadata: Decodable, Sendable {
     let pairingCode: String
     let certificateFingerprint: String
     let expiresAt: String?
+    /// The remote daemon's wire-protocol version and app version, mirrored from its pairing link so
+    /// the SSH pairing path can run the same compatibility gate as the `--link` path.
+    let protocolVersion: Int
+    let appVersion: String
 
     func validated() throws -> Self {
         guard trimmed(name) != nil else {
@@ -1027,6 +1055,9 @@ private struct RemotePairingMetadata: Decodable, Sendable {
         }
         guard trimmed(pairingNonce) != nil, trimmed(pairingCode) != nil, trimmed(certificateFingerprint) != nil else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON is missing required pairing credentials.")
+        }
+        guard trimmed(appVersion) != nil else {
+            throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON is missing the daemon app version.")
         }
         return self
     }

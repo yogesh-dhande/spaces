@@ -54,8 +54,21 @@ struct SpacesDeviceAPIClient: Sendable {
     }
 
     func pair(pairingLink: SpacesDevicePairingLink, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> String {
+        // Refuse to redeem an incompatible link before the one-time pairing window is consumed.
+        switch SpacesWireCompatibility.evaluate(daemonProtocolVersion: pairingLink.protocolVersion, localVersion: SpacesWireProtocol.version) {
+        case .compatible:
+            break
+        case .daemonTooOld:
+            throw SpacesDeviceAPIClientError.requestFailed(
+                "\(pairingLink.name) is running Spaces \(pairingLink.appVersion), which is older than this app. Update Spaces on \(pairingLink.name), then pair again.")
+        case .clientTooOld:
+            throw SpacesDeviceAPIClientError.requestFailed(
+                "\(pairingLink.name) is running Spaces \(pairingLink.appVersion), which is newer than this app. Update Spaces on this device, then pair again.")
+        }
         let response = try await sendRequest(
-            .init(command: .pair(.init(pairingCode: pairingLink.code, pairingNonce: pairingLink.nonce)), clientApp: clientAppIdentity),
+            .init(
+                command: .pair(.init(pairingCode: pairingLink.code, pairingNonce: pairingLink.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                clientApp: clientAppIdentity),
             commandChannel: commandChannel
         )
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }

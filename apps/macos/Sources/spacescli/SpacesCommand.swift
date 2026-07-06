@@ -32,7 +32,7 @@ public struct SpacesCommand: ParsableCommand {
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
             """, version: AppVersion.current,
         subcommands: [
-            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, PairCommand.self,
+            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self,
             MobileCommand.self, MCPCommand.self,
         ])
 
@@ -145,14 +145,6 @@ struct MCPCommand: ParsableCommand {
     func run() throws { try SpacesMCPStdioServer().run() }
 }
 
-struct PairCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "pair", abstract: "Open a pairing window for this device's spacesd daemon.")
-
-    @Flag(name: .long, help: "Print structured pairing metadata for SSH-assisted Mac pairing.") var json = false
-
-    func run() throws { if json { try emitPairCommandJSON() } else { for line in try pairCommandLines() { print(line) } } }
-}
-
 struct PairingWindowPayload: Codable, Sendable, Equatable {
     let name: String
     let host: String
@@ -162,6 +154,8 @@ struct PairingWindowPayload: Codable, Sendable, Equatable {
     let certificateFingerprint: String
     let expiresAt: String
     let pairingLink: String
+    let protocolVersion: Int
+    let appVersion: String
 }
 
 func pairCommandLines(
@@ -198,7 +192,7 @@ func pairingWindowPayload(_ window: SpacesDevicePairingWindowSnapshot) throws ->
     return PairingWindowPayload(
         name: link.name, host: link.host, port: link.port, pairingNonce: link.nonce, pairingCode: link.code,
         certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
-        pairingLink: window.linkString)
+        pairingLink: window.linkString, protocolVersion: link.protocolVersion, appVersion: link.appVersion)
 }
 
 private func emitPairCommandJSON() throws {
@@ -236,23 +230,33 @@ struct DeviceListCommand: ParsableCommand {
 
 struct DevicePairCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "pair", abstract: "Pair this client with another device's spacesd daemon.",
+        commandName: "pair", abstract: "Open a pairing window for this device, or pair this client with another device.",
         discussion: """
-            Provide exactly one source:
-              --ssh user@host   SSH bootstrap: validates the host, prepares the daemon if needed, and pairs.
-              --link <link>     Redeems a spaces://pair link printed by `spaces pair` on the target device.
+            With no source, opens a pairing window on this device's spacesd daemon and prints its
+            spaces://pair link (use --json for machine-readable metadata).
+
+            Provide a source to pair this client with another device:
+              --ssh user@host   SSH sugar: fetches the target's pairing link over SSH, then redeems it.
+              --link <link>     Redeems a spaces://pair link printed by `spaces device pair` on the target device.
             """)
 
     @Option(name: .long, help: "SSH destination (user@host or host) of the device to pair.") var ssh: String?
     @Option(name: .long, help: "SSH port. Defaults to 22.") var sshPort: Int?
     @Option(name: .long, help: "A spaces://pair link from the target device's pairing window.") var link: String?
+    @Flag(name: .long, help: "When opening a pairing window, print structured metadata for SSH-assisted pairing.") var json = false
 
     func validate() throws {
-        guard (ssh != nil) != (link != nil) else { throw ValidationError("Provide exactly one of --ssh or --link.") }
+        if ssh != nil, link != nil { throw ValidationError("Provide at most one of --ssh or --link.") }
         if ssh == nil, sshPort != nil { throw ValidationError("--ssh-port requires --ssh.") }
+        if json, ssh != nil || link != nil { throw ValidationError("--json only applies when opening a pairing window (omit --ssh and --link).") }
     }
 
     func run() throws {
+        // No source: open a pairing window on this device's daemon (the target of an SSH or link pair).
+        if ssh == nil, link == nil {
+            if json { try emitPairCommandJSON() } else { for line in try pairCommandLines() { print(line) } }
+            return
+        }
         let result: SpacesRemoteDevicePairingResult
         if let ssh {
             let (sshUser, sshHost) = Self.parsedSSHDestination(ssh)
@@ -568,7 +572,7 @@ func mobileStatusLines(status: SpacesDeviceAPIStatus) -> [String] {
     } else {
         lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
     }
-    lines.append("pair=Run `spaces pair` to show iOS pairing details, or `spaces pair --json` for SSH-assisted Mac pairing.")
+    lines.append("pair=Run `spaces device pair` to open a pairing window, or `spaces device pair --json` for SSH-assisted pairing.")
     return lines
 }
 

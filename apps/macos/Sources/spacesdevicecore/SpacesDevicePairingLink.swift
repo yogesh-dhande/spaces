@@ -1,12 +1,14 @@
 import Foundation
 
-/// One-time pairing link (`spaces://pair?...`). Version 2: trust is delivered as the daemon's
+/// One-time pairing link (`spaces://pair?...`). Version 3: trust is delivered as the daemon's
 /// pinned TLS certificate fingerprint (`fp`); there is no transport key — the pairing code and
-/// nonce authorize a single token issuance over the pinned channel.
+/// nonce authorize a single token issuance over the pinned channel. The link also advertises the
+/// daemon's wire-protocol version (`pv`) and app version (`av`) so the redeeming client can refuse
+/// an incompatible pairing before it burns the one-time window.
 public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
     public static let scheme = "spaces"
     public static let host = "pair"
-    public static let version = "2"
+    public static let version = "3"
 
     public let host: String
     public let port: Int
@@ -14,14 +16,22 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
     public let code: String
     public let certificateFingerprint: String
     public let name: String
+    /// The daemon's `SpacesWireProtocol.version`, used for the pairing-time compatibility gate.
+    public let protocolVersion: Int
+    /// The daemon's app version (`AppVersion.short`), surfaced in incompatible-version messaging.
+    public let appVersion: String
 
-    public init(host: String, port: Int, nonce: String, code: String, certificateFingerprint: String, name: String) {
+    public init(
+        host: String, port: Int, nonce: String, code: String, certificateFingerprint: String, name: String, protocolVersion: Int, appVersion: String
+    ) {
         self.host = host
         self.port = port
         self.nonce = nonce
         self.code = code
         self.certificateFingerprint = certificateFingerprint
         self.name = name
+        self.protocolVersion = protocolVersion
+        self.appVersion = appVersion
     }
 
     public var url: URL {
@@ -32,6 +42,7 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
             URLQueryItem(name: "v", value: Self.version), URLQueryItem(name: "host", value: host), URLQueryItem(name: "port", value: String(port)),
             URLQueryItem(name: "nonce", value: nonce), URLQueryItem(name: "code", value: code),
             URLQueryItem(name: "fp", value: certificateFingerprint), URLQueryItem(name: "name", value: name),
+            URLQueryItem(name: "pv", value: String(protocolVersion)), URLQueryItem(name: "av", value: appVersion),
         ]
         return components.url ?? URL(string: "\(Self.scheme)://\(Self.host)")!
     }
@@ -61,8 +72,14 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
         guard let nonce = trimmed(values["nonce"]) else { throw SpacesDevicePairingLinkError.missingField("nonce") }
         guard let code = trimmed(values["code"]) else { throw SpacesDevicePairingLinkError.missingField("code") }
         guard let certificateFingerprint = trimmed(values["fp"]) else { throw SpacesDevicePairingLinkError.missingField("fp") }
+        guard let protocolVersionValue = trimmed(values["pv"]), let protocolVersion = Int(protocolVersionValue) else {
+            throw SpacesDevicePairingLinkError.missingField("pv")
+        }
+        guard let appVersion = trimmed(values["av"]) else { throw SpacesDevicePairingLinkError.missingField("av") }
         let name = trimmed(values["name"]) ?? "Spaces"
-        return Self(host: host, port: port, nonce: nonce, code: code, certificateFingerprint: certificateFingerprint, name: name)
+        return Self(
+            host: host, port: port, nonce: nonce, code: code, certificateFingerprint: certificateFingerprint, name: name,
+            protocolVersion: protocolVersion, appVersion: appVersion)
     }
 
     private static func trimmed(_ value: String?) -> String? {

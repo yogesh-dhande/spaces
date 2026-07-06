@@ -95,12 +95,51 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-TLS", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
                 appVersion: "1.0")
             let response = try sendTLSRequest(
-                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: clientApp),
+                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)), clientApp: clientApp),
                 port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok)
             XCTAssertNotNil(response.issuedAuthToken)
             XCTAssertFalse(try plaintextReceivesDeviceAPIResponse(port: server.listeningPort))
+        }
+    }
+
+    func testIncompatibleClientProtocolVersionIsRejectedWithoutConsumingWindow() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
+            try server.start()
+            defer { server.stop() }
+
+            let window = server.openPairingWindow(host: "127.0.0.1", name: "Test Mac", code: "12345678", nonce: "NONCE")
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-VERSION", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+
+            // A client one wire version ahead is rejected before the code is validated, so the window
+            // survives for a compatible retry with the same code/nonce.
+            let rejected = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version + 1)),
+                    clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertFalse(rejected.ok)
+            XCTAssertNil(rejected.issuedAuthToken)
+
+            // A missing clientProtocolVersion reads as an incompatible (too-old) client and is also rejected.
+            let missingVersion = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: nil)), clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertFalse(missingVersion.ok)
+
+            let accepted = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                    clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(accepted.ok)
+            XCTAssertNotNil(accepted.issuedAuthToken)
         }
     }
 
@@ -117,7 +156,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 appVersion: "1.0")
 
             let rejectedResponse = try sendTLSRequest(
-                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: unsupportedClientApp),
+                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)), clientApp: unsupportedClientApp),
                 port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             XCTAssertFalse(rejectedResponse.ok)
             XCTAssertTrue(rejectedResponse.message.contains("Unsupported Spaces client bundle"))
@@ -126,7 +165,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-SUPPORTED", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let acceptedResponse = try sendTLSRequest(
-                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: supportedClientApp),
+                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)), clientApp: supportedClientApp),
                 port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(acceptedResponse.ok)

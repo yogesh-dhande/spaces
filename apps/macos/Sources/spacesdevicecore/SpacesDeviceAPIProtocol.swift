@@ -821,10 +821,15 @@ public struct SpacesDeviceAPIEmptyPayload: Codable, Sendable, Equatable { public
 public struct SpacesDevicePairRequest: Codable, Sendable, Equatable {
     public let pairingCode: String?
     public let pairingNonce: String?
+    /// The redeeming client's `SpacesWireProtocol.version`. The daemon rejects a request whose
+    /// version does not match its own before validating the code, so an incompatible client can
+    /// never consume the one-time pairing window. Absent (nil) reads as an incompatible client.
+    public let clientProtocolVersion: Int?
 
-    public init(pairingCode: String?, pairingNonce: String?) {
+    public init(pairingCode: String?, pairingNonce: String?, clientProtocolVersion: Int?) {
         self.pairingCode = pairingCode
         self.pairingNonce = pairingNonce
+        self.clientProtocolVersion = clientProtocolVersion
     }
 }
 

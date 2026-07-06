@@ -22,7 +22,13 @@ public enum SpacesWireProtocol {
     //    so devices must re-pair after updating both sides. Also adds the agent-facing
     //    sendTerminalInput and tailTerminalOutput commands (one-shot terminal input and
     //    rendered output tail, token-authorized without attachment/owner gating).
-    public static let version = 4
+    // 5: Pairing is version-gated at redemption. Pairing links become v3, advertising the
+    //    daemon's wire-protocol version (pv) and app version (av); the client refuses to
+    //    redeem an incompatible link, and the daemon symmetrically rejects a pair request
+    //    whose clientProtocolVersion does not match before it validates the code. A v4 client
+    //    and v5 daemon can still complete the TLS handshake, so the pairing gate — not the
+    //    transport — is what stops the mismatch.
+    public static let version = 5
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

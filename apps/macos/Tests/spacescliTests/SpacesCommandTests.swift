@@ -63,12 +63,18 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(tail.device, "linux-box")
     }
 
-    func testDevicePairRequiresExactlyOneSource() throws {
-        XCTAssertThrowsError(try DevicePairCommand.parse([]))
-        XCTAssertThrowsError(try DevicePairCommand.parse(["--ssh", "user@host", "--link", "spaces://pair?v=2"]))
-        XCTAssertThrowsError(try DevicePairCommand.parse(["--link", "spaces://pair?v=2", "--ssh-port", "2222"]))
+    func testDevicePairSourceRules() throws {
+        // No source opens a pairing window on this device (optionally as JSON).
+        XCTAssertNoThrow(try DevicePairCommand.parse([]))
+        XCTAssertTrue(try DevicePairCommand.parse(["--json"]).json)
+        // A source pairs this client with another device.
+        XCTAssertEqual(try DevicePairCommand.parse(["--link", "spaces://pair"]).link, "spaces://pair")
+        XCTAssertEqual(try DevicePairCommand.parse(["--ssh", "user@host"]).ssh, "user@host")
         XCTAssertNoThrow(try DevicePairCommand.parse(["--ssh", "user@host", "--ssh-port", "2222"]))
-        XCTAssertNoThrow(try DevicePairCommand.parse(["--link", "spaces://pair?v=2"]))
+        // --ssh and --link are mutually exclusive; --ssh-port requires --ssh; --json is window-only.
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--ssh", "user@host", "--link", "spaces://pair"]))
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--link", "spaces://pair", "--ssh-port", "2222"]))
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--json", "--link", "spaces://pair"]))
     }
 
     func testDevicePairParsesSSHDestination() {
@@ -203,15 +209,10 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.authToken, "SECRET")
     }
 
-    func testPairCommandParses() throws {
-        XCTAssertNoThrow(try PairCommand.parse([]))
-        XCTAssertTrue(try PairCommand.parse(["--json"]).json)
-    }
-
     func testPairCommandLinesUseSpacesScheme() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio",
+                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
         let lines = try pairCommandLines {
             SpacesDeviceAPIControlResponse(ok: true, message: "ok", result: .pairingWindow(.init(pairingWindow: window)))
@@ -227,7 +228,7 @@ final class SpacesCommandTests: XCTestCase {
     func testPairCommandJSONPayloadUsesDeviceMetadata() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio",
+                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
 
         let payload = try pairCommandPayload {
@@ -241,13 +242,16 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(payload.pairingNonce, "N")
         XCTAssertEqual(payload.certificateFingerprint, "SHA256:abc")
         XCTAssertEqual(payload.pairingLink, window.linkString)
+        // The SSH pairing path reads these from the JSON to run the compatibility gate.
+        XCTAssertEqual(payload.protocolVersion, 5)
+        XCTAssertEqual(payload.appVersion, "0.1.0")
     }
 
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
             subcommands,
-            ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "PairCommand", "MobileCommand", "MCPCommand"])
+            ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MobileCommand", "MCPCommand"])
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {

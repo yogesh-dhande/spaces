@@ -1020,7 +1020,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     {
         pairingCoordinator.openWindow(
             host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
-            duration: duration)
+            protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration)
     }
 
     public func openPairingWindow(
@@ -1029,7 +1029,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     ) -> SpacesDevicePairingWindow {
         pairingCoordinator.openWindow(
             host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
-            duration: duration, code: code, nonce: nonce)
+            protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration, code: code, nonce: nonce)
     }
 
     public func pairingWindowSnapshot() -> SpacesDevicePairingWindowSnapshot? { pairingCoordinator.snapshot() }
@@ -1039,6 +1039,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .pair(let payload):
             guard let clientApp = request.clientApp else {
                 return SpacesDeviceAPIResponse(ok: false, message: SpacesDevicePairingError.missingClientApp.localizedDescription)
+            }
+            // Version-gate before validating the code so an incompatible client never consumes the
+            // one-time pairing window. A missing clientProtocolVersion reads as an incompatible (too
+            // old) client. This runs pre-authentication, so it discloses the daemon's app version.
+            if let incompatibility = Self.pairingVersionRejection(clientProtocolVersion: payload.clientProtocolVersion) {
+                return SpacesDeviceAPIResponse(ok: false, message: incompatibility)
             }
             try pairingStore.validate(clientApp: clientApp)
             try pairingCoordinator.validate(code: payload.pairingCode, nonce: payload.pairingNonce, peerID: peerID)
@@ -1295,6 +1301,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Returns a rejection message when a pairing client's wire-protocol version does not match this
+    /// daemon's, or nil when it matches. Keeps the pairing gate symmetric with the client's
+    /// pre-redeem check: whichever side is older is told to update.
+    static func pairingVersionRejection(clientProtocolVersion: Int?) -> String? {
+        let clientProtocolVersion = clientProtocolVersion ?? 0
+        guard clientProtocolVersion != SpacesWireProtocol.version else { return nil }
+        if clientProtocolVersion < SpacesWireProtocol.version {
+            return "This device runs Spaces \(AppVersion.short); update Spaces on the pairing device to match, then pair again."
+        }
+        return "This device runs Spaces \(AppVersion.short), which is older than the pairing device; update Spaces on this device, then pair again."
     }
 
     private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
