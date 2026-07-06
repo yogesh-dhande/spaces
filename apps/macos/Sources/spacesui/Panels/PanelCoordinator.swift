@@ -483,6 +483,7 @@ import spacesdevicecore
     func refreshTabTitles(scope: PanelScope) {
         guard let state = panels[scope], let view = state.view else { return }
         for tab in state.layout.tabs { view.updateTabTitle(tabTitle(forTabID: tab.id, in: state.layout), forTabID: tab.id) }
+        syncPaneAccessibilityTitles(scope: scope)
         syncPanelWindowTitle(scope: scope)
         syncFocusedPaneFooter(scope: scope)
     }
@@ -490,8 +491,21 @@ import spacesdevicecore
     private func refreshTabTitles(forSessionID sessionID: String?) {
         guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
         view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
+        syncPaneAccessibilityTitles(scope: placement.scope)
         syncPanelWindowTitle(scope: placement.scope)
         syncFocusedPaneFooter(scope: placement.scope)
+    }
+
+    /// Publishes each pane's resolved title onto its content view's accessibility label
+    /// (see `TerminalPaneContentController.setAccessibilityRuntimeTargetName`). Every
+    /// render/title-refresh path calls this so the front window's selected-tab session
+    /// stays identifiable by name to UI automation and VoiceOver — the shared window
+    /// title no longer distinguishes panes post-panel-rework.
+    private func syncPaneAccessibilityTitles(scope: PanelScope) {
+        guard let layout = panels[scope]?.layout else { return }
+        for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: layout) {
+            contentControllers[sessionID]?.setAccessibilityRuntimeTargetName(contentTitle(forSessionID: sessionID))
+        }
     }
 
     /// The selected workspace footer shows the focused pane's identity; re-sync it
@@ -565,6 +579,7 @@ import spacesdevicecore
         for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
         view.apply(
             layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+        syncPaneAccessibilityTitles(scope: scope)
         syncPanelWindowTitle(scope: scope)
         syncFocusedPaneFooter(scope: scope)
     }

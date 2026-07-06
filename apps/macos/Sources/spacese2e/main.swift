@@ -1969,6 +1969,11 @@ private struct SpacesSurfacePayload: Codable {
     let frontWindowIdentifier: String?
     let frontWindowTitle: String?
     let frontWindowKind: String
+    /// Identity of the focused window's active terminal pane (post-panel-rework terminals are
+    /// panes inside one shared window, so the window title/identifier no longer encodes them).
+    let frontTerminalPaneSessionID: String?
+    let frontTerminalPaneMode: String?
+    let frontTerminalPaneTitle: String?
     let mainWindowVisible: Bool
     let mainWindowFocused: Bool
     let commandPaletteVisible: Bool
@@ -2493,6 +2498,7 @@ private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurf
     let frontWindowIdentifier = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXIdentifierAttribute as String) }
     let frontWindowTitle = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXTitleAttribute as String) }
     let frontWindowKind = classifySpacesWindow(focusedWindow)
+    let frontTerminalPane = focusedWindow.flatMap { firstTerminalPaneIdentity(in: $0) }
 
     let mainWindow = windows.first { window in
         let identifier = axStringAttribute(window, attribute: kAXIdentifierAttribute as String)
@@ -2515,7 +2521,8 @@ private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurf
 
     return SpacesSurfacePayload(
         processID: Int(pid), appVisible: appVisible, frontWindowIdentifier: frontWindowIdentifier, frontWindowTitle: frontWindowTitle,
-        frontWindowKind: frontWindowKind, mainWindowVisible: mainWindowVisible, mainWindowFocused: mainWindowFocused,
+        frontWindowKind: frontWindowKind, frontTerminalPaneSessionID: frontTerminalPane?.sessionID, frontTerminalPaneMode: frontTerminalPane?.mode,
+        frontTerminalPaneTitle: frontTerminalPane?.title, mainWindowVisible: mainWindowVisible, mainWindowFocused: mainWindowFocused,
         commandPaletteVisible: commandPaletteVisible, commandPaletteFocused: commandPaletteFocused, modalVisible: modalVisible)
 }
 
@@ -2533,6 +2540,31 @@ private func classifySpacesWindow(_ window: AXUIElement?) -> String {
     if title.hasSuffix(" (viewer)") { return "terminal_viewer" }
     if !title.isEmpty { return "terminal_owner" }
     return "other"
+}
+
+/// Depth-first search for the focused window's active terminal pane, identified by the
+/// `terminal-pane-<sessionID>` AXIdentifier that `TerminalSessionPaneViewController` sets. Only
+/// the selected tab's pane tree is in the window's AX hierarchy, so the first match is the
+/// frontmost session. Returns its session id (identifier suffix), owner/viewer mode (AXValue),
+/// and runtime-target name (AXDescription). Runs in-process over the AXUIElement C API, which is
+/// far cheaper than an equivalent AppleScript/System-Events traversal the harness would otherwise
+/// poll in a tight loop.
+private func firstTerminalPaneIdentity(in element: AXUIElement, depth: Int = 0) -> (sessionID: String, mode: String, title: String)? {
+    guard depth < 48 else { return nil }
+    let prefix = "terminal-pane-"
+    if let identifier = axStringAttribute(element, attribute: kAXIdentifierAttribute as String), identifier.hasPrefix(prefix) {
+        return (
+            String(identifier.dropFirst(prefix.count)),
+            axStringAttribute(element, attribute: kAXValueAttribute as String) ?? "",
+            axStringAttribute(element, attribute: kAXDescriptionAttribute as String) ?? "")
+    }
+    for child in axElementArrayAttribute(element, attribute: kAXChildrenAttribute as String) {
+        if let found = firstTerminalPaneIdentity(in: child, depth: depth + 1) { return found }
+    }
+    for row in axElementArrayAttribute(element, attribute: kAXRowsAttribute as String) {
+        if let found = firstTerminalPaneIdentity(in: row, depth: depth + 1) { return found }
+    }
+    return nil
 }
 
 private func isVisibleWindow(_ window: AXUIElement) -> Bool {

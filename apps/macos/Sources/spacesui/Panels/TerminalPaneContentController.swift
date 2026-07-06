@@ -30,6 +30,11 @@ import spacesterminalui
 
     func activate(focus: Bool) { pane.showEmbedded(focus: focus) }
 
+    /// Mirrors the pane's resolved tab title (the runtime target's name) onto its content
+    /// view's accessibility label so UI automation can match the front window's selected-tab
+    /// session by name. Pushed by `PanelCoordinator` on every render.
+    func setAccessibilityRuntimeTargetName(_ name: String) { pane.setAccessibilityRuntimeTargetName(name) }
+
     /// Reclaims owner attachment for the session, preempting a different active owner
     /// (e.g. a mobile client that took the session over) when the runtime is interactive.
     /// The `openTerminalSessionWindow` (owner) IPC calls this after opening the pane;
