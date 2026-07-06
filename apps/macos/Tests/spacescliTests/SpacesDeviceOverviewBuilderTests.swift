@@ -27,6 +27,19 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(overview.workspaces.first(where: { $0.id == nestedWorkspace.id })?.sessionCount, 0)
     }
 
+    func testWorkspaceEnvironmentFlowsThroughToSummary() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_WEB_PORT": "51023"]
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            workspaces: [.init(project: project, workspace: workspace, environment: environment)], sessions: [])
+
+        XCTAssertEqual(overview.workspaces.first?.environment, environment)
+    }
+
     func testMetadataWorkspaceMissingFromOverviewKeepsStampedWorkspaceIDButNoRow() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
@@ -380,8 +393,8 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
             isRunning: true, lastLaunchedAt: nil)
         let terminalWindow = WindowRecord(
-            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: nil,
-            terminalNativeID: nil, role: "terminal", orderIndex: 0, lastSeenAt: "now")
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: nil, terminalNativeID: nil,
+            role: "terminal", orderIndex: 0, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [terminalWindow])], sessions: [])

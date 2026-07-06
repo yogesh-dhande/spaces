@@ -1,5 +1,4 @@
 import AppKit
-import Carbon
 import CoreImage
 import Foundation
 import spacesclientcore
@@ -159,7 +158,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             return false
         }
         outlineView.onRowMenu = { [weak self] row in self?.menuForRow(row) }
-        outlineView.onArrowNavigation = { [weak self] direction in self?.navigateSidebarSelection(direction: direction) ?? false }
         outlineView.delegate = self
         outlineView.dataSource = self
     }
@@ -729,18 +727,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return true
     }
 
-    func handleSidebarArrowNavigation(event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        guard flags.isEmpty else { return false }
-        let direction: Int
-        switch event.keyCode {
-        case UInt16(kVK_UpArrow): direction = -1
-        case UInt16(kVK_DownArrow): direction = 1
-        default: return false
-        }
-        return navigateSidebarSelection(direction: direction)
-    }
-
     func selectWorkspace(_ workspace: WorkspaceSummary) {
         // A non-git project's single workspace has no dedicated row; its project row
         // stands in for it, so select that row instead of a `.workspace` item.
@@ -1181,8 +1167,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         NSLayoutConstraint.activate([
             // Indent the card so the workspace reads as nested under its git project header.
             cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: Self.workspaceIndent),
-            cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
+            cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor), cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
             cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
 
             contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
@@ -1300,8 +1285,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // project (project → target), whose project row stands in for the missing workspace level.
             row.leadingAnchor.constraint(
                 equalTo: cell.leadingAnchor, constant: nestedUnderWorkspace ? Self.workspaceIndent * 2 : Self.workspaceIndent),
-            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
-            row.topAnchor.constraint(equalTo: cell.topAnchor), row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10), row.topAnchor.constraint(equalTo: cell.topAnchor),
+            row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
         ])
         return cell
     }
@@ -1318,9 +1303,72 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     func menuForRow(_ row: Int) -> NSMenu? {
-        guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef, case .runtimeTarget(_, let workspace, let item) = ref.item else {
-            return nil
+        guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef else { return nil }
+        switch ref.item {
+        case .runtimeTarget(_, let workspace, let item): return runtimeTargetMenu(workspace: workspace, item: item)
+        case .workspace(_, let workspace): return workspaceContextMenu(workspace: workspace)
+        // A non-git project's row stands in for its single workspace, so its right-click menu offers
+        // the same workspace actions, resolved to that lone visible workspace.
+        case .project(let project) where !project.isGitRepo:
+            guard let workspace = visibleWorkspaces(projectID: project.id).first else { return nil }
+            return workspaceContextMenu(workspace: workspace)
+        default: return nil
         }
+    }
+
+    /// Right-click menu for a sidebar workspace row (and the standin row of a non-git project):
+    /// lifecycle controls gated on run state, path actions, and Hide. Lifecycle/Hide items carry the
+    /// workspace id and path actions carry the directory in `identifier.rawValue`, matching the
+    /// sender-identifier contract the underlying action methods read.
+    private func workspaceContextMenu(workspace: WorkspaceSummary) -> NSMenu {
+        let menu = NSMenu()
+        func addItem(_ title: String, symbol: String, target: AnyObject, action: Selector, identifier: String) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = target
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            item.identifier = NSUserInterfaceItemIdentifier(identifier)
+            menu.addItem(item)
+        }
+        if workspace.isRunning {
+            addItem("Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id)
+            addItem("Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id)
+        } else {
+            addItem("Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id)
+        }
+        menu.addItem(.separator())
+        addItem("Copy path", symbol: "doc.on.doc", target: host, action: #selector(AppKitController.copyDirectoryPath(_:)), identifier: workspace.dir)
+        // Reveal in Finder needs a path on this Mac, so it is offered only for local-device workspaces.
+        if host.isLocalWorkspace(workspace) {
+            addItem(
+                "Reveal in Finder", symbol: "folder", target: host, action: #selector(AppKitController.revealDirectoryInFinder(_:)),
+                identifier: workspace.dir)
+        }
+        menu.addItem(.separator())
+        addItem("Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id)
+        return menu
+    }
+
+    @objc private func startWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.launchWorkspace(id: id)
+    }
+
+    @objc private func restartWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.restartWorkspace(id: id)
+    }
+
+    @objc private func stopWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.stopWorkspace(id: id)
+    }
+
+    @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.hideWorkspace(id: id)
+    }
+
+    private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {
         let context = RuntimeTargetMenuContext(workspaceID: workspace.id, item: item)
         let menu = NSMenu()
         func addItem(_ title: String, symbol: String, action: Selector?) {
@@ -1665,7 +1713,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if let transient = transientlyExpandedWorkspaceID, !visibleWorkspaceIDs.contains(transient) { transientlyExpandedWorkspaceID = nil }
         for project in host.projects {
             guard let row = rowIndex(forProjectID: project.id), let item = host.outlineView.item(atRow: row) else { continue }
-            guard !project.isCollapsed else { host.outlineView.collapseItem(item); continue }
+            guard !project.isCollapsed else {
+                host.outlineView.collapseItem(item)
+                continue
+            }
             // Reveal the project's rows but leave each workspace collapsed until expanded or
             // selected; a non-git project's children are its runtime targets, so this shows them.
             host.outlineView.expandItem(item)
@@ -1695,11 +1746,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard host.projects.first(where: { $0.id == projectID })?.isGitRepo == true else { return }
         for workspace in visibleWorkspaces(projectID: projectID) {
             guard let row = rowIndex(forWorkspaceID: workspace.id), let item = host.outlineView.item(atRow: row) else { continue }
-            if isWorkspaceExpanded(workspace.id) {
-                host.outlineView.expandItem(item)
-            } else {
-                host.outlineView.collapseItem(item)
-            }
+            if isWorkspaceExpanded(workspace.id) { host.outlineView.expandItem(item) } else { host.outlineView.collapseItem(item) }
         }
     }
 

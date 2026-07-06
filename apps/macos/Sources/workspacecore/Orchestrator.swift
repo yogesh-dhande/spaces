@@ -1831,7 +1831,10 @@ public final class WorkspaceOrchestrator {
         }
     }
 
-    func buildWorkspaceEnv(
+    /// The environment injected into every process and terminal of a workspace: workspace/project
+    /// identity variables plus a per-service port/host/URL triple. Public so the Device API overview
+    /// can report the authoritative values for the settings dialog to display.
+    public func buildWorkspaceEnv(
         project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [(port: Int, name: String)], runtimeManifest: WorkspaceRuntimeManifest? = nil
     ) -> [String: String] {
         var env: [String: String] = [:]

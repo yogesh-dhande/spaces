@@ -9,6 +9,7 @@ struct SpacesDeviceOverviewBuilder {
         let workspace: WorkspaceRecord
         let settings: WorkspaceSettings?
         let assignedPorts: [SpacesDeviceAssignedPort]
+        let environment: [String: String]
         let resolvedBrowserSessions: [BrowserSession]
         let setupState: WorkspaceSetupState?
         let runningProcesses: [RunningProcessRecord]
@@ -19,13 +20,14 @@ struct SpacesDeviceOverviewBuilder {
         init(
             project: ProjectRecord, workspace: WorkspaceRecord, settings: WorkspaceSettings? = nil, runningProcesses: [RunningProcessRecord] = [],
             agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = [], assignedPorts: [SpacesDeviceAssignedPort] = [],
-            resolvedBrowserSessions: [BrowserSession] = [], setupState: WorkspaceSetupState? = nil,
+            environment: [String: String] = [:], resolvedBrowserSessions: [BrowserSession] = [], setupState: WorkspaceSetupState? = nil,
             terminalDaemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
         ) {
             self.project = project
             self.workspace = workspace
             self.settings = settings
             self.assignedPorts = assignedPorts
+            self.environment = environment
             self.resolvedBrowserSessions = resolvedBrowserSessions
             self.setupState = setupState
             self.runningProcesses = runningProcesses
@@ -79,7 +81,7 @@ struct SpacesDeviceOverviewBuilder {
                 isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived, isHidden: descriptor.workspace.isHidden,
                 isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
                 sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,
-                setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
+                environment: descriptor.environment, setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
                 processRows: runtimeRows.processes, codingAgentRows: runtimeRows.agents, terminalRows: runtimeRows.terminals)
         }
@@ -128,10 +130,9 @@ struct SpacesDeviceOverviewBuilder {
             id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, shell: session.launchConfiguration.shell,
             command: session.launchConfiguration.command, state: session.runtimeState.state, backend: session.launchConfiguration.backend,
             lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
-            childPID: session.runtimeState.childPID, workspaceID: session.workspaceID,
-            workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
-            projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
-            isControlAvailable: isInteractive && session.isControlAvailable,
+            childPID: session.runtimeState.childPID, workspaceID: session.workspaceID, workspaceTitle: matchedWorkspace?.workspace.displayName,
+            projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
+            updatedAt: session.runtimeState.updatedAt, isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender, daemonEndpoint: matchedWorkspace?.terminalDaemonEndpoint)
     }

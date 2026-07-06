@@ -1251,8 +1251,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// after the pane opens. The pane's own attach otherwise stays a viewer when another
     /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
     /// perf metric the E2E harness parses.
-    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool
-    {
+    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1385,8 +1384,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
                 })
             return TerminalPaneContentController(
-                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID),
-                workspaceID: request.workspaceID, sessionID: sessionID, pane: pane)
+                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
+                sessionID: sessionID, pane: pane)
         } catch {
             showError(error)
             return nil
@@ -2947,10 +2946,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let session = overview?.sessions.first { $0.id == sessionID }
         if let session {
             return DeviceTerminalOpenRequest(
-                workspaceID: session.workspaceID, sessionID: session.id, title: session.title,
-                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell,
-                command: session.command, initialState: session.state, servicePID: session.servicePID, childPID: session.childPID,
-                createdAt: session.createdAt, updatedAt: session.updatedAt)
+                workspaceID: session.workspaceID, sessionID: session.id, title: session.title, workingDirectory: session.workingDirectory,
+                kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell, command: session.command, initialState: session.state,
+                servicePID: session.servicePID, childPID: session.childPID, createdAt: session.createdAt, updatedAt: session.updatedAt)
         }
         guard let workspace = overview?.workspaces.first(where: { $0.id == fallbackWorkspaceID }),
             let row = workspace.terminalRows.first(where: { $0.sessionID == sessionID })
@@ -3324,7 +3322,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func selectWorkspace(_ workspace: WorkspaceSummary) { sidebar.selectWorkspace(workspace) }
     func orderedSidebarWorkspaces() -> [WorkspaceSummary] { sidebar.orderedSidebarWorkspaces() }
     func navigateSidebarSelection(direction: Int) -> Bool { sidebar.navigateSidebarSelection(direction: direction) }
-    func handleSidebarArrowNavigation(event: NSEvent) -> Bool { sidebar.handleSidebarArrowNavigation(event: event) }
     func toggleProjectExpanded(projectID: String) { sidebar.toggleProjectExpanded(projectID: projectID) }
     func canPreserveDetailPaneAfterSidebarReload() -> Bool { sidebar.canPreserveDetailPaneAfterSidebarReload() }
     func rebuildFlatSidebarData() { sidebar.rebuildFlatSidebarData() }
@@ -3499,7 +3496,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deviceSection(id: deviceID).map { !$0.isLocal } ?? (deviceID != SpacesPairedDeviceRecord.localDeviceID)
     }
 
-    private func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
+    func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
+
+    /// Hides a workspace from the sidebar (stopping it first if it is running), routed through the
+    /// workspace-visibility controller so the sidebar row's right-click menu and the visibility
+    /// dialog share one hide path. The sidebar refreshes from the mutation response, so no explicit
+    /// reload callback is needed here.
+    func hideWorkspace(id: String) { workspaceVisibility.hideWorkspace(workspaceID: id) }
 
     /// The device that owns the current selection, so mutations route to the
     /// daemon that actually hosts the selected workspace/project rather than
@@ -7227,25 +7230,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.launchWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performLaunchWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    /// Sender-free entry point for the sidebar workspace row's right-click menu, which fires from
+    /// an `NSMenuItem` rather than the footer's `NSButton`.
+    func launchWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performLaunchWorkspace(id: id) } }
+
+    private func performLaunchWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.launchWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7253,30 +7263,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.restartWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performRestartWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response):
-                    // Restart goes through the daemon stop path; the daemon does not own the
-                    // client-side dedicated Chrome windows, so close them here too for a clean
-                    // restarted state (a later browser focus then opens a fresh window).
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    func restartWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performRestartWorkspace(id: id) } }
+
+    private func performRestartWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.restartWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response):
+                // Restart goes through the daemon stop path; the daemon does not own the
+                // client-side dedicated Chrome windows, so close them here too for a clean
+                // restarted state (a later browser focus then opens a fresh window).
+                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7284,27 +7299,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.stopWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performStopWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response):
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    func stopWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performStopWorkspace(id: id) } }
+
+    private func performStopWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.stopWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response):
+                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7871,12 +7891,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let focusedPaneContent {
                 self.panelCoordinator.noteContentFocused(focusedPaneContent)
                 let disposition = Self.shortcutMonitorDisposition(
-                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true,
-                    shortcutLeaderModifiers: self.shortcutLeaderModifiers)
+                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true, shortcutLeaderModifiers: self.shortcutLeaderModifiers)
                 focusedTerminalDisposition = disposition
-                if disposition == .passEventToTerminal {
-                    return focusedPaneContent.handleKeyEvent(event) ? nil : event
-                }
+                if disposition == .passEventToTerminal { return focusedPaneContent.handleKeyEvent(event) ? nil : event }
             }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
@@ -7892,7 +7909,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.handleClosePaneShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
-            if self.handleSidebarArrowNavigation(event: event) { return nil }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
                 // In a global panel window the new tab opens there, targeting the
@@ -7984,8 +8000,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// all shortcuts run as before.
     nonisolated static func shortcutMonitorDisposition(
         eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool, shortcutLeaderModifiers: Set<HotkeyModifier> = []
-    ) -> ShortcutMonitorDisposition
-    {
+    ) -> ShortcutMonitorDisposition {
         guard firstResponderIsTerminalPane else { return .runAppShortcuts }
         let modifiers = eventShortcutModifiers(from: eventModifiers)
         if modifiers.contains(.cmd) { return .runAppShortcuts }
@@ -8129,9 +8144,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func shortcutCaptureKey(for keyCode: UInt16) -> String? { AppKitController.shortcutCaptureKeyMap[keyCode] }
 
-    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
-        Self.eventShortcutModifiers(from: flags)
-    }
+    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> { Self.eventShortcutModifiers(from: flags) }
 
     nonisolated static func eventShortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
         let filtered = flags.intersection([.command, .shift, .option, .control])
