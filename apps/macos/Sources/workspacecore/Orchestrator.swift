@@ -1835,7 +1835,10 @@ public final class WorkspaceOrchestrator {
         // so app servers can allowlist the host/origin for CORS or framework host checks; the URL is
         // the client-facing identity, not evidence that the remote daemon itself runs Caddy.
         // These need the shared router port, which is app configuration available here but not inside
-        // the pure planner, so they live only here.
+        // the pure planner, so they live only here. The router port is a Mac-only concept (only the
+        // macOS client runs Caddy), so remote daemons never seed one; the fallback below then yields
+        // the canonical `AppConfig.defaultRouterPort`, a stable client-facing identity the Mac client
+        // rewrites to its own live Caddy port before navigation.
         let slug = SpacesProfile.workspaceHostSlug(
             branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         let routerPort = (try? store.appConfig().routerPort) ?? AppConfig.defaultRouterPort

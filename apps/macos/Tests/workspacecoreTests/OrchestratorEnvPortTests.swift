@@ -515,6 +515,32 @@ extension OrchestratorTests {
         XCTAssertEqual(env["SPACES_WEB_HOST"], "web.\(slug).localhost")
     }
 
+    // The browser-facing service URL's port is whatever the store reports for the router port:
+    // the seeded value when present (macOS, which runs Caddy), and the canonical
+    // `AppConfig.defaultRouterPort` fallback when unset (headless remote daemons, which never seed
+    // one — see `seedProfileRouterPortIfNeeded`). This test locks the seeded branch; the unseeded
+    // branch is covered by `testBuildWorkspaceEnvKeepsBrowserFacingServiceURLForRemoteManifest`.
+    // Together they guarantee a non-seeding remote daemon advertises the canonical port, never a
+    // fabricated per-profile derived one.
+    func testBuildWorkspaceEnvUsesSeededRouterPortForServiceURL() throws {
+        let store = try makeTemporaryStore()
+        var config = try store.appConfig()
+        let seededPort = 34567
+        XCTAssertNotEqual(seededPort, AppConfig.defaultRouterPort)
+        config.routerPort = seededPort
+        try store.setAppConfig(config)
+
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let project = makeProjectRecord(dir: "/local/project")
+        let workspace = makeWorkspaceRecord(id: "workspace-seeded", projectID: project.id, dir: "/local/project/ws", branch: "feature/web")
+        let slug = SpacesProfile.workspaceHostSlug(
+            branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+
+        let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [(port: 3000, name: "web")])
+
+        XCTAssertEqual(env["SPACES_WEB_URL"], "http://web.\(slug).localhost:\(seededPort)")
+    }
+
     // MARK: - resolveEnvVars
 
     // Tests applyEnvVars substitutes a single named variable.
