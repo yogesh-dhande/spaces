@@ -5330,7 +5330,13 @@ PY
       "$noisy_cycle_elapsed_ms" \
       "$host" \
       "single"
-    assert_metric_not_above "$noisy_cycle_elapsed_ms" "$SPACES_CYCLE_LATENCY_BUDGET_MS" \
+    # Assert the budget against the app's own window_cycle latency (the user-facing route+focus
+    # time), the same signal `measure_spaces_cycle_transition` gates on — not the harness
+    # wall-clock above, which folds in AX-snapshot/CLI verification polling the user never sees
+    # and drifts over budget under load even though the cycle itself stays ~500ms.
+    local noisy_cycle_app_elapsed_ms
+    noisy_cycle_app_elapsed_ms="$(extract_metric_field "$cycle_line" "elapsed_ms")"
+    assert_metric_not_above "$noisy_cycle_app_elapsed_ms" "$SPACES_CYCLE_LATENCY_BUDGET_MS" \
       "high-output process user-facing cycle latency"
     assert_spaces_cpu_not_above "spaces_app.cpu_after_high_output_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
     if [[ -n "$KNOWN_SPACES_NOISY_SESSION_ID" ]]; then
