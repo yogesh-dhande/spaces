@@ -108,6 +108,52 @@ import XCTest
             XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
         }
 
+        func testSecureSocketRootIsPrivateToCurrentUser() throws {
+            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+                "caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+
+            let root = try CaddyService.secureSocketRoot(parentDirectory: base)
+
+            var status = stat()
+            XCTAssertEqual(lstat(root.path, &status), 0)
+            XCTAssertEqual(status.st_mode & S_IFMT, S_IFDIR)
+            XCTAssertEqual(status.st_uid, getuid())
+            XCTAssertEqual(status.st_mode & 0o077, 0, "the admin socket root must deny group and other access")
+        }
+
+        func testSecureSocketRootRejectsWorldAccessibleDirectory() throws {
+            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+                "caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            // Another local user could pre-create the predictable path with lax permissions; the
+            // service must refuse it rather than bind the admin socket into a shared directory.
+            let squatted = base.appendingPathComponent("spaces-caddy-sockets-\(getuid())", isDirectory: true)
+            try FileManager.default.createDirectory(at: squatted, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o777])
+
+            XCTAssertThrowsError(try CaddyService.secureSocketRoot(parentDirectory: base)) { error in
+                guard case CaddyServiceError.socketRootUntrusted = error else { return XCTFail("Expected socketRootUntrusted, got \(error)") }
+            }
+        }
+
+        func testSecureSocketRootRejectsSymlink() throws {
+            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+                "caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            // A symlink at the socket root would redirect the admin socket outside our owned tree.
+            let target = base.appendingPathComponent("elsewhere", isDirectory: true)
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+            let link = base.appendingPathComponent("spaces-caddy-sockets-\(getuid())", isDirectory: true)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+            XCTAssertThrowsError(try CaddyService.secureSocketRoot(parentDirectory: base)) { error in
+                guard case CaddyServiceError.socketRootUntrusted = error else { return XCTFail("Expected socketRootUntrusted, got \(error)") }
+            }
+        }
+
         private func bindUnixSocket(at path: String) throws -> Int32 {
             unlink(path)
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)

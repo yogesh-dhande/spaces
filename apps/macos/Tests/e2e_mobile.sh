@@ -1034,14 +1034,14 @@ new_terminal_session() {
   fi
   local title="${1:-e2e-$CURRENT_SCENARIO}"
   local command_text="${2:-}"
-  local create_log="$SCENARIO_DIR/start-terminal-session.log"
+  local create_log="$SCENARIO_DIR/start-workspace-terminal-session.log"
   local show_log="$SCENARIO_DIR/show-terminal.log"
   local session_id
   : >"$create_log"
   for attempt in 1 2 3 4 5; do
-    local attempt_log="$SCENARIO_DIR/start-terminal-session-attempt-$attempt.log"
+    local attempt_log="$SCENARIO_DIR/start-workspace-terminal-session-attempt-$attempt.log"
     local -a create_args
-    create_args=(start-terminal-session --cwd "$PROJECT_DIR" --title "$title")
+    create_args=(start-workspace-terminal-session --workspace-dir "$PROJECT_DIR" --title "$title")
     if [[ -n "$command_text" ]]; then
       create_args+=(--command "$command_text")
     fi

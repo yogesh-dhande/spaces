@@ -972,6 +972,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         accessoryStack.spacing = 4
         accessoryStack.translatesAutoresizingMaskIntoConstraints = false
         accessoryStack.setContentHuggingPriority(.required, for: .horizontal)
+        // Both git and non-git project rows open project settings. A non-git project stands in for
+        // its single workspace, and its project template is kept in sync with that workspace (see
+        // updateProjectConfig), so editing project settings edits the config that actually runs while
+        // still exposing project-level Delete and spaces.yaml import/export.
         let settingsButton = host.sidebarRowIconButton(
             symbol: "gearshape", tooltip: "Project settings for \(project.name)", action: #selector(AppKitController.showProjectSettings(_:)))
         settingsButton.identifier = NSUserInterfaceItemIdentifier(project.id)
@@ -1161,8 +1165,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             chipSlot.addSubview(chip)
             NSLayoutConstraint.activate([
                 chip.leadingAnchor.constraint(equalTo: chipSlot.leadingAnchor),
-                chip.trailingAnchor.constraint(lessThanOrEqualTo: chipSlot.trailingAnchor),
-                chip.topAnchor.constraint(equalTo: chipSlot.topAnchor), chip.bottomAnchor.constraint(equalTo: chipSlot.bottomAnchor),
+                chip.trailingAnchor.constraint(lessThanOrEqualTo: chipSlot.trailingAnchor), chip.topAnchor.constraint(equalTo: chipSlot.topAnchor),
+                chip.bottomAnchor.constraint(equalTo: chipSlot.bottomAnchor),
             ])
         }
         row.addArrangedSubview(chipSlot)
@@ -1194,7 +1198,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             row.addArrangedSubview(editor)
         } else {
             let isPendingLaunchAction = item.kind == .missingConfiguredProcess || item.kind == .agentLauncher
-            let titleLabel = NSTextField(labelWithString: item.title)
+            let titleLabel = PressableLabel(labelWithString: item.title)
+            // Mirror the row identifier onto the title label. AppKit does not expose an
+            // NSTableCellView's own accessibility identifier as a queryable element (only its
+            // text/interactive subviews are), so the cell-level id on line ~1147 is invisible to
+            // VoiceOver and UI automation; the label carries a findable copy. The press action
+            // mirrors `onRowMouseDown`'s runtimeTarget branch below so VoiceOver activation and
+            // UI automation's `AXPress` both actually open/focus the target, not just find it.
+            titleLabel.setAccessibilityIdentifier("sidebar-target-\(workspace.id)-\(item.key)")
+            titleLabel.onAccessibilityPress = { [weak self] in
+                guard let self else { return }
+                if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
+                self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
+            }
             titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
             titleLabel.textColor =
                 isPendingLaunchAction ? sidebarMetadataTextColor(isSelected: false) : sidebarPrimaryTextColor(isSelected: false, isArchived: false)
@@ -1210,9 +1226,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         NSLayoutConstraint.activate([
             // Flush with the workspace card's leading edge: the ⌘-number chip column
             // aligns under the workspace row instead of adding a second indent level.
-            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10), row.topAnchor.constraint(equalTo: cell.topAnchor),
-            row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor), row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            row.topAnchor.constraint(equalTo: cell.topAnchor), row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
         ])
         return cell
     }
@@ -1649,8 +1664,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.setAccessibilityIdentifier("sidebar-alerts")
 
         let bellIcon = NSImageView()
-        bellIcon.image = NSImage(systemSymbolName: "bell", accessibilityDescription: "Alerts")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        bellIcon.image = NSImage(systemSymbolName: "bell", accessibilityDescription: "Alerts")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
         bellIcon.contentTintColor = .secondaryLabelColor
         bellIcon.setContentHuggingPriority(.required, for: .horizontal)
 

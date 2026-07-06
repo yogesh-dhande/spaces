@@ -264,6 +264,7 @@ public enum TerminalServiceProfileCommandOperation: String, Codable, Sendable, E
     case terminalList
     case terminalSend
     case terminalTail
+    case terminalCommand
 }
 
 public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable {
@@ -280,11 +281,17 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
     public let terminalBytes: Data?
     public let appendNewline: Bool?
     public let lineCount: Int?
+    /// Working directory used to derive the owning workspace for `openWorkspaceTerminal`
+    /// when `workspaceID` is omitted (deepest workspace whose directory contains it).
+    public let cwd: String?
+    public let terminalCommand: String?
+    public let terminalTitle: String?
 
     public init(
         operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
         branch: String? = nil, baseBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil, agentEvent: String? = nil,
-        terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil
+        terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil, cwd: String? = nil,
+        terminalCommand: String? = nil, terminalTitle: String? = nil
     ) {
         self.operation = operation
         self.projectID = projectID
@@ -299,6 +306,9 @@ public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable
         self.terminalBytes = terminalBytes
         self.appendNewline = appendNewline
         self.lineCount = lineCount
+        self.cwd = cwd
+        self.terminalCommand = terminalCommand
+        self.terminalTitle = terminalTitle
     }
 }
 
@@ -365,18 +375,20 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     public let workspaces: [TerminalServiceProfileWorkspaceRecord]?
     public let workspace: TerminalServiceProfileWorkspaceRecord?
     public let terminalSessions: [TerminalServiceSessionSummary]?
+    public let terminalSession: TerminalServiceSessionSummary?
     public let terminalOutput: String?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
-        terminalOutput: String? = nil
+        terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil
     ) {
         self.message = message
         self.projects = projects
         self.workspaces = workspaces
         self.workspace = workspace
         self.terminalSessions = terminalSessions
+        self.terminalSession = terminalSession
         self.terminalOutput = terminalOutput
     }
 }

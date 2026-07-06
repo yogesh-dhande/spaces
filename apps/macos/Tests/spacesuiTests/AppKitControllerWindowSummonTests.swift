@@ -33,7 +33,7 @@ import workspacecore
 
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "service-session", title: "service", workingDirectory: root.path, shell: "/bin/zsh", command: nil,
-            createdAt: "2026-05-18T00:00:00Z")
+            createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let paths = TerminalSessionPaths(rootDirectory: root.path)
 
         let resolvedHost = AppKitController.terminalSessionHost(launchConfiguration: launchConfiguration, paths: paths)

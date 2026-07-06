@@ -1,6 +1,8 @@
 import Foundation
 
 #if os(macOS)
+    import Darwin
+
     /// Manages the bundled Caddy binary that reverse-proxies `<service>.<workspace-slug>.localhost`
     /// hosts to each workspace's dynamically assigned local port. Mirrors `TerminalService`: locate
     /// the binary, spawn it detached, reload its config gracefully, and stop it on the SIGTERM→SIGKILL
@@ -18,7 +20,42 @@ import Foundation
 
         /// Unix socket the Caddy admin API listens on for the active profile. Callers must embed this
         /// in the generated config (admin.listen) so it matches the address used for reloads.
-        public static func adminSocketPath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy-admin.sock") }
+        ///
+        /// Lives under a short fixed root rather than the profile runtime directory: AF_UNIX socket
+        /// paths are capped at 104 bytes on macOS, and a worktree/branch-derived runtime directory
+        /// (`~/.spaces-dev/profiles/spaces/<branch-slug>-<hash>/runtime/`) can exceed that on its own
+        /// for a long branch name, which fails the bind silently. The filename is a stable hash of the
+        /// runtime directory (mirroring `TerminalServicePaths`) so each profile still gets its own
+        /// distinct socket, and the root (`secureSocketRoot`) is a per-user `0700` directory so no
+        /// other local user can pre-create or observe the admin socket that controls local routing.
+        public static func adminSocketPath() throws -> String {
+            let socketRoot = try secureSocketRoot()
+            let hash = SpacesProfile.shortStableHash(SpacesProfile.canonicalPath(try runtimeDirectory()))
+            return socketRoot.appendingPathComponent("admin-\(hash).sock", isDirectory: false).path
+        }
+
+        /// The per-user root that holds every profile's admin socket, created `0700` and owned by the
+        /// current user. Because the `/tmp` path is predictable (short, fixed prefix + uid), another
+        /// local user could race to pre-create it; `createDirectory` does not touch an existing
+        /// directory's attributes, so this re-validates via `lstat` that the path is a real directory
+        /// (not a symlink), is owned by us, and grants no group/other access. Anything else is a
+        /// hijack attempt (the admin API can rewrite the local router config), so we refuse rather
+        /// than bind into an attacker-controlled directory.
+        ///
+        /// `parentDirectory` defaults to `/tmp` (kept short for the 104-byte AF_UNIX cap); tests
+        /// override it to validate the ownership/mode checks against an isolated temporary base.
+        static func secureSocketRoot(parentDirectory: URL = URL(fileURLWithPath: "/tmp", isDirectory: true)) throws -> URL {
+            let uid = getuid()
+            let root = parentDirectory.appendingPathComponent("spaces-caddy-sockets-\(uid)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            var status = stat()
+            guard lstat(root.path, &status) == 0 else { throw CaddyServiceError.socketRootUntrusted(root.path) }
+            let isDirectory = (status.st_mode & S_IFMT) == S_IFDIR
+            let isOwnedByCurrentUser = status.st_uid == uid
+            let deniesGroupAndOther = (status.st_mode & 0o077) == 0
+            guard isDirectory, isOwnedByCurrentUser, deniesGroupAndOther else { throw CaddyServiceError.socketRootUntrusted(root.path) }
+            return root
+        }
 
         /// Client-owned route registry read by the local macOS daemon when reconciling Caddy.
         public static func routeRegistryPath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy-routes.json") }
@@ -133,6 +170,29 @@ import Foundation
 
         private static func adminSocketHasOwner(_ socketPath: String) -> Bool { !serviceProcessIDsOwningSocket(socketPath).isEmpty }
 
+        /// True when a live Caddy owns the profile's admin socket. Unlike checking for the generated
+        /// config file or the socket file on disk (both of which survive a crash or `stop()`), this
+        /// connects to the admin socket: a graceful `stop()` removes the socket so `connect` fails with
+        /// ENOENT, and a crash leaves an unowned socket whose `connect` fails with ECONNREFUSED. Callers
+        /// use this to distinguish a Caddy that is actually serving routes from a stale on-disk config.
+        public static func isRunning() -> Bool {
+            guard let socketPath = try? adminSocketPath() else { return false }
+            let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard descriptor >= 0 else { return false }
+            defer { close(descriptor) }
+
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            let utf8Path = socketPath.utf8CString
+            guard utf8Path.count <= MemoryLayout.size(ofValue: address.sun_path) else { return false }
+            withUnsafeMutablePointer(to: &address.sun_path.0) { pointer in
+                utf8Path.withUnsafeBufferPointer { buffer in if let baseAddress = buffer.baseAddress { memcpy(pointer, baseAddress, buffer.count) } }
+            }
+            return withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            } == 0
+        }
+
         static func resolveExecutableURL(environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default)
             throws -> URL
         {
@@ -171,12 +231,14 @@ import Foundation
         case executableNotFound
         case startupTimedOut(String)
         case reloadFailed(String)
+        case socketRootUntrusted(String)
 
         public var errorDescription: String? {
             switch self {
             case .executableNotFound: "The caddy executable is required to route workspace service URLs."
             case .startupTimedOut(let path): "Timed out waiting for caddy to start from \(path)."
             case .reloadFailed(let path): "Failed to reload caddy with config at \(path)."
+            case .socketRootUntrusted(let path): "The caddy admin socket directory \(path) is not a private directory owned by the current user."
             }
         }
     }

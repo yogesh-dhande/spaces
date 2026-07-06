@@ -155,9 +155,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             let occupiedSocket = try makeOccupiedPortSocket()
             defer { close(occupiedSocket.fileDescriptor) }
 
-            let environment = [
-                SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)",
-            ]
+            let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)"]
             let supervisor = SpacesDeviceAPISupervisor(
                 settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
             supervisor.start()
@@ -176,9 +174,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             let occupiedSocket = try makeOccupiedPortSocket()
             defer { close(occupiedSocket.fileDescriptor) }
 
-            let environment = [
-                SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)",
-            ]
+            let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "\(occupiedSocket.port)"]
             let supervisor = SpacesDeviceAPISupervisor(
                 settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
             supervisor.start()
@@ -198,9 +194,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
     func testOpenPairingWindowDoesNotEmitIPv6WildcardHost() async throws {
         try await withTemporaryProfile { _ in
-            let environment = [
-                SpacesDeviceAPIDefaults.hostEnvironmentVariable: "::", SpacesDeviceAPIDefaults.portEnvironmentVariable: "0",
-            ]
+            let environment = [SpacesDeviceAPIDefaults.hostEnvironmentVariable: "::", SpacesDeviceAPIDefaults.portEnvironmentVariable: "0"]
             let supervisor = SpacesDeviceAPISupervisor(
                 settingsStore: SpacesDeviceAPISettingsStore(environment: environment), environment: environment, restartInterval: 60)
             supervisor.start()
@@ -288,7 +282,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
                         command: .terminalControl(
                             .init(
                                 action: .resize, sessionID: sessionID, clientID: "ios-client", columns: 80, rows: 24, ownerEpoch: 11, resizeSerial: 5)
-                        ), authToken: authToken, clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                        ), authToken: authToken, clientApp: clientApp), port: server.listeningPort,
+                    certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(acceptedResponse.ok)
@@ -303,7 +298,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
                     SpacesDeviceAPIRequest(
                         command: .terminalControl(
                             .init(action: .scroll, sessionID: sessionID, clientID: "ios-client", ownerEpoch: 12, scrollVertical: 24, scrollMods: 7)),
-                        authToken: authToken, clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                        authToken: authToken, clientApp: clientApp), port: server.listeningPort,
+                    certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(acceptedScrollResponse.ok)
@@ -324,7 +320,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "takeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                    command: "cat", createdAt: "2026-05-29T00:00:00Z"), paths: paths)
+                    command: "cat", createdAt: "2026-05-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             let recorder = DeviceAPITerminalControlRecorder()
             let controlServer = TerminalControlServer(
                 socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.device.api.takeover-state.test")
@@ -402,7 +398,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
                     SpacesDeviceAPIRequest(
                         command: .terminalControl(
                             .init(action: .key, sessionID: interruptSessionID, clientID: "ios-owner", key: "ctrl+c", ownerEpoch: 3)),
-                        authToken: authToken, clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                        authToken: authToken, clientApp: clientApp), port: server.listeningPort,
+                    certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(response.ok)
@@ -432,7 +429,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "dead-process", workingDirectory: workspaceDir.path, shell: "/bin/zsh",
-                    command: "sleep 300", createdAt: "2026-06-04T12:00:00Z"), paths: paths)
+                    command: "sleep 300", createdAt: "2026-06-04T12:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .running,
@@ -473,7 +470,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                    createdAt: "2026-05-26T00:00:00Z"), paths: paths)
+                    createdAt: "2026-05-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
             try Data("\u{1B}[32mOUTPUT-LOG-SHOULD-NOT-APPEAR\u{1B}[0m\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
             let liveState = Self.liveTerminalStatePayload(sessionID: sessionID, snapshotText: "LIVE-STATE")
@@ -524,7 +521,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
 
             let status = try supervisor.status()
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: status.port, certificateFingerprint: status.certificateFingerprint)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: status.port,
+                certificateFingerprint: status.certificateFingerprint)
             defer { connection.cancel() }
 
             XCTAssertTrue(subscriptionServer.waitForAccepted(timeout: 5))
@@ -565,7 +563,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             defer { server.stop() }
 
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
             defer { connection.cancel() }
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
@@ -612,7 +611,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             defer { server.stop() }
 
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
             defer { connection.cancel() }
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
@@ -631,7 +631,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "final-target", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z"), paths: paths)
+                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             let runtimeState = TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:23:23Z",
                 exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)
@@ -655,7 +655,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             defer { server.stop() }
 
             let connection = try startSubscribeConnection(
-                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+                sessionID: sessionID, clientApp: clientApp, authToken: authToken, port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
             defer { connection.cancel() }
 
             let receivedPayload = try readStreamPayload(connection, timeout: 5)
@@ -674,7 +675,7 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "final-target", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z"), paths: paths)
+                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             let runtimeState = TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:23:23Z",
                 exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)
@@ -854,9 +855,9 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         return socket.port
     }
 
-    private func startSubscribeConnection(sessionID: String, clientApp: SpacesDeviceClientApp, authToken: String, port: Int, certificateFingerprint: String)
-        throws -> NWConnection
-    {
+    private func startSubscribeConnection(
+        sessionID: String, clientApp: SpacesDeviceClientApp, authToken: String, port: Int, certificateFingerprint: String
+    ) throws -> NWConnection {
         let ready = DispatchSemaphore(value: 0)
         let sent = DispatchSemaphore(value: 0)
         let queue = DispatchQueue(label: "spaces.device.api.supervisor.subscribe.test")

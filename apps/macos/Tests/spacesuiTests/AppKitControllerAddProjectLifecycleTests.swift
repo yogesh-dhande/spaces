@@ -5,119 +5,11 @@ import Testing
 @testable import spacesui
 
 @Suite struct AppKitControllerAddProjectLifecycleTests {
-    @Test func preparedGitProjectResultRequiresActiveMatchingRequest() {
-        let preparationID = UUID()
-
-        #expect(
-            AppKitController.preparedGitProjectResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
-                currentPreparationID: preparationID, completionPreparationID: preparationID))
-    }
-
-    @Test func preparedGitProjectResultRejectsStaleOrInactiveRequests() {
-        let preparationID = UUID()
-
-        #expect(
-            !AppKitController.preparedGitProjectResultMatchesActiveRequest(
-                isActiveForm: false, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
-                currentPreparationID: preparationID, completionPreparationID: preparationID))
-        #expect(
-            !AppKitController.preparedGitProjectResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 0, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
-                currentPreparationID: preparationID, completionPreparationID: preparationID))
-        #expect(
-            !AppKitController.preparedGitProjectResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/other.git",
-                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local",
-                currentPreparationID: preparationID, completionPreparationID: preparationID))
-        #expect(
-            !AppKitController.preparedGitProjectResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "remote", requestedDeviceID: "local",
-                currentPreparationID: preparationID, completionPreparationID: preparationID))
-        #expect(
-            !AppKitController.preparedGitProjectResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 1, currentRepoURL: "https://example.com/repo.git",
-                requestedRepoURL: "https://example.com/repo.git", currentDeviceID: "local", requestedDeviceID: "local", currentPreparationID: UUID(),
-                completionPreparationID: preparationID))
-    }
-
-    @Test func localProjectPreviewResultRequiresActiveLocalSource() {
-        #expect(
-            AppKitController.localProjectPreviewResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 0, currentDirectoryPath: "/tmp/project", requestedDirectoryPath: "/tmp/project"))
-    }
-
-    @Test func localProjectPreviewResultRejectsStaleOrInactiveRequests() {
-        #expect(
-            !AppKitController.localProjectPreviewResultMatchesActiveRequest(
-                isActiveForm: false, selectedSegment: 0, currentDirectoryPath: "/tmp/project", requestedDirectoryPath: "/tmp/project"))
-        #expect(
-            !AppKitController.localProjectPreviewResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 1, currentDirectoryPath: "/tmp/project", requestedDirectoryPath: "/tmp/project"))
-        #expect(
-            !AppKitController.localProjectPreviewResultMatchesActiveRequest(
-                isActiveForm: true, selectedSegment: 0, currentDirectoryPath: "/tmp/other", requestedDirectoryPath: "/tmp/project"))
-    }
-
-    @Test func preparedGitProjectReadinessRequiresSelectedDevice() {
-        #expect(
-            AppKitController.preparedGitProjectMatchesCurrentSelection(
-                preparedGitProjectHandle: "handle", preparedGitURL: "https://example.com/repo.git", preparedGitDeviceID: "local",
-                currentRepoURL: "https://example.com/repo.git", selectedDeviceID: "local", currentPreparationID: nil))
-        #expect(
-            !AppKitController.preparedGitProjectMatchesCurrentSelection(
-                preparedGitProjectHandle: "handle", preparedGitURL: "https://example.com/repo.git", preparedGitDeviceID: "remote",
-                currentRepoURL: "https://example.com/repo.git", selectedDeviceID: "local", currentPreparationID: nil))
-        #expect(
-            !AppKitController.preparedGitProjectMatchesCurrentSelection(
-                preparedGitProjectHandle: "handle", preparedGitURL: "https://example.com/repo.git", preparedGitDeviceID: "local",
-                currentRepoURL: "https://example.com/repo.git", selectedDeviceID: "local", currentPreparationID: UUID()))
-    }
-
-    @Test func preparedGitProjectDiscardKeyUsesTrimmedRepoURLAndDevice() {
-        #expect(
-            AppKitController.preparedGitProjectDiscardKey(repoURL: "  https://example.com/repo.git\n", deviceID: "local")
-                == "local\nhttps://example.com/repo.git")
-        #expect(
-            AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "local")
-                != AppKitController.preparedGitProjectDiscardKey(repoURL: "https://example.com/repo.git", deviceID: "remote"))
-        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: "   ", deviceID: "local") == nil)
-        #expect(AppKitController.preparedGitProjectDiscardKey(repoURL: nil, deviceID: "local") == nil)
-    }
-
-    @Test func preparedGitProjectCreateFailureRestoresHandleToStillActiveForm() {
-        #expect(
-            AppKitController.preparedGitProjectCreateFailureAction(
-                isActiveForm: true, formHasPreparedHandle: false, formTargetsPreparationDevice: true) == .restoreToForm)
-    }
-
-    @Test func preparedGitProjectCreateFailureDiscardsOrphanedClone() {
-        // Form dismissed mid-create, so there is nothing to restore into.
-        #expect(
-            AppKitController.preparedGitProjectCreateFailureAction(
-                isActiveForm: false, formHasPreparedHandle: false, formTargetsPreparationDevice: true) == .discardOrphan)
-        // A newer preparation already replaced the handle on the still-active form; the captured
-        // clone is orphaned and discarding it must not clobber the newer one.
-        #expect(
-            AppKitController.preparedGitProjectCreateFailureAction(
-                isActiveForm: true, formHasPreparedHandle: true, formTargetsPreparationDevice: true) == .discardOrphan)
-        #expect(
-            AppKitController.preparedGitProjectCreateFailureAction(
-                isActiveForm: false, formHasPreparedHandle: true, formTargetsPreparationDevice: true) == .discardOrphan)
-    }
-
-    @Test func preparedGitProjectCreateFailureDiscardsWhenFormSwitchedDevices() {
-        // The user changed the (still-editable) device picker mid-create, so the form now targets a
-        // different daemon than the one the clone was prepared on. Restoring the handle would make
-        // Cancel/retry act on the wrong daemon and orphan the original clone, so discard it on its own
-        // device instead.
-        #expect(
-            AppKitController.preparedGitProjectCreateFailureAction(
-                isActiveForm: true, formHasPreparedHandle: false, formTargetsPreparationDevice: false) == .discardOrphan)
+    @Test func addProjectRequiresDeviceSelectionOnlyWithMultipleDevices() {
+        // A single device (the local Mac) skips the device step and opens configuration directly.
+        #expect(!AppKitController.addProjectRequiresDeviceSelection(deviceCount: 1))
+        // More than one paired device shows the device-selection step first.
+        #expect(AppKitController.addProjectRequiresDeviceSelection(deviceCount: 2))
     }
 
     @MainActor @Test func setupScriptReplaceCancelsOpenEditorAndAppliesHydratedValue() {
@@ -167,6 +59,20 @@ import Testing
         #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertSecondButtonReturn) == .projectOnly)
         #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .alertThirdButtonReturn) == .cancel)
         #expect(AppKitController.projectImportWorkspaceSyncDecision(for: .abort) == .cancel)
+    }
+
+    @MainActor @Test func nonGitProjectSaveAlwaysSyncsItsWorkspace() {
+        // A non-git project stands in for its single workspace, so saving its settings must sync to
+        // that workspace regardless of any pending-import choice — the edits are the config that runs.
+        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: false))
+        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: false, pendingImportUpdateAllWorkspaces: true))
+    }
+
+    @MainActor @Test func gitProjectSaveSyncsOnlyWhenImportChoseUpdateAll() {
+        // A git project keeps the template/per-workspace split: a plain save leaves existing
+        // workspaces untouched, and only a pending import that chose Update All Workspaces syncs.
+        #expect(!AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: false))
+        #expect(AppKitController.projectSaveSyncsAllWorkspaces(isGitRepo: true, pendingImportUpdateAllWorkspaces: true))
     }
 
     @MainActor @Test func managedDirectoryReplacementDecisionMapsAlertResponses() {

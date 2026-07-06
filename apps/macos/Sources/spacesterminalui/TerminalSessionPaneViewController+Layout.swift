@@ -7,6 +7,15 @@ extension TerminalSessionPaneViewController {
     func buildUI() {
         let contentView = view
         contentView.translatesAutoresizingMaskIntoConstraints = false
+        // Queryable regardless of the pane's window shell (owner-attached window pre-panel-rework,
+        // or a pane inside a shared panel window today): UI automation and VoiceOver read the
+        // pane's current owner/viewer attachment mode off this stable identifier's AXValue (kept
+        // current by updateInputOwnershipUI) instead of inferring it from window title/identifier,
+        // which no longer distinguishes attachment mode now that panes share one window.
+        contentView.setAccessibilityIdentifier("terminal-pane-\(sessionID)")
+        // A bare container NSView is otherwise treated as accessibility-uninteresting and
+        // collapsed out of the AX tree entirely, so its identifier/value would never surface.
+        contentView.setAccessibilityElement(true)
 
         titleLabel.stringValue = sessionID
         titleLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
@@ -230,6 +239,7 @@ extension TerminalSessionPaneViewController {
     }
 
     func updateInputOwnershipUI(isOwner: Bool, isInteractive: Bool) {
+        view.setAccessibilityValue(isOwner ? "owner" : "viewer")
         let usesInlineControls = visibleRenderer == .textView && isOwner
         inputRowStackView.isHidden = !usesInlineControls
         let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded
@@ -257,6 +267,14 @@ extension TerminalSessionPaneViewController {
         }
         updateHeaderLayoutVisibility()
     }
+
+    /// Publishes the pane's runtime-target name (the sidebar/tab title — e.g. "frontend",
+    /// "codex") as the pane container's accessibility label. Post-panel-rework every session
+    /// renders as a pane inside one shared window whose title no longer encodes which session
+    /// is frontmost, so UI automation and VoiceOver identify the front window's selected-tab
+    /// session by this label off the same `terminal-pane-<sessionID>` element that carries the
+    /// owner/viewer AXValue. The panel coordinator keeps it current on every render pass.
+    public func setAccessibilityRuntimeTargetName(_ name: String) { view.setAccessibilityLabel(name) }
 
     func updateHeaderLayoutVisibility() {
         // Session metadata remains available through debug accessors, but panes render
@@ -422,9 +440,7 @@ extension TerminalSessionPaneViewController {
         summaryText(workingDirectory: launchConfiguration.workingDirectory, shell: launchConfiguration.shell, command: launchConfiguration.command)
     }
 
-    static func displayLabel(for client: TerminalClient) -> String {
-        client.identity.deviceName ?? client.identity.hostName ?? client.identity.label
-    }
+    static func displayLabel(for client: TerminalClient) -> String { client.identity.deviceName ?? client.identity.hostName ?? client.identity.label }
 
     static func summaryText(workingDirectory: String, shell: String, command: String?) -> String {
         let cwd = abbreviatedPath(workingDirectory)

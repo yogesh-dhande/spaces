@@ -774,10 +774,17 @@ private struct E2ERunner {
 
     private static func stepPrefix(_ index: Int) -> String { String(format: "%03d", index) }
 
+    /// Maximum slug length. Slugs name single path components (`steps/<NNN>-<slug>`, `<NNN>-<slug>.log`);
+    /// batching many scenarios into one runScript call (e.g. the exhaustive mobile lane) can otherwise
+    /// push the component past the filesystem's 255-byte per-name limit, and creating the child `work`/`tmp`
+    /// directories then fails with "the file name 'work' is invalid".
+    private static let maxSlugLength = 120
+
     private static func slug(_ value: String) -> String {
         let slug = value.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
             in: CharacterSet(charactersIn: "-"))
-        return slug.isEmpty ? "step" : slug
+        let capped = slug.count > maxSlugLength ? String(slug.prefix(maxSlugLength)).trimmingCharacters(in: CharacterSet(charactersIn: "-")) : slug
+        return capped.isEmpty ? "step" : capped
     }
 
     private static func flatArtifactName(stepIndex: Int, stepName: String, relativePath: String) -> String {

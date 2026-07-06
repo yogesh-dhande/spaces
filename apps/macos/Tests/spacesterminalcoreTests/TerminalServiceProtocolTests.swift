@@ -12,7 +12,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
     func testRequestAndResponseRoundTripThroughCodec() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "session-1", backend: .ghosttyEmbedded, lifetimePolicy: .whileAttached, title: "shell", workingDirectory: "/tmp/work",
-            shell: "/bin/zsh", command: "cat", createdAt: "2026-05-17T00:00:00Z")
+            shell: "/bin/zsh", command: "cat", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let manifest = TerminalServiceWorkspaceRuntimeManifest(
             workspaceID: "workspace-1", projectID: "project-1", deviceID: "host-1", location: .remote, localPath: "/local/work",
             remotePath: "/srv/work", branch: "feature", baseBranch: "main", gitRemoteURL: "git@example.com:repo.git",

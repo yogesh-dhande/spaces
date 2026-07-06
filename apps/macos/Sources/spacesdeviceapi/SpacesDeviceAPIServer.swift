@@ -1062,8 +1062,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(
                 ok: true, message: "Loaded device overview.", result: .overview(try loadOverview(clientApp: request.clientApp)))
         case .createProject(let payload): return try handleCreateProjectRequest(payload)
-        case .prepareGitProject(let payload): return try handlePrepareGitProjectRequest(payload)
-        case .discardPreparedGitProject(let payload): return try handleDiscardPreparedGitProjectRequest(payload)
+        case .previewGitProject(let payload): return try handleGitPreviewRequest(payload)
         case .deleteProject(let payload): return try handleDeleteProjectRequest(payload)
         case .importProject(let payload): return try handleImportProjectRequest(payload)
         case .exportProject(let payload): return try handleExportProjectRequest(payload)
@@ -1134,7 +1133,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             command: payload.action.rawValue, text: payload.text, key: payload.key, clientID: clientID, client: payload.client,
             attachmentMode: payload.attachmentMode, columns: payload.columns, rows: payload.rows, ownerEpoch: payload.ownerEpoch,
             resizeSerial: payload.resizeSerial, scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical,
-            scrollMods: payload.scrollMods, appendNewline: payload.appendNewline)
+            scrollMods: payload.scrollMods, appendNewline: payload.appendNewline, appearance: payload.appearance)
         let dispatchStartedAt = Date()
         logDeviceAPIPerformance(sessionID: sessionID, name: "terminal_control_dispatch_begin", attributes: attributes)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
@@ -1327,6 +1326,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let overviewLoaderForTesting { return try overviewLoaderForTesting(clientApp) }
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
+        // The router port is a Mac-only concept (only the macOS client runs Caddy), so remote
+        // daemons never seed one and this fallback yields the canonical `AppConfig.defaultRouterPort`.
+        // The reported `assignedPort.url` is a client-facing host/origin identity; the Mac client
+        // rewrites the port to its own live Caddy port before navigation.
         let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
         let projects = try store.projects()
         let workspaces = try projects.flatMap { project in
@@ -1601,16 +1604,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 project = try orchestrator.addProject(dir: projectDir)
             }
         } else if let gitURL {
-            if let handle = normalizedString(request.preparedGitProjectHandle) {
-                // Adopt the repository already cloned by prepareGitProject instead of re-cloning.
-                let prepared = try Self.decodePreparedGitProject(handle: handle)
+            // Clone the repository now (deferred from the add-project preview, which only fetched
+            // spaces.yaml) and apply the client's reviewed config. addPreparedGitProject applies the
+            // config unconditionally; addProject(gitURL:) would instead discard it in favor of the
+            // repo's own spaces.yaml, dropping any edits the user made in the form.
+            let prepared = try orchestrator.prepareGitProject(gitURL: gitURL, replaceExistingManagedDirectories: true)
+            do {
                 project = try orchestrator.addPreparedGitProject(prepared) { project in
                     if let config = request.config { applyProjectConfig(config, to: &project) }
                 }
-            } else {
-                project = try orchestrator.addProject(gitURL: gitURL) { project in
-                    if let config = request.config { applyProjectConfig(config, to: &project) }
-                }
+            } catch {
+                try? orchestrator.discardPreparedGitProject(prepared)
+                throw error
             }
         } else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide exactly one project directory or Git URL.")
@@ -1619,53 +1624,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try refreshedMutationResponse(message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID)
     }
 
-    /// Clones a git repository to its final managed location on this daemon and returns the detected
-    /// `spaces.yaml`-derived config plus an opaque handle to the clone. The client populates the add
-    /// form from the config and later either creates the project (reusing the clone via the handle)
-    /// or discards it — so a git import clones exactly once, on the device that will own it.
-    private func handlePrepareGitProjectRequest(_ request: SpacesDevicePrepareGitProjectRequest) throws -> SpacesDeviceAPIResponse {
+    /// Loads a git repository's `spaces.yaml` for the add-project preview by fetching only that single
+    /// file (no clone), returning the detected config to populate the add form plus any managed
+    /// directories a later Create would replace. The full clone is deferred to `createProject`.
+    private func handleGitPreviewRequest(_ request: SpacesDeviceGitProjectPreviewRequest) throws -> SpacesDeviceAPIResponse {
         guard let gitURL = normalizedString(request.gitURL) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Git repository URL is required.")
         }
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let orchestrator = deviceOrchestrator(store: store)
-        // Report managed-directory collisions before cloning so the client can confirm replacement.
-        let candidates = try orchestrator.managedGitProjectImportReplacementCandidates(gitURL: gitURL)
-        if !candidates.isEmpty, !request.replaceExistingManagedDirectories {
-            let mapped = candidates.map { SpacesDeviceManagedDirectoryReplacementCandidate(kind: $0.kind.rawValue, path: $0.path) }
-            return SpacesDeviceAPIResponse(
-                ok: true, message: "Managed directories already exist for this repository.",
-                result: .gitProjectPreparation(
-                    SpacesDeviceGitProjectPreparation(
-                        preparedGitProjectHandle: nil, name: nil, defaultBranch: nil, config: nil, replacementCandidates: mapped)))
-        }
-        let prepared = try orchestrator.prepareGitProject(
-            gitURL: gitURL, replaceExistingManagedDirectories: request.replaceExistingManagedDirectories)
+        let preview = try deviceOrchestrator(store: store).previewGitProject(gitURL: gitURL)
+        let candidates = preview.replacementCandidates.map { SpacesDeviceManagedDirectoryReplacementCandidate(kind: $0.kind.rawValue, path: $0.path) }
         return SpacesDeviceAPIResponse(
-            ok: true, message: "Prepared git project '\(prepared.project.name)'.",
-            result: .gitProjectPreparation(
-                SpacesDeviceGitProjectPreparation(
-                    preparedGitProjectHandle: try Self.encodePreparedGitProject(prepared), name: prepared.project.name,
-                    defaultBranch: prepared.project.defaultBranch, config: SpacesDeviceOverviewBuilder.projectConfig(from: prepared.project),
-                    replacementCandidates: [])))
-    }
-
-    private func handleDiscardPreparedGitProjectRequest(_ request: SpacesDeviceDiscardPreparedGitProjectRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let prepared = try Self.decodePreparedGitProject(handle: request.preparedGitProjectHandle)
-        try deviceOrchestrator(store: store).discardPreparedGitProject(prepared)
-        return SpacesDeviceAPIResponse(ok: true, message: "Discarded prepared git project.")
-    }
-
-    /// The prepared import round-trips to the client as an opaque base64 blob: it references this
-    /// daemon's on-disk clone, so the client only holds and returns it, never interprets it.
-    private static func encodePreparedGitProject(_ prepared: WorkspaceOrchestrator.PreparedGitProjectImport) throws -> String {
-        try JSONEncoder().encode(prepared).base64EncodedString()
-    }
-
-    private static func decodePreparedGitProject(handle: String) throws -> WorkspaceOrchestrator.PreparedGitProjectImport {
-        guard let data = Data(base64Encoded: handle) else { throw WorkspaceError.invalidArgument(message: "Invalid prepared git project handle.") }
-        return try JSONDecoder().decode(WorkspaceOrchestrator.PreparedGitProjectImport.self, from: data)
+            ok: true, message: "Loaded git project preview.",
+            result: .gitProjectPreview(
+                SpacesDeviceGitProjectPreview(
+                    config: SpacesDeviceOverviewBuilder.projectConfig(from: preview.project), replacementCandidates: candidates,
+                    spacesYAMLFound: preview.spacesYAMLFound)))
     }
 
     private func handleDeleteProjectRequest(_ request: SpacesDeviceProjectReference) throws -> SpacesDeviceAPIResponse {

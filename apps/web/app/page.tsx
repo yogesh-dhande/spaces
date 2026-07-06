@@ -29,7 +29,7 @@ const keyFeatures: Feature[] = [
   {
     title: "Stable per-workspace URLs",
     description:
-      "Declare named services and reach each one at a stable, predictable URL like http://web.my-branch.localhost:8088, served by a bundled reverse proxy. Run three instances of your app side by side — isolated, no port conflicts, no `.env` edits.",
+      "Declare named services and reach each one at a stable, predictable URL like http://web.my-branch.localhost:7391, served by a bundled reverse proxy. Run three instances of your app side by side — isolated, no port conflicts, no `.env` edits.",
   },
   {
     title: "Jump to any workspace",

@@ -139,6 +139,7 @@ extension AppKitController {
         }
 
         func normalizedValue(for setting: ShortcutSetting, rawValue: String?) throws -> String? {
+            if setting == .guiLeaderHotkey { return try normalizedLeaderModifierSet(rawValue) }
             guard setting.usesLeader else { return rawValue }
             return try normalizedLeaderBackedShortcut(rawValue)
         }
@@ -169,6 +170,11 @@ extension AppKitController {
             let leaderModifiers = try leaderModifiers()
             if spec.modifiers.isSuperset(of: leaderModifiers) { return spec.removing(modifiers: leaderModifiers).normalized }
             return spec.normalized
+        }
+
+        private func normalizedLeaderModifierSet(_ raw: String?) throws -> String? {
+            guard let raw else { return nil }
+            return try HotkeySpec.normalizedModifierSet(HotkeySpec.parseModifierSet(raw))
         }
     }
 }

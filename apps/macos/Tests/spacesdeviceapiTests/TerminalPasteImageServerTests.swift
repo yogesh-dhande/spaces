@@ -108,7 +108,7 @@
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "cat", workingDirectory: "/tmp", shell: "/bin/zsh", command: "cat",
-                    createdAt: "2026-07-02T00:00:00Z"), paths: paths)
+                    createdAt: "2026-07-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 123,

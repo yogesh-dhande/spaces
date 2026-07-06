@@ -43,6 +43,14 @@ import workspacecore
         #expect(!AppKitController.SidebarDeviceLoadState.loading.isOffline)
     }
 
+    @Test func addProjectDeviceIsSelectableOnlyWhenReachable() {
+        // Offline devices are not selectable in the add-project device step: creating on one would make
+        // the source step's Continue hang on a request that only times out.
+        #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loaded))
+        #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loading))
+        #expect(!AppKitController.addProjectDeviceIsSelectable(loadState: .offline("daemon down")))
+    }
+
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
         // Known reachability failures a relaunch can resolve — the daemon answered that its Device API is
         // not running, or its control endpoint was unreachable (daemon down) — offer the action.
@@ -474,28 +482,39 @@ import workspacecore
         #expect(request.resizeSerial == 3)
     }
 
+    @Test func deviceTerminalControlRequestCarriesAttachAppearanceToTheDaemon() throws {
+        // The attaching client's OS appearance must survive the device-API conversion; otherwise the remote
+        // Linux daemon never learns the client's light/dark preference and keeps its default theme.
+        let control = TerminalControlRequest(command: "attach", attachmentMode: .owner, appearance: .light)
+
+        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .attach)
+        #expect(request.appearance == .light)
+    }
+
     @Test func remoteBrowserRoutePlanMapsLoopbackServicePortToCaddyURL() throws {
         let plan = try #require(
             BrowserSSHForwardManager.routePlan(
                 targetURL: "http://localhost:32001/docs/?tab=api#readme",
-                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391")]))
 
         #expect(plan.serviceName == "web")
         #expect(plan.remotePort == 32001)
         #expect(plan.routeHost == "web.feature-123.localhost")
-        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/docs/?tab=api#readme")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:7391/docs/?tab=api#readme")
     }
 
     @Test func remoteBrowserRoutePlanKeepsConfiguredCaddyServiceURL() throws {
         let plan = try #require(
             BrowserSSHForwardManager.routePlan(
-                targetURL: "http://web.feature-123.localhost:8088/admin/",
-                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")]))
+                targetURL: "http://web.feature-123.localhost:7391/admin/",
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391")]))
 
         #expect(plan.serviceName == "web")
         #expect(plan.remotePort == 32001)
         #expect(plan.routeHost == "web.feature-123.localhost")
-        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:7391/admin/")
     }
 
     @Test func remoteBrowserRoutePlanUsesLocalCaddyRouterPort() throws {
@@ -503,15 +522,15 @@ import workspacecore
             BrowserSSHForwardManager.routePlan(
                 targetURL: "http://web.feature-123.localhost:9000/admin/",
                 assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")],
-                localRouterPort: 8088))
+                localRouterPort: 7391))
 
-        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:8088/admin/")
+        #expect(plan.browserURL.absoluteString == "http://web.feature-123.localhost:7391/admin/")
     }
 
     @Test func remoteBrowserRoutePlanLeavesExternalURLsUnchanged() {
         let plan = BrowserSSHForwardManager.routePlan(
             targetURL: "https://example.com/docs",
-            assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:8088")])
+            assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391")])
 
         #expect(plan == nil)
     }
@@ -549,6 +568,27 @@ import workspacecore
             ])
     }
 
+    @Test func servicePortDisplayShowsRemoteAndForwardedLocalPortPair() {
+        #expect(AppKitController.servicePortDisplay(assignedPort: 3000, forwardedLocalPort: 52341) == "3000:52341")
+        #expect(AppKitController.servicePortDisplay(assignedPort: 3000, forwardedLocalPort: nil) == "3000")
+        #expect(AppKitController.servicePortDisplay(assignedPort: nil, forwardedLocalPort: 52341) == nil)
+        #expect(AppKitController.servicePortDisplay(assignedPort: 0, forwardedLocalPort: 52341) == nil)
+    }
+
+    @Test func servicePortDisplayTextsMatchForwardsByServiceNameAndRemotePort() {
+        let texts = AppKitController.servicePortDisplayTexts(
+            assignedPorts: [
+                SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:7391"),
+                SpacesDeviceAssignedPort(name: "api", port: 32002, url: "http://api.feature-123.localhost:7391"),
+            ], forwards: [BrowserSSHForwardManager.ServiceForwardSnapshot(serviceName: "web", remotePort: 32001, localPort: 41001)])
+
+        #expect(texts == ["32001:41001", "32002"])
+    }
+
+    @Test func forwardedServicePortsForUnknownWorkspaceIsEmpty() {
+        #expect(BrowserSSHForwardManager().forwardedServicePorts(deviceID: "remote", workspaceID: "workspace-1").isEmpty)
+    }
+
     private func startingSessionSummary(id: String, title: String, rowKind: SpacesDeviceTerminalSessionRowKind) -> SpacesDeviceTerminalSessionSummary
     {
         SpacesDeviceTerminalSessionSummary(
@@ -568,9 +608,9 @@ import workspacecore
             installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
         let summary = SpacesDeviceTerminalSessionSummary(
             id: "session-cold", title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: nil, workspaceTitle: nil, projectID: nil, projectName: nil,
-            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: "workspace-cold", workspaceTitle: nil, projectID: nil,
+            projectName: nil, createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true,
+            isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot())
 
         let match = await AppKitController.resolveSessionSummaryMatchOffMain(
             sessionID: "session-cold", device: device, clientApp: clientApp,

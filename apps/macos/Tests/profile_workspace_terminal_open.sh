@@ -22,6 +22,14 @@ WORKSPACE_INFO_JSON="$WORK_ROOT/workspace.json"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
 METRICS_PATH="$WORK_ROOT/metrics.json"
 PROJECT_DIR="$WORK_ROOT/repo"
+# Isolate the GUI app's device-client credentials to the file store. Without
+# SPACES_CLIENT_SECRET_DIR the client bootstraps its device auth token/transport key into the
+# real macOS Keychain, which fails from the ad-hoc-signed debug binary; that failure aborts the
+# initial sidebar snapshot, leaving the local device unloaded so open-workspace-terminal can
+# never resolve its device (workspace_terminal_open_ui success=0). Every other GUI E2E lane sets
+# these; the daemon-facing spacese2e seed/IPC calls do not need them.
+CLIENT_DB_PATH="$WORK_ROOT/client/spaces-client.db"
+CLIENT_SECRET_DIR="$WORK_ROOT/client/secrets"
 WORKSPACE_DIR=""
 APP_PID=""
 
@@ -135,17 +143,20 @@ WORKSPACE_DIR="$(json_get "$WORKSPACE_INFO_JSON" "dir")"
 WORKSPACE_ID="$(json_get "$WORKSPACE_INFO_JSON" "id")"
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
+mkdir -p "$(dirname "$CLIENT_DB_PATH")" "$CLIENT_SECRET_DIR"
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" \
+  SPACES_CLIENT_DB_PATH="$CLIENT_DB_PATH" SPACES_CLIENT_SECRET_DIR="$CLIENT_SECRET_DIR" \
+  DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 sleep 3
 
 for iteration in $(seq 1 "$ITERATIONS"); do
+  # `workspace_terminal_open_ui` is the app-side workspace-terminal-open metric. The pre-rework
+  # `terminal_session_wait_ready` (now emitted by the daemon-side orchestrator) and
+  # `terminal_window_summon` (only the terminal show/focus IPC path) are no longer on the
+  # open-workspace-terminal path, so this scenario measures the UI open latency.
   ui_pattern="spaces: perf metric=workspace_terminal_open_ui target=workspace=${WORKSPACE_ID} success=1"
-  wait_pattern="spaces: perf metric=terminal_session_wait_ready target=session=.* success=1"
-  summon_pattern="spaces: perf metric=terminal_window_summon target=session=.* success=1 .*mode=owner"
   ui_baseline="$(grep -Ec "$ui_pattern" "$APP_LOG" || true)"
-  wait_baseline="$(grep -Ec "$wait_pattern" "$APP_LOG" || true)"
-  summon_baseline="$(grep -Ec "$summon_pattern" "$APP_LOG" || true)"
 
   started_at="$(python3 - <<'PY'
 import time
@@ -154,8 +165,6 @@ PY
 )"
   env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E_CLI" open-workspace-terminal --workspace-dir "$WORKSPACE_DIR" >/dev/null
   wait_for_log_pattern_count_greater_than "$ui_pattern" "$ui_baseline" 30
-  wait_for_log_pattern_count_greater_than "$wait_pattern" "$wait_baseline" 30
-  wait_for_log_pattern_count_greater_than "$summon_pattern" "$summon_baseline" 30
   wall_ms="$(ms_since "$started_at")"
   printf 'iteration=%s workspace_terminal_open_wall_ms=%s\n' "$iteration" "$wall_ms" >>"$WORK_ROOT/open-wall-samples.txt"
 done
@@ -168,11 +177,7 @@ iterations = int(iterations)
 terminal_pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 metrics = {
     "workspace_terminal_open_ui": [],
-    "terminal_session_wait_ready": [],
-    "terminal_window_summon": [],
 }
-for path_metric in metrics:
-    pass
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
     for raw_line in handle:
@@ -207,8 +212,6 @@ def summarize(values):
 ordered = [
     ("workspace_terminal_open_wall", wall_samples),
     ("workspace_terminal_open_ui", metrics["workspace_terminal_open_ui"]),
-    ("terminal_session_wait_ready", metrics["terminal_session_wait_ready"]),
-    ("terminal_window_summon", metrics["terminal_window_summon"]),
 ]
 
 payload = {"iterations": iterations, "metrics": {}}

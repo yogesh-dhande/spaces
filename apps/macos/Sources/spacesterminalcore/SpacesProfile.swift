@@ -132,6 +132,28 @@ public struct SpacesProfile: Sendable, Equatable {
 
     public static func ipcObject(profileRoot: String) -> String { "spaces.profile.\(shortStableHash(canonicalPath(profileRoot)))" }
 
+    /// Well-known local Caddy router port for the single installed/production instance.
+    public static let installedRouterPort = 7391
+
+    /// Default local Caddy router port for this profile. The installed/production profile keeps
+    /// the well-known port; dev/worktree/explicit-db profiles derive a distinct deterministic port
+    /// so concurrent Spaces instances (multiple worktrees, or the installed app plus a dev build)
+    /// don't all try to bind one port — where only the first wins and every other instance's Caddy
+    /// silently fails to start, breaking its workspace-service routing.
+    public var defaultRouterPort: Int {
+        switch source {
+        case .installedFallback: return Self.installedRouterPort
+        case .developmentWorktree, .explicitDatabasePath: return Self.derivedRouterPort(profileRoot: rootDirectory)
+        }
+    }
+
+    /// Maps a profile's stable hash into a fixed high port range that avoids the default workspace
+    /// service port range (20000–30000) and the OS ephemeral range (49152+).
+    public static func derivedRouterPort(profileRoot: String) -> Int {
+        let value = UInt64(shortStableHash(canonicalPath(profileRoot)), radix: 16) ?? 0
+        return 31000 + Int(value % 10000)  // 31000–40999
+    }
+
     public static func slugifyBranchName(_ branchName: String) -> String {
         let trimmed = branchName.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "HEAD" { return "detached-head" }

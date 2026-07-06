@@ -217,7 +217,7 @@ import Foundation
             isRunningUnderXCTest() && ProcessInfo.processInfo.environment["SPACESD_EXECUTABLE"] == nil
         }
 
-        static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
+        public static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
             positiveTimeout(environment["SPACESD_CREATE_TIMEOUT"], defaultValue: 30)
         }
 
@@ -433,7 +433,7 @@ import Foundation
             return try ensureRunning(timeout: timeout)
         }
 
-        static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
+        public static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
             guard let rawValue = environment["SPACESD_CREATE_TIMEOUT"], let value = TimeInterval(rawValue), value > 0 else { return 30 }
             return value
         }

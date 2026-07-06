@@ -70,7 +70,8 @@ final class TerminalSessionModelTests: XCTestCase {
               "workingDirectory": "/tmp/work",
               "shell": "/bin/zsh",
               "command": "cat",
-              "createdAt": "2026-05-08T00:00:00Z"
+              "createdAt": "2026-05-08T00:00:00Z",
+              "workspaceID": "workspace-1"
             }
             """.data(using: .utf8)!
 
@@ -79,8 +80,23 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(decoded.backend, .ghosttyEmbedded)
         XCTAssertEqual(decoded.lifetimePolicy, .persistent)
         XCTAssertEqual(decoded.sessionID, "session-legacy")
-        XCTAssertNil(decoded.workspaceID)
+        XCTAssertEqual(decoded.workspaceID, "workspace-1")
         XCTAssertEqual(decoded.kind, .shell)
+    }
+
+    func testLaunchConfigurationDecodeFailsWithoutWorkspaceID() {
+        let json = """
+            {
+              "sessionID": "session-legacy",
+              "title": "legacy",
+              "workingDirectory": "/tmp/work",
+              "shell": "/bin/zsh",
+              "command": "cat",
+              "createdAt": "2026-05-08T00:00:00Z"
+            }
+            """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try JSONDecoder().decode(TerminalSessionLaunchConfiguration.self, from: json))
     }
 
     func testLaunchConfigurationPersistenceRoundTripsWorkspaceIDAndKind() throws {
@@ -395,7 +411,7 @@ final class TerminalSessionModelTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, title: sessionID, workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-                createdAt: "2026-05-08T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-08T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
     }
 }
 

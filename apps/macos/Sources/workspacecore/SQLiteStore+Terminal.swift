@@ -106,7 +106,6 @@ extension SQLiteStore {
                   SELECT terminal_sessions.workspace_id, terminal_sessions.created_at AS resolved_at, 300000 AS resolved_order, 3 AS source_priority
                   FROM terminal_sessions
                   WHERE terminal_sessions.session_id = ?
-                    AND terminal_sessions.workspace_id IS NOT NULL
                 )
                 ORDER BY source_priority, resolved_at DESC, resolved_order
                 LIMIT 1
@@ -127,7 +126,7 @@ extension SQLiteStore {
         let role = row[7]
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], name: row[3].isEmpty ? nil : row[3], detail: row[4].isEmpty ? nil : row[4],
-            targetURL: targetURL, terminalTrackingID: trackingID,
-            terminalNativeID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0, lastSeenAt: row[9])
+            targetURL: targetURL, terminalTrackingID: trackingID, terminalNativeID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0,
+            lastSeenAt: row[9])
     }
 }

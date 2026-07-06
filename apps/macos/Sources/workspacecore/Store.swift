@@ -83,6 +83,10 @@ public final class SQLiteStore {
         }
     }
 
+    /// The explicitly-stored Caddy router port, or nil when none is set — so callers can tell an
+    /// override apart from the default and avoid overwriting a user-chosen port when seeding.
+    public func storedRouterPort() throws -> Int? { try setting(key: SettingsKey.appRouterPort).flatMap(Int.init) }
+
     public func appConfig() throws -> AppConfig {
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000
         let end = try setting(key: SettingsKey.appPortRangeEnd).flatMap(Int.init) ?? 30000

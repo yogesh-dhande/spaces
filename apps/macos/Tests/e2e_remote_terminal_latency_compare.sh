@@ -574,9 +574,13 @@ class LocalFactory:
     def start(self, title: str, remote_command: str, surface: str) -> TargetSession:
         local_cwd = work_root / "local-cwd"
         local_cwd.mkdir(parents=True, exist_ok=True)
+        # Every terminal session is workspace-owned, so this local "ssh client" side
+        # registers `local_cwd` as a plain (non-git) project and uses its default
+        # workspace as the launch target.
+        workspace_dir = request_json([spacese2e, "register-project", "--project-dir", str(local_cwd)], env=base_env, timeout=10)["dir"]
         command = ssh_command(self.remote_directory, remote_command)
         completed = request_json(
-            [spacese2e, "start-terminal-session", "--title", title, "--cwd", str(local_cwd), "--command", command],
+            [spacese2e, "start-workspace-terminal-session", "--workspace-dir", workspace_dir, "--title", title, "--command", command],
             env=base_env,
             timeout=30,
         )

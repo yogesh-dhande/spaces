@@ -53,8 +53,8 @@ extension OrchestratorTests {
             try runGitAndCapture(["rev-parse", "--is-bare-repository"], cwd: project.dir).trimmingCharacters(in: .whitespacesAndNewlines), "true")
     }
 
-    // Tests add project by cloning uses master branch when main is unavailable by arranging representative inputs and asserting the expected result.
-    func testAddProjectByCloningUsesMasterWhenMainMissing() throws {
+    // Tests add project by cloning follows a repository default branch named master.
+    func testAddProjectByCloningUsesMasterWhenItIsRepositoryDefault() throws {
         let fixture = try makeTempGitRepo(name: "master-only", initialBranch: "master")
         let root = try makeTempDirectory()
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
@@ -212,6 +212,98 @@ extension OrchestratorTests {
         let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
         XCTAssertEqual(settings?.stopScript, "echo git-yaml-stop")
         XCTAssertEqual(settings?.agentLaunchers.first?.name, "Codex")
+    }
+
+    func testGitProjectPreviewAndCreateUseRepositoryDefaultBranch() throws {
+        let fixture = try makeTempGitRepo(name: "yaml-git-default-master", initialBranch: "master")
+        try spacesYAMLFixture(stopScript: "echo master-stop").write(
+            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(["commit", "-m", "add master spaces yaml"], cwd: fixture.path)
+        try runGit(["checkout", "-b", "main"], cwd: fixture.path)
+        try spacesYAMLFixture(stopScript: "echo main-stop").write(
+            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(["commit", "-m", "add main spaces yaml"], cwd: fixture.path)
+        try runGit(["checkout", "master"], cwd: fixture.path)
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let preview = try orchestrator.previewGitProject(gitURL: fixture.path)
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)
+        defer { try? orchestrator.discardPreparedGitProject(prepared) }
+
+        XCTAssertEqual(preview.project.defaultBranch, "master")
+        XCTAssertEqual(preview.project.stopScript, "echo master-stop")
+        XCTAssertEqual(prepared.project.defaultBranch, "master")
+        XCTAssertEqual(prepared.defaultWorkspace.branch, "master")
+        XCTAssertEqual(prepared.project.stopScript, "echo master-stop")
+    }
+
+    // The add-project preview loads spaces.yaml by fetching just that file — no clone is left in the
+    // managed repositories directory, and no spaces.yaml means an empty (but present) config.
+    func testPreviewGitProjectLoadsSpacesYAMLWithoutCloning() throws {
+        let fixture = try makeTempGitRepo(name: "yaml-git-preview")
+        try spacesYAMLFixture(stopScript: "echo preview-stop").write(
+            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add spaces yaml"], cwd: fixture.path)
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let preview = try orchestrator.previewGitProject(gitURL: fixture.path)
+
+        XCTAssertEqual(preview.project.stopScript, "echo preview-stop")
+        XCTAssertEqual(preview.project.processes.first?.command, "npm run api")
+        XCTAssertTrue(preview.replacementCandidates.isEmpty)
+        XCTAssertTrue(preview.spacesYAMLFound)
+        // The preview must not clone into the managed repositories directory.
+        let managedRepo = reposRoot.appendingPathComponent(
+            managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "yaml-git-preview"), isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: managedRepo.path))
+
+        // A repository without spaces.yaml still previews, reporting not-found with an empty config.
+        let plain = try makeTempGitRepo(name: "plain-git-preview")
+        let plainPreview = try orchestrator.previewGitProject(gitURL: plain.path)
+        XCTAssertFalse(plainPreview.spacesYAMLFound)
+        XCTAssertNil(plainPreview.project.stopScript)
+        XCTAssertTrue(plainPreview.project.processes.isEmpty)
+    }
+
+    // At Create the daemon clones and then applies the user's reviewed config (via addPreparedGitProject)
+    // rather than the repo's own spaces.yaml, so edits made in the form are preserved.
+    func testAddPreparedGitProjectAppliesReviewedConfigOverRepoSpacesYAML() throws {
+        let fixture = try makeTempGitRepo(name: "yaml-git-create-config")
+        try spacesYAMLFixture(stopScript: "echo repo-stop").write(
+            to: fixture.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
+        try runGit(["add", "spaces.yaml"], cwd: fixture.path)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "add spaces yaml"], cwd: fixture.path)
+        let root = try makeTempDirectory()
+        let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+
+        let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path, replaceExistingManagedDirectories: true)
+        // Sanity: the repo's spaces.yaml was detected.
+        XCTAssertEqual(prepared.project.processes.first?.command, "npm run api")
+
+        let project = try orchestrator.addPreparedGitProject(prepared) { config in
+            config.stopScript = "echo reviewed-stop"
+            config.processes = [ProcessTemplate(name: "reviewed", command: "npm run reviewed")]
+        }
+
+        XCTAssertEqual(project.stopScript, "echo reviewed-stop")
+        XCTAssertEqual(project.processes.map(\.name), ["reviewed"])
+        let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
+        let settings = try orchestrator.workspaceSettings(workspaceID: defaultWorkspace.id)
+        XCTAssertEqual(settings?.processes.first?.command, "npm run reviewed")
     }
 
     func testAddReviewedProjectUsesEditedSettingsFromHydratedPreview() throws {
@@ -605,8 +697,8 @@ extension OrchestratorTests {
         }
     }
 
-    // Tests addProject(gitURL:) throws when the cloned repo has neither main nor master branch.
-    func testAddProjectByGitURLThrowsWhenRepoHasNeitherMainNorMaster() throws {
+    // Tests addProject(gitURL:) accepts a non-conventional branch name when it is the repository default.
+    func testAddProjectByGitURLUsesRepositoryDefaultBranchWithNonStandardName() throws {
         let fixture = try makeTempGitRepo(name: "develop-only", initialBranch: "develop")
         let root = try makeTempDirectory()
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
@@ -614,12 +706,15 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
 
-        XCTAssertThrowsError(try orchestrator.addProject(gitURL: fixture.path)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("main or master branch"))
-        }
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
+
+        XCTAssertEqual(project.defaultBranch, "develop")
+        XCTAssertEqual(defaultWorkspace.branch, "develop")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(defaultWorkspace.dir)/README.md"))
     }
 
-    // Tests addProject(gitURL:) succeeds for a repo with only a master branch (covers preferredImportedDefaultBranch master path).
+    // Tests addProject(gitURL:) succeeds for a repository whose default branch is master.
     func testAddProjectByGitURLSucceedsWithMasterBranch() throws {
         let fixture = try makeTempGitRepo(name: "master-only", initialBranch: "master")
         let root = try makeTempDirectory()

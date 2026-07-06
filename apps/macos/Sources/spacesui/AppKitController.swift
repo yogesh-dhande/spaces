@@ -150,11 +150,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let source: String
     }
 
-    private struct PreparedGitProjectDiscardEntry {
-        let id: UUID
-        let task: Task<Result<Void, Error>, Never>
-    }
-
     var window: NSWindow!
     private var splitView: NSSplitView?
     let outlineView = SidebarOutlineView()
@@ -283,6 +278,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var didStartBackgroundServices = false
     private let browserSSHForwardManager = BrowserSSHForwardManager()
     private var remoteBrowserForwardRevisions: [String: Int] = [:]
+    // The open workspace settings dialog's Services section, kept so an SSH forward start/stop can
+    // refresh the rows' port texts in place instead of rebuilding the section. The section object is
+    // owned by its view (RowSectionCard.retain), so the weak reference clears itself when the dialog
+    // closes. Set from the workspace settings dialog, which lives in a separate file, so these are
+    // module-internal rather than private.
+    weak var visibleWorkspacePortsSection: PortsSection?
+    var visiblePortsWorkspaceID: String?
     var chromeAutomationSetupController: ChromeAutomationSetupController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
@@ -300,7 +302,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var hasAppliedSplitViewWidth = false
     var activeAddWorkspaceFormTag: Int? { didSet { if oldValue != nil, activeAddWorkspaceFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
-    private var preparedGitProjectDiscardTasksByURL: [String: PreparedGitProjectDiscardEntry] = [:]
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
     var showingAlerts = false
@@ -487,9 +488,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
-        if let result = discardActiveAddProjectPreparedSourceSynchronouslyIfNeeded(), case .failure(let error) = result {
-            NSLog("spaces: prepared add-project cleanup failed during termination: \(String(describing: error))")
-        }
         deferredHotkeySelectionRefreshTask?.cancel()
         browserSSHForwardManager.stopAll()
         sidebar.cancelSidebarReloadTask()
@@ -1004,7 +1002,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
-            await self.openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
+            await self.openTerminalSessionPane(sessionID: sessionID, mode: mode, requestID: requestID)
         }
     }
 
@@ -1237,17 +1235,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         {
             return request
         }
-        guard let summary = await resolveSessionSummaryMatch(sessionID: sessionID)?.summary, let workspaceID = summary.workspaceID else { return nil }
+        guard let match = await resolveSessionSummaryMatch(sessionID: sessionID) else { return nil }
+        let summary = match.summary
         return DeviceTerminalOpenRequest(
-            workspaceID: workspaceID, sessionID: sessionID, title: summary.title, workingDirectory: summary.workingDirectory,
-            kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell, command: summary.command, initialState: summary.state,
-            servicePID: summary.servicePID, childPID: summary.childPID, createdAt: summary.createdAt, updatedAt: summary.updatedAt)
+            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: sessionID, title: summary.title,
+            workingDirectory: summary.workingDirectory, kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
+            command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
+            createdAt: summary.createdAt, updatedAt: summary.updatedAt)
     }
 
-    /// Opens (or focuses) a session's pane for the open/focus IPC surfaces. Emits the
-    /// `terminal_window_summon` perf metric the E2E harness parses; panes always attach
-    /// as owner, so the detail reports `mode=owner`.
-    @discardableResult private func openTerminalSessionPane(sessionID: String, requestID: String? = nil) async -> Bool {
+    /// Opens (or focuses) the session's pane and, for an owner-mode open, reclaims owner
+    /// attachment. `mode` carries the intent of the `openTerminalSessionWindow` IPC: an
+    /// owner open (e.g. `spaces terminal show`) must preempt a different active owner (a
+    /// mobile client that took the session over), so it calls `requestOwnershipIfNeeded()`
+    /// after the pane opens. The pane's own attach otherwise stays a viewer when another
+    /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
+    /// perf metric the E2E harness parses.
+    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1256,12 +1260,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "mode=owner route=pane\(requestDetail)")
+                detail: "mode=\(mode.rawValue) route=pane\(requestDetail)")
             return false
         }
+        if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }
         logPerfMetric(
             "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "mode=owner reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
+            detail: "mode=\(mode.rawValue) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
         return true
     }
 
@@ -1270,7 +1275,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func focusTerminalSessionPane(sessionID: String, requestID: String?) async {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        let focused = await openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
+        // Focus must not preempt a different active owner (matching the pre-rework focus
+        // path); only the owner-mode open IPC reclaims ownership.
+        let focused = await openTerminalSessionPane(sessionID: sessionID, mode: .viewer, requestID: requestID)
         logPerfMetric(
             "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: focused,
             detail: "route=pane\(requestDetail)")
@@ -1284,7 +1291,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let sessionID = request.sessionID
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            let device = deviceForWorkspaceMutation(workspaceID: request.workspaceID)
+            // A global-window pane can mix devices, so its request carries deviceID
+            // directly; otherwise it derives from the request's workspace.
+            let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
+            let device = deviceForMutation(deviceID: resolvedDeviceID)
             let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
             let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
             // The seed launch configuration wins over the state model's own summary lookup,
@@ -1314,10 +1324,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return self.applyRemoteAgentSignals(events)
             }
             let remoteClientStore = RemoteTerminalWindowClientStore()
+            // Resolved once here (this runs on the main actor); the attach closure is @Sendable and
+            // may run off-main, so it cannot read NSApp. A remote daemon renders its terminal with
+            // this appearance's theme variant; like local terminals, a mid-session OS appearance
+            // change takes effect on the next pane open / relaunch.
+            let themeAppearance: ThemeAppearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
                 remoteClientStore.set(client.id)
                 let response = try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode),
+                    sessionID: sessionID,
+                    request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode, appearance: themeAppearance),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
@@ -1368,8 +1384,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
                 })
             return TerminalPaneContentController(
-                descriptor: .terminalSession(deviceID: deviceID(forWorkspaceID: request.workspaceID), sessionID: sessionID),
-                workspaceID: request.workspaceID, sessionID: sessionID, pane: pane)
+                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
+                sessionID: sessionID, pane: pane)
         } catch {
             showError(error)
             return nil
@@ -1424,7 +1440,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
-            scrollMods: request.scrollMods, appendNewline: request.appendNewline)
+            scrollMods: request.scrollMods, appendNewline: request.appendNewline, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns
@@ -2019,31 +2035,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
     }
 
-    /// Clones a git repository on the target device and returns its detected spaces.yaml config plus
-    /// an opaque handle to the clone. Routed through the Device API so the preview works on the
-    /// device that will own the project (local or remote), not always locally.
-    nonisolated private static func prepareGitProjectResult(gitURL: String, replaceExistingManagedDirectories: Bool, device: SpacesPairedDeviceRecord)
-        async -> Result<SpacesDeviceGitProjectPreparation, Error>
-    {
+    /// Loads a git repository's `spaces.yaml` (single file, no clone) plus any managed-directory
+    /// replacement candidates. Routed through the Device API so the preview runs on the device that
+    /// will own the project (local or remote), not always locally.
+    nonisolated private static func previewGitProjectResult(gitURL: String, device: SpacesPairedDeviceRecord) async -> Result<
+        SpacesDeviceGitProjectPreview, Error
+    > {
         await Task.detached(priority: .userInitiated) {
             do {
                 return .success(
-                    try SpacesDeviceClient.prepareGitProject(
-                        gitURL: gitURL, replaceExistingManagedDirectories: replaceExistingManagedDirectories, device: device,
-                        clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
-            } catch { return .failure(error) }
-        }.value
-    }
-
-    nonisolated private static func discardPreparedGitProjectResult(preparedGitProjectHandle: String, device: SpacesPairedDeviceRecord) async
-        -> Result<Void, Error>
-    {
-        await Task.detached(priority: .utility) {
-            do {
-                _ = try SpacesDeviceClient.discardPreparedGitProject(
-                    preparedGitProjectHandle: preparedGitProjectHandle, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                return .success(())
+                    try SpacesDeviceClient.previewGitProject(
+                        gitURL: gitURL, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)))
             } catch { return .failure(error) }
         }.value
     }
@@ -2465,7 +2467,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     struct DeviceTerminalOpenRequest: Sendable, Equatable {
+        /// The workspace whose panel hosts this pane. Every terminal session is
+        /// workspace-owned, so this always resolves.
         let workspaceID: String
+        /// The owning device, when it can't be derived from `workspaceID` alone (global-window
+        /// panes mix devices, so the descriptor carries deviceID directly). `nil` resolves the
+        /// device from `workspaceID`.
+        let deviceID: String?
         let sessionID: String
         let title: String
         let workingDirectory: String
@@ -2483,11 +2491,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let updatedAt: String?
 
         init(
-            workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind, shell: String? = nil,
-            command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
+            workspaceID: String, deviceID: String? = nil, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
+            shell: String? = nil, command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
             createdAt: String? = nil, updatedAt: String? = nil
         ) {
             self.workspaceID = workspaceID
+            self.deviceID = deviceID
             self.sessionID = sessionID
             self.title = title
             self.workingDirectory = workingDirectory
@@ -2580,6 +2589,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     static func shouldStartManagedDirectoryReplacementFlow(candidateCount: Int, decision: ManagedDirectoryReplacementDecision) -> Bool {
         candidateCount == 0 || decision == .replace
+    }
+
+    /// Whether saving a project's settings should sync the template to its workspaces. A non-git
+    /// project stands in for its single workspace, so it always syncs (the edits are the config that
+    /// runs); a git project syncs only when a pending import chose Update All Workspaces.
+    static func projectSaveSyncsAllWorkspaces(isGitRepo: Bool, pendingImportUpdateAllWorkspaces: Bool) -> Bool {
+        !isGitRepo || pendingImportUpdateAllWorkspaces
     }
 
     @discardableResult static func applyProjectImportWorkspaceSyncDecision(_ decision: ProjectImportWorkspaceSyncDecision, to refs: ProjectFieldRefs)
@@ -2930,10 +2946,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let session = overview?.sessions.first { $0.id == sessionID }
         if let session {
             return DeviceTerminalOpenRequest(
-                workspaceID: session.workspaceID ?? fallbackWorkspaceID, sessionID: session.id, title: session.title,
-                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell,
-                command: session.command, initialState: session.state, servicePID: session.servicePID, childPID: session.childPID,
-                createdAt: session.createdAt, updatedAt: session.updatedAt)
+                workspaceID: session.workspaceID, sessionID: session.id, title: session.title, workingDirectory: session.workingDirectory,
+                kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell, command: session.command, initialState: session.state,
+                servicePID: session.servicePID, childPID: session.childPID, createdAt: session.createdAt, updatedAt: session.updatedAt)
         }
         guard let workspace = overview?.workspaces.first(where: { $0.id == fallbackWorkspaceID }),
             let row = workspace.terminalRows.first(where: { $0.sessionID == sessionID })
@@ -3351,14 +3366,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard device.id != localDeviceID else { return }
         let manager = browserSSHForwardManager
         let revision = nextRemoteBrowserForwardRevision(deviceID: device.id)
-        Task.detached(priority: .utility) { manager.reconcile(device: device, overview: overview, revision: revision) }
+        Task.detached(priority: .utility) { [weak self] in
+            manager.reconcile(device: device, overview: overview, revision: revision)
+            await self?.refreshVisibleServicePortDisplays(deviceID: device.id)
+        }
     }
 
     func stopRemoteBrowserForwards(deviceID: String) {
         guard deviceID != localDeviceID else { return }
         let manager = browserSSHForwardManager
         let revision = nextRemoteBrowserForwardRevision(deviceID: deviceID)
-        Task.detached(priority: .utility) { manager.stop(deviceID: deviceID, revision: revision) }
+        Task.detached(priority: .utility) { [weak self] in
+            manager.stop(deviceID: deviceID, revision: revision)
+            await self?.refreshVisibleServicePortDisplays(deviceID: deviceID)
+        }
     }
 
     private func nextRemoteBrowserForwardRevision(deviceID: String) -> Int {
@@ -4348,21 +4369,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return section
     }
 
-    private func showAddProjectForm() {
+    /// The New Project title, naming the target device only when there is a choice to disambiguate.
+    private func addProjectFlowTitle(deviceID: String) -> String {
+        deviceSections.count > 1 ? "New Project · \(deviceSection(id: deviceID)?.deviceName ?? localDeviceName)" : "New Project"
+    }
+
+    /// Step 2: choose the source — an existing folder or a repository to clone — and its location.
+    /// Continue loads the configuration (Step 3). Splitting the source into its own step means it is
+    /// fixed before configuration, so there is no source toggle to switch mid-config.
+    private func showAddProjectSourceStep(deviceID: String) {
         clearActiveAddProjectFormState()
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 16
-        stack.detachesHiddenViews = true
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        // --- Fields ---
-        let sourceSegmented = NSSegmentedControl(
-            labels: ["Pick folder", "Clone repo"], trackingMode: .selectOne, target: self, action: #selector(projectSourceChanged(_:)))
-        sourceSegmented.selectedSegment = 0
-        sourceSegmented.setAccessibilityIdentifier("add-project-source-mode")
+        let deviceName = deviceSection(id: deviceID)?.deviceName ?? localDeviceName
+        let folderRow = addProjectSourceRow(
+            icon: "folder", title: "Existing folder", subtitle: "Use a project already on \(deviceName)", accessibilityID: "add-project-source-folder"
+        )
+        let gitRow = addProjectSourceRow(
+            icon: "chevron.left.forwardslash.chevron.right", title: "Clone a repo", subtitle: "Clone a Git repository into ~/spaces/repos",
+            accessibilityID: "add-project-source-git")
 
         let dirField = NSTextField(string: "")
         dirField.placeholderString = "~/projects/my-app"
@@ -4371,12 +4395,145 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let repoURLField = NSTextField(string: "")
         repoURLField.placeholderString = "https://github.com/org/repo.git"
         repoURLField.delegate = self
-        let prepareButton = actionButton(
-            title: "Clone", symbol: "arrow.down.circle", tooltip: "Clone repository and load project settings",
-            action: #selector(prepareProjectSource(_:)), primary: false)
-        prepareButton.setAccessibilityIdentifier("add-project-prepare-source")
-        Theme.applySecondaryStyle(to: prepareButton)
+        repoURLField.setAccessibilityIdentifier("add-project-repo-url")
+        let folderInputRow = sourceInputRow(headerText: "Folder path", field: dirField)
+        let gitInputRow = sourceInputRow(headerText: "Repository URL", field: repoURLField)
+        folderInputRow.isHidden = true
+        gitInputRow.isHidden = true
 
+        // Config-step controls are built now and shown after Continue loads the config.
+        let (setup, stop, ports, processes, browsers, agents) = makeAddProjectConfigSections()
+        let createButton = actionButton(title: "Create", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
+        let spacesYAMLMissingLabel = NSTextField(
+            wrappingLabelWithString: "No spaces.yaml found in this repository. Set up the configuration below as needed.")
+        spacesYAMLMissingLabel.font = .systemFont(ofSize: 12)
+        spacesYAMLMissingLabel.textColor = .secondaryLabelColor
+        spacesYAMLMissingLabel.setAccessibilityIdentifier("add-project-spaces-yaml-missing")
+
+        let continueButton = actionButton(
+            title: "Continue", symbol: nil, tooltip: "Load the project configuration", action: #selector(continueFromSourceStep(_:)), primary: true)
+        continueButton.isEnabled = false
+        continueButton.setAccessibilityIdentifier("add-project-source-continue")
+
+        let id = storeAddProjectFields(
+            folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
+            repoURLField: repoURLField, continueButton: continueButton, setupScriptSection: setup, stopScriptSection: stop, portsSection: ports,
+            processesSection: processes, browserSessionsSection: browsers, agentLaunchersSection: agents, createButton: createButton,
+            spacesYAMLMissingLabel: spacesYAMLMissingLabel)
+        activeAddProjectFormTag = id
+        guard let refs = AddProjectFieldCache.shared.cache[id] else { return }
+        refs.selectedDeviceID = deviceID
+        attachAddProjectSourceRowSelection(folderRow, kind: .folder, tag: id)
+        attachAddProjectSourceRowSelection(gitRow, kind: .git, tag: id)
+
+        presentAddProjectSourceStep(refs)
+    }
+
+    /// Renders the source step from the stored field views and presents it. Used for the initial
+    /// presentation and to return to the source step (with the entered values intact) when a load fails
+    /// or the managed-directory replacement prompt is declined.
+    private func presentAddProjectSourceStep(_ refs: AddProjectFieldRefs) {
+        let sourceCard = formSectionCard(
+            icon: "folder.badge.plus", title: "Source", subtitle: "Where does your project live?",
+            contentViews: [refs.folderRow, refs.gitRow, refs.folderInputRow, refs.gitInputRow])
+
+        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        Theme.applySecondaryStyle(to: cancelButton)
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.setViews([cancelButton], in: .leading)
+        buttonRow.setViews([refs.continueButton], in: .trailing)
+
+        let stack = addProjectStepStack()
+        stack.addArrangedSubview(sourceCard)
+        stack.addArrangedSubview(buttonRow)
+        constrainFormFieldToFillWidth(sourceCard, in: stack)
+        constrainFormFieldToFillWidth(buttonRow, in: stack)
+
+        presentAddProjectWindow(hosting: stack, title: addProjectFlowTitle(deviceID: refs.selectedDeviceID))
+        updateAddProjectSourceStepUI(refs)
+    }
+
+    /// A brief loading step shown while the chosen source's `spaces.yaml` is fetched. It carries no
+    /// editable inputs so the source cannot change while the preview is in flight.
+    private func presentAddProjectLoadingStep(deviceID: String, detail: String) {
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.setContentHuggingPriority(.required, for: .horizontal)
+
+        let label = NSTextField(labelWithString: detail)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 10
+        row.alignment = .centerY
+        row.addArrangedSubview(spinner)
+        row.addArrangedSubview(label)
+
+        let card = formSectionCard(icon: "square.and.arrow.down", title: "Loading project settings", subtitle: "", contentViews: [row])
+
+        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        Theme.applySecondaryStyle(to: cancelButton)
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.setViews([cancelButton], in: .leading)
+
+        let stack = addProjectStepStack()
+        stack.addArrangedSubview(card)
+        stack.addArrangedSubview(buttonRow)
+        constrainFormFieldToFillWidth(card, in: stack)
+        constrainFormFieldToFillWidth(buttonRow, in: stack)
+
+        presentAddProjectWindow(hosting: stack, title: addProjectFlowTitle(deviceID: deviceID))
+    }
+
+    /// Step 3: review and edit the configuration (loaded from the source on entry) and create.
+    private func showAddProjectConfigStep(_ refs: AddProjectFieldRefs) {
+        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
+        Theme.applySecondaryStyle(to: cancelButton)
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.setViews([cancelButton], in: .leading)
+        buttonRow.setViews([refs.createButton], in: .trailing)
+
+        refs.spacesYAMLMissingLabel.isHidden = !refs.spacesYAMLMissing
+
+        let sectionViews = [
+            refs.spacesYAMLMissingLabel, refs.setupScriptSection.view, refs.portsSection.view, refs.processesSection.view,
+            refs.browserSessionsSection.view, refs.agentLaunchersSection.view, refs.stopScriptSection.view, buttonRow,
+        ]
+        let stack = addProjectStepStack()
+        for view in sectionViews {
+            view.isHidden = view === refs.spacesYAMLMissingLabel ? !refs.spacesYAMLMissing : false
+            stack.addArrangedSubview(view)
+            constrainFormFieldToFillWidth(view, in: stack)
+        }
+
+        presentAddProjectWindow(hosting: stack, title: addProjectFlowTitle(deviceID: refs.selectedDeviceID))
+        refs.createButton.isEnabled = true
+    }
+
+    private func addProjectStepStack() -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 16
+        stack.detachesHiddenViews = true
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    private func makeAddProjectConfigSections() -> (
+        ScriptSection, ScriptSection, PortsSection, ProcessesSection, BrowserSessionsSection, AgentLaunchersSection
+    ) {
         let setupScriptSection = ScriptSection(
             title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: "",
             subtitle: "Runs when each new workspace is created or revived from archive.")
@@ -4387,130 +4544,99 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let processesSection = ProcessesSection(subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Named URLs that open in Chrome when you focus them.")
         let agentLaunchersSection = AgentLaunchersSection(subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
+        return (setupScriptSection, stopScriptSection, portsSection, processesSection, browserSessionsSection, agentLaunchersSection)
+    }
 
-        // --- Source section: segmented control on top, input below ---
-        let localSourceSection = NSStackView()
-        localSourceSection.orientation = .horizontal
-        localSourceSection.alignment = .centerY
-        localSourceSection.spacing = 8
-        localSourceSection.detachesHiddenViews = true
+    /// A left-aligned, hover-highlighted, selectable source row (icon, title, caption). Selecting it
+    /// reveals its input below; the highlighted border marks the current choice.
+    private func addProjectSourceRow(icon: String, title: String, subtitle: String, accessibilityID: String) -> ClickableRowView {
+        let container = ClickableRowView(isInteractive: true)
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        container.setAccessibilityElement(true)
+        container.setAccessibilityRole(.button)
+        container.setAccessibilityLabel(title)
+        container.setAccessibilityIdentifier(accessibilityID)
 
-        dirField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        dirField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+        iconView.contentTintColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        localSourceSection.addArrangedSubview(dirField)
+        let titleField = NSTextField(labelWithString: title)
+        titleField.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleField.textColor = .labelColor
+        let captionField = NSTextField(labelWithString: subtitle)
+        captionField.font = .systemFont(ofSize: 11)
+        captionField.textColor = .secondaryLabelColor
+        captionField.lineBreakMode = .byTruncatingTail
 
-        let cloneSourceSection = NSStackView()
-        cloneSourceSection.orientation = .horizontal
-        cloneSourceSection.alignment = .centerY
-        cloneSourceSection.spacing = 8
-        cloneSourceSection.detachesHiddenViews = true
-        cloneSourceSection.isHidden = true
+        let textStack = NSStackView(views: [titleField, captionField])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
 
-        repoURLField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        repoURLField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [iconView, textStack, NSView()])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor), row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            row.topAnchor.constraint(equalTo: container.topAnchor), row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+        ])
+        return container
+    }
 
-        cloneSourceSection.addArrangedSubview(repoURLField)
-        cloneSourceSection.addArrangedSubview(prepareButton)
+    private func sourceInputRow(headerText: String, field: NSTextField) -> NSView {
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [makeFieldHeader(headerText), field])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.detachesHiddenViews = true
+        field.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        return stack
+    }
 
-        let sourceContentStack = NSStackView()
-        sourceContentStack.orientation = .vertical
-        sourceContentStack.alignment = .leading
-        sourceContentStack.spacing = 8
-        sourceContentStack.detachesHiddenViews = true
-        sourceSegmented.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        // Device selector: only meaningful when more than one device is paired.
-        // With a single device the project is created on the local Mac. The label
-        // sits above a full-width popup so it lines up with the controls below.
-        if deviceSections.count > 1 {
-            let devicePopUp = NSPopUpButton()
-            devicePopUp.target = self
-            devicePopUp.action = #selector(projectDeviceChanged(_:))
-            devicePopUp.setAccessibilityIdentifier("add-project-device")
-            for section in deviceSections {
-                devicePopUp.addItem(withTitle: section.deviceName)
-                devicePopUp.lastItem?.representedObject = section.deviceID
-            }
-            if let localItem = devicePopUp.itemArray.first(where: { ($0.representedObject as? String) == localProjectCreationDeviceID() }) {
-                devicePopUp.select(localItem)
-            }
-            let deviceField = NSStackView(views: [makeFieldHeader("Device"), devicePopUp])
-            deviceField.orientation = .vertical
-            deviceField.alignment = .leading
-            deviceField.spacing = 4
-            sourceContentStack.addArrangedSubview(deviceField)
-            constrainFormFieldToFillWidth(deviceField, in: sourceContentStack)
-            devicePopUp.widthAnchor.constraint(equalTo: deviceField.widthAnchor).isActive = true
+    private func attachAddProjectSourceRowSelection(_ row: ClickableRowView, kind: AddProjectSourceKind, tag: Int) {
+        let target = ClickTarget { [weak self] in self?.selectAddProjectSourceKind(kind, tag: tag) }
+        let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
+        row.addGestureRecognizer(recognizer)
+        objc_setAssociatedObject(row, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private func selectAddProjectSourceKind(_ kind: AddProjectSourceKind, tag: Int) {
+        guard let refs = AddProjectFieldCache.shared.cache[tag] else { return }
+        refs.selectedSourceKind = kind
+        updateAddProjectSourceStepUI(refs)
+        addProjectWindow?.makeFirstResponder(kind == .folder ? refs.dirField : refs.repoURLField)
+    }
+
+    private func updateAddProjectSourceStepUI(_ refs: AddProjectFieldRefs) {
+        let kind = refs.selectedSourceKind
+        setAddProjectSourceRowSelected(refs.folderRow, selected: kind == .folder)
+        setAddProjectSourceRowSelected(refs.gitRow, selected: kind == .git)
+        refs.folderInputRow.isHidden = kind != .folder
+        refs.gitInputRow.isHidden = kind != .git
+        let input: String
+        switch kind {
+        case .folder: input = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .git: input = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        case nil: input = ""
         }
-        sourceContentStack.addArrangedSubview(sourceSegmented)
-        sourceContentStack.addArrangedSubview(localSourceSection)
-        sourceContentStack.addArrangedSubview(cloneSourceSection)
-        constrainFormFieldToFillWidth(localSourceSection, in: sourceContentStack)
-        constrainFormFieldToFillWidth(cloneSourceSection, in: sourceContentStack)
+        refs.continueButton.isEnabled = kind != nil && !input.isEmpty
+    }
 
-        let sourceCard = formSectionCard(
-            icon: "folder.badge.plus", title: "Source", subtitle: "Where does your project live?", contentViews: [sourceContentStack])
-        stack.addArrangedSubview(sourceCard)
-
-        // --- Section cards (shown once source is configured) ---
-        setupScriptSection.view.isHidden = true
-        stack.addArrangedSubview(setupScriptSection.view)
-
-        portsSection.view.isHidden = true
-        stack.addArrangedSubview(portsSection.view)
-
-        processesSection.view.isHidden = true
-        stack.addArrangedSubview(processesSection.view)
-
-        browserSessionsSection.view.isHidden = true
-        stack.addArrangedSubview(browserSessionsSection.view)
-
-        agentLaunchersSection.view.isHidden = true
-        stack.addArrangedSubview(agentLaunchersSection.view)
-
-        stopScriptSection.view.isHidden = true
-        stack.addArrangedSubview(stopScriptSection.view)
-
-        // --- Buttons ---
-        let createButton = actionButton(title: "Create", symbol: nil, tooltip: "Create project", action: #selector(createProject(_:)), primary: true)
-        createButton.isEnabled = false
-        let cancelButton = actionButton(title: "Cancel", symbol: nil, tooltip: "Cancel", action: #selector(cancelProjectForm), primary: false)
-        Theme.applySecondaryStyle(to: cancelButton)
-
-        let buttonRow = NSStackView()
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 8
-        buttonRow.setViews([cancelButton], in: .leading)
-        buttonRow.setViews([createButton], in: .trailing)
-        stack.addArrangedSubview(buttonRow)
-
-        // --- Width constraints ---
-        constrainFormFieldToFillWidth(sourceCard, in: stack)
-        constrainFormFieldToFillWidth(setupScriptSection.view, in: stack)
-        constrainFormFieldToFillWidth(portsSection.view, in: stack)
-        constrainFormFieldToFillWidth(processesSection.view, in: stack)
-        constrainFormFieldToFillWidth(browserSessionsSection.view, in: stack)
-        constrainFormFieldToFillWidth(agentLaunchersSection.view, in: stack)
-        constrainFormFieldToFillWidth(stopScriptSection.view, in: stack)
-        constrainFormFieldToFillWidth(buttonRow, in: stack)
-
-        presentAddProjectWindow(hosting: stack)
-
-        createButton.tag = storeAddProjectFields(
-            sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            prepareButton: prepareButton,
-            progressiveInputViews: [
-                setupScriptSection.view, portsSection.view, processesSection.view, browserSessionsSection.view, agentLaunchersSection.view,
-                stopScriptSection.view,
-            ], createButton: createButton)
-        activeAddProjectFormTag = createButton.tag
-        if let refs = AddProjectFieldCache.shared.cache[createButton.tag] {
-            refs.selectedDeviceID = localProjectCreationDeviceID()
-            updateAddProjectSourceUI(refs)
-        }
-        addProjectWindow?.makeFirstResponder(dirField)
+    private func setAddProjectSourceRowSelected(_ row: ClickableRowView, selected: Bool) {
+        row.layer?.borderWidth = selected ? 2 : 1
+        row.layer?.borderColor =
+            selected ? sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)).cgColor : sidebarCardBorderColor(isSelected: false).cgColor
     }
 
     /// The default device for new projects: the local Mac.
@@ -4518,19 +4644,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deviceSections.first(where: { $0.isLocal })?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
     }
 
-    @objc private func projectDeviceChanged(_ sender: NSPopUpButton) {
-        guard let tag = activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[tag] else { return }
-        refs.selectedDeviceID = (sender.selectedItem?.representedObject as? String) ?? localProjectCreationDeviceID()
-        // The folder lives on the chosen device, so re-validate any typed path there.
-        refs.preparedLocalDirectoryPath = nil
-        refs.directoryCompletions = []
-        updateAddProjectProgressiveDisclosure(refs)
-        scheduleAddProjectDirectoryPreview(refs)
-        scheduleAddProjectDirectorySuggestions(refs)
-    }
-
-    private func presentAddProjectWindow(hosting stack: NSStackView) {
-        let header = buildFormWindowHeader(symbol: "square.and.pencil", title: "New Project", closeAction: #selector(closeAddProjectWindow))
+    private func presentAddProjectWindow(hosting stack: NSStackView, title: String) {
+        let header = buildFormWindowHeader(symbol: "square.and.pencil", title: title, closeAction: #selector(closeAddProjectWindow))
         addProjectWindow = presentFormWindow(existing: addProjectWindow, header: header, hosting: stack)
     }
 
@@ -5457,8 +5572,45 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
+    /// Live SSH-forward snapshots for a workspace's services: remote workspaces read the forward
+    /// manager, local workspaces have no forwards (their assigned port is already local).
+    func workspaceServiceForwards(workspaceID: String) -> [BrowserSSHForwardManager.ServiceForwardSnapshot] {
+        let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID)
+        guard isRemoteDeviceID(workspaceDeviceID) else { return [] }
+        return browserSSHForwardManager.forwardedServicePorts(deviceID: workspaceDeviceID, workspaceID: workspaceID)
+    }
+
+    /// Refreshes the open workspace settings dialog's Services rows' port texts after an SSH forward
+    /// for `deviceID` starts or stops. Reloads the section in place (preserving open editors); when
+    /// no workspace settings dialog is open the weak section reference is nil and this is a no-op.
+    private func refreshVisibleServicePortDisplays(deviceID: String) {
+        guard let section = visibleWorkspacePortsSection, let workspaceID = visiblePortsWorkspaceID,
+            self.deviceID(forWorkspaceID: workspaceID) == deviceID, let workspace = deviceWorkspaceSummary(workspaceID: workspaceID)
+        else { return }
+        section.reload(
+            ports: section.currentPorts,
+            collapsedDisplayPortTexts: Self.servicePortDisplayTexts(
+                assignedPorts: workspace.assignedPorts, forwards: workspaceServiceForwards(workspaceID: workspaceID)))
+    }
+
+    /// The Services row port text: `remote:local` while a remote service has a live SSH forward
+    /// (e.g. "3000:52341"), otherwise the bare assigned port.
+    nonisolated static func servicePortDisplay(assignedPort: Int?, forwardedLocalPort: Int?) -> String? {
+        guard let assignedPort, assignedPort > 0 else { return nil }
+        guard let forwardedLocalPort else { return String(assignedPort) }
+        return "\(assignedPort):\(forwardedLocalPort)"
+    }
+
+    nonisolated static func servicePortDisplayTexts(
+        assignedPorts: [SpacesDeviceAssignedPort], forwards: [BrowserSSHForwardManager.ServiceForwardSnapshot]
+    ) -> [String?] {
+        var localPorts: [String: Int] = [:]
+        for forward in forwards { localPorts["\(forward.serviceName):\(forward.remotePort)"] = forward.localPort }
+        return assignedPorts.map { servicePortDisplay(assignedPort: $0.port, forwardedLocalPort: localPorts["\($0.name):\($0.port)"]) }
+    }
+
     private func clearActiveAddProjectFormState() {
-        discardActiveAddProjectPreparedSourceIfNeeded()
+        // Nothing is cloned until Create, so tearing down the form only clears its cached state.
         if let activeAddProjectFormTag { AddProjectFieldCache.shared.cache[activeAddProjectFormTag] = nil }
         activeAddProjectFormTag = nil
     }
@@ -6163,19 +6315,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func storeAddProjectFields(
-        sourceSegmented: NSSegmentedControl, localSourceSection: NSStackView, cloneSourceSection: NSStackView, dirField: NSTextField,
-        repoURLField: NSTextField, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
-        processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
-        prepareButton: NSButton, progressiveInputViews: [NSView], createButton: NSButton
+        folderRow: ClickableRowView, gitRow: ClickableRowView, folderInputRow: NSView, gitInputRow: NSView, dirField: NSTextField,
+        repoURLField: NSTextField, continueButton: NSButton, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection,
+        portsSection: PortsSection, processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection,
+        agentLaunchersSection: AgentLaunchersSection, createButton: NSButton, spacesYAMLMissingLabel: NSTextField
     ) -> Int {
         let id = UUID().uuidString.hashValue
         AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
-            sourceSegmented: sourceSegmented, localSourceSection: localSourceSection, cloneSourceSection: cloneSourceSection, dirField: dirField,
-            repoURLField: repoURLField, prepareButton: prepareButton, progressiveInputViews: progressiveInputViews, createButton: createButton,
-            setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection)
-        sourceSegmented.tag = id
-        prepareButton.tag = id
+            folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
+            repoURLField: repoURLField, continueButton: continueButton, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection,
+            portsSection: portsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
+            agentLaunchersSection: agentLaunchersSection, createButton: createButton, spacesYAMLMissingLabel: spacesYAMLMissingLabel)
+        continueButton.tag = id
+        createButton.tag = id
         return id
     }
 
@@ -6311,7 +6463,111 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         openWorkspaceFinder(workspaceID: workspaceID)
     }
 
-    @objc private func addProject() { showAddProjectForm() }
+    /// Add Project is a two-step flow: pick the device, then configure the project. The device step is
+    /// skipped when the local Mac is the only device. Splitting device selection out fixes the device
+    /// for the configuration step, so the project's source always targets one daemon.
+    @objc private func addProject() {
+        if Self.addProjectRequiresDeviceSelection(deviceCount: deviceSections.count) {
+            showAddProjectDeviceStep()
+        } else {
+            showAddProjectSourceStep(deviceID: localProjectCreationDeviceID())
+        }
+    }
+
+    /// The device-selection step is shown only when there is a choice; a single device (the local Mac)
+    /// goes straight to project configuration.
+    nonisolated static func addProjectRequiresDeviceSelection(deviceCount: Int) -> Bool { deviceCount > 1 }
+
+    /// Step 1: choose the device the project will be created on. Each device is a full-width,
+    /// left-aligned row; clicking one advances to the configuration step. Closing the window cancels.
+    private func showAddProjectDeviceStep() {
+        clearActiveAddProjectFormState()
+
+        let deviceRows = deviceSections.map { addProjectDeviceRow(section: $0) }
+        let deviceCard = formSectionCard(
+            icon: "desktopcomputer", title: "Device", subtitle: "Choose where this project will live.", contentViews: deviceRows)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 16
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(deviceCard)
+        constrainFormFieldToFillWidth(deviceCard, in: stack)
+
+        presentAddProjectWindow(hosting: stack, title: "New Project")
+    }
+
+    /// A left-aligned, hover-highlighted device row: platform icon, device name, and a `local`/`remote`
+    /// caption, with a trailing chevron signaling that clicking advances to project configuration.
+    /// A project can only be created on a reachable device; an offline daemon would make the source
+    /// step's Continue hang on a request that just times out, so its row is shown disabled.
+    nonisolated static func addProjectDeviceIsSelectable(loadState: SidebarDeviceLoadState) -> Bool { !loadState.isOffline }
+
+    private func addProjectDeviceRow(section: DeviceSection) -> NSView {
+        let selectable = Self.addProjectDeviceIsSelectable(loadState: section.loadState)
+        let container = ClickableRowView(isInteractive: selectable)
+        container.layer?.borderWidth = 1
+        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        container.alphaValue = selectable ? 1 : 0.55
+        container.setAccessibilityElement(true)
+        container.setAccessibilityRole(.button)
+        container.setAccessibilityLabel(section.deviceName)
+        container.setAccessibilityIdentifier("add-project-device-option")
+        container.toolTip = selectable ? "Create the project on \(section.deviceName)" : "\(section.deviceName) is offline"
+
+        let iconView = NSImageView()
+        iconView.image = NSImage(systemSymbolName: section.isLocal ? "desktopcomputer" : "server.rack", accessibilityDescription: nil)
+        iconView.contentTintColor = sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        iconView.setContentHuggingPriority(.required, for: .horizontal)
+        iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let nameField = NSTextField(labelWithString: section.deviceName)
+        nameField.font = .systemFont(ofSize: 13, weight: .semibold)
+        nameField.textColor = .labelColor
+        nameField.lineBreakMode = .byTruncatingMiddle
+        nameField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let caption = selectable ? (section.isLocal ? "This Mac" : "Remote device") : "Offline"
+        let captionField = NSTextField(labelWithString: caption)
+        captionField.font = .systemFont(ofSize: 11)
+        captionField.textColor = .secondaryLabelColor
+        captionField.lineBreakMode = .byTruncatingTail
+
+        let textStack = NSStackView(views: [nameField, captionField])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 1
+
+        // Selectable rows show a chevron (click advances); offline rows show a muted offline glyph.
+        let trailingIcon = NSImageView()
+        trailingIcon.image = NSImage(systemSymbolName: selectable ? "chevron.right" : "bolt.horizontal.circle", accessibilityDescription: nil)
+        trailingIcon.contentTintColor = .tertiaryLabelColor
+        trailingIcon.setContentHuggingPriority(.required, for: .horizontal)
+        trailingIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [iconView, textStack, NSView(), trailingIcon])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor), row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            row.topAnchor.constraint(equalTo: container.topAnchor), row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+        ])
+
+        // An offline device is not clickable, so no gesture is attached and Continue can never target it.
+        guard selectable else { return container }
+        let deviceID = section.deviceID
+        let target = ClickTarget { [weak self] in self?.showAddProjectSourceStep(deviceID: deviceID) }
+        let recognizer = NSClickGestureRecognizer(target: target, action: #selector(ClickTarget.clicked(_:)))
+        container.addGestureRecognizer(recognizer)
+        objc_setAssociatedObject(container, &Self.clickTargetAssocKey, target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return container
+    }
 
     @objc func addWorkspace(_ sender: NSButton) {
         guard let projectID = sender.identifier?.rawValue, let project = projects.first(where: { $0.id == projectID }) else { return }
@@ -6364,9 +6620,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
             if let device = deviceForDaemonStateMutation() {
-                let decision = presentProjectImportWorkspaceSyncPrompt()
-                guard decision != .cancel else { return }
-                let updateAllWorkspaces = decision == .updateAllWorkspaces
+                // A non-git project's template always syncs to its single workspace, so it takes the
+                // sync path unprompted; git projects choose whether to update existing workspaces.
+                let updateAllWorkspaces: Bool
+                if isGitProject(refs.projectID) {
+                    let decision = presentProjectImportWorkspaceSyncPrompt()
+                    guard decision != .cancel else { return }
+                    updateAllWorkspaces = decision == .updateAllWorkspaces
+                } else {
+                    updateAllWorkspaces = true
+                }
                 let response = try SpacesDeviceClient.importProjectSpacesYAML(
                     projectID: refs.projectID, updateAllWorkspaces: updateAllWorkspaces, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
@@ -6418,8 +6681,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.agentLaunchersSection.replace(launchers: settings.agentLaunchers)
     }
 
+    /// Whether the project is a git repo (vs a non-git project standing in for its single
+    /// workspace). Unknown project ids default to git so the workspace-sync prompt is preserved.
+    private func isGitProject(_ projectID: String) -> Bool { projects.first { $0.id == projectID }?.isGitRepo ?? true }
+
     private func confirmProjectImportWorkspaceSyncIfNeeded(_ refs: ProjectFieldRefs) -> Bool {
         guard refs.hasPendingImportedConfig else { return true }
+        // A non-git project's template always syncs to its single workspace (see
+        // updateProjectConfig), so there is no "project only" choice to offer — proceed unprompted.
+        guard isGitProject(refs.projectID) else { return true }
         return Self.applyProjectImportWorkspaceSyncDecision(presentProjectImportWorkspaceSyncPrompt(), to: refs)
     }
 
@@ -6500,12 +6770,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private func createProject(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
         do {
-            // The project is created on the device chosen in the form (local by
-            // default); folder autocomplete and preview use the same device.
+            // The project is created on the device fixed in step 1; folder autocomplete and preview
+            // used the same device.
             if let device = deviceRecord(forDeviceID: refs.selectedDeviceID) {
                 let projectDir: String?
                 let gitURL: String?
-                if refs.sourceSegmented.selectedSegment == 1 {
+                if refs.selectedSourceKind == .git {
                     let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !repoURL.isEmpty else { throw WorkspaceError.invalidArgument(message: "Git repository URL is required.") }
                     projectDir = nil
@@ -6513,23 +6783,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 } else {
                     let dir = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !dir.isEmpty else { return }
-                    guard refs.preparedLocalDirectoryPath == dir else {
-                        throw WorkspaceError.invalidArgument(message: "Enter the project directory before creating the project.")
-                    }
                     projectDir = dir
                     gitURL = nil
                 }
                 let config = Self.deviceProjectConfig(from: refs)
-                // The repository was already cloned by prepareGitProject; pass its handle so the
-                // daemon adopts that clone instead of re-cloning. Clear it off the form so Cancel
-                // or a window close during the in-flight create won't discard the clone that is
-                // being consumed; on failure it is restored (or discarded) so it never leaks.
-                let preparedGitProjectHandle = refs.preparedGitProjectHandle
-                let preparedGitURL = refs.preparedGitURL
-                refs.preparedGitProjectHandle = nil
-                refs.preparedGitURL = nil
-                refs.preparedGitDeviceID = nil
-                refs.gitPreparationID = nil
+                // For a git source the daemon clones the repository now and applies this config (the
+                // preview only fetched spaces.yaml). Cloning at Create means nothing is left behind if
+                // the user cancels, so there is no prepared clone to track or discard.
                 let originalTitle = sender.title
                 sender.isEnabled = false
                 sender.title = "Creating..."
@@ -6542,12 +6802,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         sender?.isEnabled = true
                         sender?.title = originalTitle
                         hideOperationProgressOverlay()
-                        if isActiveAddProjectForm(refs) { updateAddProjectSourceUI(refs) }
                     }
                     let result = await Self.deviceMutation(device: device) { device in
                         try SpacesDeviceClient.createProject(
-                            projectDir: projectDir, gitURL: gitURL, config: config, preparedGitProjectHandle: preparedGitProjectHandle,
-                            device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                            projectDir: projectDir, gitURL: gitURL, config: config, device: device,
+                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                     }
                     switch result {
                     case .success(let response):
@@ -6563,8 +6822,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             applyDeviceMutationResponse(response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
                         }
                     case .failure(let error):
-                        restoreOrDiscardPreparedGitProjectAfterCreateFailure(
-                            refs: refs, handle: preparedGitProjectHandle, repoURL: preparedGitURL, device: device)
+                        // Nothing was cloned yet (the clone is part of the failed Create), so there is
+                        // no prepared clone to restore or discard.
                         showError(error)
                     }
                 }
@@ -6574,73 +6833,71 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         } catch { showError(error) }
     }
 
-    @objc private func projectSourceChanged(_ sender: NSSegmentedControl) {
+    @objc private func continueFromSourceStep(_ sender: NSButton) {
         guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
-        if refs.sourceSegmented.selectedSegment == 0 { discardPreparedAddProjectGitSourceIfNeeded(refs) }
-        updateAddProjectSourceUI(refs)
+        advanceFromSourceStep(refs)
     }
 
-    @objc private func prepareProjectSource(_ sender: NSButton) {
-        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
-        prepareAddProjectGitSource(refs)
-    }
-
-    private func updateAddProjectSourceUI(_ refs: AddProjectFieldRefs) {
-        let cloneSelected = refs.sourceSegmented.selectedSegment == 1
-        refs.localSourceSection.isHidden = cloneSelected
-        refs.cloneSourceSection.isHidden = !cloneSelected
-        let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let gitPrepared = refs.preparedGitProjectHandle != nil && refs.preparedGitURL == repoURL
-        let gitPreparing = refs.gitPreparationID != nil
-        // The daemon clones the repo and returns its spaces.yaml config to pre-fill the form, so the
-        // Clone step is shown for git sources on any device (local or remote).
-        refs.prepareButton.isHidden = !cloneSelected
-        refs.prepareButton.title = gitPreparing ? "Cloning..." : (gitPrepared ? "Cloned" : "Clone")
-        refs.prepareButton.isEnabled = cloneSelected && !repoURL.isEmpty && !gitPrepared && !gitPreparing
-        updateAddProjectProgressiveDisclosure(refs)
-    }
-
-    private func updateAddProjectProgressiveDisclosure(_ refs: AddProjectFieldRefs) {
-        let hasPreparedSource = isAddProjectSourcePrepared(refs)
-        for view in refs.progressiveInputViews { view.isHidden = !hasPreparedSource }
-        refs.createButton.isEnabled = hasPreparedSource
-    }
-
-    private func isAddProjectSourcePrepared(_ refs: AddProjectFieldRefs) -> Bool {
-        if refs.sourceSegmented.selectedSegment == 1 {
-            let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            // A git source is prepared once the daemon has cloned it (handle held), so the form is
-            // populated from spaces.yaml and Create can adopt the existing clone.
-            return refs.gitPreparationID == nil && refs.preparedGitProjectHandle != nil && refs.preparedGitURL == repoURL
-                && refs.preparedGitDeviceID == refs.selectedDeviceID
+    /// Loads the configuration from the chosen source and advances to the config step. For a folder the
+    /// daemon validates the path and reads any `spaces.yaml`; for a repo it fetches `spaces.yaml` (single
+    /// file, no clone). While loading, the source inputs are replaced by a loading step so nothing is
+    /// editable in flight; a failure returns to the source step (values intact) with the error surfaced.
+    private func advanceFromSourceStep(_ refs: AddProjectFieldRefs) {
+        guard let kind = refs.selectedSourceKind else { return }
+        // Loading against an offline daemon would hang until the request times out. Offline devices are
+        // not selectable in the device step, but the device step is skipped for a lone local device, so
+        // guard here too and surface the offline state instead.
+        if let section = deviceSection(id: refs.selectedDeviceID), !Self.addProjectDeviceIsSelectable(loadState: section.loadState) {
+            showError(WorkspaceError.invalidArgument(message: "\(section.deviceName) is offline. Reconnect it and try again."))
+            return
         }
-        let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !directoryPath.isEmpty && refs.preparedLocalDirectoryPath == directoryPath
-    }
+        guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else {
+            showDeviceNotLoadedError()
+            return
+        }
+        let input = (kind == .folder ? refs.dirField : refs.repoURLField).stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
 
-    nonisolated static func preparedGitProjectResultMatchesActiveRequest(
-        isActiveForm: Bool, selectedSegment: Int, currentRepoURL: String, requestedRepoURL: String, currentDeviceID: String,
-        requestedDeviceID: String, currentPreparationID: UUID?, completionPreparationID: UUID
-    ) -> Bool {
-        isActiveForm && selectedSegment == 1 && currentRepoURL == requestedRepoURL && currentDeviceID == requestedDeviceID
-            && currentPreparationID == completionPreparationID
-    }
-
-    nonisolated static func localProjectPreviewResultMatchesActiveRequest(
-        isActiveForm: Bool, selectedSegment: Int, currentDirectoryPath: String, requestedDirectoryPath: String
-    ) -> Bool { isActiveForm && selectedSegment == 0 && currentDirectoryPath == requestedDirectoryPath }
-
-    nonisolated static func preparedGitProjectMatchesCurrentSelection(
-        preparedGitProjectHandle: String?, preparedGitURL: String?, preparedGitDeviceID: String?, currentRepoURL: String, selectedDeviceID: String,
-        currentPreparationID: UUID?
-    ) -> Bool {
-        guard preparedGitProjectHandle != nil, currentPreparationID == nil else { return false }
-        return preparedGitURL == currentRepoURL && preparedGitDeviceID == selectedDeviceID
-    }
-
-    nonisolated static func preparedGitProjectDiscardKey(repoURL: String?, deviceID: String) -> String? {
-        guard let key = repoURL?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
-        return "\(deviceID)\n\(key)"
+        // Swap the source inputs for a loading step. With no editable source on screen during the fetch,
+        // the loaded config cannot end up describing a source different from what Create will use, so no
+        // separate staleness bookkeeping is needed.
+        presentAddProjectLoadingStep(
+            deviceID: refs.selectedDeviceID,
+            detail: kind == .folder ? "Validating the folder and reading spaces.yaml…" : "Reading spaces.yaml from the repository…")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            switch kind {
+            case .folder:
+                let result = await Self.deviceProjectPreview(dir: input, device: device)
+                guard isActiveAddProjectForm(refs) else { return }
+                switch result {
+                case .success(let preview):
+                    refs.spacesYAMLMissing = false
+                    hydrateAddProjectSettings(refs, from: preview.config)
+                    showAddProjectConfigStep(refs)
+                case .failure(let error):
+                    presentAddProjectSourceStep(refs)
+                    showError(error)
+                }
+            case .git:
+                let result = await Self.previewGitProjectResult(gitURL: input, device: device)
+                guard isActiveAddProjectForm(refs) else { return }
+                switch result {
+                case .success(let preview):
+                    // Managed directories already exist for this repo; Create replaces them, so confirm now.
+                    if !preview.replacementCandidates.isEmpty, !presentManagedDirectoryReplacementPrompt(candidates: preview.replacementCandidates) {
+                        presentAddProjectSourceStep(refs)
+                        return
+                    }
+                    refs.spacesYAMLMissing = !preview.spacesYAMLFound
+                    hydrateAddProjectSettings(refs, from: preview.config ?? SpacesDeviceProjectConfig())
+                    showAddProjectConfigStep(refs)
+                case .failure(let error):
+                    presentAddProjectSourceStep(refs)
+                    showError(error)
+                }
+            }
+        }
     }
 
     private func isActiveAddProjectForm(_ refs: AddProjectFieldRefs) -> Bool {
@@ -6683,138 +6940,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return refs.directoryCompletions
     }
 
-    /// Validates the typed directory on the selected device and loads its `spaces.yaml` settings,
-    /// debounced so it runs as the user types or picks a suggestion. Runs silently: a path that is
-    /// not yet a valid project directory simply leaves Create disabled rather than surfacing an error.
-    private func scheduleAddProjectDirectoryPreview(_ refs: AddProjectFieldRefs) {
-        refs.directoryPreviewTask?.cancel()
-        let directoryPath = refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !directoryPath.isEmpty, refs.preparedLocalDirectoryPath != directoryPath else { return }
-        guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else { return }
-        refs.directoryPreviewTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled, let self else { return }
-            let result = await Self.deviceProjectPreview(dir: directoryPath, device: device)
-            guard !Task.isCancelled,
-                Self.localProjectPreviewResultMatchesActiveRequest(
-                    isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
-                    currentDirectoryPath: refs.dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                    requestedDirectoryPath: directoryPath)
-            else { return }
-            switch result {
-            case .success(let preview):
-                refs.preparedLocalDirectoryPath = directoryPath
-                hydrateAddProjectSettings(refs, from: preview.config)
-            case .failure: refs.preparedLocalDirectoryPath = nil
-            }
-            updateAddProjectSourceUI(refs)
-        }
-    }
-
-    private func prepareAddProjectGitSource(_ refs: AddProjectFieldRefs) {
-        let repoURL = refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !repoURL.isEmpty else {
-            showError(WorkspaceError.invalidArgument(message: "Git repository URL is required."))
-            return
-        }
-        guard refs.gitPreparationID == nil else {
-            updateAddProjectSourceUI(refs)
-            return
-        }
-        if refs.preparedGitProjectHandle != nil, refs.preparedGitURL == repoURL {
-            updateAddProjectSourceUI(refs)
-            return
-        }
-        guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else {
-            showDeviceNotLoadedError()
-            return
-        }
-        let preparationID = UUID()
-        refs.gitPreparationID = preparationID
-        refs.preparedLocalDirectoryPath = nil
-        refs.prepareButton.isEnabled = false
-        let originalTitle = refs.prepareButton.title
-        refs.prepareButton.title = "Cloning..."
-        updateAddProjectProgressiveDisclosure(refs)
-        showOperationProgressOverlay(
-            message: "Cloning project...", detail: "Cloning repository and checking the default workspace for spaces.yaml.", context: .global)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                if refs.gitPreparationID == preparationID {
-                    refs.gitPreparationID = nil
-                    refs.prepareButton.title = originalTitle
-                }
-                hideOperationProgressOverlay()
-                updateAddProjectSourceUI(refs)
-            }
-            // Discard any repository prepared earlier for this form before preparing a new one.
-            if let previousHandle = refs.preparedGitProjectHandle {
-                let discardResult = await beginPreparedGitProjectDiscard(handle: previousHandle, repoURL: refs.preparedGitURL, device: device).value
-                if case .failure(let error) = discardResult {
-                    refs.preparedGitProjectHandle = nil
-                    refs.preparedGitURL = nil
-                    refs.preparedGitDeviceID = nil
-                    showError(error)
-                    return
-                }
-                refs.preparedGitProjectHandle = nil
-                refs.preparedGitURL = nil
-                refs.preparedGitDeviceID = nil
-            }
-            if let discardResult = await activePreparedGitProjectDiscardResult(repoURL: repoURL), case .failure(let error) = discardResult {
-                showError(error)
-                return
-            }
-            // The daemon clones to the project's final managed path and returns its spaces.yaml
-            // config. If managed directories already exist it returns replacement candidates instead
-            // of cloning, so confirm replacement and prepare again.
-            var preparation: SpacesDeviceGitProjectPreparation
-            switch await Self.prepareGitProjectResult(gitURL: repoURL, replaceExistingManagedDirectories: false, device: device) {
-            case .failure(let error):
-                refs.preparedGitProjectHandle = nil
-                refs.preparedGitURL = nil
-                refs.preparedGitDeviceID = nil
-                showError(error)
-                return
-            case .success(let result): preparation = result
-            }
-            if !preparation.replacementCandidates.isEmpty {
-                guard presentManagedDirectoryReplacementPrompt(candidates: preparation.replacementCandidates) else { return }
-                switch await Self.prepareGitProjectResult(gitURL: repoURL, replaceExistingManagedDirectories: true, device: device) {
-                case .failure(let error):
-                    refs.preparedGitProjectHandle = nil
-                    refs.preparedGitURL = nil
-                    refs.preparedGitDeviceID = nil
-                    showError(error)
-                    return
-                case .success(let result): preparation = result
-                }
-            }
-            guard
-                Self.preparedGitProjectResultMatchesActiveRequest(
-                    isActiveForm: isActiveAddProjectForm(refs), selectedSegment: refs.sourceSegmented.selectedSegment,
-                    currentRepoURL: refs.repoURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), requestedRepoURL: repoURL,
-                    currentDeviceID: refs.selectedDeviceID, requestedDeviceID: device.id, currentPreparationID: refs.gitPreparationID,
-                    completionPreparationID: preparationID)
-            else {
-                // The form moved on while cloning; discard the clone we just made.
-                if let handle = preparation.preparedGitProjectHandle {
-                    _ = await beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device).value
-                }
-                return
-            }
-            guard let handle = preparation.preparedGitProjectHandle, let config = preparation.config else {
-                showError(WorkspaceError.invalidArgument(message: "Preparing the git project did not return a cloned repository."))
-                return
-            }
-            refs.preparedGitProjectHandle = handle
-            refs.preparedGitURL = repoURL
-            refs.preparedGitDeviceID = device.id
-            hydrateAddProjectSettings(refs, from: config)
-        }
-    }
-
     private func hydrateAddProjectSettings(_ refs: AddProjectFieldRefs, from config: SpacesDeviceProjectConfig) {
         let settings = Self.localProjectSettings(from: config)
         refs.setupScriptSection.replace(value: settings.setupScript ?? "")
@@ -6823,101 +6948,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         refs.processesSection.replace(processes: settings.processes)
         refs.browserSessionsSection.replace(sessions: settings.browserSessions)
         refs.agentLaunchersSection.replace(launchers: settings.agentLaunchers)
-    }
-
-    private func discardPreparedAddProjectGitSourceIfNeeded(_ refs: AddProjectFieldRefs) {
-        guard let handle = refs.preparedGitProjectHandle else { return }
-        let repoURL = refs.preparedGitURL
-        let device = deviceRecord(forDeviceID: refs.selectedDeviceID)
-        refs.preparedGitProjectHandle = nil
-        refs.preparedGitURL = nil
-        refs.preparedGitDeviceID = nil
-        guard let device else { return }
-        let discardTask = beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device)
-        Task { @MainActor [weak self] in
-            let result = await discardTask.value
-            if case .failure(let error) = result { self?.showError(error) }
-        }
-    }
-
-    /// Adoption of a prepared git clone failed, so the daemon-side clone still exists in the managed
-    /// repo/workspace directories. If the add-project form is still open and hasn't been re-prepared,
-    /// restore the handle to it so Cancel/retry can discard or reuse the clone. Otherwise (the form was
-    /// dismissed mid-create, or a newer preparation replaced the handle) discard the orphaned clone here
-    /// so it never leaks.
-    private func restoreOrDiscardPreparedGitProjectAfterCreateFailure(
-        refs: AddProjectFieldRefs, handle: String?, repoURL: String?, device: SpacesPairedDeviceRecord
-    ) {
-        guard let handle else { return }
-        switch Self.preparedGitProjectCreateFailureAction(
-            isActiveForm: isActiveAddProjectForm(refs), formHasPreparedHandle: refs.preparedGitProjectHandle != nil,
-            formTargetsPreparationDevice: refs.selectedDeviceID == device.id)
-        {
-        case .restoreToForm:
-            refs.preparedGitProjectHandle = handle
-            refs.preparedGitURL = repoURL
-            refs.preparedGitDeviceID = device.id
-        case .discardOrphan: beginPreparedGitProjectDiscard(handle: handle, repoURL: repoURL, device: device)
-        }
-    }
-
-    enum PreparedGitProjectCreateFailureAction: Equatable { case restoreToForm, discardOrphan }
-
-    /// Decides what to do with a prepared git clone whose project create failed. Restore the handle to the
-    /// form only when it is still the active form, nothing newer was prepared into it, and the form still
-    /// targets the device the clone was prepared on, so Cancel/retry acts on the right daemon. Otherwise the
-    /// captured clone is orphaned — the form was dismissed, a newer preparation replaced the handle, or the
-    /// user switched the (still-editable) device picker mid-create so the form now points at a different
-    /// daemon — and it must be discarded on its original device so it never leaks or targets the wrong daemon.
-    nonisolated static func preparedGitProjectCreateFailureAction(isActiveForm: Bool, formHasPreparedHandle: Bool, formTargetsPreparationDevice: Bool)
-        -> PreparedGitProjectCreateFailureAction
-    { isActiveForm && !formHasPreparedHandle && formTargetsPreparationDevice ? .restoreToForm : .discardOrphan }
-
-    private func discardActiveAddProjectPreparedSourceIfNeeded() {
-        guard let activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[activeAddProjectFormTag] else { return }
-        discardPreparedAddProjectGitSourceIfNeeded(refs)
-    }
-
-    private func discardActiveAddProjectPreparedSourceSynchronouslyIfNeeded() -> Result<Void, Error>? {
-        guard let activeAddProjectFormTag, let refs = AddProjectFieldCache.shared.cache[activeAddProjectFormTag],
-            let handle = refs.preparedGitProjectHandle, let device = deviceRecord(forDeviceID: refs.selectedDeviceID)
-        else { return nil }
-        refs.preparedGitProjectHandle = nil
-        refs.preparedGitURL = nil
-        refs.preparedGitDeviceID = nil
-        do {
-            _ = try SpacesDeviceClient.discardPreparedGitProject(
-                preparedGitProjectHandle: handle, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            return .success(())
-        } catch { return .failure(error) }
-    }
-
-    @discardableResult private func beginPreparedGitProjectDiscard(handle: String, repoURL: String?, device: SpacesPairedDeviceRecord) -> Task<
-        Result<Void, Error>, Never
-    > {
-        let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: device.id)
-        let previousTask = key.flatMap { preparedGitProjectDiscardTasksByURL[$0]?.task }
-        let task = Task<Result<Void, Error>, Never> {
-            if let previousTask { _ = await previousTask.value }
-            return await Self.discardPreparedGitProjectResult(preparedGitProjectHandle: handle, device: device)
-        }
-        guard let key else { return task }
-        let id = UUID()
-        preparedGitProjectDiscardTasksByURL[key] = PreparedGitProjectDiscardEntry(id: id, task: task)
-        Task { @MainActor [weak self] in
-            _ = await task.value
-            guard let self, self.preparedGitProjectDiscardTasksByURL[key]?.id == id else { return }
-            self.preparedGitProjectDiscardTasksByURL[key] = nil
-        }
-        return task
-    }
-
-    private func activePreparedGitProjectDiscardResult(repoURL: String) async -> Result<Void, Error>? {
-        let deviceID =
-            activeAddProjectFormTag.flatMap { AddProjectFieldCache.shared.cache[$0]?.selectedDeviceID } ?? SpacesPairedDeviceRecord.localDeviceID
-        guard let key = Self.preparedGitProjectDiscardKey(repoURL: repoURL, deviceID: deviceID), let entry = preparedGitProjectDiscardTasksByURL[key]
-        else { return nil }
-        return await entry.task.value
     }
 
     private func defaultWorkspaceBaseBranch(project: ProjectSummary, branches: [String]) -> String? {
@@ -7058,13 +7088,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         for refs in AddProjectFieldCache.shared.cache.values {
             guard refs.repoURLField === changedField else { continue }
-            updateAddProjectSourceUI(refs)
+            updateAddProjectSourceStepUI(refs)
             return
         }
         if let refs = addProjectRefs(forDirectoryField: changedField) {
-            updateAddProjectSourceUI(refs)
+            updateAddProjectSourceStepUI(refs)
             scheduleAddProjectDirectorySuggestions(refs)
-            scheduleAddProjectDirectoryPreview(refs)
             return
         }
         for refs in AddWorkspaceFieldCache.shared.cache.values {
@@ -7782,15 +7811,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }
-            // A focused terminal pane owns every non-⌘ key (the pane translation
-            // replaces the old terminal window's sendEvent hook); ⌘ chords run the app
-            // shortcuts below and fall through to the pane's command handling at the end.
+            // A focused terminal pane owns ordinary terminal input; app shortcut
+            // chords run first so leader-backed shortcuts still work inside panes.
             let focusedPaneContent = self.panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder)
+            var focusedTerminalDisposition: ShortcutMonitorDisposition?
             if let focusedPaneContent {
                 self.panelCoordinator.noteContentFocused(focusedPaneContent)
-                if Self.shortcutMonitorDisposition(eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true) == .passEventToTerminal {
-                    return focusedPaneContent.handleKeyEvent(event) ? nil : event
-                }
+                let disposition = Self.shortcutMonitorDisposition(
+                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true, shortcutLeaderModifiers: self.shortcutLeaderModifiers)
+                focusedTerminalDisposition = disposition
+                if disposition == .passEventToTerminal { return focusedPaneContent.handleKeyEvent(event) ? nil : event }
             }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
@@ -7834,9 +7864,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 return nil
             }
-            // App shortcuts didn't claim this ⌘ chord; give the focused pane's terminal
-            // command handling a chance (the old terminal window's performKeyEquivalent).
+            // App shortcuts did not claim the chord. Command shortcuts fall through
+            // to terminal command-equivalent handling; non-Command leader chords
+            // fall through to the pane's normal key handling, including image paste.
             if let focusedPaneContent, focusedPaneContent.handleCommandKeyEquivalent(event) { return nil }
+            if focusedTerminalDisposition == .runAppShortcutsThenTerminal, let focusedPaneContent {
+                return focusedPaneContent.handleKeyEvent(event) ? nil : event
+            }
             return event
         }
     }
@@ -7877,22 +7911,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     enum ShortcutMonitorDisposition: Equatable, Sendable {
-        /// Return the event untouched so the focused terminal pane receives it (plain
-        /// keys, ctrl chords, arrows — anything without ⌘).
+        /// Send the event directly to the focused terminal pane before the shortcut
+        /// chain handles it.
         case passEventToTerminal
         /// Run the app-shortcut chain; unhandled events still fall through to the
         /// window, whose key routing forwards them to the focused pane.
         case runAppShortcuts
+        /// Run the app-shortcut chain first, then send an unclaimed event directly
+        /// to the focused terminal pane.
+        case runAppShortcutsThenTerminal
     }
 
     /// Keyboard routing for the local shortcut monitor once terminals live inside app
-    /// windows as panes: a focused terminal owns every non-⌘ key, while ⌘ chords run
-    /// the app shortcuts first. With no terminal focused, all shortcuts run as before.
-    nonisolated static func shortcutMonitorDisposition(eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool)
-        -> ShortcutMonitorDisposition
-    {
+    /// windows as panes: a focused terminal owns ordinary input, while ⌘ chords and
+    /// configured leader chords run app shortcuts first. With no terminal focused,
+    /// all shortcuts run as before.
+    nonisolated static func shortcutMonitorDisposition(
+        eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool, shortcutLeaderModifiers: Set<HotkeyModifier> = []
+    ) -> ShortcutMonitorDisposition {
         guard firstResponderIsTerminalPane else { return .runAppShortcuts }
-        return eventModifiers.contains(.command) ? .runAppShortcuts : .passEventToTerminal
+        let modifiers = eventShortcutModifiers(from: eventModifiers)
+        if modifiers.contains(.cmd) { return .runAppShortcuts }
+        if !shortcutLeaderModifiers.isEmpty, modifiers.isSuperset(of: shortcutLeaderModifiers) { return .runAppShortcutsThenTerminal }
+        return .passEventToTerminal
     }
 
     /// ⌘W closes the active panel's focused pane — the last pane of a tab takes the
@@ -8031,7 +8072,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func shortcutCaptureKey(for keyCode: UInt16) -> String? { AppKitController.shortcutCaptureKeyMap[keyCode] }
 
-    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
+    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> { Self.eventShortcutModifiers(from: flags) }
+
+    nonisolated static func eventShortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
         let filtered = flags.intersection([.command, .shift, .option, .control])
         var modifiers = Set<HotkeyModifier>()
         if filtered.contains(.command) { modifiers.insert(.cmd) }
@@ -8316,21 +8359,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// cannot be scripted. Remote service sessions use this after their URL has been routed through
     /// the Mac Caddy router.
     private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
-        let focused = await Task.detached(priority: .userInitiated) {
+        let startedAt = Date()
+        let result: (focused: Bool, path: String, focusMS: Int) = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
-            guard chrome.isAvailable() else { return false }
+            let focusStartedAt = Date()
             let store = ClientBrowserWindowIDStore()
             if let trackedID = try? store.windowID(workspaceID: workspaceID, targetURL: targetURL),
                 (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
             {
-                return true
+                return (true, "focused_tracked", TerminalPerformance.elapsedMS(since: focusStartedAt))
             }
             let newWindowID = (try? chrome.openWindow(url: targetURL, background: false)) ?? -1
-            guard newWindowID > 0 else { return false }
+            guard newWindowID > 0 else { return (false, "fallback", TerminalPerformance.elapsedMS(since: focusStartedAt)) }
             try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: newWindowID)
-            return true
+            return (true, "opened_window", TerminalPerformance.elapsedMS(since: focusStartedAt))
         }.value
-        if !focused { NSWorkspace.shared.open(fallbackURL) }
+        if !result.focused { NSWorkspace.shared.open(fallbackURL) }
+        logPerfMetric(
+            "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            success: result.focused, detail: "path=\(result.path) focus_ms=\(result.focusMS)")
     }
 
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
@@ -8447,6 +8494,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }.value
                 switch routeResult {
                 case .success(let routedURL):
+                    refreshVisibleServicePortDisplays(deviceID: device.id)
                     await focusLocalChromeTab(workspaceID: workspaceID, targetURL: routedURL.absoluteString, fallbackURL: routedURL)
                 case .failure(let error):
                     showError(error)
@@ -8458,16 +8506,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
         case .openTerminal(let request):
+            // Window-focus terminal targets are always workspace-backed (they come from a
+            // workspace's run-target list), so a missing device is a not-loaded state.
             guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
                 showDeviceNotLoadedError()
                 return nil
             }
             Self.setClientActiveWorkspaceID(request.workspaceID)
+            // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
+            // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
+            // fires just after we foreground the terminal and re-hides the app, leaving
+            // `NSApp.isActive` false — which breaks window-cycle current-target resolution
+            // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
+            cancelDeferredExternalWindowHide()
             // A row-built resolution can predate the session's overview entry and lack the
             // real shell/command; recover them through the cold overview fetch so the pane's
             // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
             let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
             guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return nil }
+            // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
+            // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
+            // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
+            // closed and reopened (or is currently a viewer) reattaches as owner instead of the
+            // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
+            // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
+            panelCoordinator.content(forSessionID: request.sessionID)?.requestOwnershipIfNeeded()
             if let requestID, !requestID.isEmpty {
                 logPerfMetric(
                     "terminal_window_focus_ipc", target: "session=\(request.sessionID)", elapsedMS: 0, success: true,
@@ -9071,9 +9134,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func persistProjectFields(_ refs: ProjectFieldRefs) throws {
         if let device = deviceForDaemonStateMutation() {
+            // A non-git project stands in for its single workspace, so its project settings are the
+            // config that runs: sync the saved template to that workspace unconditionally. Git
+            // projects keep the template/per-workspace split and only sync a pending import when the
+            // user chose Update All Workspaces.
+            let updateAllWorkspaces = Self.projectSaveSyncsAllWorkspaces(
+                isGitRepo: isGitProject(refs.projectID), pendingImportUpdateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces)
             let response = try SpacesDeviceClient.updateProjectConfig(
-                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: refs.pendingImportUpdateAllWorkspaces,
-                device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                projectID: refs.projectID, config: Self.deviceProjectConfig(from: refs), updateAllWorkspaces: updateAllWorkspaces, device: device,
+                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
             refs.discardImportedConfigButton.isHidden = true

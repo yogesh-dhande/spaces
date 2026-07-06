@@ -94,8 +94,8 @@ extension WorkspaceOrchestrator {
                 try store.upsert(
                     window: WindowRecord(
                         id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
-                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
-                        terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
+                        role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
             }
             if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -196,8 +196,7 @@ extension WorkspaceOrchestrator {
     func launchSpacesTerminalSession(
         title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode,
         backend: TerminalSessionBackendKind = .ghosttyEmbedded, readinessPolicy: BuiltInTerminalReadinessPolicy = .stableChildPID,
-        sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, workspaceID: String? = nil,
-        kind: TerminalSessionKind = .shell
+        sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, workspaceID: String, kind: TerminalSessionKind = .shell
     ) throws -> SpacesTerminalSessionHandle {
         let sessionID = sessionID ?? UUID().uuidString
         let launchConfiguration = TerminalSessionLaunchConfiguration(
@@ -389,20 +388,20 @@ extension WorkspaceOrchestrator {
         return trimmed
     }
 
+    /// Resolves the workspace owning a built-in terminal session: the workspace behind its
+    /// running-process/agent/terminal-window row if it has one, else the workspace stamped
+    /// on its own launch configuration — which every session now carries, since
+    /// `spaces terminal command` always resolves a workspace before launching. Returns nil
+    /// only when the session's launch configuration itself can't be read (deleted/pruned).
     func workspaceForBuiltInTerminalSession(sessionID: String, ownership existingOwnership: BuiltInTerminalSessionOwnership? = nil) throws
         -> WorkspaceRecord?
     {
         let ownership = try existingOwnership ?? builtInTerminalSessionOwnership(sessionID: sessionID)
-        if let workspaceID = ownership.processWorkspaceID ?? ownership.agentWorkspaceID ?? ownership.terminalWindowWorkspaceID
-            ?? ownership.launchWorkspaceID
-        {
-            return try store.workspace(id: workspaceID)
-        }
-        guard let workingDirectory = terminalSessionWorkingDirectory(sessionID: sessionID) else { return nil }
-        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: false) }
-        return workspaces.filter { isPath(workingDirectory, inside: $0.dir, allowEqual: true) }.max {
-            normalizePath($0.dir).count < normalizePath($1.dir).count
-        }
+        guard
+            let workspaceID = ownership.processWorkspaceID ?? ownership.agentWorkspaceID ?? ownership.terminalWindowWorkspaceID
+                ?? ownership.launchWorkspaceID
+        else { return nil }
+        return try store.workspace(id: workspaceID)
     }
 
     func terminalSession(sessionID: String, belongsTo workspace: WorkspaceRecord) -> Bool {

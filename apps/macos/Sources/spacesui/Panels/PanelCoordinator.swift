@@ -8,9 +8,7 @@ import spacesdevicecore
 @MainActor final class PanelCoordinator {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
-    }
+    init(host: AppKitController) { self.host = host }
 
     struct PanePlacement: Equatable {
         let scope: PanelScope
@@ -82,9 +80,7 @@ import spacesdevicecore
                 ordered.append(contentsOf: PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout))
             case .globalWindow:
                 for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout)
-                where contentControllers[sessionID]?.workspaceID == workspaceID {
-                    ordered.append(sessionID)
-                }
+                where contentControllers[sessionID]?.workspaceID == workspaceID { ordered.append(sessionID) }
             }
         }
         return ordered
@@ -141,12 +137,12 @@ import spacesdevicecore
     /// cmd+opt+t landing path for a freshly created session), or in an explicit scope
     /// (a global panel window's "+" button).
     @discardableResult func openSessionInNewTab(_ request: AppKitController.DeviceTerminalOpenRequest, in scope: PanelScope? = nil) -> Bool {
-        let scope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
+        let resolvedScope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
         guard let content = ensureContentController(request: request) else { return false }
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
-        mutateLayout(scope: scope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
-        host.showPanelScope(scope)
-        activateFocusedPane(scope: scope)
+        mutateLayout(scope: resolvedScope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
+        host.showPanelScope(resolvedScope)
+        activateFocusedPane(scope: resolvedScope)
         return true
     }
 
@@ -246,8 +242,8 @@ import spacesdevicecore
         guard panels[scope] == nil else { return }
         panels[scope] = PanelState(layout: layout, view: nil)
         for pane in PanelLayoutEngine.allPanes(in: layout) {
-            guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil,
-                let workspaceID = host.clientWorkspaceID(forTerminalSession: sessionID),
+            guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil else { continue }
+            guard let workspaceID = host.clientWorkspaceID(forTerminalSession: sessionID),
                 let request = host.paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
             else { continue }
             _ = ensureContentController(request: request)
@@ -298,9 +294,7 @@ import spacesdevicecore
     /// on it (arrow-key workspace switching), without stealing keyboard focus from the
     /// sidebar.
     func restoreSelection(scope: PanelScope) {
-        for tab in layout(for: scope).tabs {
-            for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) }
-        }
+        for tab in layout(for: scope).tabs { for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) } }
         render(scope: scope)
     }
 
@@ -315,9 +309,8 @@ import spacesdevicecore
     private func activateContentIfVisible(scope: PanelScope, pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers[sessionID] else { return }
         let layout = layout(for: scope)
-        let isInSelectedTab = layout.tabs.first { $0.id == layout.selectedTabID }.map {
-            PanelLayoutEngine.panes(in: $0).contains { $0.id == pane.id }
-        } ?? false
+        let isInSelectedTab =
+            layout.tabs.first { $0.id == layout.selectedTabID }.map { PanelLayoutEngine.panes(in: $0).contains { $0.id == pane.id } } ?? false
         if isInSelectedTab { content.activate(focus: false) } else { content.deactivate() }
     }
 
@@ -364,9 +357,7 @@ import spacesdevicecore
     /// Detaches every open pane's terminal client at app termination without stopping
     /// sessions (daemon-owned sessions keep running across quit; panes are rebuilt on
     /// relaunch from the persisted layout).
-    func closeAllContentForTermination() {
-        for content in contentControllers.values { content.close() }
-    }
+    func closeAllContentForTermination() { for content in contentControllers.values { content.close() } }
 
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
@@ -445,9 +436,9 @@ import spacesdevicecore
         if let existing = contentControllers[request.sessionID] { return existing }
         guard let content = host.makeTerminalPaneContent(request: request) else { return nil }
         content.onTitleChanged = { [weak self, weak content] title in
-            guard let self, let content, let sessionID = content.descriptor.terminalSessionID,
-                self.placement(forSessionID: sessionID) != nil
-            else { return }
+            guard let self, let content, let sessionID = content.descriptor.terminalSessionID, self.placement(forSessionID: sessionID) != nil else {
+                return
+            }
             self.refreshTabTitles(forSessionID: sessionID)
         }
         contentControllers[request.sessionID] = content
@@ -461,6 +452,7 @@ import spacesdevicecore
     func refreshTabTitles(scope: PanelScope) {
         guard let state = panels[scope], let view = state.view else { return }
         for tab in state.layout.tabs { view.updateTabTitle(tabTitle(forTabID: tab.id, in: state.layout), forTabID: tab.id) }
+        syncPaneAccessibilityTitles(scope: scope)
         syncPanelWindowTitle(scope: scope)
         syncFocusedPaneFooter(scope: scope)
     }
@@ -468,8 +460,21 @@ import spacesdevicecore
     private func refreshTabTitles(forSessionID sessionID: String?) {
         guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
         view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
+        syncPaneAccessibilityTitles(scope: placement.scope)
         syncPanelWindowTitle(scope: placement.scope)
         syncFocusedPaneFooter(scope: placement.scope)
+    }
+
+    /// Publishes each pane's resolved title onto its content view's accessibility label
+    /// (see `TerminalPaneContentController.setAccessibilityRuntimeTargetName`). Every
+    /// render/title-refresh path calls this so the front window's selected-tab session
+    /// stays identifiable by name to UI automation and VoiceOver — the shared window
+    /// title no longer distinguishes panes post-panel-rework.
+    private func syncPaneAccessibilityTitles(scope: PanelScope) {
+        guard let layout = panels[scope]?.layout else { return }
+        for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: layout) {
+            contentControllers[sessionID]?.setAccessibilityRuntimeTargetName(contentTitle(forSessionID: sessionID))
+        }
     }
 
     /// The selected workspace footer shows the focused pane's identity; re-sync it
@@ -527,9 +532,7 @@ import spacesdevicecore
         panels[scope] = state
         if rerender { render(scope: scope) }
         if previousVisibility != state.layout.selectedTabID {
-            for tab in state.layout.tabs {
-                for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) }
-            }
+            for tab in state.layout.tabs { for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) } }
         }
         onLayoutChanged?(scope, state.layout)
         // A global panel exists only while it has content: an emptied layout (last tab
@@ -541,8 +544,8 @@ import spacesdevicecore
         guard let state = panels[scope], let view = state.view else { return }
         var titles: [String: String] = [:]
         for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
-        view.apply(
-            layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+        view.apply(layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+        syncPaneAccessibilityTitles(scope: scope)
         syncPanelWindowTitle(scope: scope)
         syncFocusedPaneFooter(scope: scope)
     }

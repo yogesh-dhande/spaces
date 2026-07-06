@@ -129,6 +129,24 @@ public final class WorkspaceOrchestrator {
         }
     }
 
+    /// The result of loading `spaces.yaml` for the add-project preview without cloning the repo.
+    /// `project` carries the imported config applied onto a base record; `replacementCandidates`
+    /// reports managed directories that a later Create would replace, detected from the local
+    /// filesystem (no clone required).
+    public struct GitProjectPreview: Sendable {
+        public let project: ProjectRecord
+        public let replacementCandidates: [ManagedDirectoryReplacementCandidate]
+        /// Whether a `spaces.yaml` was found on the repository's default branch. `false` means the
+        /// returned config is empty because the repo has no `spaces.yaml`, not because it was empty.
+        public let spacesYAMLFound: Bool
+
+        public init(project: ProjectRecord, replacementCandidates: [ManagedDirectoryReplacementCandidate], spacesYAMLFound: Bool) {
+            self.project = project
+            self.replacementCandidates = replacementCandidates
+            self.spacesYAMLFound = spacesYAMLFound
+        }
+    }
+
     public struct ManagedDirectoryReplacementCandidate: Equatable, Sendable {
         public enum Kind: String, Hashable, Sendable {
             case projectRepository
@@ -1276,6 +1294,24 @@ public final class WorkspaceOrchestrator {
         return session
     }
 
+    /// Resolves the workspace `spaces terminal command` should target: the explicit
+    /// `--workspace` id when given, else the deepest unarchived workspace whose directory
+    /// contains `cwd` (same containment rule as `workspaceForBuiltInTerminalSession`'s
+    /// fallback). Errors clearly when neither resolves, instead of falling back to a
+    /// workspace-less session.
+    public func resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: String?, cwd: String) throws -> String {
+        if let explicitWorkspaceID = explicitWorkspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitWorkspaceID.isEmpty {
+            return explicitWorkspaceID
+        }
+        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: false) }
+        guard
+            let matched = workspaces.filter({ isPath(cwd, inside: $0.dir, allowEqual: true) }).max(by: {
+                normalizePath($0.dir).count < normalizePath($1.dir).count
+            })
+        else { throw WorkspaceError.invalidArgument(message: "Current directory is not inside a Spaces workspace.") }
+        return matched.id
+    }
+
     public func reserveWorkspaceTerminalLaunch(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
@@ -1817,7 +1853,10 @@ public final class WorkspaceOrchestrator {
         // so app servers can allowlist the host/origin for CORS or framework host checks; the URL is
         // the client-facing identity, not evidence that the remote daemon itself runs Caddy.
         // These need the shared router port, which is app configuration available here but not inside
-        // the pure planner, so they live only here.
+        // the pure planner, so they live only here. The router port is a Mac-only concept (only the
+        // macOS client runs Caddy), so remote daemons never seed one; the fallback below then yields
+        // the canonical `AppConfig.defaultRouterPort`, a stable client-facing identity the Mac client
+        // rewrites to its own live Caddy port before navigation.
         let slug = SpacesProfile.workspaceHostSlug(
             branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         let routerPort = (try? store.appConfig().routerPort) ?? AppConfig.defaultRouterPort
@@ -2251,11 +2290,7 @@ public final class WorkspaceOrchestrator {
         try store.workspaces(projectID: projectID, includeArchived: true).first(where: \.isDefault)
     }
 
-    func preferredImportedDefaultBranch(path: String) throws -> String {
-        if git.branchExists(path: path, branch: "main") { return "main" }
-        if git.branchExists(path: path, branch: "master") { return "master" }
-        throw WorkspaceError.invalidArgument(message: "Imported git repository must contain a main or master branch.")
-    }
+    func importedRepositoryDefaultBranch(path: String) throws -> String { try git.repositoryDefaultBranch(path: path) }
 
     func isManagedWorkspacesDirectory(path: String, allowEqual: Bool = false) -> Bool {
         isPath(path, inside: workspaceRootDirectory().path, allowEqual: allowEqual)

@@ -102,7 +102,7 @@ final class SpacesCommandTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: "session-stale", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-12T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         XCTAssertEqual(try availableTerminalSessionRows(), [])
     }
@@ -120,7 +120,7 @@ final class SpacesCommandTests: XCTestCase {
         let paths = try TerminalSessionPaths.forSession(id: "session-live")
         let configuration = TerminalSessionLaunchConfiguration(
             sessionID: "session-live", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-            createdAt: "2026-05-12T00:00:00Z")
+            createdAt: "2026-05-12T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
@@ -144,25 +144,18 @@ final class SpacesCommandTests: XCTestCase {
     }
 
     func testTerminalCommandParsesOptions() throws {
-        let command = try TerminalCommandCommand.parse(["--command", "cat", "--title", "session", "--cwd", "/tmp", "--backend", "ghostty-embedded"])
+        let command = try TerminalCommandCommand.parse(["--command", "cat", "--title", "session", "--workspace", "workspace-1"])
 
         XCTAssertEqual(command.command, "cat")
         XCTAssertEqual(command.title, "session")
-        XCTAssertEqual(command.cwd, "/tmp")
-        XCTAssertEqual(command.backend, .ghosttyEmbedded)
+        XCTAssertEqual(command.workspace, "workspace-1")
     }
 
-    func testTerminalCommandLaunchConfigurationUsesPersistentLifetime() throws {
-        let launchConfiguration = terminalCommandLaunchConfiguration(
-            sessionID: "session-cli", backend: .ghosttyEmbedded, command: "cat", title: "session", cwd: "/tmp", shell: "/bin/sh",
-            createdAt: "2026-05-26T00:00:00Z")
+    func testTerminalCommandParsesWithoutExplicitWorkspace() throws {
+        let command = try TerminalCommandCommand.parse(["--command", "cat"])
 
-        XCTAssertEqual(launchConfiguration.lifetimePolicy, .persistent)
-        XCTAssertEqual(launchConfiguration.sessionID, "session-cli")
-        XCTAssertEqual(launchConfiguration.command, "cat")
-        XCTAssertEqual(launchConfiguration.title, "session")
-        XCTAssertEqual(launchConfiguration.workingDirectory, "/tmp")
-        XCTAssertEqual(launchConfiguration.shell, "/bin/sh")
+        XCTAssertEqual(command.command, "cat")
+        XCTAssertNil(command.workspace)
     }
 
     func testTerminalSendParsesSessionAndText() throws {
@@ -250,8 +243,7 @@ final class SpacesCommandTests: XCTestCase {
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
-            subcommands,
-            ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MobileCommand", "MCPCommand"])
+            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MobileCommand", "MCPCommand"])
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {

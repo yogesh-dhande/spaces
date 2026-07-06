@@ -107,6 +107,11 @@ import workspacecore
         foregroundAgentReconciler.start()
         terminalForegroundAgentReconciler = foregroundAgentReconciler
         #if os(macOS)
+            // The router port is a Mac-only concept: only the macOS client runs Caddy, so only it
+            // pins/consumes a real listening port. Seed it alongside the router service and never on
+            // headless remote daemons, whose derived per-profile port would be a fabricated value the
+            // browser never dials (see seedProfileRouterPortIfNeeded).
+            seedProfileRouterPortIfNeeded(databasePath: databasePath)
             let monitor = ProcessExitMonitorService(databasePath: databasePath) { error in
                 writeStandardError("spacesd process_exit_monitor_error error=\(error)\n")
             }
@@ -505,6 +510,13 @@ import workspacecore
         case .agentSignal:
             let orchestrator = try makeProfileOrchestrator()
             return try recordProfileAgentSignal(command, orchestrator: orchestrator)
+        case .terminalCommand:
+            let orchestrator = try makeProfileOrchestrator()
+            let cwd = try requiredProfileArgument(command.cwd, name: "cwd")
+            let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: command.workspaceID, cwd: cwd)
+            let session = try orchestrator.createWorkspaceTerminalSession(
+                workspaceID: workspaceID, title: command.terminalTitle, command: command.terminalCommand)
+            return TerminalServiceProfileCommandResponse(message: "Started terminal session.", terminalSession: session)
         }
     }
 
@@ -544,6 +556,31 @@ import workspacecore
         let output = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lineCount)
         return TerminalServiceProfileCommandResponse(message: "Read terminal output.", terminalOutput: output)
     }
+
+    /// Pins this profile's Caddy router port on first daemon start. Called only on macOS, since
+    /// Caddy is a Mac-client-only service (`CaddyRouterService` is `#if os(macOS)`); a headless
+    /// remote daemon has no router to pin and must not seed a per-profile derived port, which would
+    /// be a fabricated value no browser ever dials. Remote daemons leave the port unset, so their
+    /// browser-facing service URLs fall back to the canonical `AppConfig.defaultRouterPort` as a
+    /// client-facing host/origin identity that the Mac client rewrites to its own live Caddy port.
+    ///
+    /// The installed/production profile keeps the well-known 7391; dev/worktree profiles derive a
+    /// distinct deterministic port so concurrent Spaces instances (multiple worktrees, or the
+    /// installed app plus a dev build) don't all try to bind one port — where only the first wins
+    /// and every other instance's Caddy silently fails to start, breaking its workspace-service
+    /// routing. Seeds only when unset, so an explicit override still wins, and service URLs then
+    /// read the pinned port.
+    #if os(macOS)
+        private func seedProfileRouterPortIfNeeded(databasePath: String) {
+            do {
+                let store = try SQLiteStore(path: databasePath)
+                guard try store.storedRouterPort() == nil else { return }
+                var config = try store.appConfig()
+                config.routerPort = try SpacesProfile.current().defaultRouterPort
+                try store.setAppConfig(config)
+            } catch { writeStandardError("spacesd router_port_seed_error error=\(error)\n") }
+        }
+    #endif
 
     private func makeProfileOrchestrator() throws -> WorkspaceOrchestrator {
         let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
