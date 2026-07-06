@@ -89,6 +89,7 @@ Each live session also participates in a service-level control path:
 - `spaces terminal tail` reads `output.log`, not a live client window.
 - ANSI and full-screen output are replayed through `libghostty-vt`.
 - Tail rendering uses the persisted terminal size from SQLite so wrapping and redraw-heavy transcripts stay aligned with the last visible geometry.
+- Tail returns recent output, including lines that scrolled above the current prompt, so an agent that sent a command through `sendTerminalInput` can read its result. Only a genuine full-screen repaint — an entire-screen clear (`clear`) or a cursor-home rewrite (status frames, full-screen apps) — resets the tail to the current screen; a shell prompt's routine erase-below on redraw does not. Tail renders at most the most recent window of the append-only output log, so its cost stays bounded over a long-lived session.
 - The VT bridge feeds `spaces terminal tail` and diagnostics. Terminal UI rendering does not use VT replay, snapshot-to-VT encoding, or `output.log`.
 
 ## Device API

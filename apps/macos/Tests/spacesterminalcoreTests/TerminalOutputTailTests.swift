@@ -111,6 +111,30 @@ final class TerminalOutputTailTests: XCTestCase {
             tailed, "SEQ 00000002 FRAME 000002 ROW 001 alpha\nSEQ 00000003 FRAME 000002 ROW 002 beta\nSEQ 00000004 FRAME 000002 ROW 003 gamma")
     }
 
+    func testTailKeepsOutputThatScrolledAboveAPromptRedrawEraseBelow() throws {
+        // A shell prompt redraw emits a bare erase-below (CSI J), not a full-screen clear, so output
+        // that scrolled above the current prompt must still appear in the tail. This is the contract
+        // agents rely on: `sendTerminalInput` runs a command, then `tailTerminalOutput` reads its
+        // result even though the shell has already drawn a fresh prompt below it. A regression here
+        // silently truncates the tail to just the final (empty) prompt line.
+        let esc = "\u{001B}"
+        // Zsh-style redraw: reverse-video PROMPT_EOL_MARK, carriage returns, SGR resets, a bare CSI J
+        // to clear below the prompt, then the prompt text — mirroring a real interactive transcript.
+        let promptRedraw = "\(esc)[1m\(esc)[7m%\(esc)[27m\(esc)[0m\r \r\r\(esc)[0m\(esc)[24m\(esc)[Juser@host demo % \(esc)[K\(esc)[?2004h"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let text =
+            "\(promptRedraw)\(esc)[?2004le\u{0008}echo scrolled-marker\(esc)[?2004l\r\r\n"
+            + "scrolled-marker\r\n"
+            + promptRedraw
+        try text.data(using: .utf8)?.write(to: url)
+
+        let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 20)
+
+        XCTAssertTrue(
+            tailed.split(separator: "\n", omittingEmptySubsequences: false).contains { $0.trimmingCharacters(in: .whitespaces) == "scrolled-marker" },
+            "tail dropped output that scrolled above the redrawn prompt: \(tailed)")
+    }
+
     func testTailUsesPersistedTerminalSizeForANSIWrapping() throws {
         let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
