@@ -1198,12 +1198,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             row.addArrangedSubview(editor)
         } else {
             let isPendingLaunchAction = item.kind == .missingConfiguredProcess || item.kind == .agentLauncher
-            let titleLabel = NSTextField(labelWithString: item.title)
+            let titleLabel = PressableLabel(labelWithString: item.title)
             // Mirror the row identifier onto the title label. AppKit does not expose an
             // NSTableCellView's own accessibility identifier as a queryable element (only its
             // text/interactive subviews are), so the cell-level id on line ~1147 is invisible to
-            // VoiceOver and UI automation; the label carries a findable copy.
+            // VoiceOver and UI automation; the label carries a findable copy. The press action
+            // mirrors `onRowMouseDown`'s runtimeTarget branch below so VoiceOver activation and
+            // UI automation's `AXPress` both actually open/focus the target, not just find it.
             titleLabel.setAccessibilityIdentifier("sidebar-target-\(workspace.id)-\(item.key)")
+            titleLabel.onAccessibilityPress = { [weak self] in
+                guard let self else { return }
+                if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
+                self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
+            }
             titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
             titleLabel.textColor =
                 isPendingLaunchAction ? sidebarMetadataTextColor(isSelected: false) : sidebarPrimaryTextColor(isSelected: false, isArchived: false)
