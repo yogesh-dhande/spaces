@@ -3,6 +3,31 @@ import spacesterminalcore
 import workspacecore
 
 final class SpacesMCPStdioServer {
+    private struct MCPToolDescriptor {
+        let name: String
+        let description: String
+        let properties: [String: Any]
+        let required: [String]
+        let oneOf: [[String: Any]]
+        let handler: (SpacesMCPStdioServer, [String: Any]) throws -> TerminalServiceProfileCommandResponse
+
+        init(
+            name: String, description: String, properties: [String: Any], required: [String], oneOf: [[String: Any]] = [],
+            handler: @escaping (SpacesMCPStdioServer, [String: Any]) throws -> TerminalServiceProfileCommandResponse
+        ) {
+            self.name = name
+            self.description = description
+            self.properties = properties
+            self.required = required
+            self.oneOf = oneOf
+            self.handler = handler
+        }
+
+        var definition: [String: Any] {
+            SpacesMCPStdioServer.tool(name: name, description: description, properties: properties, required: required, oneOf: oneOf)
+        }
+    }
+
     private let input: FileHandle
     private let output: FileHandle
     private let encoder: JSONEncoder
@@ -17,42 +42,84 @@ final class SpacesMCPStdioServer {
 
     func run() throws { while let data = try readMessage() { try handleMessage(data) } }
 
-    static func toolDefinitions() -> [[String: Any]] {
+    private static func toolDescriptors() -> [MCPToolDescriptor] {
         [
-            tool(name: "spaces_project_list", description: "List Spaces projects.", properties: [:], required: []),
-            tool(
+            MCPToolDescriptor(name: "spaces_project_list", description: "List Spaces projects.", properties: [:], required: []) { _, _ in
+                try TerminalService.sendProfileCommand(.init(operation: .projectList))
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_list", description: "List Spaces workspaces.",
                 properties: ["project": stringSchema("Project ID filter."), "includeArchived": boolSchema("Include archived workspaces.")],
-                required: []),
-            tool(
+                required: []
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .init(
+                        operation: .workspaceList, projectID: server.optionalString(arguments["project"]),
+                        includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false))
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_create", description: "Create a workspace on this device.",
                 properties: [
                     "project": stringSchema("Project ID."), "branch": stringSchema("Workspace branch."),
                     "baseBranch": stringSchema("Base branch for new branch creation."),
                     "existingBranch": boolSchema("Use an existing branch instead of creating a new branch."),
-                ], required: ["project", "branch"]),
-            tool(
+                ], required: ["project", "branch"]
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .init(
+                        operation: .workspaceCreate, projectID: try server.requiredString(arguments["project"], field: "project"),
+                        branch: try server.requiredString(arguments["branch"], field: "branch"),
+                        baseBranch: server.optionalString(arguments["baseBranch"]),
+                        existingBranch: server.optionalBool(arguments["existingBranch"]) ?? false))
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_start", description: "Ensure a workspace is running.",
-                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]),
-            tool(
+                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .init(operation: .workspaceStart, workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace.",
-                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]),
-            tool(name: "spaces_terminal_list", description: "List available Spaces terminal sessions.", properties: [:], required: []),
-            tool(
+                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .init(operation: .workspaceRestart, workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+            },
+            MCPToolDescriptor(name: "spaces_terminal_list", description: "List available Spaces terminal sessions.", properties: [:], required: []) {
+                _, _ in try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5)
+            },
+            MCPToolDescriptor(
                 name: "spaces_terminal_tail", description: "Read recent output from an explicit Spaces terminal session.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."), "lines": intSchema("Number of output lines to read. Defaults to 20."),
-                ], required: ["session"]),
-            tool(
+                ], required: ["session"]
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .init(
+                        operation: .terminalTail, terminalSessionID: try server.requiredString(arguments["session"], field: "session"),
+                        lineCount: server.optionalInt(arguments["lines"])), timeout: 5)
+            },
+            MCPToolDescriptor(
                 name: "spaces_terminal_send", description: "Send text or raw bytes to an explicit Spaces terminal session.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
                     "text": stringSchema("Text to send. Use an empty string with appendNewline to press Enter."),
                     "bytes": byteArraySchema("Raw byte values to send. Each value must be an integer from 0 through 255."),
                     "appendNewline": boolSchema("Append a newline after the payload."),
-                ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]),
+                ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
+            ) { server, arguments in
+                let payload = try server.terminalInputPayload(from: arguments)
+                return try TerminalService.sendProfileCommand(
+                    .init(
+                        operation: .terminalSend, terminalSessionID: try server.requiredString(arguments["session"], field: "session"),
+                        terminalText: payload.text, terminalBytes: payload.bytes,
+                        appendNewline: server.optionalBool(arguments["appendNewline"]) ?? false), timeout: 5)
+            },
         ]
     }
+
+    static func toolDefinitions() -> [[String: Any]] { toolDescriptors().map(\.definition) }
 
     private static func tool(name: String, description: String, properties: [String: Any], required: [String], oneOf: [[String: Any]] = [])
         -> [String: Any]
@@ -109,40 +176,10 @@ final class SpacesMCPStdioServer {
     }
 
     private func callTool(name: String, arguments: [String: Any]) throws -> TerminalServiceProfileCommandResponse {
-        switch name {
-        case "spaces_project_list": return try TerminalService.sendProfileCommand(.init(operation: .projectList))
-        case "spaces_workspace_list":
-            return try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .workspaceList, projectID: optionalString(arguments["project"]),
-                    includeArchived: optionalBool(arguments["includeArchived"]) ?? false))
-        case "spaces_workspace_create":
-            return try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .workspaceCreate, projectID: try requiredString(arguments["project"], field: "project"),
-                    branch: try requiredString(arguments["branch"], field: "branch"), baseBranch: optionalString(arguments["baseBranch"]),
-                    existingBranch: optionalBool(arguments["existingBranch"]) ?? false))
-        case "spaces_workspace_start":
-            return try TerminalService.sendProfileCommand(
-                .init(operation: .workspaceStart, workspaceID: try requiredString(arguments["workspace"], field: "workspace")))
-        case "spaces_workspace_restart":
-            return try TerminalService.sendProfileCommand(
-                .init(operation: .workspaceRestart, workspaceID: try requiredString(arguments["workspace"], field: "workspace")))
-        case "spaces_terminal_list": return try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5)
-        case "spaces_terminal_tail":
-            return try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .terminalTail, terminalSessionID: try requiredString(arguments["session"], field: "session"),
-                    lineCount: optionalInt(arguments["lines"])), timeout: 5)
-        case "spaces_terminal_send":
-            let payload = try terminalInputPayload(from: arguments)
-            return try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .terminalSend, terminalSessionID: try requiredString(arguments["session"], field: "session"),
-                    terminalText: payload.text, terminalBytes: payload.bytes, appendNewline: optionalBool(arguments["appendNewline"]) ?? false),
-                timeout: 5)
-        default: throw MCPError.invalidArguments("Unknown Spaces tool '\(name)'.")
+        guard let descriptor = Self.toolDescriptors().first(where: { $0.name == name }) else {
+            throw MCPError.invalidArguments("Unknown Spaces tool '\(name)'.")
         }
+        return try descriptor.handler(self, arguments)
     }
 
     private func encodedText(_ response: TerminalServiceProfileCommandResponse) throws -> String {

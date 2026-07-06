@@ -128,10 +128,9 @@ struct SpacesDeviceOverviewBuilder {
             id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, shell: session.launchConfiguration.shell,
             command: session.launchConfiguration.command, state: session.runtimeState.state, backend: session.launchConfiguration.backend,
             lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
-            childPID: session.runtimeState.childPID, workspaceID: session.workspaceID,
-            workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
-            projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
-            isControlAvailable: isInteractive && session.isControlAvailable,
+            childPID: session.runtimeState.childPID, workspaceID: session.workspaceID, workspaceTitle: matchedWorkspace?.workspace.displayName,
+            projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
+            updatedAt: session.runtimeState.updatedAt, isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender, daemonEndpoint: matchedWorkspace?.terminalDaemonEndpoint)
     }
@@ -352,7 +351,7 @@ struct SpacesDeviceOverviewBuilder {
     ) -> [SpacesDeviceWorkspaceTerminalRow] {
         var rows: [SpacesDeviceWorkspaceTerminalRow] = []
         var includedSessionIDs = Set<String>()
-        for window in descriptor.windows where window.role == "terminal" {
+        for window in descriptor.windows where window.roleValue == .terminal {
             if let key = terminalTrackingKey(window), claimedTerminalKeys.contains(key) { continue }
             let rawSessionID = terminalSessionID(for: window)
             let session = rawSessionID.flatMap { sessionsByID[$0] }

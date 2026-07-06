@@ -25,12 +25,8 @@ import workspacecore
 #endif
 
 @MainActor private final class SpacesDaemonController {
-    private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
     private static let mobileTerminalServiceCommands: Set<String> = [
         "list", "state", "subscribe", "control", "resolveTerminalLink", "readTerminalLinkChunk",
-    ]
-    private static let mobileTerminalControlCommands: Set<String> = [
-        "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll",
     ]
     private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
 
@@ -349,7 +345,7 @@ import workspacecore
         guard Self.mobileTerminalServiceCommands.contains(request.commandName) else {
             return TerminalServiceResponse(ok: false, message: "Mobile terminal credential cannot call '\(request.commandName)'.")
         }
-        if request.commandName == "control", !Self.mobileTerminalControlCommands.contains(request.command.controlCommandName ?? "") {
+        if request.commandName == "control", !TerminalControlCommand.isMobileTerminalControlName(request.command.controlCommandName ?? "") {
             return TerminalServiceResponse(ok: false, message: "Mobile terminal credential cannot call this terminal control command.")
         }
         do {
@@ -633,7 +629,10 @@ import workspacecore
         let controlResponse = try sendProfileTerminalControl(
             sessionID: sessionID,
             request: TerminalControlRequest(
-                command: "send", text: command.terminalText, bytes: command.terminalBytes, appendNewline: command.appendNewline ?? false))
+                command: .send(
+                    TerminalControlSendPayload(
+                        text: command.terminalText, bytes: command.terminalBytes, clientID: nil, ownerEpoch: nil,
+                        appendNewline: command.appendNewline ?? false))))
         guard controlResponse.ok else { throw SpacesRuntimeError.invalidArgument(message: controlResponse.message) }
         return TerminalServiceProfileCommandResponse(message: controlResponse.message)
     }
@@ -682,9 +681,7 @@ import workspacecore
                 var config = try store.appConfig()
                 config.routerPort = try SpacesProfile.current().defaultRouterPort
                 try store.setAppConfig(config)
-            } catch {
-                writeStandardError("spacesd router_port_seed_error error=\(error)\n")
-            }
+            } catch { writeStandardError("spacesd router_port_seed_error error=\(error)\n") }
         }
     #endif
 
@@ -838,15 +835,15 @@ import workspacecore
     private func handleTerminalControl(_ request: TerminalServiceControlCommandRequest) -> TerminalServiceResponse {
         let sessionID = request.sessionID
         let controlRequest = request.controlRequest
+        let command = controlRequest.commandValue
         guard !sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.") }
-        if Self.ownerGatedTerminalCommands.contains(controlRequest.command),
-            controlRequest.clientID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-        {
+        if command.requiresOwnerClientID, controlRequest.clientID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
             return TerminalServiceResponse(ok: false, message: "Missing device client ID.")
         }
         if let liveCore = sessionCores[sessionID] {
             let response = liveCore.handleControlRequest(controlRequest)
-            return terminalControlResponse(sessionID: sessionID, controlResponse: response, includeSessionState: controlRequest.command == "takeover")
+            return terminalControlResponse(
+                sessionID: sessionID, controlResponse: response, includeSessionState: command.includesSessionStateOnSuccess)
         }
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -857,7 +854,8 @@ import workspacecore
                 return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
             }
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
-            return terminalControlResponse(sessionID: sessionID, controlResponse: response, includeSessionState: controlRequest.command == "takeover")
+            return terminalControlResponse(
+                sessionID: sessionID, controlResponse: response, includeSessionState: command.includesSessionStateOnSuccess)
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 

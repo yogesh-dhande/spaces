@@ -140,8 +140,7 @@ final class StoreTests: XCTestCase {
 
         XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
             XCTAssertEqual(
-                error.localizedDescription,
-                "No migration step exists from schema version 0; cannot reach version \(DatabaseSchema.currentVersion).")
+                error.localizedDescription, "No migration step exists from schema version 0; cannot reach version \(DatabaseSchema.currentVersion).")
         }
     }
 
@@ -555,8 +554,8 @@ final class StoreTests: XCTestCase {
             id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: "Browser", role: "browser", orderIndex: 0,
             lastSeenAt: "now")
         let secondWindow = WindowRecord(
-            id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, title: "Terminal", role: "terminal",
-            orderIndex: 1, lastSeenAt: "now")
+            id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, title: "Terminal", role: "terminal", orderIndex: 1,
+            lastSeenAt: "now")
         try store.upsert(window: firstWindow)
         try store.upsert(window: secondWindow)
 
@@ -564,6 +563,8 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(storedWindows.count, 3)
         XCTAssertEqual(storedWindows[0].name, "Browser")
         XCTAssertEqual(storedWindows[0].detail, nil)
+        XCTAssertEqual(storedWindows.first(where: { $0.id == firstWindow.id })?.roleValue, .browser)
+        XCTAssertEqual(storedWindows.first(where: { $0.id == secondWindow.id })?.roleValue, .terminal)
         XCTAssertTrue(storedWindows.contains(where: { $0.name == "Terminal" }))
         try store.deleteWindow(id: firstWindow.id)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 2)
@@ -724,8 +725,7 @@ final class StoreTests: XCTestCase {
                 status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "term", role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "term", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
 
         try store.deleteWorkspace(id: workspace.id)
 
@@ -762,8 +762,8 @@ final class StoreTests: XCTestCase {
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["api"])
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, role: "browser", orderIndex: 0,
-                lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Google Chrome", title: nil, role: "browser", orderIndex: 0, lastSeenAt: "now")
+        )
 
         try store.deleteProject(id: project.id)
 

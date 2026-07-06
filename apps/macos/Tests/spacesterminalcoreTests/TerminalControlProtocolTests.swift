@@ -45,6 +45,32 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertNil(request.scrollMods)
     }
 
+    func testTypedCommandWrapperPreservesWireShape() throws {
+        let request = TerminalControlRequest(
+            command: .resize(TerminalControlResizePayload(clientID: "client-1", columns: 100, rows: 30, ownerEpoch: 4, resizeSerial: 8)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "resize")
+        XCTAssertEqual(decoded.commandValue.name, "resize")
+        XCTAssertEqual(decoded.commandValue.requiresOwnerClientID, true)
+        XCTAssertEqual(decoded.columns, 100)
+        XCTAssertEqual(decoded.rows, 30)
+        XCTAssertEqual(decoded.ownerEpoch, 4)
+        XCTAssertEqual(decoded.resizeSerial, 8)
+    }
+
+    func testTypedCommandWrapperReportsMissingPayloadFields() throws {
+        let send = try TerminalControlCodec.decodeRequest(#"{"command":"send","clientID":"client-1"}"#.data(using: .utf8)!)
+        let attach = try TerminalControlCodec.decodeRequest(#"{"command":"attach","clientID":"legacy-extra"}"#.data(using: .utf8)!)
+        let resize = try TerminalControlCodec.decodeRequest(#"{"command":"resize","clientID":"client-1","columns":100}"#.data(using: .utf8)!)
+
+        XCTAssertEqual(send.commandValue.requiredPayloadFailureMessage, "Missing input payload.")
+        XCTAssertEqual(attach.commandValue.requiredPayloadFailureMessage, "Missing client payload.")
+        XCTAssertEqual(resize.commandValue.requiredPayloadFailureMessage, "Missing terminal size.")
+        XCTAssertEqual(attach.clientID, "legacy-extra")
+    }
+
     func testClientCanSendRequestToSessionSocket() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

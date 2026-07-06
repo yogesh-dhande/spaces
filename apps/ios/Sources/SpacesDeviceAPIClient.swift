@@ -628,21 +628,27 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
     func attach(sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode, timeout: Duration = .seconds(3)) async throws {
         try await control(
             sessionID: sessionID,
-            request: TerminalControlRequest(command: "attach", client: client, attachmentMode: mode),
+            request: TerminalControlRequest(
+                command: .attach(TerminalControlAttachPayload(client: client, attachmentMode: mode, appearance: nil))),
             timeout: timeout)
     }
 
     func detach(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
-        try await control(sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), timeout: timeout)
+        try await control(
+            sessionID: sessionID, request: TerminalControlRequest(command: .detach(TerminalControlClientPayload(clientID: clientID))),
+            timeout: timeout)
     }
 
     func heartbeat(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
-        try await control(sessionID: sessionID, request: TerminalControlRequest(command: "heartbeat", clientID: clientID), timeout: timeout)
+        try await control(
+            sessionID: sessionID, request: TerminalControlRequest(command: .heartbeat(TerminalControlClientPayload(clientID: clientID))),
+            timeout: timeout)
     }
 
     func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload? {
         let response = try await controlResponse(
-            sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), timeout: timeout)
+            sessionID: sessionID, request: TerminalControlRequest(command: .takeover(TerminalControlClientPayload(clientID: clientID))),
+            timeout: timeout)
         return response.sessionState
     }
 
@@ -657,21 +663,23 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
         try await control(
             sessionID: sessionID,
             request: TerminalControlRequest(
-                command: "send", text: text, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: appendNewline),
+                command: .send(
+                    TerminalControlSendPayload(
+                        text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: appendNewline))),
             timeout: timeout)
     }
 
     func sendKey(sessionID: String, clientID: String, key: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3)) async throws {
         try await control(
             sessionID: sessionID,
-            request: TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch),
+            request: TerminalControlRequest(command: .key(TerminalControlKeyPayload(key: key, clientID: clientID, ownerEpoch: ownerEpoch))),
             timeout: timeout)
     }
 
     func clearScreen(sessionID: String, clientID: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3)) async throws {
         try await control(
             sessionID: sessionID,
-            request: TerminalControlRequest(command: "clearScreen", clientID: clientID, ownerEpoch: ownerEpoch),
+            request: TerminalControlRequest(command: .clearScreen(TerminalControlOwnerPayload(clientID: clientID, ownerEpoch: ownerEpoch))),
             timeout: timeout)
     }
 
@@ -687,7 +695,9 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
         try await control(
             sessionID: sessionID,
             request: TerminalControlRequest(
-                command: "resize", clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: resizeSerial),
+                command: .resize(
+                    TerminalControlResizePayload(
+                        clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: resizeSerial))),
             timeout: timeout)
     }
 
@@ -703,8 +713,10 @@ struct SpacesDeviceTerminalDaemonClient: Sendable {
         try await control(
             sessionID: sessionID,
             request: TerminalControlRequest(
-                command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: horizontal, scrollVertical: vertical,
-                scrollMods: scrollMods),
+                command: .scroll(
+                    TerminalControlScrollPayload(
+                        clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: horizontal, scrollVertical: vertical,
+                        scrollMods: scrollMods))),
             timeout: timeout)
     }
 

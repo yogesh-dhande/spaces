@@ -196,8 +196,7 @@ extension WorkspaceOrchestrator {
         let existingWindow = existingWindows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
         let restoredWindow = WindowRecord(
             id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: process.templateName,
-            detail: process.command, targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
-            role: "terminal",
+            detail: process.command, targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
             orderIndex: existingWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
             lastSeenAt: now)
         try store.upsert(window: restoredWindow)
@@ -359,7 +358,7 @@ extension WorkspaceOrchestrator {
             logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
         try store.upsert(runningProcess: updatedProcess)
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
-            $0.role == "terminal" && matchesTrackedTerminalWindow($0, process: process)
+            $0.roleValue == .terminal && matchesTrackedTerminalWindow($0, process: process)
         }) {
             try store.upsert(
                 window: WindowRecord(
@@ -560,7 +559,7 @@ extension WorkspaceOrchestrator {
             terminateProcessGroup(pid: pid)
         }
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
-            if terminalWindow.role == "terminal", isManagedTerminalApp(terminalWindow.app),
+            if terminalWindow.roleValue == .terminal, isManagedTerminalApp(terminalWindow.app),
                 let sessionID = normalizedTerminalSessionID(terminalWindow.terminalNativeID ?? terminalWindow.terminalTrackingID)
             {
                 builtInTerminalWindowCloser(sessionID)
@@ -609,8 +608,8 @@ extension WorkspaceOrchestrator {
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: name, detail: template.command,
-                targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
-                orderIndex: nextOrder, lastSeenAt: now))
+                targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal", orderIndex: nextOrder,
+                lastSeenAt: now))
         launchSucceeded = true
         return record
     }

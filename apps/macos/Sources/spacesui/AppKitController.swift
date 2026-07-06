@@ -1251,8 +1251,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// after the pane opens. The pane's own attach otherwise stays a viewer when another
     /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
     /// perf metric the E2E harness parses.
-    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool
-    {
+    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1334,15 +1333,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 remoteClientStore.set(client.id)
                 let response = try Self.sendDeviceTerminalControl(
                     sessionID: sessionID,
-                    request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode, appearance: themeAppearance),
+                    request: TerminalControlRequest(
+                        command: .attach(TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: themeAppearance))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
             let detachClientAction: @Sendable (String) throws -> Void = { clientID in
                 if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
                 let response = try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender,
-                    refreshStateAfterControl: true, applyState: applyControlState)
+                    sessionID: sessionID, request: TerminalControlRequest(command: .detach(TerminalControlClientPayload(clientID: clientID))),
+                    requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
             let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse = { text, appendNewline in
@@ -1351,7 +1351,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 return try Self.sendDeviceTerminalControl(
                     sessionID: sessionID,
-                    request: TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline),
+                    request: TerminalControlRequest(
+                        command: .send(
+                            TerminalControlSendPayload(text: text, bytes: nil, clientID: clientID, ownerEpoch: nil, appendNewline: appendNewline))),
                     requestSender: requestSender, applyState: applyControlState)
             }
             let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse = { key in
@@ -1359,8 +1361,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     return TerminalControlResponse(ok: false, message: "Terminal pane is not attached.")
                 }
                 return try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID), requestSender: requestSender,
-                    applyState: applyControlState)
+                    sessionID: sessionID,
+                    request: TerminalControlRequest(command: .key(TerminalControlKeyPayload(key: key, clientID: clientID, ownerEpoch: nil))),
+                    requestSender: requestSender, applyState: applyControlState)
             }
             let pasteImageAction: @MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse = { image in
                 guard let clientID = remoteClientStore.current() else {
@@ -1371,8 +1374,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                 try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
-                    refreshStateAfterControl: true, applyState: applyControlState)
+                    sessionID: sessionID, request: TerminalControlRequest(command: .takeover(TerminalControlClientPayload(clientID: clientID))),
+                    requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
             }
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
@@ -1385,8 +1388,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
                 })
             return TerminalPaneContentController(
-                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID),
-                workspaceID: request.workspaceID, sessionID: sessionID, pane: pane)
+                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
+                sessionID: sessionID, pane: pane)
         } catch {
             showError(error)
             return nil
@@ -1434,8 +1437,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard request.bytes == nil else {
             throw WorkspaceError.invalidArgument(message: "Raw byte terminal control is not supported for active remote devices.")
         }
-        guard let action = SpacesDeviceTerminalControlAction(rawValue: request.command) else {
-            throw WorkspaceError.invalidArgument(message: "Unsupported remote terminal command '\(request.command)'.")
+        let command = request.commandValue
+        guard let action = SpacesDeviceTerminalControlAction(rawValue: command.name) else {
+            throw WorkspaceError.invalidArgument(message: "Unsupported remote terminal command '\(command.name)'.")
         }
         return SpacesDeviceTerminalControlRequest(
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
@@ -2467,6 +2471,80 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let agentWindow: AgentWindowRecord?
     }
 
+    struct WorkspaceRuntimeTargetIndex: Sendable {
+        let orderedTargets: [WorkspaceRunShortcutTarget]
+        let targetsByProcessID: [String: WorkspaceRunShortcutTarget]
+        let targetsByTerminalSessionID: [String: WorkspaceRunShortcutTarget]
+        let targetsByAgentID: [String: WorkspaceRunShortcutTarget]
+        let targetsByURL: [String: WorkspaceRunShortcutTarget]
+        let shortcutIndices: WorkspaceDetailShortcutIndices
+
+        init(
+            browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
+            configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+        ) {
+            let orderedTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+                configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+            self.orderedTargets = orderedTargets
+
+            var targetsByProcessID: [String: WorkspaceRunShortcutTarget] = [:]
+            var targetsByTerminalSessionID: [String: WorkspaceRunShortcutTarget] = [:]
+            var targetsByAgentID: [String: WorkspaceRunShortcutTarget] = [:]
+            var targetsByURL: [String: WorkspaceRunShortcutTarget] = [:]
+            var browserSessionsByURL: [String: Int] = [:]
+            var processesByName: [String: Int] = [:]
+            var codingAgentsByName: [String: Int] = [:]
+            var codingAgentsByIdentity: [String: Int] = [:]
+
+            for (offset, target) in orderedTargets.enumerated() {
+                let index = offset + 1
+                switch target.kind {
+                case .browser:
+                    if let targetURL = target.targetURL, !targetURL.isEmpty {
+                        targetsByURL[targetURL, default: target] = target
+                        if index <= 10 { browserSessionsByURL[targetURL] = index }
+                    }
+                case .process:
+                    if let processID = target.processID, let process = processesByID[processID] {
+                        targetsByProcessID[processID, default: target] = target
+                        if let sessionID = process.terminalTrackingID, !sessionID.isEmpty {
+                            targetsByTerminalSessionID[sessionID, default: target] = target
+                        }
+                        if index <= 10 { processesByName[process.templateName] = index }
+                    }
+                case .missingConfiguredProcess:
+                    if let processKey = target.processKey, !processKey.isEmpty, index <= 10 { processesByName[processKey] = index }
+                case .agentLauncher:
+                    if let launcherName = target.launcherName, !launcherName.isEmpty, index <= 10 {
+                        codingAgentsByName[launcherName] = index
+                        codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: launcherName)] = index
+                    }
+                case .agent:
+                    if let agentWindow = target.agentWindow {
+                        targetsByAgentID[agentWindow.id, default: target] = target
+                        if let sessionID = agentWindow.terminalTrackingID, !sessionID.isEmpty {
+                            targetsByTerminalSessionID[sessionID, default: target] = target
+                        }
+                        if index <= 10 {
+                            if let label = agentWindow.label, !label.isEmpty { codingAgentsByName[label] = index }
+                            codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: agentWindow.id)] = index
+                        }
+                    }
+                case .window: break
+                }
+            }
+
+            self.targetsByProcessID = targetsByProcessID
+            self.targetsByTerminalSessionID = targetsByTerminalSessionID
+            self.targetsByAgentID = targetsByAgentID
+            self.targetsByURL = targetsByURL
+            shortcutIndices = WorkspaceDetailShortcutIndices(
+                browserSessionsByURL: browserSessionsByURL, processesByName: processesByName, codingAgentsByName: codingAgentsByName,
+                codingAgentsByIdentity: codingAgentsByIdentity)
+        }
+    }
+
     struct DeviceTerminalOpenRequest: Sendable, Equatable {
         /// The workspace whose panel hosts this pane. Every terminal session is
         /// workspace-owned, so this always resolves.
@@ -2708,7 +2786,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func preferredTerminalWindowsByTrackingKey(_ windows: [WindowRecord]) -> [String: WindowRecord] {
         windows.reduce(into: [:]) { result, window in
-            guard window.role == "terminal", let trackingKey = window.terminalTrackingKey else { return }
+            guard window.roleValue == .terminal, let trackingKey = window.terminalTrackingKey else { return }
             // Duplicate keys can exist transiently while Ghostty rows are being reconciled.
             // Prefer the earliest ordered tracked window instead of crashing on duplicates.
             let existingOrder = result[trackingKey]?.orderIndex ?? Int.max
@@ -2720,7 +2798,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         configuredProcesses: [ProcessTemplate], windows: [WindowRecord], processes: [RunningProcessRecord], agentWindows: [AgentWindowRecord]
     ) -> [WorkspaceRunProcessEntry] {
         let terminalOrderByTargetID: [String: Int] = windows.reduce(into: [:]) { result, window in
-            guard window.role == "terminal", let targetID = window.terminalTrackingKey else { return }
+            guard window.roleValue == .terminal, let targetID = window.terminalTrackingKey else { return }
             let existingOrder = result[targetID] ?? Int.max
             result[targetID] = min(existingOrder, window.orderIndex)
         }
@@ -2783,17 +2861,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     processCommand: process.command))
         }
 
-        for (windowIdx, window) in windows.enumerated() where window.role != "browser" {
+        for (windowIdx, window) in windows.enumerated() where window.roleValue != .browser {
             let windowProcesses: [RunningProcessRecord]
-            if window.role == "terminal" {
+            if window.roleValue == .terminal {
                 windowProcesses = window.terminalTrackingKey.flatMap { processesByTerminalID[$0] } ?? []
             } else {
                 windowProcesses = []
             }
             let isAgentClaimedWindow = window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
             let nonAgentWindowProcesses = windowProcesses.filter { process in !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) }
-            if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
-            if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
+            if isAgentClaimedWindow && (window.roleValue != .terminal || windowProcesses.isEmpty) { continue }
+            if window.roleValue == .terminal, !nonAgentWindowProcesses.isEmpty {
                 for process in nonAgentWindowProcesses where !matchedProcessIDs.contains(process.id) {
                     matchedProcessIDs.insert(process.id)
                     entries.append(
@@ -2892,9 +2970,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let processEntries = orderedWorkspaceRunProcessEntries(
             configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
-        return orderedWorkspaceRunShortcutTargets(
+        return workspaceRuntimeTargetIndex(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows)
+            configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows
+        ).orderedTargets
     }
 
     /// Maps a single focusable target to a device-agnostic focus resolution.
@@ -2947,10 +3026,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let session = overview?.sessions.first { $0.id == sessionID }
         if let session {
             return DeviceTerminalOpenRequest(
-                workspaceID: session.workspaceID, sessionID: session.id, title: session.title,
-                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell,
-                command: session.command, initialState: session.state, servicePID: session.servicePID, childPID: session.childPID,
-                createdAt: session.createdAt, updatedAt: session.updatedAt)
+                workspaceID: session.workspaceID, sessionID: session.id, title: session.title, workingDirectory: session.workingDirectory,
+                kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell, command: session.command, initialState: session.state,
+                servicePID: session.servicePID, childPID: session.childPID, createdAt: session.createdAt, updatedAt: session.updatedAt)
         }
         guard let workspace = overview?.workspaces.first(where: { $0.id == fallbackWorkspaceID }),
             let row = workspace.terminalRows.first(where: { $0.sessionID == sessionID })
@@ -2971,40 +3049,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
         configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
     ) -> WorkspaceDetailShortcutIndices {
-        let targets = orderedWorkspaceRunShortcutTargets(
+        workspaceRuntimeTargetIndex(
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows
+        ).shortcutIndices
+    }
+
+    nonisolated static func workspaceRuntimeTargetIndex(
+        browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
+        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+    ) -> WorkspaceRuntimeTargetIndex {
+        WorkspaceRuntimeTargetIndex(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
             configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-
-        var browserSessionsByURL: [String: Int] = [:]
-        var processesByName: [String: Int] = [:]
-        var codingAgentsByName: [String: Int] = [:]
-        var codingAgentsByIdentity: [String: Int] = [:]
-
-        for (offset, target) in targets.enumerated() {
-            let index = offset + 1
-            guard index <= 10 else { break }
-            switch target.kind {
-            case .browser: if let targetURL = target.targetURL, !targetURL.isEmpty { browserSessionsByURL[targetURL] = index }
-            case .process:
-                if let processID = target.processID, let process = processesByID[processID] { processesByName[process.templateName] = index }
-            case .missingConfiguredProcess: if let processKey = target.processKey, !processKey.isEmpty { processesByName[processKey] = index }
-            case .agentLauncher:
-                if let launcherName = target.launcherName, !launcherName.isEmpty {
-                    codingAgentsByName[launcherName] = index
-                    codingAgentsByIdentity[codingAgentShortcutIdentity(launcherName: launcherName)] = index
-                }
-            case .agent:
-                if let agentWindow = target.agentWindow {
-                    if let label = agentWindow.label, !label.isEmpty { codingAgentsByName[label] = index }
-                    codingAgentsByIdentity[codingAgentShortcutIdentity(agentWindowID: agentWindow.id)] = index
-                }
-            case .window: break
-            }
-        }
-
-        return WorkspaceDetailShortcutIndices(
-            browserSessionsByURL: browserSessionsByURL, processesByName: processesByName, codingAgentsByName: codingAgentsByName,
-            codingAgentsByIdentity: codingAgentsByIdentity)
     }
 
     nonisolated static func workspaceProcessStatusByName(_ processes: [RunningProcessRecord]) -> [String: RowPrimitives.StatusKind] {
@@ -5527,7 +5584,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         agentWindows.reduce(into: [:]) { result, agentWindow in
             guard
                 let window = trackedWindows.first(where: {
-                    guard $0.role == "terminal" else { return false }
+                    guard $0.roleValue == .terminal else { return false }
                     if let trackingID = agentWindow.terminalTrackingID, !trackingID.isEmpty, $0.terminalTrackingID == trackingID { return true }
                     if let nativeID = agentWindow.terminalNativeID, !nativeID.isEmpty, $0.terminalNativeID == nativeID { return true }
                     return false
@@ -7839,12 +7896,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let focusedPaneContent {
                 self.panelCoordinator.noteContentFocused(focusedPaneContent)
                 let disposition = Self.shortcutMonitorDisposition(
-                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true,
-                    shortcutLeaderModifiers: self.shortcutLeaderModifiers)
+                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true, shortcutLeaderModifiers: self.shortcutLeaderModifiers)
                 focusedTerminalDisposition = disposition
-                if disposition == .passEventToTerminal {
-                    return focusedPaneContent.handleKeyEvent(event) ? nil : event
-                }
+                if disposition == .passEventToTerminal { return focusedPaneContent.handleKeyEvent(event) ? nil : event }
             }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
@@ -7952,8 +8006,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// all shortcuts run as before.
     nonisolated static func shortcutMonitorDisposition(
         eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool, shortcutLeaderModifiers: Set<HotkeyModifier> = []
-    ) -> ShortcutMonitorDisposition
-    {
+    ) -> ShortcutMonitorDisposition {
         guard firstResponderIsTerminalPane else { return .runAppShortcuts }
         let modifiers = eventShortcutModifiers(from: eventModifiers)
         if modifiers.contains(.cmd) { return .runAppShortcuts }
@@ -8097,9 +8150,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func shortcutCaptureKey(for keyCode: UInt16) -> String? { AppKitController.shortcutCaptureKeyMap[keyCode] }
 
-    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
-        Self.eventShortcutModifiers(from: flags)
-    }
+    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> { Self.eventShortcutModifiers(from: flags) }
 
     nonisolated static func eventShortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
         let filtered = flags.intersection([.command, .shift, .option, .control])
@@ -9738,7 +9789,7 @@ extension AppKitController {
                         let window = windows[windowListIndex]
                         let label: String
                         let detail: String?
-                        if window.role == "terminal" {
+                        if window.roleValue == .terminal {
                             let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
                             label = fallback.label
                             detail = fallback.detail

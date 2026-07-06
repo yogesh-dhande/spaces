@@ -288,7 +288,8 @@ struct TerminalSendCommand: ParsableCommand {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
         }
         let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "send", text: text, appendNewline: newline), socketPath: paths.controlSocketPath)
+            request: TerminalControlRequest(command: .send(.init(text: text, bytes: nil, clientID: nil, ownerEpoch: nil, appendNewline: newline))),
+            socketPath: paths.controlSocketPath)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         print("Sent input to terminal session \(sessionID)")
     }
@@ -305,7 +306,8 @@ struct TerminalKeyCommand: ParsableCommand {
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
         }
-        let response = try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key), socketPath: paths.controlSocketPath)
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: .key(.init(key: key, clientID: nil, ownerEpoch: nil))), socketPath: paths.controlSocketPath)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         print("Sent key to terminal session \(sessionID)")
     }
@@ -369,7 +371,7 @@ struct TerminalTakeoverCommand: ParsableCommand {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
         }
         let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
+            request: TerminalControlRequest(command: .takeover(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
     }
@@ -396,7 +398,7 @@ struct TerminalProxyCommand: ParsableCommand {
             case "tail":
                 if let clientID = request.clientID {
                     _ = try? TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "heartbeat", clientID: clientID), socketPath: paths.controlSocketPath)
+                        request: TerminalControlRequest(command: .heartbeat(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
                 }
                 let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: max(request.lineCount ?? 40, 1))
                 return TerminalControlResponse(ok: true, message: tailed)

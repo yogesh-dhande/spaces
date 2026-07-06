@@ -479,20 +479,21 @@
         }
 
         public func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let command = request.commandValue
             trace(
-                "control_request command=\(request.command) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
+                "control_request command=\(command.name) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
             )
-            return switch request.command {
-            case "attach": controlResponseForAttachRequest(request)
-            case "detach": controlResponseForDetachRequest(request)
-            case "heartbeat": controlResponseForHeartbeatRequest(request)
-            case "send": controlResponseForSendRequest(request)
-            case "key": controlResponseForKeyRequest(request)
-            case "clearScreen": controlResponseForClearScreenRequest(request)
-            case "takeover": controlResponseForTakeoverRequest(request)
-            case "resize": controlResponseForResizeRequest(request)
-            case "scroll": controlResponseForScrollRequest(request)
-            default: TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+            return switch command {
+            case .attach: controlResponseForAttachRequest(request)
+            case .detach: controlResponseForDetachRequest(request)
+            case .heartbeat: controlResponseForHeartbeatRequest(request)
+            case .send: controlResponseForSendRequest(request)
+            case .key: controlResponseForKeyRequest(request)
+            case .clearScreen: controlResponseForClearScreenRequest(request)
+            case .takeover: controlResponseForTakeoverRequest(request)
+            case .resize: controlResponseForResizeRequest(request)
+            case .scroll: controlResponseForScrollRequest(request)
+            case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
             }
         }
 

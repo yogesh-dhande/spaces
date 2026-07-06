@@ -179,8 +179,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         detachClientSynchronouslyOnClose: Bool = true, defersInitialOwnerClientAttach: Bool = false,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
         ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
-        onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil, onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
@@ -201,19 +200,21 @@ private final class NotificationObserverBag: @unchecked Sendable {
         self.sendInputAction =
             sendInputAction ?? { [socketPath = paths.controlSocketPath, client] text, appendNewline in
                 try TerminalControlClient.send(
-                    request: TerminalControlRequest(command: "send", text: text, clientID: client.id, appendNewline: appendNewline),
+                    request: TerminalControlRequest(
+                        command: .send(.init(text: text, bytes: nil, clientID: client.id, ownerEpoch: nil, appendNewline: appendNewline))),
                     socketPath: socketPath)
             }
         self.sendKeyAction =
             sendKeyAction ?? { [socketPath = paths.controlSocketPath, client] key in
-                try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key, clientID: client.id), socketPath: socketPath)
+                try TerminalControlClient.send(
+                    request: TerminalControlRequest(command: .key(.init(key: key, clientID: client.id, ownerEpoch: nil))), socketPath: socketPath)
             }
         self.pasteImageAction = pasteImageAction
         self.pasteboardImageReadAction = pasteboardImageReadAction ?? { TerminalPasteboardImageReader.readImage() }
         self.takeoverAction =
             takeoverAction ?? { clientID in
                 try TerminalControlClient.send(
-                    request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
+                    request: TerminalControlRequest(command: .takeover(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
             }
         self.attachClientAction = attachClientAction
         self.detachClientAction = detachClientAction

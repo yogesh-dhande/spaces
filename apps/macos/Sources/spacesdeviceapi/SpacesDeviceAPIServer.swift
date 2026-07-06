@@ -58,7 +58,6 @@ private func deviceAPIStreamRelayAttributes(for data: Data) -> [String: String] 
 }
 
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
-    private static let ownerGatedTerminalCommands: Set<SpacesDeviceTerminalControlAction> = [.send, .key, .clearScreen, .resize, .scroll]
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
     static let terminalPasteImageMaxBytes = 10 * 1024 * 1024
@@ -198,15 +197,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private final class StreamSendSequencer: @unchecked Sendable {
             typealias Operation = @Sendable (@escaping @Sendable (Error?) -> Void) -> Void
 
+            private let queueKey: DispatchSpecificKey<Void>
             private var pendingOperations: [Operation] = []
             private var isRunning = false
 
+            init(queueKey: DispatchSpecificKey<Void>) { self.queueKey = queueKey }
+
             func enqueue(_ operation: @escaping Operation) {
+                assertOnOwningQueue()
                 pendingOperations.append(operation)
                 startNextIfNeeded()
             }
 
             private func startNextIfNeeded() {
+                assertOnOwningQueue()
                 guard !isRunning, !pendingOperations.isEmpty else { return }
                 isRunning = true
                 let operation = pendingOperations.removeFirst()
@@ -214,8 +218,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             private func finishCurrent() {
+                assertOnOwningQueue()
                 isRunning = false
                 startNextIfNeeded()
+            }
+
+            private func assertOnOwningQueue() {
+                precondition(DispatchQueue.getSpecific(key: queueKey) != nil, "StreamSendSequencer must be used on its owning queue.")
             }
         }
 
@@ -1100,9 +1109,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         trace(
             "terminal_control_request source_session=\(sessionID) target_session=\(sessionID) client=\(clientID ?? payload.client?.id ?? "-") command=\(payload.action.rawValue)"
         )
-        if Self.ownerGatedTerminalCommands.contains(payload.action), clientID == nil {
-            return SpacesDeviceAPIResponse(ok: false, message: "Missing device client ID.")
-        }
+        let terminalCommand = Self.terminalControlCommand(from: payload, clientID: clientID)
+        if terminalCommand.requiresOwnerClientID, clientID == nil { return SpacesDeviceAPIResponse(ok: false, message: "Missing device client ID.") }
 
         let startedAt = Date()
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1116,11 +1124,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let attributes: [String: String] = [
             "action": payload.action.rawValue, "client_id": clientID ?? "nil", "owner_epoch": payload.ownerEpoch.map(String.init) ?? "nil",
         ]
-        let terminalRequest = TerminalControlRequest(
-            command: payload.action.rawValue, text: payload.text, key: payload.key, clientID: clientID, client: payload.client,
-            attachmentMode: payload.attachmentMode, columns: payload.columns, rows: payload.rows, ownerEpoch: payload.ownerEpoch,
-            resizeSerial: payload.resizeSerial, scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical,
-            scrollMods: payload.scrollMods, appendNewline: payload.appendNewline, appearance: payload.appearance)
+        let terminalRequest = TerminalControlRequest(command: terminalCommand)
         let dispatchStartedAt = Date()
         logDeviceAPIPerformance(sessionID: sessionID, name: "terminal_control_dispatch_begin", attributes: attributes)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
@@ -1132,12 +1136,38 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         TerminalPerformance.logMetric(
             "device_api_\(payload.action.rawValue)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
-        let sessionState = response.ok && payload.action == .takeover ? try? loadCurrentState(sessionID: sessionID) : nil
+        let sessionState = response.ok && terminalCommand.includesSessionStateOnSuccess ? try? loadCurrentState(sessionID: sessionID) : nil
         responseAttributes["include_session_state"] = sessionState == nil ? "0" : "1"
         logDeviceAPIPerformance(
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: responseAttributes)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, result: sessionState.map(SpacesDeviceAPIResult.terminalState))
+    }
+
+    private static func terminalControlCommand(from payload: SpacesDeviceTerminalControlRequest, clientID: String?) -> TerminalControlCommand {
+        switch payload.action {
+        case .attach:
+            .attach(TerminalControlAttachPayload(client: payload.client, attachmentMode: payload.attachmentMode, appearance: payload.appearance))
+        case .detach: .detach(TerminalControlClientPayload(clientID: clientID))
+        case .heartbeat: .heartbeat(TerminalControlClientPayload(clientID: clientID))
+        case .takeover: .takeover(TerminalControlClientPayload(clientID: clientID))
+        case .send:
+            .send(
+                TerminalControlSendPayload(
+                    text: payload.text, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: payload.appendNewline))
+        case .key: .key(TerminalControlKeyPayload(key: payload.key, clientID: clientID, ownerEpoch: payload.ownerEpoch))
+        case .clearScreen: .clearScreen(TerminalControlOwnerPayload(clientID: clientID, ownerEpoch: payload.ownerEpoch))
+        case .resize:
+            .resize(
+                TerminalControlResizePayload(
+                    clientID: clientID, columns: payload.columns, rows: payload.rows, ownerEpoch: payload.ownerEpoch,
+                    resizeSerial: payload.resizeSerial))
+        case .scroll:
+            .scroll(
+                TerminalControlScrollPayload(
+                    clientID: clientID, ownerEpoch: payload.ownerEpoch, scrollHorizontal: payload.scrollHorizontal,
+                    scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods))
+        }
     }
 
     private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {
@@ -1170,7 +1200,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
         let remotePath = "/tmp/spaces-paste-\(UUID().uuidString).\(fileExtension)"
         try Self.writeUserOnlyPasteImage(payload.imageData, toPath: remotePath)
-        let terminalRequest = TerminalControlRequest(command: "send", text: remotePath, clientID: clientID, ownerEpoch: payload.ownerEpoch)
+        let terminalRequest = TerminalControlRequest(
+            command: .send(
+                TerminalControlSendPayload(text: remotePath, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: false)))
         let response: TerminalControlResponse
         do { response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath) } catch {
             try? FileManager.default.removeItem(atPath: remotePath)
@@ -2026,7 +2058,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 timer.schedule(deadline: .now() + .seconds(20), repeating: .seconds(20))
                 timer.setEventHandler { [controlSocketPath = subscription.controlSocketPath] in
                     _ = try? TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "heartbeat", clientID: clientID), socketPath: controlSocketPath)
+                        request: TerminalControlRequest(command: .heartbeat(TerminalControlClientPayload(clientID: clientID))),
+                        socketPath: controlSocketPath)
                 }
                 heartbeatTimer = timer
                 timer.resume()
@@ -2127,7 +2160,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 timer.schedule(deadline: .now() + .seconds(20), repeating: .seconds(20))
                 timer.setEventHandler {
                     _ = try? TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "heartbeat", clientID: clientID), socketPath: paths.controlSocketPath)
+                        request: TerminalControlRequest(command: .heartbeat(TerminalControlClientPayload(clientID: clientID))),
+                        socketPath: paths.controlSocketPath)
                 }
                 heartbeatTimer = timer
             } else {
@@ -2136,7 +2170,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             streamRelays[ObjectIdentifier(connection)] = StreamRelay(
                 sessionID: sessionID, installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
-                heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer())
+                heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey))
 
             relaySource.resume()
             heartbeatTimer?.resume()
@@ -2162,7 +2196,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             relaySource.setCancelHandler { close(relaySocketFD) }
             streamRelays[ObjectIdentifier(connection)] = StreamRelay(
                 sessionID: "device-overview", installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue,
-                relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer())
+                relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey))
             relaySource.resume()
         }
 

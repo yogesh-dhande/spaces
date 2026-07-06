@@ -6,7 +6,7 @@ import systembridge
 extension SQLiteStore {
     public func upsert(window: WindowRecord) throws {
         try withImmediateTransaction {
-            let targetType = window.role == "browser" ? "browser" : "terminal"
+            let targetType = window.roleValue == .browser ? "browser" : "terminal"
             let hasExistingTargetID =
                 (try queryRow(sql: "SELECT id FROM runtime_targets WHERE id = ? AND workspace_id = ?", bindings: [window.id, window.workspaceID]))
                 != nil
@@ -126,7 +126,7 @@ extension SQLiteStore {
         let role = row[7]
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], name: row[3].isEmpty ? nil : row[3], detail: row[4].isEmpty ? nil : row[4],
-            targetURL: targetURL, terminalTrackingID: trackingID,
-            terminalNativeID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0, lastSeenAt: row[9])
+            targetURL: targetURL, terminalTrackingID: trackingID, terminalNativeID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0,
+            lastSeenAt: row[9])
     }
 }

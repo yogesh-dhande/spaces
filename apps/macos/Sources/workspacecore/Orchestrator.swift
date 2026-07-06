@@ -969,7 +969,7 @@ public final class WorkspaceOrchestrator {
         // Browser windows are client-owned (the app tracks each session's Chrome window) and
         // are never closed by the daemon on stop; only Spaces-managed terminal sessions are
         // terminated by session id here.
-        for window in windows where window.role == "terminal" && isManagedTerminalApp(window.app) {
+        for window in windows where window.roleValue == .terminal && isManagedTerminalApp(window.app) {
             guard let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) else { continue }
             if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
                 terminateBuiltInTerminalSession(sessionID)
@@ -1081,7 +1081,7 @@ public final class WorkspaceOrchestrator {
         let missingConfiguredProcessCount = missingRuntimeRecordCount(expectedKeys: expectedProcessKeys, actualKeys: trackedProcessKeys)
 
         let expectedBrowserTargets = Set(try resolvedWorkspaceBrowserSessions(workspaceID: workspaceID).compactMap(\.url).filter { !$0.isEmpty })
-        let trackedBrowserTargets = Set(trackedWindows.filter { $0.role == "browser" }.compactMap(\.targetURL).filter { !$0.isEmpty })
+        let trackedBrowserTargets = Set(trackedWindows.filter { $0.roleValue == .browser }.compactMap(\.targetURL).filter { !$0.isEmpty })
         let missingConfiguredBrowserSessionCount = expectedBrowserTargets.subtracting(trackedBrowserTargets).count
 
         let expectsManagedRuntime = !expectedProcessKeys.isEmpty
@@ -1448,16 +1448,16 @@ public final class WorkspaceOrchestrator {
 
         var targets: [WorkspaceNavigationTarget] = []
 
-        for window in windows where window.role == "browser" {
+        for window in windows where window.roleValue == .browser {
             let isAgentClaimedWindow = terminalTargetID(window: window).map(agentTerminalIDs.contains) ?? false
             guard !isAgentClaimedWindow else { continue }
             targets.append(.browser(window))
         }
 
-        for window in windows where window.role != "browser" {
+        for window in windows where window.roleValue != .browser {
             let windowTerminalID = terminalTargetID(window: window)
             let windowProcesses: [RunningProcessRecord]
-            if window.role == "terminal", let windowTerminalID, let matchedByTerminalID = processesByTerminalID[windowTerminalID],
+            if window.roleValue == .terminal, let windowTerminalID, let matchedByTerminalID = processesByTerminalID[windowTerminalID],
                 !matchedByTerminalID.isEmpty
             {
                 windowProcesses = matchedByTerminalID
@@ -1469,7 +1469,7 @@ public final class WorkspaceOrchestrator {
                 guard let terminalID = terminalTargetID(process: process) else { return true }
                 return !agentTerminalIDs.contains(terminalID)
             }
-            if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
+            if window.roleValue == .terminal, !nonAgentWindowProcesses.isEmpty {
                 for process in nonAgentWindowProcesses {
                     matchedProcessIDs.insert(process.id)
                     targets.append(.process(process))
@@ -1899,9 +1899,9 @@ public final class WorkspaceOrchestrator {
         let agentWindows = try store.agentWindows(workspaceID: workspaceID)
         var prunedTerminalTrackingKeys = Set<String>()
         var pruned = 0
-        for window in windows where window.role != "browser" {
+        for window in windows where window.roleValue != .browser {
             if managedTrackedTerminalWindowIsStillLive(window: window) { continue }
-            if window.role == "terminal", let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
+            if window.roleValue == .terminal, let trackingKey = window.terminalTrackingKey { prunedTerminalTrackingKeys.insert(trackingKey) }
             try store.deleteWindow(id: window.id)
             pruned += 1
         }
@@ -1911,8 +1911,8 @@ public final class WorkspaceOrchestrator {
     }
 
     private func windowTrackingKey(_ window: WindowRecord) -> String {
-        if window.role == "browser" { return "browser:\(window.targetURL ?? "")" }
-        if window.role == "terminal" {
+        if window.roleValue == .browser { return "browser:\(window.targetURL ?? "")" }
+        if window.roleValue == .terminal {
             let app = window.app.lowercased()
             if let terminalNativeID = window.terminalNativeID, !terminalNativeID.isEmpty { return "terminal:\(app):native:\(terminalNativeID)" }
             if let terminalTrackingID = window.terminalTrackingID, !terminalTrackingID.isEmpty {
