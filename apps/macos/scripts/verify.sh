@@ -5,6 +5,26 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 repo_root="$(cd "$root/../.." && pwd)"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 
+# A healthy full verify (build + SwiftPM coverage + iOS tests) completes well under this
+# ceiling; a run that exceeds it is hung — typically a flaky test that deadlocks under the
+# parallel coverage run — and must fail fast instead of blocking a commit indefinitely.
+# Override with SPACES_VERIFY_TIMEOUT_SECONDS (0 disables, e.g. when attaching a debugger).
+# The watchdog is armed at the end of this script; see run_verify_steps below.
+verify_timeout_seconds="${SPACES_VERIFY_TIMEOUT_SECONDS:-900}"
+
+# Recursively SIGKILL a process and all of its descendants. macOS has no `timeout(1)` and
+# ships bash 3.2 (no $BASHPID), so the watchdog runs the real work as a separate child and
+# kills that child's tree — the watchdog is a sibling of that tree, so no self-exclusion is
+# needed. Depth-first so children die before their parent can spawn more.
+kill_process_tree() {
+  local pid="$1"
+  local child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_process_tree "$child"
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+
 ios_test_destination() {
   if [ -n "${SPACES_IOS_TEST_DESTINATION:-}" ]; then
     printf '%s\n' "$SPACES_IOS_TEST_DESTINATION"
@@ -81,14 +101,47 @@ stop_current_profile_runtime_for_tests() {
   )
 }
 
-cd "$root"
+run_verify_steps() {
+  cd "$root"
 
-"$root/Tests/setup_ghostty_xcode_mismatch_autobuild.sh"
-"$root/Tests/setup_ghostty_cache_restore.sh"
-"$root/scripts/lint.sh"
-"$root/scripts/swiftpm.sh" build
-spaces_profile_eval_shell_env "$root/.build/debug/spaces"
-stop_current_profile_runtime_for_tests
-unset SPACES_DEVICE_API_PORT
-"$root/scripts/coverage.sh"
-run_ios_tests
+  "$root/Tests/setup_ghostty_xcode_mismatch_autobuild.sh"
+  "$root/Tests/setup_ghostty_cache_restore.sh"
+  "$root/scripts/lint.sh"
+  "$root/scripts/swiftpm.sh" build
+  spaces_profile_eval_shell_env "$root/.build/debug/spaces"
+  stop_current_profile_runtime_for_tests
+  unset SPACES_DEVICE_API_PORT
+  "$root/scripts/coverage.sh"
+  run_ios_tests
+}
+
+if [ "$verify_timeout_seconds" -le 0 ]; then
+  run_verify_steps
+  exit 0
+fi
+
+# Run the real work as a child so the watchdog — a sibling of that child, not part of its
+# process tree — can force-kill the whole tree (swift-test/xcodebuild workers included) on
+# timeout without needing to identify or exclude itself. A SIGKILLed child makes `wait`
+# return non-zero, so the run exits with a failing status that aborts the commit.
+run_verify_steps &
+verify_work_pid=$!
+
+(
+  sleep "$verify_timeout_seconds"
+  echo "verify.sh: exceeded ${verify_timeout_seconds}s ceiling; killing the run (likely a hung/flaky test)." >&2
+  kill_process_tree "$verify_work_pid"
+) &
+verify_watchdog_pid=$!
+
+# On interrupt, tear down both children so no orphaned build/test processes linger.
+trap 'kill_process_tree "$verify_work_pid" 2>/dev/null; kill "$verify_watchdog_pid" 2>/dev/null || true' INT TERM
+
+verify_status=0
+wait "$verify_work_pid" || verify_status=$?
+
+# Work finished (cleanly or via the watchdog's kill): stop the now-idle watchdog.
+kill "$verify_watchdog_pid" 2>/dev/null || true
+wait "$verify_watchdog_pid" 2>/dev/null || true
+
+exit "$verify_status"
