@@ -665,12 +665,15 @@ extension OrchestratorTests {
                 terminalTrackingID: "session-web", terminalNativeID: "session-web", pid: 2222, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: "now", exitedAt: nil))
 
+        var returnedProcess: RunningProcessRecord?
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+            returnedProcess = try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
         }
 
         XCTAssertEqual(capture.modes, [.owner])
         XCTAssertEqual(capture.sessionIDs.count, 1)
+        XCTAssertEqual(returnedProcess?.terminalTrackingID, capture.sessionIDs.first)
+        XCTAssertEqual(returnedProcess?.terminalNativeID, capture.sessionIDs.first)
 
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         XCTAssertEqual(Set(processes.map(\.templateName)), ["api", "web"])
@@ -715,12 +718,15 @@ extension OrchestratorTests {
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "npm run api")])
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
+        var returnedProcess: RunningProcessRecord?
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
-            try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
+            returnedProcess = try orchestrator.recoverMissingConfiguredProcess(workspaceID: workspace.id, processKey: "api")
         }
 
         XCTAssertEqual(capture.modes, [.owner])
         XCTAssertEqual(capture.sessionIDs.count, 1)
+        XCTAssertEqual(returnedProcess?.terminalTrackingID, capture.sessionIDs.first)
+        XCTAssertEqual(returnedProcess?.terminalNativeID, capture.sessionIDs.first)
         let recoveredProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == "api" }))
         XCTAssertEqual(recoveredProcess.terminalApp, TerminalHost.spaces.appName)
         XCTAssertEqual(recoveredProcess.terminalTrackingID, capture.sessionIDs.first)

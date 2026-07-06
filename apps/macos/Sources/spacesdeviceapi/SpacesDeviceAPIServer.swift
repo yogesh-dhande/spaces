@@ -1761,13 +1761,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let workspaceID = request.workspaceID
         let processKey = request.processKey
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        if let processTemplateID = normalizedString(request.processTemplateID) {
-            try deviceOrchestrator(store: store).runConfiguredProcess(
-                workspaceID: workspaceID, processTemplateID: processTemplateID, processKey: processKey)
-        } else {
-            try deviceOrchestrator(store: store).runConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-        }
-        return try refreshedMutationResponse(message: "Ran process '\(processKey)'.", workspaceID: workspaceID)
+        let record =
+            if let processTemplateID = normalizedString(request.processTemplateID) {
+                try deviceOrchestrator(store: store).runConfiguredProcess(
+                    workspaceID: workspaceID, processTemplateID: processTemplateID, processKey: processKey)
+            } else { try deviceOrchestrator(store: store).runConfiguredProcess(workspaceID: workspaceID, processKey: processKey) }
+        return try refreshedMutationResponse(
+            message: "Ran process '\(processKey)'.", workspaceID: workspaceID,
+            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
     }
 
     private func handleStopWorkspaceProcessRequest(_ request: SpacesDeviceWorkspaceProcessMutationRequest) throws -> SpacesDeviceAPIResponse {
