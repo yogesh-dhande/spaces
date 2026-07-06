@@ -30,7 +30,15 @@ extension AppKitController {
         switch scope {
         case .workspace(_, let workspaceID):
             if selectedWorkspaceID != workspaceID, let (_, workspace) = findWorkspace(id: workspaceID) { selectWorkspace(workspace) }
-            if window?.isVisible != true { window?.makeKeyAndOrderFront(nil) }
+            // Explicitly focusing/opening a workspace terminal (sidebar row, numbered shortcut,
+            // window cycle, `open`/`focus-workspace-process`) must bring Spaces to the foreground,
+            // mirroring how focusing a browser target activates Chrome. Post-panel-rework the
+            // terminal is a pane inside the main window, so an already-visible-but-backgrounded
+            // window would otherwise stay behind the frontmost app — leaving `NSApp.isActive`
+            // false, which makes global window-cycle navigation unable to resolve the focused
+            // terminal as the current target (`focusedBuiltInTerminalSessionIDForGlobalNavigation`).
+            NSApp.activate(ignoringOtherApps: true)
+            window?.makeKeyAndOrderFront(nil)
         case .globalWindow(let panelWindowID):
             panelCoordinator.showPanelWindow(panelWindowID: panelWindowID, makeKey: true)
         }

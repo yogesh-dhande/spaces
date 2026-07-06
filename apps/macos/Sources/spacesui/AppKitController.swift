@@ -8623,11 +8623,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             Self.setClientActiveWorkspaceID(workspaceID)
+            // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
+            // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
+            // fires just after we foreground the terminal and re-hides the app, leaving
+            // `NSApp.isActive` false — which breaks window-cycle current-target resolution
+            // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
+            cancelDeferredExternalWindowHide()
             // A row-built resolution can predate the session's overview entry and lack the
             // real shell/command; recover them through the cold overview fetch so the pane's
             // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
             let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
             guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return nil }
+            // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
+            // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
+            // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
+            // closed and reopened (or is currently a viewer) reattaches as owner instead of the
+            // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
+            // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
+            panelCoordinator.content(forSessionID: request.sessionID)?.requestOwnershipIfNeeded()
             if let requestID, !requestID.isEmpty {
                 logPerfMetric(
                     "terminal_window_focus_ipc", target: "session=\(request.sessionID)", elapsedMS: 0, success: true,
