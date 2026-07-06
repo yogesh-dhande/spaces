@@ -17,7 +17,6 @@ import XCTest
             let events = directory.appendingPathComponent("events", isDirectory: false)
             let runStarted = directory.appendingPathComponent("run-started", isDirectory: false)
             let releaseRun = directory.appendingPathComponent("release-run", isDirectory: false)
-            let socket = runtimeDirectory.appendingPathComponent("caddy-admin.sock", isDirectory: false)
             try Data(
                 """
                 #!/bin/sh
@@ -49,15 +48,20 @@ import XCTest
                 "SPACES_TEST_CADDY_RELEASE_RUN", "SPACES_TEST_CADDY_SOCKET",
             ]
             let originalEnvironment = environmentKeys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
+            setenv(SpacesProfile.databasePathEnvironmentVariable, directory.appendingPathComponent("spaces.db").path, 1)
+            setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeDirectory.path, 1)
+            setenv(CaddyService.executableEnvironmentVariable, fakeCaddy.path, 1)
+            SpacesProfile.resetCacheForTesting()
+            // The admin socket lives under a short fixed root keyed by a hash of the runtime
+            // directory, not the runtime directory itself; resolve it the same way the code under
+            // test does instead of assuming the old runtime-directory-relative location.
+            let socket = URL(fileURLWithPath: try CaddyService.adminSocketPath())
             defer {
                 try? Data().write(to: releaseRun)
                 try? FileManager.default.removeItem(at: socket)
                 for (name, value) in originalEnvironment { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
                 SpacesProfile.resetCacheForTesting()
             }
-            setenv(SpacesProfile.databasePathEnvironmentVariable, directory.appendingPathComponent("spaces.db").path, 1)
-            setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, runtimeDirectory.path, 1)
-            setenv(CaddyService.executableEnvironmentVariable, fakeCaddy.path, 1)
             setenv("SPACES_TEST_CADDY_EVENTS", events.path, 1)
             setenv("SPACES_TEST_CADDY_RUN_STARTED", runStarted.path, 1)
             setenv("SPACES_TEST_CADDY_RELEASE_RUN", releaseRun.path, 1)

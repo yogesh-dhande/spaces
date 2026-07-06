@@ -172,6 +172,22 @@ enum RowPrimitives {
     @objc func clicked(_ sender: NSClickGestureRecognizer) { action() }
 }
 
+/// A label whose `AXPress` accessibility action invokes a closure, for rows whose click
+/// handling lives on the enclosing outline view's low-level mouse-down override (see
+/// `SidebarOutlineView.onRowMouseDown`) rather than a button or table-row selection. A plain
+/// `NSTextField` label reports no accessibility actions, so `AXPress` on it silently succeeds
+/// without doing anything instead of throwing — VoiceOver and UI automation can locate the row
+/// by its identifier but never activate it. Overriding the press action fixes both.
+@MainActor final class PressableLabel: NSTextField {
+    var onAccessibilityPress: (() -> Void)?
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onAccessibilityPress else { return super.accessibilityPerformPress() }
+        onAccessibilityPress()
+        return true
+    }
+}
+
 nonisolated(unsafe) private var rowClickTargetAssocKey: UInt8 = 0
 
 /// Attach a click action to `view` by adding an `NSClickGestureRecognizer`.

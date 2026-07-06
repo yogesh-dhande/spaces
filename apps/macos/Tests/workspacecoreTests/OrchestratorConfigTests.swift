@@ -299,7 +299,9 @@ extension OrchestratorTests {
             try paths.ensureDirectories()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
             try TerminalSessionPersistence.writeLaunchConfiguration(
-                .init(sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now"),
+                .init(
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now",
+                    workspaceID: workspace.id, kind: .shell),
                 paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
@@ -342,7 +344,9 @@ extension OrchestratorTests {
             try paths.ensureDirectories()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
             try TerminalSessionPersistence.writeLaunchConfiguration(
-                .init(sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now"),
+                .init(
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now",
+                    workspaceID: workspace.id, kind: .shell),
                 paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
@@ -387,7 +391,8 @@ extension OrchestratorTests {
             let timestamp = ISO8601DateFormatter().string(from: Date())
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
-                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: timestamp),
+                    sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: timestamp,
+                    workspaceID: workspace.id, kind: .shell),
                 paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
@@ -712,7 +717,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "shell-1", workingDirectory: workspace.dir,
-                    shell: "/bin/zsh", command: nil, createdAt: "now"), paths: paths)
+                    shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
@@ -759,6 +764,90 @@ extension OrchestratorTests {
         }
 
         XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
+    }
+
+    // Guards the P2 leak this was fixed for: before every terminal session was workspace-owned,
+    // a `spaces terminal command` session with no window/process/agent row and no stamped
+    // workspace resolved to no workspace at all, so `stopAdHocBuiltInTerminalSession(sessionID:)`
+    // returned false without ever asking the daemon to stop the shell — the pane closed but the
+    // process kept running. With every launch configuration always carrying a workspace id, the
+    // self-resolving stop path must now terminate that same shape of session.
+    func testStopAdHocBuiltInTerminalSessionTerminatesWorkspaceOwnedSessionWithNoOwnerRow() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "terminal-command-session"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                TerminalSessionLaunchConfiguration(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "shell", workingDirectory: workspace.dir,
+                    shell: "/bin/zsh", command: nil, createdAt: "now", workspaceID: workspace.id, kind: .shell), paths: paths)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
+                    state: .running, updatedAt: "now", title: "shell", workingDirectory: workspace.dir), paths: paths)
+
+            XCTAssertTrue(try orchestrator.stopAdHocBuiltInTerminalSession(sessionID: sessionID))
+        }
+
+        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
+    }
+
+    func testResolveWorkspaceIDForTerminalCommandPrefersExplicitID() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        let resolved = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: workspace.id, cwd: "/somewhere/else")
+
+        XCTAssertEqual(resolved, workspace.id)
+    }
+
+    func testResolveWorkspaceIDForTerminalCommandMatchesDeepestContainingWorkspace() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let parentDir = root.appendingPathComponent("project", isDirectory: true)
+        let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
+        try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
+        let project = makeProjectRecord(dir: parentDir.path)
+        let parentWorkspace = makeWorkspaceRecord(projectID: project.id, dir: parentDir.path)
+        let childWorkspace = makeWorkspaceRecord(projectID: project.id, dir: childDir.path)
+        try store.upsert(project: project)
+        try store.upsert(workspace: parentWorkspace)
+        try store.upsert(workspace: childWorkspace)
+
+        let resolved = try orchestrator.resolveWorkspaceIDForTerminalCommand(
+            explicitWorkspaceID: nil, cwd: childDir.appendingPathComponent("src").path)
+
+        XCTAssertEqual(resolved, childWorkspace.id)
+    }
+
+    func testResolveWorkspaceIDForTerminalCommandThrowsOutsideAnyWorkspace() throws {
+        let root = try makeTempDirectory()
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        _ = try orchestrator.addProject(dir: projectDir.path)
+
+        XCTAssertThrowsError(
+            try orchestrator.resolveWorkspaceIDForTerminalCommand(
+                explicitWorkspaceID: nil, cwd: root.appendingPathComponent("outside").path)
+        ) { error in XCTAssertTrue(error.localizedDescription.contains("Spaces workspace")) }
     }
 
     func testRenameAdHocBuiltInTerminalSessionPersistsUserTitleOverRuntimeTitleUpdates() throws {

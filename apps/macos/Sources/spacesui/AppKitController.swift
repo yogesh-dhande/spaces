@@ -1002,7 +1002,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             TerminalPerformance.logMetric(
                 "terminal_window_open_ipc", target: "session=\(sessionID)", elapsedMS: 0, success: true,
                 detail: "mode=\(mode.rawValue)\(requestID.map { " request_id=\($0)" } ?? "")")
-            await self.openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
+            await self.openTerminalSessionPane(sessionID: sessionID, mode: mode, requestID: requestID)
         }
     }
 
@@ -1235,17 +1235,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         {
             return request
         }
-        guard let summary = await resolveSessionSummaryMatch(sessionID: sessionID)?.summary, let workspaceID = summary.workspaceID else { return nil }
+        guard let match = await resolveSessionSummaryMatch(sessionID: sessionID) else { return nil }
+        let summary = match.summary
         return DeviceTerminalOpenRequest(
-            workspaceID: workspaceID, sessionID: sessionID, title: summary.title, workingDirectory: summary.workingDirectory,
-            kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell, command: summary.command, initialState: summary.state,
-            servicePID: summary.servicePID, childPID: summary.childPID, createdAt: summary.createdAt, updatedAt: summary.updatedAt)
+            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: sessionID, title: summary.title,
+            workingDirectory: summary.workingDirectory, kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
+            command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
+            createdAt: summary.createdAt, updatedAt: summary.updatedAt)
     }
 
-    /// Opens (or focuses) a session's pane for the open/focus IPC surfaces. Emits the
-    /// `terminal_window_summon` perf metric the E2E harness parses; panes always attach
-    /// as owner, so the detail reports `mode=owner`.
-    @discardableResult private func openTerminalSessionPane(sessionID: String, requestID: String? = nil) async -> Bool {
+    /// Opens (or focuses) the session's pane and, for an owner-mode open, reclaims owner
+    /// attachment. `mode` carries the intent of the `openTerminalSessionWindow` IPC: an
+    /// owner open (e.g. `spaces terminal show`) must preempt a different active owner (a
+    /// mobile client that took the session over), so it calls `requestOwnershipIfNeeded()`
+    /// after the pane opens. The pane's own attach otherwise stays a viewer when another
+    /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
+    /// perf metric the E2E harness parses.
+    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool
+    {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1254,12 +1261,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "mode=owner route=pane\(requestDetail)")
+                detail: "mode=\(mode.rawValue) route=pane\(requestDetail)")
             return false
         }
+        if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }
         logPerfMetric(
             "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
-            detail: "mode=owner reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
+            detail: "mode=\(mode.rawValue) reused=\(reusedExistingPane ? 1 : 0) route=pane\(requestDetail)")
         return true
     }
 
@@ -1268,7 +1276,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func focusTerminalSessionPane(sessionID: String, requestID: String?) async {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
-        let focused = await openTerminalSessionPane(sessionID: sessionID, requestID: requestID)
+        // Focus must not preempt a different active owner (matching the pre-rework focus
+        // path); only the owner-mode open IPC reclaims ownership.
+        let focused = await openTerminalSessionPane(sessionID: sessionID, mode: .viewer, requestID: requestID)
         logPerfMetric(
             "terminal_window_focus_ipc", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: focused,
             detail: "route=pane\(requestDetail)")
@@ -1282,7 +1292,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let sessionID = request.sessionID
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            let device = deviceForWorkspaceMutation(workspaceID: request.workspaceID)
+            // A global-window pane can mix devices, so its request carries deviceID
+            // directly; otherwise it derives from the request's workspace.
+            let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
+            let device = deviceForMutation(deviceID: resolvedDeviceID)
             let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
             let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
             // The seed launch configuration wins over the state model's own summary lookup,
@@ -1372,7 +1385,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
                 })
             return TerminalPaneContentController(
-                descriptor: .terminalSession(deviceID: deviceID(forWorkspaceID: request.workspaceID), sessionID: sessionID),
+                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID),
                 workspaceID: request.workspaceID, sessionID: sessionID, pane: pane)
         } catch {
             showError(error)
@@ -2455,7 +2468,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     struct DeviceTerminalOpenRequest: Sendable, Equatable {
+        /// The workspace whose panel hosts this pane. Every terminal session is
+        /// workspace-owned, so this always resolves.
         let workspaceID: String
+        /// The owning device, when it can't be derived from `workspaceID` alone (global-window
+        /// panes mix devices, so the descriptor carries deviceID directly). `nil` resolves the
+        /// device from `workspaceID`.
+        let deviceID: String?
         let sessionID: String
         let title: String
         let workingDirectory: String
@@ -2473,11 +2492,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let updatedAt: String?
 
         init(
-            workspaceID: String, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind, shell: String? = nil,
-            command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
+            workspaceID: String, deviceID: String? = nil, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
+            shell: String? = nil, command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
             createdAt: String? = nil, updatedAt: String? = nil
         ) {
             self.workspaceID = workspaceID
+            self.deviceID = deviceID
             self.sessionID = sessionID
             self.title = title
             self.workingDirectory = workingDirectory
@@ -2927,7 +2947,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let session = overview?.sessions.first { $0.id == sessionID }
         if let session {
             return DeviceTerminalOpenRequest(
-                workspaceID: session.workspaceID ?? fallbackWorkspaceID, sessionID: session.id, title: session.title,
+                workspaceID: session.workspaceID, sessionID: session.id, title: session.title,
                 workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell,
                 command: session.command, initialState: session.state, servicePID: session.servicePID, childPID: session.childPID,
                 createdAt: session.createdAt, updatedAt: session.updatedAt)
@@ -8513,16 +8533,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
         case .openTerminal(let request):
+            // Window-focus terminal targets are always workspace-backed (they come from a
+            // workspace's run-target list), so a missing device is a not-loaded state.
             guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
                 showDeviceNotLoadedError()
                 return nil
             }
             Self.setClientActiveWorkspaceID(request.workspaceID)
+            // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
+            // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
+            // fires just after we foreground the terminal and re-hides the app, leaving
+            // `NSApp.isActive` false — which breaks window-cycle current-target resolution
+            // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
+            cancelDeferredExternalWindowHide()
             // A row-built resolution can predate the session's overview entry and lack the
             // real shell/command; recover them through the cold overview fetch so the pane's
             // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
             let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
             guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return nil }
+            // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
+            // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
+            // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
+            // closed and reopened (or is currently a viewer) reattaches as owner instead of the
+            // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
+            // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
+            panelCoordinator.content(forSessionID: request.sessionID)?.requestOwnershipIfNeeded()
             if let requestID, !requestID.isEmpty {
                 logPerfMetric(
                     "terminal_window_focus_ipc", target: "session=\(request.sessionID)", elapsedMS: 0, success: true,

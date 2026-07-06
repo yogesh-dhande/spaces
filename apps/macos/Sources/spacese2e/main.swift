@@ -19,7 +19,8 @@ struct SpacesE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
-            E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
+            E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,
+            LookupWorkspaceCommand.self,
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
             OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
             LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
@@ -28,7 +29,7 @@ struct SpacesE2ECommand: ParsableCommand {
             AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, CycleWorkspaceWindowCommand.self,
             FocusWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
             CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
-            StartTerminalSessionCommand.self, TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self,
+            TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self,
             TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self,
             PlanWorkspaceRuntimeCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
@@ -216,30 +217,6 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
             WorkspaceSummaryPayload(
                 id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
-    }
-}
-
-private struct StartTerminalSessionCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "start-terminal-session")
-
-    @Option(name: .long) var command: String?
-    @Option(name: .long) var title: String?
-    @Option(name: .long) var cwd: String?
-    @Option(name: .long) var shell: String?
-
-    /// Creates a built-in terminal session directly through TerminalService
-    /// without opening a macOS window. The helper always uses a persistent
-    /// lifetime so standalone mobile harnesses can attach later.
-    func run() throws {
-        let normalizedWorkingDirectory = normalizePath(cwd ?? FileManager.default.currentDirectoryPath)
-        let resolvedShell = terminalShellPath(shell)
-        let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: normalizedWorkingDirectory)
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: UUID().uuidString, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: resolvedTitle,
-            workingDirectory: normalizedWorkingDirectory, shell: resolvedShell, command: command,
-            createdAt: ISO8601DateFormatter().string(from: Date()))
-        let session = try TerminalService.createSession(launchConfiguration)
-        try emitJSON(session)
     }
 }
 
@@ -1292,6 +1269,29 @@ private struct LookupWorkspaceCommand: ParsableCommand {
     }
 }
 
+private struct RegisterProjectCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "register-project")
+
+    @Option(name: .long) var projectDir: String
+
+    /// Registers a directory as a Spaces project (reusing one already registered
+    /// there) and emits its default workspace, so latency/perf harnesses that
+    /// have no project of their own can get a workspace-owned terminal session
+    /// without the git worktree setup `create-workspace` implies.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedProjectDir = normalizePath(projectDir)
+        let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
+        guard let workspace = try orchestrator.store.workspace(dir: project.dir) else {
+            throw ValidationError("Default workspace not found for project: \(project.dir)")
+        }
+        try emitJSON(
+            WorkspaceSummaryPayload(
+                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                notes: workspace.notes))
+    }
+}
+
 private struct CreateWorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create-workspace")
 
@@ -1969,6 +1969,11 @@ private struct SpacesSurfacePayload: Codable {
     let frontWindowIdentifier: String?
     let frontWindowTitle: String?
     let frontWindowKind: String
+    /// Identity of the focused window's active terminal pane (post-panel-rework terminals are
+    /// panes inside one shared window, so the window title/identifier no longer encodes them).
+    let frontTerminalPaneSessionID: String?
+    let frontTerminalPaneMode: String?
+    let frontTerminalPaneTitle: String?
     let mainWindowVisible: Bool
     let mainWindowFocused: Bool
     let commandPaletteVisible: Bool
@@ -2228,19 +2233,6 @@ private func validOptionalPort(_ port: Int?, label: String) throws -> Int? {
 
 private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
 
-private func terminalShellPath(_ explicitPath: String?) -> String {
-    if let explicitPath = explicitPath?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty { return explicitPath }
-    if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
-        return configured
-    }
-    return "/bin/zsh"
-}
-
-private func terminalDefaultTitle(command: String?, cwd: String) -> String {
-    if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty { return command }
-    let name = URL(fileURLWithPath: cwd).lastPathComponent
-    return name.isEmpty ? "Terminal" : name
-}
 
 private final class MobileServePairingWindowEmitter: @unchecked Sendable {
     weak var server: SpacesDeviceAPIServer?
@@ -2493,6 +2485,8 @@ private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurf
     let frontWindowIdentifier = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXIdentifierAttribute as String) }
     let frontWindowTitle = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXTitleAttribute as String) }
     let frontWindowKind = classifySpacesWindow(focusedWindow)
+    let frontTerminalPane =
+        focusedTerminalPaneIdentity(appElement: appElement) ?? focusedWindow.flatMap { firstTerminalPaneIdentity(in: $0) }
 
     let mainWindow = windows.first { window in
         let identifier = axStringAttribute(window, attribute: kAXIdentifierAttribute as String)
@@ -2515,7 +2509,8 @@ private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurf
 
     return SpacesSurfacePayload(
         processID: Int(pid), appVisible: appVisible, frontWindowIdentifier: frontWindowIdentifier, frontWindowTitle: frontWindowTitle,
-        frontWindowKind: frontWindowKind, mainWindowVisible: mainWindowVisible, mainWindowFocused: mainWindowFocused,
+        frontWindowKind: frontWindowKind, frontTerminalPaneSessionID: frontTerminalPane?.sessionID, frontTerminalPaneMode: frontTerminalPane?.mode,
+        frontTerminalPaneTitle: frontTerminalPane?.title, mainWindowVisible: mainWindowVisible, mainWindowFocused: mainWindowFocused,
         commandPaletteVisible: commandPaletteVisible, commandPaletteFocused: commandPaletteFocused, modalVisible: modalVisible)
 }
 
@@ -2533,6 +2528,57 @@ private func classifySpacesWindow(_ window: AXUIElement?) -> String {
     if title.hasSuffix(" (viewer)") { return "terminal_viewer" }
     if !title.isEmpty { return "terminal_owner" }
     return "other"
+}
+
+/// The terminal pane that actually holds keyboard focus, resolved by walking up from the
+/// app's focused AX element to the nearest `terminal-pane-<sessionID>` ancestor. In a split
+/// tab every visible pane is in the window's AX hierarchy, so the first-match DFS in
+/// `firstTerminalPaneIdentity` reports the left/top pane even after focus moved to another
+/// split; this walk targets the pane the harness actually drove. Returns nil when keyboard
+/// focus is not inside a terminal pane (e.g. the sidebar or a rename editor), so the caller
+/// falls back to the first visible pane. Same identity tuple as `firstTerminalPaneIdentity`:
+/// session id (identifier suffix), owner/viewer mode (AXValue), runtime-target name (AXDescription).
+private func focusedTerminalPaneIdentity(appElement: AXUIElement) -> (sessionID: String, mode: String, title: String)? {
+    let prefix = "terminal-pane-"
+    var element = axElementAttribute(appElement, attribute: kAXFocusedUIElementAttribute as String)
+    var depth = 0
+    while let current = element, depth < 48 {
+        if let identifier = axStringAttribute(current, attribute: kAXIdentifierAttribute as String), identifier.hasPrefix(prefix) {
+            return (
+                String(identifier.dropFirst(prefix.count)),
+                axStringAttribute(current, attribute: kAXValueAttribute as String) ?? "",
+                axStringAttribute(current, attribute: kAXDescriptionAttribute as String) ?? "")
+        }
+        element = axElementAttribute(current, attribute: kAXParentAttribute as String)
+        depth += 1
+    }
+    return nil
+}
+
+/// Depth-first search for the selected tab's first (left/top) terminal pane, identified by the
+/// `terminal-pane-<sessionID>` AXIdentifier that `TerminalSessionPaneViewController` sets. Only
+/// the selected tab's pane tree is in the window's AX hierarchy. This is the fallback the surface
+/// snapshot uses when keyboard focus is not inside any pane; `focusedTerminalPaneIdentity` handles
+/// the focused-split case. Returns its session id (identifier suffix), owner/viewer mode (AXValue),
+/// and runtime-target name (AXDescription). Runs in-process over the AXUIElement C API, which is
+/// far cheaper than an equivalent AppleScript/System-Events traversal the harness would otherwise
+/// poll in a tight loop.
+private func firstTerminalPaneIdentity(in element: AXUIElement, depth: Int = 0) -> (sessionID: String, mode: String, title: String)? {
+    guard depth < 48 else { return nil }
+    let prefix = "terminal-pane-"
+    if let identifier = axStringAttribute(element, attribute: kAXIdentifierAttribute as String), identifier.hasPrefix(prefix) {
+        return (
+            String(identifier.dropFirst(prefix.count)),
+            axStringAttribute(element, attribute: kAXValueAttribute as String) ?? "",
+            axStringAttribute(element, attribute: kAXDescriptionAttribute as String) ?? "")
+    }
+    for child in axElementArrayAttribute(element, attribute: kAXChildrenAttribute as String) {
+        if let found = firstTerminalPaneIdentity(in: child, depth: depth + 1) { return found }
+    }
+    for row in axElementArrayAttribute(element, attribute: kAXRowsAttribute as String) {
+        if let found = firstTerminalPaneIdentity(in: row, depth: depth + 1) { return found }
+    }
+    return nil
 }
 
 private func isVisibleWindow(_ window: AXUIElement) -> Bool {

@@ -141,12 +141,12 @@ import spacesdevicecore
     /// cmd+opt+t landing path for a freshly created session), or in an explicit scope
     /// (a global panel window's "+" button).
     @discardableResult func openSessionInNewTab(_ request: AppKitController.DeviceTerminalOpenRequest, in scope: PanelScope? = nil) -> Bool {
-        let scope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
+        let resolvedScope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
         guard let content = ensureContentController(request: request) else { return false }
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
-        mutateLayout(scope: scope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
-        host.showPanelScope(scope)
-        activateFocusedPane(scope: scope)
+        mutateLayout(scope: resolvedScope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
+        host.showPanelScope(resolvedScope)
+        activateFocusedPane(scope: resolvedScope)
         return true
     }
 
@@ -246,8 +246,8 @@ import spacesdevicecore
         guard panels[scope] == nil else { return }
         panels[scope] = PanelState(layout: layout, view: nil)
         for pane in PanelLayoutEngine.allPanes(in: layout) {
-            guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil,
-                let workspaceID = host.clientWorkspaceID(forTerminalSession: sessionID),
+            guard let sessionID = pane.content.terminalSessionID, contentControllers[sessionID] == nil else { continue }
+            guard let workspaceID = host.clientWorkspaceID(forTerminalSession: sessionID),
                 let request = host.paneOpenRequest(workspaceID: workspaceID, sessionID: sessionID)
             else { continue }
             _ = ensureContentController(request: request)
@@ -461,6 +461,7 @@ import spacesdevicecore
     func refreshTabTitles(scope: PanelScope) {
         guard let state = panels[scope], let view = state.view else { return }
         for tab in state.layout.tabs { view.updateTabTitle(tabTitle(forTabID: tab.id, in: state.layout), forTabID: tab.id) }
+        syncPaneAccessibilityTitles(scope: scope)
         syncPanelWindowTitle(scope: scope)
         syncFocusedPaneFooter(scope: scope)
     }
@@ -468,8 +469,21 @@ import spacesdevicecore
     private func refreshTabTitles(forSessionID sessionID: String?) {
         guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
         view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
+        syncPaneAccessibilityTitles(scope: placement.scope)
         syncPanelWindowTitle(scope: placement.scope)
         syncFocusedPaneFooter(scope: placement.scope)
+    }
+
+    /// Publishes each pane's resolved title onto its content view's accessibility label
+    /// (see `TerminalPaneContentController.setAccessibilityRuntimeTargetName`). Every
+    /// render/title-refresh path calls this so the front window's selected-tab session
+    /// stays identifiable by name to UI automation and VoiceOver — the shared window
+    /// title no longer distinguishes panes post-panel-rework.
+    private func syncPaneAccessibilityTitles(scope: PanelScope) {
+        guard let layout = panels[scope]?.layout else { return }
+        for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: layout) {
+            contentControllers[sessionID]?.setAccessibilityRuntimeTargetName(contentTitle(forSessionID: sessionID))
+        }
     }
 
     /// The selected workspace footer shows the focused pane's identity; re-sync it
@@ -543,6 +557,7 @@ import spacesdevicecore
         for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
         view.apply(
             layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+        syncPaneAccessibilityTitles(scope: scope)
         syncPanelWindowTitle(scope: scope)
         syncFocusedPaneFooter(scope: scope)
     }

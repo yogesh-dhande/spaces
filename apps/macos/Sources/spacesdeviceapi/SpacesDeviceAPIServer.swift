@@ -1265,6 +1265,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let overviewLoaderForTesting { return try overviewLoaderForTesting(clientApp) }
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
+        // The router port is a Mac-only concept (only the macOS client runs Caddy), so remote
+        // daemons never seed one and this fallback yields the canonical `AppConfig.defaultRouterPort`.
+        // The reported `assignedPort.url` is a client-facing host/origin identity; the Mac client
+        // rewrites the port to its own live Caddy port before navigation.
         let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
         let projects = try store.projects()
         let workspaces = try projects.flatMap { project in

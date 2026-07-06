@@ -608,7 +608,8 @@ import workspacecore
             installationID: "install", bundleID: "com.example.Spaces", platform: "macos", deviceName: "Mac", appVersion: "1.0")
         let summary = SpacesDeviceTerminalSessionSummary(
             id: "session-cold", title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: nil, workspaceTitle: nil, projectID: nil, projectName: nil,
+            lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: "workspace-cold", workspaceTitle: nil, projectID: nil,
+            projectName: nil,
             createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
             attachmentSnapshot: TerminalSessionAttachmentSnapshot())
 

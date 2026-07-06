@@ -37,7 +37,7 @@ scripts/verify.sh
 `scripts/format-staged-swift.sh` formats staged macOS Swift source and test files in place and re-stages them.
 `scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
 `scripts/coverage.sh` runs SwiftPM tests in parallel. Process-wide environment mutations stay isolated because XCTest cases run in separate processes and the few Swift Testing suites that override `SPACES_DB_PATH` are serialized. Set `SPACES_TEST_PARALLEL=0` to force a serial run when debugging a contention issue; auto-detected workers are capped at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`. When the debug CLI exists, coverage exports that CLI's repo-local profile before tests so profile-sensitive tests do not read the installed database. Coverage also points `XDG_CONFIG_HOME` at an empty build-local directory so Ghostty tests do not load a developer's personal Ghostty config.
-`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, repo-local profile export, current-profile app and spacesd shutdown, coverage, then iOS unit tests. The profile shutdown is scoped to the repo-local profile so native Ghostty tests do not contend with a running debug app; set `SPACES_VERIFY_KEEP_PROFILE_RUNTIME=1` to leave that runtime running. The iOS unit pass prefers an available non-booted iPhone simulator so it does not attach to a simulator already owned by mobile E2E; set `SPACES_IOS_TEST_DESTINATION` to override the destination, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory.
+`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, repo-local profile export, current-profile app and spacesd shutdown, coverage, then iOS unit tests. The profile shutdown is scoped to the repo-local profile so native Ghostty tests do not contend with a running debug app; set `SPACES_VERIFY_KEEP_PROFILE_RUNTIME=1` to leave that runtime running. The iOS unit pass prefers an available non-booted iPhone simulator so it does not attach to a simulator already owned by mobile E2E; set `SPACES_IOS_TEST_DESTINATION` to override the destination, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory. A watchdog force-kills the whole run and exits non-zero if it exceeds `SPACES_VERIFY_TIMEOUT_SECONDS` (default 900), so a hung or deadlocked test fails the gate fast instead of blocking a commit indefinitely; set it to `0` to disable the ceiling (for example when attaching a debugger).
 `scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
@@ -138,8 +138,12 @@ export SPACES_DB_PATH="$TMPDIR/spaces-ghostty/spaces.db"
 export SPACES_RUNTIME_DIR="$(dirname "$SPACES_DB_PATH")/runtime"
 apps/macos/scripts/setup_ghostty.sh
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  terminal command --backend ghostty-embedded --command cat --title verify-ghostty
+mkdir -p "$TMPDIR/spaces-ghostty/workspace"
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spacese2e \
+  register-project --project-dir "$TMPDIR/spaces-ghostty/workspace" >/dev/null
+spaces_cli="$(cd apps/macos/.build/debug && pwd)/spaces"
+(cd "$TMPDIR/spaces-ghostty/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" "$spaces_cli" \
+  terminal command --command cat --title verify-ghostty)
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces terminal list
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal send <session-id> "hello from ghostty" --newline
@@ -306,7 +310,10 @@ export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
+mkdir -p "$TMPDIR/spaces-ios-demo/workspace"
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-project --project-dir "$TMPDIR/spaces-ios-demo/workspace" >/dev/null
+(cd "$TMPDIR/spaces-ios-demo/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" "$(cd apps/macos/.build/debug && pwd)/spaces" \
+  terminal command --command cat --title ios-demo)
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
@@ -338,7 +345,10 @@ scripts/install-ios-device.sh
 export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
+mkdir -p "$TMPDIR/spaces-ios-demo/workspace"
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-project --project-dir "$TMPDIR/spaces-ios-demo/workspace" >/dev/null
+(cd "$TMPDIR/spaces-ios-demo/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" "$(cd apps/macos/.build/debug && pwd)/spaces" \
+  terminal command --command cat --title ios-demo)
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 ```
 

@@ -59,7 +59,7 @@ import workspacecore
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: "ad-hoc-lifecycle-\(UUID().uuidString)", title: "Terminal", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                    createdAt: "2026-06-04T00:00:00Z"), paths: paths)
+                    createdAt: "2026-06-04T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
             #expect(
                 AppKitController.shouldTerminateAdHocBuiltInTerminalSession(
@@ -73,7 +73,7 @@ import workspacecore
     @Test func appBuiltInTerminalLauncherUsesServiceCreateSessionPath() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "service-session", title: "service", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-05-27T00:00:00Z")
+            createdAt: "2026-05-27T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let capturedConfiguration = LaunchConfigurationCapture()
 
         let launcher = AppKitController.appBuiltInTerminalSessionLauncher { configuration in

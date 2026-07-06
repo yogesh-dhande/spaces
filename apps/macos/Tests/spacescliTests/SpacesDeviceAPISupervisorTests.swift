@@ -318,7 +318,7 @@ import workspacecore
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "takeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                    command: "cat", createdAt: "2026-05-29T00:00:00Z"), paths: paths)
+                    command: "cat", createdAt: "2026-05-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             let recorder = DeviceAPITerminalControlRecorder()
             let controlServer = TerminalControlServer(
                 socketPath: paths.controlSocketPath, queue: DispatchQueue(label: "spaces.device.api.takeover-state.test")
@@ -426,7 +426,7 @@ import workspacecore
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "dead-process", workingDirectory: workspaceDir.path, shell: "/bin/zsh",
-                    command: "sleep 300", createdAt: "2026-06-04T12:00:00Z"), paths: paths)
+                    command: "sleep 300", createdAt: "2026-06-04T12:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .running,
@@ -467,7 +467,7 @@ import workspacecore
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 TerminalSessionLaunchConfiguration(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                    createdAt: "2026-05-26T00:00:00Z"), paths: paths)
+                    createdAt: "2026-05-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
             try Data("\u{1B}[32mOUTPUT-LOG-SHOULD-NOT-APPEAR\u{1B}[0m\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
             let liveState = Self.liveTerminalStatePayload(sessionID: sessionID, snapshotText: "LIVE-STATE")
@@ -629,7 +629,7 @@ import workspacecore
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "final-target", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z"), paths: paths)
+                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             let runtimeState = TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:23:23Z",
                 exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)
@@ -672,7 +672,7 @@ import workspacecore
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, title: "final-target", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z"), paths: paths)
+                    command: "sleep 300", createdAt: "2026-06-04T14:23:10Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
             let runtimeState = TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 100, childPID: 200, state: .exited, updatedAt: "2026-06-04T14:23:23Z",
                 exitedAt: "2026-06-04T14:23:23Z", title: "final-target", workingDirectory: "/tmp/work", columns: 5, rows: 1)

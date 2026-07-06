@@ -349,7 +349,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "session-provider", backend: .ghosttyEmbedded, title: "provider-title", workingDirectory: "/tmp/provider", shell: "/bin/zsh",
-            command: nil, createdAt: "2026-06-29T00:00:00Z")
+            command: nil, createdAt: "2026-06-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: "session-provider", backend: .ghosttyEmbedded, servicePID: 7, childPID: 8, state: .running, updatedAt: "2026-06-29T00:00:01Z",
             title: "provider-title", workingDirectory: "/tmp/provider", columns: 80, rows: 24)
@@ -508,7 +508,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, title: "viewer-provider", workingDirectory: "/tmp/viewer-provider", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-05-20T00:00:00Z")
+            createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
@@ -542,7 +542,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "reentry", workingDirectory: "/tmp/reentry", shell: "/bin/zsh", command: nil,
-                createdAt: "2026-06-06T00:00:00Z"), paths: paths)
+                createdAt: "2026-06-06T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited, updatedAt: "2026-06-06T00:00:01Z"),
             paths: paths)
@@ -572,7 +572,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-reentry", workingDirectory: "/tmp/reentry", shell: "/bin/zsh",
-                command: nil, createdAt: "2026-06-06T00:00:00Z"), paths: paths)
+                command: nil, createdAt: "2026-06-06T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-06T00:00:01Z"),
             paths: paths)
@@ -607,7 +607,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-1", title: "session title", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-1", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
         try "echo hello\necho hello\n".write(toFile: paths.outputPath, atomically: true, encoding: .utf8)
@@ -633,7 +633,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-render-state-text", title: "session title", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-render-state-text", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
@@ -663,7 +663,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-upgrade", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "zsh", createdAt: "2026-05-10T00:00:00Z"), paths: paths)
+                command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-upgrade", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
@@ -689,7 +689,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             .init(
                 sessionID: "session-2", backend: .ghosttyEmbedded, title: "process", workingDirectory: "/Users/test/project", shell: "/bin/zsh",
                 command: "export API_PORT=20001; export APP_PORT=20000; export PATH='/usr/bin:/bin'; uv run python -m spaces_e2e_demo",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-2", backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
@@ -718,7 +718,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-3", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-3", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
@@ -761,7 +761,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-viewer-snapshot", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-15T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-viewer-snapshot", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -800,7 +800,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-viewer-surface", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-19T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-viewer-surface", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -842,7 +842,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-viewer-loading", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-15T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-viewer-loading", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -879,7 +879,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-owner-seeking-custom", backend: .ghosttyEmbedded, title: "owner-seeking", workingDirectory: "/tmp/work",
-                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-owner-seeking-custom", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -923,7 +923,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-reopen", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
             paths: paths)
@@ -982,7 +982,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-reopen", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
             paths: paths)
@@ -1034,7 +1034,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-mirror", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
             paths: paths)
@@ -1093,7 +1093,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "retakeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
             paths: paths)
@@ -1141,7 +1141,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-owner-seeking", backend: .ghosttyEmbedded, title: "owner-seeking", workingDirectory: "/tmp/work",
-                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-owner-seeking", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1203,7 +1203,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "stale-takeover", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
             paths: paths)
@@ -1272,7 +1272,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-owner-to-viewer", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-19T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-owner-to-viewer", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1317,7 +1317,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-viewer-final-output", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work",
-                shell: "/bin/zsh", command: "false", createdAt: "2026-05-15T00:00:00Z"), paths: paths)
+                shell: "/bin/zsh", command: "false", createdAt: "2026-05-15T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-viewer-final-output", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
@@ -1368,7 +1368,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-4", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-4", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
@@ -1393,7 +1393,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-4b", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "zsh",
-                createdAt: "2026-05-10T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-4b", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-10T00:00:01Z"),
@@ -1415,7 +1415,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-owner-status", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-owner-status", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
@@ -1438,7 +1438,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-viewer-exited", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-viewer-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
@@ -1478,7 +1478,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-starting-remote", backend: .ghosttyEmbedded, title: "shell-1", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-06-22T12:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-06-22T12:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-starting-remote", backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .starting,
@@ -1506,7 +1506,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-script-exited", title: "script", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-script-exited", servicePID: 1, childPID: 22, state: .exited, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
 
@@ -1527,7 +1527,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-owner-surface", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-owner-surface", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1556,7 +1556,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-visible-debug-dump", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-29T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-visible-debug-dump", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1582,7 +1582,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-snapshot-debug-dump", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-29T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-snapshot-debug-dump", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1609,7 +1609,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-owner-first-responder", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work",
-                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-12T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-owner-first-responder", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1634,7 +1634,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-copy-paste", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-copy-paste", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1673,7 +1673,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-image-command-v", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-image-command-v", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1714,7 +1714,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-command-edit", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-command-edit", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1749,7 +1749,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-control-v-image", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-control-v-image", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1785,7 +1785,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-control-v-text", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-control-v-text", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1818,7 +1818,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-control-c", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-control-c", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1846,7 +1846,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-search-esc", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-search-esc", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1874,7 +1874,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-search-field-typing", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-search-field-typing", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1915,7 +1915,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-search-esc-exited", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-search-esc-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
@@ -1955,7 +1955,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-viewer-disabled", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: viewerPaths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: viewerPaths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-viewer-disabled", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -1978,7 +1978,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-exited-disabled", backend: .ghosttyEmbedded, title: "exited", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: exitedPaths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: exitedPaths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-exited-disabled", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
@@ -2010,7 +2010,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-copy-paste-exited", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-copy-paste-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .exited,
@@ -2040,7 +2040,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-focus", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-09T00:00:01Z"
@@ -2076,7 +2076,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-focus-window", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-focus-window", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -2105,7 +2105,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-focus-fast-path", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-focus-fast-path", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -2133,7 +2133,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-focus-title-refresh", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work",
-                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-focus-title-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -2181,7 +2181,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-show-focus", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-12T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-show-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -2217,7 +2217,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-scroll-refresh", backend: .ghosttyEmbedded, title: "owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "printf 'one\\ntwo\\nthree\\n'", createdAt: "2026-05-12T00:00:00Z"), paths: paths)
+                command: "printf 'one\\ntwo\\nthree\\n'", createdAt: "2026-05-12T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-scroll-refresh", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -2242,7 +2242,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-fallback", title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-fallback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
         NSPasteboard.general.clearContents()
@@ -2270,7 +2270,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-fallback-exited", backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-fallback-exited", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited,
@@ -2299,7 +2299,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-transcript-config", title: "transcript", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-transcript-config", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
             paths: paths)
@@ -2320,7 +2320,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-viewer-focus", backend: .ghosttyEmbedded, title: "viewer-focus", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-viewer-focus", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running,
@@ -2401,7 +2401,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-6", backend: .ghosttyEmbedded, title: "frontend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "npm run dev", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-6", backend: .ghosttyEmbedded, servicePID: 1, childPID: 4321, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
@@ -2474,7 +2474,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-notify", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-notify", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running,
@@ -2531,7 +2531,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-metadata", backend: .ghosttyEmbedded, title: "backend", workingDirectory: initialWorkingDirectory.path,
-                shell: "/bin/zsh", command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                shell: "/bin/zsh", command: "uv run api", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-metadata", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running,
@@ -2571,7 +2571,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-runtime", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-runtime", backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running,
@@ -2608,7 +2608,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-output-notify", backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "cat", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-output-notify", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
@@ -2653,7 +2653,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-runtime-recover", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-runtime-recover", backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .exited,
@@ -2688,7 +2688,7 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             .init(
                 sessionID: "session-7", backend: .ghosttyEmbedded, title: "backend", workingDirectory: "/tmp/work", shell: "/bin/zsh",
-                command: "uv run api", createdAt: "2026-05-09T00:00:00Z"), paths: paths)
+                command: "uv run api", createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(
                 sessionID: "session-7", backend: .ghosttyEmbedded, servicePID: 1, childPID: 9876, state: .running, updatedAt: "2026-05-09T00:00:01Z"),

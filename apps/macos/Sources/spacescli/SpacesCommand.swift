@@ -4,7 +4,6 @@ import Foundation
 import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
-import spacesterminalghostty
 import workspacecore
 
 #if canImport(Darwin)
@@ -12,8 +11,6 @@ import workspacecore
 #elseif canImport(Glibc)
     import Glibc
 #endif
-
-extension TerminalSessionBackendKind: ExpressibleByArgument {}
 
 public struct SpacesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -250,43 +247,32 @@ func availableTerminalSessionRows(fileManager: FileManager = .default) throws ->
 }
 
 struct TerminalCommandCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start a terminal session in the background.")
+    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start a background terminal session in a workspace.")
+
+    @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
 
     @Option(name: .long, help: "Shell command to run inside the terminal session. If omitted, starts a login shell.") var command: String?
 
     @Option(name: .long, help: "Window or session title to track.") var title: String?
 
-    @Option(name: .long, help: "Working directory. Defaults to the current directory.") var cwd: String?
-
-    @Option(name: .long, help: "Shell executable path. Defaults to $SHELL or the platform login shell.") var shell: String?
-
-    @Option(name: .long, help: "Terminal backend. Defaults to ghostty-embedded.") var backend: TerminalSessionBackendKind = .ghosttyEmbedded
-
     func run() throws {
-        guard TerminalSessionBackendSupport.isSupported(backend) else {
-            throw WorkspaceError.invalidArgument(message: "Terminal backend '\(backend.rawValue)' is not available in this build.")
-        }
         let context = CLIContext()
-        let launchConfiguration = terminalCommandLaunchConfiguration(
-            sessionID: UUID().uuidString, backend: backend, command: command, title: title, cwd: cwd, shell: shell, context: context)
-        let session = try TerminalService.createSession(launchConfiguration)
-
-        print(
+        // This RPC synchronously launches the terminal session (Ghostty spawn, workspace setup),
+        // unlike other profile commands' quick metadata reads/writes, so it needs the same
+        // SPACESD_CREATE_TIMEOUT-configurable budget as the old direct TerminalService.createSession
+        // path — the default 15s profile-command timeout can trip before a slow launch finishes,
+        // even though the daemon keeps creating the session in the background.
+        let response = try TerminalService.sendProfileCommand(
+            .init(
+                operation: .terminalCommand, workspaceID: workspace, cwd: context.currentDirectoryPath(), terminalCommand: command,
+                terminalTitle: title), timeout: TerminalService.createSessionRequestTimeout())
+        guard let session = response.terminalSession else {
+            throw WorkspaceError.invalidArgument(message: "spacesd did not return a terminal session.")
+        }
+        context.output.emit(
             "Started terminal session \(session.id)\ttitle=\(session.title)\tbackend=\(session.backend.rawValue)\tlocation=local\tcwd=\(session.workingDirectory)"
         )
     }
-}
-
-func terminalCommandLaunchConfiguration(
-    sessionID: String, backend: TerminalSessionBackendKind, command: String?, title: String?, cwd: String?, shell: String?,
-    createdAt: String = ISO8601DateFormatter().string(from: Date()), context: CLIContext = CLIContext()
-) -> TerminalSessionLaunchConfiguration {
-    let workingDirectory = context.normalizePath(cwd ?? context.currentDirectoryPath())
-    let resolvedShell = terminalShellPath(shell)
-    let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: workingDirectory)
-    return TerminalSessionLaunchConfiguration(
-        sessionID: sessionID, backend: backend, lifetimePolicy: .persistent, title: resolvedTitle, workingDirectory: workingDirectory,
-        shell: resolvedShell, command: command, createdAt: createdAt)
 }
 
 struct TerminalSendCommand: ParsableCommand {
@@ -478,24 +464,6 @@ enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
         case .exit: .idle
         }
     }
-}
-
-private func terminalShellPath(_ explicitPath: String?) -> String {
-    if let explicitPath = explicitPath?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty { return explicitPath }
-    if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
-        return configured
-    }
-    #if os(Linux)
-        return "/bin/bash"
-    #else
-        return "/bin/zsh"
-    #endif
-}
-
-private func terminalDefaultTitle(command: String?, cwd: String) -> String {
-    if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty { return command }
-    let name = URL(fileURLWithPath: cwd).lastPathComponent
-    return name.isEmpty ? "Terminal" : name
 }
 
 #if os(macOS)

@@ -115,17 +115,8 @@ struct SpacesDeviceOverviewBuilder {
             daemonStatus: daemonStatus)
     }
 
-    static func matchedWorkspace(for workingDirectory: String, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {
-        let normalizedWorkingDirectory = normalizedPath(workingDirectory)
-        return workspaces.filter { descriptor in
-            let workspaceDirectory = normalizedPath(descriptor.workspace.dir)
-            return normalizedWorkingDirectory == workspaceDirectory || normalizedWorkingDirectory.hasPrefix(workspaceDirectory + "/")
-        }.max { lhs, rhs in normalizedPath(lhs.workspace.dir).count < normalizedPath(rhs.workspace.dir).count }
-    }
-
     static func matchedWorkspace(for session: TerminalSessionCatalogEntry, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {
-        if let workspaceID = session.workspaceID { return workspaces.first { $0.workspace.id == workspaceID } }
-        return matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: workspaces)
+        workspaces.first { $0.workspace.id == session.workspaceID }
     }
 
     private static func summary(
@@ -137,15 +128,13 @@ struct SpacesDeviceOverviewBuilder {
             id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, shell: session.launchConfiguration.shell,
             command: session.launchConfiguration.command, state: session.runtimeState.state, backend: session.launchConfiguration.backend,
             lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
-            childPID: session.runtimeState.childPID, workspaceID: matchedWorkspace?.workspace.id,
+            childPID: session.runtimeState.childPID, workspaceID: session.workspaceID,
             workspaceTitle: matchedWorkspace?.workspace.displayName, projectID: matchedWorkspace?.project.id,
             projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt, updatedAt: session.runtimeState.updatedAt,
             isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
             rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender, daemonEndpoint: matchedWorkspace?.terminalDaemonEndpoint)
     }
-
-    private static func normalizedPath(_ path: String) -> String { URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path }
 
     private static func projectSummaries(from projects: [ProjectRecord]) -> [SpacesDeviceProjectSummary] {
         var seen = Set<String>()
@@ -378,13 +367,7 @@ struct SpacesDeviceOverviewBuilder {
         }
 
         for (sessionID, session) in sessionsByID where !includedSessionIDs.contains(sessionID) {
-            if let workspaceID = session.workspaceID {
-                guard workspaceID == descriptor.workspace.id else { continue }
-            } else {
-                guard let matched = matchedWorkspace(for: session.effectiveWorkingDirectory, workspaces: [descriptor]),
-                    matched.workspace.id == descriptor.workspace.id
-                else { continue }
-            }
+            guard session.workspaceID == descriptor.workspace.id else { continue }
             let sessionKey = "terminal:\(sessionID)"
             guard !claimedTerminalKeys.contains(sessionKey) else { continue }
             let runState = runState(for: session)
