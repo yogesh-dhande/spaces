@@ -135,13 +135,15 @@ verify_work_pid=$!
 verify_watchdog_pid=$!
 
 # On interrupt, tear down both children so no orphaned build/test processes linger.
-trap 'kill_process_tree "$verify_work_pid" 2>/dev/null; kill "$verify_watchdog_pid" 2>/dev/null || true' INT TERM
+trap 'kill_process_tree "$verify_work_pid" 2>/dev/null; kill_process_tree "$verify_watchdog_pid" 2>/dev/null' INT TERM
 
 verify_status=0
 wait "$verify_work_pid" || verify_status=$?
 
-# Work finished (cleanly or via the watchdog's kill): stop the now-idle watchdog.
-kill "$verify_watchdog_pid" 2>/dev/null || true
+# Work finished (cleanly or via the watchdog's kill): disarm the now-idle watchdog. Kill its
+# whole tree, not just the subshell — bash does not forward the signal to its foreground
+# `sleep`, so signalling the subshell alone would orphan that sleep until the ceiling expires.
+kill_process_tree "$verify_watchdog_pid" 2>/dev/null
 wait "$verify_watchdog_pid" 2>/dev/null || true
 
 exit "$verify_status"
