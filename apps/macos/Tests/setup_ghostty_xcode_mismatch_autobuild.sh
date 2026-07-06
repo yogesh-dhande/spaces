@@ -27,6 +27,10 @@ fail() {
         echo "--- default dirty output ---" >&2
         cat "$TMP_ROOT/default-dirty.out" >&2
     fi
+    if [[ -f "$TMP_ROOT/default-metal.out" ]]; then
+        echo "--- default metal output ---" >&2
+        cat "$TMP_ROOT/default-metal.out" >&2
+    fi
     exit 1
 }
 
@@ -103,6 +107,14 @@ set -euo pipefail
 
 if [[ "${1:-}" == "swift" && "${2:-}" == "--version" ]]; then
     echo "Swift test version"
+    exit 0
+fi
+
+if [[ "${1:-}" == "-sdk" && "${3:-}" == "metal" ]]; then
+    if [[ -n "${SPACES_TEST_METAL_MISSING:-}" ]]; then
+        echo "error: error: cannot execute tool 'metal' due to missing Metal Toolchain; use: xcodebuild -downloadComponent MetalToolchain" >&2
+        exit 1
+    fi
     exit 0
 fi
 
@@ -279,6 +291,22 @@ if [[ -s "$BUILD_LOG" ]]; then
 fi
 
 rm "$TEMP_GHOSTTY_ROOT/local-dirty-change"
+
+set +e
+env "${SETUP_ENV[@]}" "SPACES_TEST_METAL_MISSING=1" "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/default-metal.out" 2>&1
+METAL_DEFAULT_STATUS=$?
+set -e
+
+if [[ "$METAL_DEFAULT_STATUS" -eq 0 ]]; then
+    fail "default setup succeeded despite a missing Metal Toolchain"
+fi
+
+grep -q "Metal Toolchain" "$TMP_ROOT/default-metal.out" || fail "default metal setup did not report the missing Metal Toolchain"
+grep -q "xcodebuild -downloadComponent MetalToolchain" "$TMP_ROOT/default-metal.out" \
+    || fail "default metal setup did not include the component install command"
+if [[ -s "$BUILD_LOG" ]]; then
+    fail "default metal setup invoked the local build path"
+fi
 
 if ! env "${SETUP_ENV[@]}" "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/default.out" 2>&1; then
     fail "default setup failed"

@@ -111,6 +111,10 @@ if [[ "${1:-}" == "swift" && "${2:-}" == "--version" ]]; then
     exit 0
 fi
 
+if [[ "${1:-}" == "-sdk" && "${3:-}" == "metal" ]]; then
+    exit 0
+fi
+
 echo "unexpected xcrun invocation: $*" >&2
 exit 2
 EOF
