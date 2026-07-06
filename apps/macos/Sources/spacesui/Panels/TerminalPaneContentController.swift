@@ -9,15 +9,13 @@ import spacesterminalui
 /// across layout rebuilds without recreating it.
 @MainActor final class TerminalPaneContentController: PaneContentHosting {
     let descriptor: PaneContentDescriptor
-    /// `nil` for a standalone session (one not tied to a workspace); it lives in a global
-    /// panel window and is excluded from per-workspace cycling/split/title lookups.
-    let workspaceID: String?
+    let workspaceID: String
     let sessionID: String
     private let pane: TerminalSessionPaneViewController
 
     var onTitleChanged: ((String) -> Void)?
 
-    init(descriptor: PaneContentDescriptor, workspaceID: String?, sessionID: String, pane: TerminalSessionPaneViewController) {
+    init(descriptor: PaneContentDescriptor, workspaceID: String, sessionID: String, pane: TerminalSessionPaneViewController) {
         self.descriptor = descriptor
         self.workspaceID = workspaceID
         self.sessionID = sessionID

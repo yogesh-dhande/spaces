@@ -1244,22 +1244,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         {
             return request
         }
-        // A session with no workspace (a standalone `spaces terminal command` session) still
-        // opens — as a pane in a global panel window — so carry its owning device directly
-        // rather than deriving it from a workspace the session doesn't have.
         guard let match = await resolveSessionSummaryMatch(sessionID: sessionID) else { return nil }
-        let summary = match.summary
-        return DeviceTerminalOpenRequest(
-            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: sessionID, title: summary.title,
-            workingDirectory: summary.workingDirectory, kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
-            command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
-            createdAt: summary.createdAt, updatedAt: summary.updatedAt)
-    }
-
-    /// The pane open request for a standalone (workspace-less) session already surfaced in a
-    /// loaded overview — the sync layout-restore path for a global panel window's tabs.
-    func standalonePaneOpenRequest(sessionID: String) -> DeviceTerminalOpenRequest? {
-        guard let match = terminalSessionSummaryMatch(sessionID: sessionID) else { return nil }
         let summary = match.summary
         return DeviceTerminalOpenRequest(
             workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: sessionID, title: summary.title,
@@ -1316,10 +1301,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let sessionID = request.sessionID
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            // Standalone requests carry their device directly; workspace-backed requests
-            // derive it from the workspace (unchanged behavior for those).
-            let resolvedDeviceID =
-                request.deviceID ?? request.workspaceID.map { deviceID(forWorkspaceID: $0) } ?? SpacesPairedDeviceRecord.localDeviceID
+            // A global-window pane can mix devices, so its request carries deviceID
+            // directly; otherwise it derives from the request's workspace.
+            let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
             let device = deviceForMutation(deviceID: resolvedDeviceID)
             let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
             let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
@@ -2507,13 +2491,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     struct DeviceTerminalOpenRequest: Sendable, Equatable {
-        /// The workspace whose panel hosts this pane, or `nil` for a standalone session
-        /// (a `spaces terminal command` session not tied to any workspace) — those open
-        /// in a global panel window instead.
-        let workspaceID: String?
-        /// The owning device, set for standalone requests where it can't be derived from a
-        /// workspace. `nil` for workspace-backed requests, which resolve the device from
-        /// `workspaceID`.
+        /// The workspace whose panel hosts this pane. Every terminal session is
+        /// workspace-owned, so this always resolves.
+        let workspaceID: String
+        /// The owning device, when it can't be derived from `workspaceID` alone (global-window
+        /// panes mix devices, so the descriptor carries deviceID directly). `nil` resolves the
+        /// device from `workspaceID`.
         let deviceID: String?
         let sessionID: String
         let title: String
@@ -2532,7 +2515,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let updatedAt: String?
 
         init(
-            workspaceID: String?, deviceID: String? = nil, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
+            workspaceID: String, deviceID: String? = nil, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
             shell: String? = nil, command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
             createdAt: String? = nil, updatedAt: String? = nil
         ) {
@@ -2987,7 +2970,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let session = overview?.sessions.first { $0.id == sessionID }
         if let session {
             return DeviceTerminalOpenRequest(
-                workspaceID: session.workspaceID ?? fallbackWorkspaceID, sessionID: session.id, title: session.title,
+                workspaceID: session.workspaceID, sessionID: session.id, title: session.title,
                 workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell,
                 command: session.command, initialState: session.state, servicePID: session.servicePID, childPID: session.childPID,
                 createdAt: session.createdAt, updatedAt: session.updatedAt)
@@ -8617,12 +8600,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return .focus(hidesApp: true)
         case .openTerminal(let request):
             // Window-focus terminal targets are always workspace-backed (they come from a
-            // workspace's run-target list), so a missing workspace/device is a not-loaded state.
-            guard let workspaceID = request.workspaceID, deviceForWorkspaceMutation(workspaceID: workspaceID) != nil else {
+            // workspace's run-target list), so a missing device is a not-loaded state.
+            guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
                 showDeviceNotLoadedError()
                 return nil
             }
-            Self.setClientActiveWorkspaceID(workspaceID)
+            Self.setClientActiveWorkspaceID(request.workspaceID)
             // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
             // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
             // fires just after we foreground the terminal and re-hides the app, leaving

@@ -1276,6 +1276,24 @@ public final class WorkspaceOrchestrator {
         return session
     }
 
+    /// Resolves the workspace `spaces terminal command` should target: the explicit
+    /// `--workspace` id when given, else the deepest unarchived workspace whose directory
+    /// contains `cwd` (same containment rule as `workspaceForBuiltInTerminalSession`'s
+    /// fallback). Errors clearly when neither resolves, instead of falling back to a
+    /// workspace-less session.
+    public func resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: String?, cwd: String) throws -> String {
+        if let explicitWorkspaceID = explicitWorkspaceID?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitWorkspaceID.isEmpty {
+            return explicitWorkspaceID
+        }
+        let workspaces = try store.projects().flatMap { project in try store.workspaces(projectID: project.id, includeArchived: false) }
+        guard
+            let matched = workspaces.filter({ isPath(cwd, inside: $0.dir, allowEqual: true) }).max(by: {
+                normalizePath($0.dir).count < normalizePath($1.dir).count
+            })
+        else { throw WorkspaceError.invalidArgument(message: "Current directory is not inside a Spaces workspace.") }
+        return matched.id
+    }
+
     public func reserveWorkspaceTerminalLaunch(workspaceID: String) throws -> WorkspaceTerminalLaunchReservation {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }

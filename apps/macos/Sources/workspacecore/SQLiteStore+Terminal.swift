@@ -106,7 +106,6 @@ extension SQLiteStore {
                   SELECT terminal_sessions.workspace_id, terminal_sessions.created_at AS resolved_at, 300000 AS resolved_order, 3 AS source_priority
                   FROM terminal_sessions
                   WHERE terminal_sessions.session_id = ?
-                    AND terminal_sessions.workspace_id IS NOT NULL
                 )
                 ORDER BY source_priority, resolved_at DESC, resolved_order
                 LIMIT 1

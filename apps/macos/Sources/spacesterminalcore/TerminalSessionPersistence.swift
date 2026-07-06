@@ -5,7 +5,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
     public let sessionID: String
     public let backend: TerminalSessionBackendKind
     public let lifetimePolicy: TerminalSessionLifetimePolicy
-    public let workspaceID: String?
+    public let workspaceID: String
     public let kind: TerminalSessionKind
     public let title: String
     /// Manual rename applied by the user via `renameTerminalSession`. Kept separate from
@@ -19,16 +19,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
 
     public init(
         sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent,
-        title: String, workingDirectory: String, shell: String, command: String?, createdAt: String
-    ) {
-        self.init(
-            sessionID: sessionID, backend: backend, lifetimePolicy: lifetimePolicy, title: title, workingDirectory: workingDirectory, shell: shell,
-            command: command, createdAt: createdAt, workspaceID: nil, kind: .shell)
-    }
-
-    public init(
-        sessionID: String, backend: TerminalSessionBackendKind = .ghosttyEmbedded, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent,
-        title: String, workingDirectory: String, shell: String, command: String?, createdAt: String, workspaceID: String?, kind: TerminalSessionKind,
+        title: String, workingDirectory: String, shell: String, command: String?, createdAt: String, workspaceID: String, kind: TerminalSessionKind,
         userTitle: String? = nil
     ) {
         self.sessionID = sessionID
@@ -63,7 +54,7 @@ public struct TerminalSessionLaunchConfiguration: Codable, Sendable, Equatable {
         sessionID = try container.decode(String.self, forKey: .sessionID)
         backend = try container.decodeIfPresent(TerminalSessionBackendKind.self, forKey: .backend) ?? .ghosttyEmbedded
         lifetimePolicy = try container.decodeIfPresent(TerminalSessionLifetimePolicy.self, forKey: .lifetimePolicy) ?? .persistent
-        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
         kind = try container.decodeIfPresent(TerminalSessionKind.self, forKey: .kind) ?? .shell
         title = try container.decode(String.self, forKey: .title)
         userTitle = try container.decodeIfPresent(String.self, forKey: .userTitle)
@@ -213,7 +204,7 @@ public enum TerminalSessionPersistence {
                         INSERT INTO terminal_sessions(
                           session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, command, created_at
                         )
-                        VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?)
                         ON CONFLICT(session_id) DO UPDATE SET
                           root_directory = excluded.root_directory,
                           backend = excluded.backend,
@@ -228,7 +219,7 @@ public enum TerminalSessionPersistence {
                         """,
                     bindings: [
                         configuration.sessionID, root, configuration.backend.rawValue, configuration.lifetimePolicy.rawValue,
-                        configuration.workspaceID ?? "", configuration.kind.rawValue, configuration.title, configuration.workingDirectory,
+                        configuration.workspaceID, configuration.kind.rawValue, configuration.title, configuration.workingDirectory,
                         configuration.shell, configuration.command ?? "", configuration.createdAt,
                     ])
             }
@@ -370,7 +361,7 @@ public enum TerminalSessionPersistence {
         return try withDatabase(paths: paths) { database in
             let row = try database.queryRow(
                 sql: """
-                    SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell, COALESCE(command, ''),
+                    SELECT session_id, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, COALESCE(command, ''),
                            created_at, COALESCE(user_title, '')
                     FROM terminal_sessions
                     WHERE root_directory = ?
@@ -719,7 +710,7 @@ public enum TerminalSessionPersistence {
         try withProfileDatabase { database in
             try database.queryRows(
                 sql: """
-                    SELECT session_id, backend, lifetime_policy, COALESCE(workspace_id, ''), kind, title, working_directory, shell, COALESCE(command, ''),
+                    SELECT session_id, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, COALESCE(command, ''),
                            created_at, COALESCE(user_title, '')
                     FROM terminal_sessions
                     ORDER BY created_at, session_id
@@ -773,7 +764,7 @@ public enum TerminalSessionPersistence {
         guard let kind = TerminalSessionKind(rawValue: row[4]) else { throw TerminalSessionPersistenceError.invalidValue("kind", row[4]) }
         return TerminalSessionLaunchConfiguration(
             sessionID: row[0], backend: backend, lifetimePolicy: lifetimePolicy, title: row[5], workingDirectory: row[6], shell: row[7],
-            command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3].isEmpty ? nil : row[3], kind: kind,
+            command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3], kind: kind,
             userTitle: row.count > 10 && !row[10].isEmpty ? row[10] : nil)
     }
 

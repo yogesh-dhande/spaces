@@ -451,20 +451,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let sessions = (overview?.sessions ?? []).filter { session in
             !representedSessionIDs.contains(session.id) && terminalSessionMatchesFilters(session, query: query)
         }
-        let grouped = Dictionary(grouping: sessions) { session in
-            session.workspaceID ?? "unassigned::\(session.projectID ?? session.projectName ?? "none")::\(session.workingDirectory)"
-        }
+        let grouped = Dictionary(grouping: sessions) { $0.workspaceID }
 
         return grouped.values.compactMap { sessions in
             guard let firstSession = sessions.first else { return nil }
-            let workspace = firstSession.workspaceID.flatMap { workspaceByID[$0] }
+            let workspace = workspaceByID[firstSession.workspaceID]
             let projectName = workspace?.projectName ?? firstSession.projectName ?? "Unassigned"
             let workspaceTitle = workspace?.displayName ?? firstSession.workspaceTitle ?? "Unassigned"
             let workspaceDirectory = workspace?.dir ?? firstSession.workingDirectory
             let orderedSessions = sessions.sorted(by: sessionSort)
 
             return SpacesMobileTerminalWorkspaceGroup(
-                id: workspace?.id ?? "unassigned::\(projectName)::\(workspaceDirectory)",
+                id: firstSession.workspaceID,
                 projectName: projectName,
                 workspaceTitle: workspaceTitle,
                 workspaceDirectory: workspaceDirectory,

@@ -610,6 +610,13 @@ import workspacecore
         case .agentSignal:
             let orchestrator = try makeProfileOrchestrator()
             return try recordProfileAgentSignal(command, orchestrator: orchestrator)
+        case .terminalCommand:
+            let orchestrator = try makeProfileOrchestrator()
+            let cwd = try requiredProfileArgument(command.cwd, name: "cwd")
+            let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: command.workspaceID, cwd: cwd)
+            let session = try orchestrator.createWorkspaceTerminalSession(
+                workspaceID: workspaceID, title: command.terminalTitle, command: command.terminalCommand)
+            return TerminalServiceProfileCommandResponse(message: "Started terminal session.", terminalSession: session)
         }
     }
 

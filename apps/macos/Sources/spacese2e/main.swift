@@ -19,7 +19,8 @@ struct SpacesE2ECommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spacese2e", abstract: "Manual real-system test helpers for Spaces.",
         subcommands: [
-            E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, CreateWorkspaceCommand.self, LookupWorkspaceCommand.self,
+            E2ECommand.self, SeedFixtureCommand.self, CleanupFixturesCommand.self, RegisterProjectCommand.self, CreateWorkspaceCommand.self,
+            LookupWorkspaceCommand.self,
             ShowMainWindowCommand.self, HideMainWindowCommand.self, ShowWindowIssueModalCommand.self, SelectWorkspaceDetailCommand.self,
             OpenWorkspaceTerminalCommand.self, RunWorkspaceProcessCommand.self, StopWorkspaceProcessCommand.self, RestartWorkspaceProcessCommand.self,
             LaunchWorkspaceAgentCommand.self, DumpWorkspaceCommand.self, FocusableWindowNamesCommand.self, ArchiveWorkspaceCommand.self,
@@ -28,7 +29,7 @@ struct SpacesE2ECommand: ParsableCommand {
             AddWorkspaceProcessCommand.self, RemoveWorkspaceProcessCommand.self, FocusWorkspaceWindowCommand.self, CycleWorkspaceWindowCommand.self,
             FocusWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
             CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
-            StartTerminalSessionCommand.self, TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self,
+            TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self,
             TerminateTerminalSessionCommand.self, TerminalServiceStateCommand.self, TerminalServiceControlCommand.self,
             PlanWorkspaceRuntimeCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
@@ -216,30 +217,6 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
             WorkspaceSummaryPayload(
                 id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
                 notes: workspace.notes))
-    }
-}
-
-private struct StartTerminalSessionCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "start-terminal-session")
-
-    @Option(name: .long) var command: String?
-    @Option(name: .long) var title: String?
-    @Option(name: .long) var cwd: String?
-    @Option(name: .long) var shell: String?
-
-    /// Creates a built-in terminal session directly through TerminalService
-    /// without opening a macOS window. The helper always uses a persistent
-    /// lifetime so standalone mobile harnesses can attach later.
-    func run() throws {
-        let normalizedWorkingDirectory = normalizePath(cwd ?? FileManager.default.currentDirectoryPath)
-        let resolvedShell = terminalShellPath(shell)
-        let resolvedTitle = title ?? terminalDefaultTitle(command: command, cwd: normalizedWorkingDirectory)
-        let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: UUID().uuidString, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: resolvedTitle,
-            workingDirectory: normalizedWorkingDirectory, shell: resolvedShell, command: command,
-            createdAt: ISO8601DateFormatter().string(from: Date()))
-        let session = try TerminalService.createSession(launchConfiguration)
-        try emitJSON(session)
     }
 }
 
@@ -1292,6 +1269,29 @@ private struct LookupWorkspaceCommand: ParsableCommand {
     }
 }
 
+private struct RegisterProjectCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "register-project")
+
+    @Option(name: .long) var projectDir: String
+
+    /// Registers a directory as a Spaces project (reusing one already registered
+    /// there) and emits its default workspace, so latency/perf harnesses that
+    /// have no project of their own can get a workspace-owned terminal session
+    /// without the git worktree setup `create-workspace` implies.
+    func run() throws {
+        let orchestrator = try makeOrchestrator()
+        let normalizedProjectDir = normalizePath(projectDir)
+        let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
+        guard let workspace = try orchestrator.store.workspace(dir: project.dir) else {
+            throw ValidationError("Default workspace not found for project: \(project.dir)")
+        }
+        try emitJSON(
+            WorkspaceSummaryPayload(
+                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+                notes: workspace.notes))
+    }
+}
+
 private struct CreateWorkspaceCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create-workspace")
 
@@ -2233,19 +2233,6 @@ private func validOptionalPort(_ port: Int?, label: String) throws -> Int? {
 
 private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
 
-private func terminalShellPath(_ explicitPath: String?) -> String {
-    if let explicitPath = explicitPath?.trimmingCharacters(in: .whitespacesAndNewlines), !explicitPath.isEmpty { return explicitPath }
-    if let configured = ProcessInfo.processInfo.environment["SHELL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !configured.isEmpty {
-        return configured
-    }
-    return "/bin/zsh"
-}
-
-private func terminalDefaultTitle(command: String?, cwd: String) -> String {
-    if let command = command?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty { return command }
-    let name = URL(fileURLWithPath: cwd).lastPathComponent
-    return name.isEmpty ? "Terminal" : name
-}
 
 private final class MobileServePairingWindowEmitter: @unchecked Sendable {
     weak var server: SpacesDeviceAPIServer?

@@ -559,7 +559,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let lifetimePolicy: TerminalSessionLifetimePolicy
     public let servicePID: Int32
     public let childPID: Int32?
-    public let workspaceID: String?
+    public let workspaceID: String
     public let workspaceTitle: String?
     public let projectID: String?
     public let projectName: String?
@@ -575,7 +575,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
 
     public init(
         id: String, title: String, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
-        backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String?,
+        backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String,
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
         rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
@@ -644,7 +644,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         lifetimePolicy = try container.decode(TerminalSessionLifetimePolicy.self, forKey: .lifetimePolicy)
         servicePID = try container.decode(Int32.self, forKey: .servicePID)
         childPID = try container.decodeIfPresent(Int32.self, forKey: .childPID)
-        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
         workspaceTitle = try container.decodeIfPresent(String.self, forKey: .workspaceTitle)
         projectID = try container.decodeIfPresent(String.self, forKey: .projectID)
         projectName = try container.decodeIfPresent(String.self, forKey: .projectName)

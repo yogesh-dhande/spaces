@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 11
+    public static let currentVersion = 12
 
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
@@ -122,6 +122,42 @@ public enum DatabaseSchema {
                     DROP TABLE IF EXISTS runtime_target_events;
                     """)
         },
+        // Every terminal session is now workspace-owned (the CLI's `spaces terminal command`
+        // always resolves a workspace instead of creating a standalone session), so a NULL
+        // workspace_id can no longer happen going forward. Any surviving NULL rows are
+        // transient session records from before this change, not projects/workspaces, so
+        // dropping them is safe.
+        DatabaseMigrationStep(fromVersion: 11, toVersion: 12, description: "Require terminal sessions to carry a workspace", requiresBackup: true) {
+            database in
+            try executeBatch(
+                database: database,
+                sql: """
+                    CREATE TABLE terminal_sessions_v12 (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      lifetime_policy TEXT NOT NULL,
+                      workspace_id TEXT NOT NULL,
+                      kind TEXT NOT NULL DEFAULT 'shell',
+                      title TEXT NOT NULL,
+                      user_title TEXT,
+                      working_directory TEXT NOT NULL,
+                      shell TEXT NOT NULL,
+                      command TEXT,
+                      created_at TEXT NOT NULL
+                    );
+                    INSERT INTO terminal_sessions_v12(
+                      session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title, working_directory, shell,
+                      command, created_at
+                    )
+                    SELECT session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title, working_directory, shell,
+                      command, created_at
+                    FROM terminal_sessions
+                    WHERE workspace_id IS NOT NULL;
+                    DROP TABLE terminal_sessions;
+                    ALTER TABLE terminal_sessions_v12 RENAME TO terminal_sessions;
+                    """)
+        },
     ]
 
     static let terminalRemoteSessionStateSQL = """
@@ -163,7 +199,7 @@ public enum DatabaseSchema {
               root_directory TEXT NOT NULL UNIQUE,
               backend TEXT NOT NULL,
               lifetime_policy TEXT NOT NULL,
-              workspace_id TEXT,
+              workspace_id TEXT NOT NULL,
               kind TEXT NOT NULL DEFAULT 'shell',
               title TEXT NOT NULL,
               user_title TEXT,

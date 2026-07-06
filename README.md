@@ -36,7 +36,7 @@ spaces workspace start --workspace <id>
 spaces workspace restart --workspace <id>
 spaces pair                                 # open a short-lived same-device pairing window
 spaces agent signal --workspace <id> --session <terminal-session-id> blocked
-spaces terminal command --command "cat"   # start a Spaces terminal session
+spaces terminal command --command "cat"   # start a terminal session in the current directory's workspace
 spaces terminal list                      # inspect live session IDs and working directories
 spaces terminal send <session> "hello"    # write input to a session
 spaces terminal key <session> ctrl+c      # send a named key or control chord

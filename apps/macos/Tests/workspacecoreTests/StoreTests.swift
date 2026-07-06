@@ -642,6 +642,68 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.workspaceIDForTerminalSession(sessionID), workspace.id)
     }
 
+    // Every terminal session is now workspace-owned, so the v11->v12 migration drops any
+    // surviving NULL-workspace terminal_sessions row (a transient session record, not a
+    // project/workspace) while preserving workspace-owned rows intact.
+    func testV11ToV12MigrationDropsNullWorkspaceTerminalSessionsAndKeepsOwnedOnes() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("v11.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (11);
+                CREATE TABLE terminal_sessions (
+                  session_id TEXT PRIMARY KEY,
+                  root_directory TEXT NOT NULL UNIQUE,
+                  backend TEXT NOT NULL,
+                  lifetime_policy TEXT NOT NULL,
+                  workspace_id TEXT,
+                  kind TEXT NOT NULL DEFAULT 'shell',
+                  title TEXT NOT NULL,
+                  user_title TEXT,
+                  working_directory TEXT NOT NULL,
+                  shell TEXT NOT NULL,
+                  command TEXT,
+                  created_at TEXT NOT NULL
+                );
+                INSERT INTO terminal_sessions(
+                  session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, created_at
+                )
+                VALUES(
+                  'session-owned', '/tmp/session-owned', 'ghostty-embedded', 'persistent', 'workspace-1', 'shell', 'shell', '/tmp/work',
+                  '/bin/zsh', '2026-06-11T00:00:00Z'
+                );
+                INSERT INTO terminal_sessions(
+                  session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, created_at
+                )
+                VALUES(
+                  'session-standalone', '/tmp/session-standalone', 'ghostty-embedded', 'persistent', NULL, 'shell', 'shell', '/tmp/other',
+                  '/bin/zsh', '2026-06-11T00:00:00Z'
+                );
+                """)
+
+        _ = try SQLiteStore(path: dbURL.path)
+
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+        let sessionIDs = try readRows(dbURL: dbURL, sql: "SELECT session_id FROM terminal_sessions ORDER BY session_id").compactMap {
+            $0.first ?? nil
+        }
+        XCTAssertEqual(sessionIDs, ["session-owned"])
+        let terminalSessionColumns = try readTableColumns(dbURL: dbURL, table: "terminal_sessions")
+        XCTAssertTrue(terminalSessionColumns.contains("workspace_id"))
+        XCTAssertThrowsError(
+            try runSQLiteExec(
+                dbURL: dbURL,
+                sql: """
+                    INSERT INTO terminal_sessions(
+                      session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, created_at
+                    )
+                    VALUES('session-new-null', '/tmp/session-new-null', 'ghostty-embedded', 'persistent', NULL, 'shell', 'shell', '/tmp/new',
+                      '/bin/zsh', '2026-06-11T00:00:01Z');
+                    """))
+    }
+
     // Tests delete workspace removes dependent rows by arranging representative inputs and asserting the expected result.
     func testDeleteWorkspaceRemovesDependentRows() throws {
         let store = try makeTemporaryStore()

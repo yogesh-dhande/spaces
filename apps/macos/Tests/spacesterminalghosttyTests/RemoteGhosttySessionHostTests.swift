@@ -129,7 +129,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorSuppressesFocusOnlyMouseClickBeforeForwarding() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-focus-only-mouse", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
         let window = ActivatingTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -161,7 +161,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorDoesNotReapplyIdenticalRevisionedRenderFrame() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-idempotent-frame", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-06T00:00:00Z")
+            createdAt: "2026-06-06T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
         let firstFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
@@ -178,7 +178,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorReappliesSameRevisionFrameWhenSnapshotChanges() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-same-revision-changed-frame", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-09T00:00:00Z")
+            createdAt: "2026-06-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
         let staleFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
@@ -193,7 +193,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorReappliesSnapshotFrameWhenContentChangesWithoutRevision() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-idempotent-snapshot", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-06T00:00:00Z")
+            createdAt: "2026-06-06T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugRenderFrameApplyHandler = { _, _ in true }
         let firstFrame = GhosttyRenderFrame(sessionRevision: nil, ownerEpoch: 0, snapshot: snapshot(text: "alpha"))
@@ -209,7 +209,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorSearchActionEventsUpdateOverlayState() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-actions", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-02T00:00:00Z")
+            createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
 
         mirrorView.applyActionEvent(.startSearch("needle"))
@@ -235,7 +235,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorStartSearchWithNeedleSubmitsSeededQuery() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-selection", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugBindingActionHandler = { _ in true }
 
@@ -256,7 +256,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorIgnoresStaleSearchResultsAfterClose() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-stale-results", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugBindingActionHandler = { _ in true }
 
@@ -287,7 +287,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorSearchFieldEditSubmitsQueryOnce() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-single-edit", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugBindingActionHandler = { _ in true }
         mirrorView.applyActionEvent(.startSearch(nil))
@@ -304,7 +304,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorSearchFieldEditDebouncesShortQueries() async throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-short-debounce", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.debugBindingActionHandler = { _ in true }
         mirrorView.applyActionEvent(.startSearch(nil))
@@ -333,7 +333,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorReleaseSurfaceResetsSearchOverlay() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-release", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
 
         mirrorView.applyActionEvent(.startSearch("needle"))
@@ -353,7 +353,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorInstallsMouseMoveTrackingArea() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-mouse-tracking", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         mirrorView.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
 
@@ -370,7 +370,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorSearchOverlayDoesNotReserveBlankStatusOrLoseFocus() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-search-focus", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -455,7 +455,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testMirrorTerminalViewOpensSupportedLinksAndTracksHover() {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-open-link", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-08T00:00:00Z")
+            createdAt: "2026-06-08T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         var openedURLs: [URL] = []
         mirrorView.debugOpenURLHandler = { url in
@@ -487,7 +487,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     @MainActor func testRemoteMirrorWindowKeyHandoffRestoresFirstResponderAndSendsEnter() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-key-handoff", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
-            createdAt: "2026-06-02T00:00:00Z")
+            createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -587,7 +587,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-            createdAt: "2026-06-04T00:00:00Z")
+            createdAt: "2026-06-04T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-04T00:00:01Z",
             exitedAt: "2026-06-04T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 5, rows: 1)
@@ -615,7 +615,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-05T00:00:01Z",
             exitedAt: "2026-06-05T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 4, rows: 1)
@@ -653,7 +653,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "live", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-            createdAt: "2026-06-05T00:00:00Z")
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-05T00:00:01Z",
@@ -681,7 +681,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-            createdAt: "2026-06-04T00:00:00Z")
+            createdAt: "2026-06-04T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let runningState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-04T00:00:02Z",
             title: "live-title", workingDirectory: "/tmp/live", columns: 4, rows: 1)
@@ -801,7 +801,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-live", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-18T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         waitForCondition("initial live snapshot") { host.snapshotText() == "alpha" }
         XCTAssertEqual(host.effectiveTitle, "live")
@@ -866,7 +866,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-stale-size", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-22T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-22T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         XCTAssertFalse((host.snapshotText() ?? "").contains("from-log"))
@@ -890,7 +890,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-render", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-17T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         XCTAssertNil(host.snapshot())
         XCTAssertNil(host.snapshotText())
@@ -912,7 +912,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-truncate", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-17T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         XCTAssertNil(host.snapshotText())
 
@@ -944,7 +944,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-renderable", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-19T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -990,7 +990,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-owner-focus", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-06-02T00:00:00Z"), paths: paths)
+                createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -1064,7 +1064,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-attachment-state", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-20T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -1122,7 +1122,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-snapshot-precedence", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-21T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-21T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -1181,7 +1181,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-handoff-snapshot", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-29T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-29T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -1246,7 +1246,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-recreate-surface", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-30T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-30T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -1292,7 +1292,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-history-refresh", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-22T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-22T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -1331,7 +1331,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let host = RemoteGhosttySessionHost(
             launchConfiguration: .init(
                 sessionID: "remote-query-responses", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
-                createdAt: "2026-05-28T00:00:00Z"), paths: paths)
+                createdAt: "2026-05-28T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
         let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
@@ -1363,7 +1363,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/bash", command: "cat",
-            createdAt: "2026-06-10T00:00:00Z")
+            createdAt: "2026-06-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-10T00:00:00Z",
             title: "remote", workingDirectory: "/tmp/work", columns: 5, rows: 1)
@@ -1412,7 +1412,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/bash", command: "cat",
-            createdAt: "2026-06-10T00:00:00Z")
+            createdAt: "2026-06-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-06-10T00:00:00Z",
             title: "remote", workingDirectory: "/tmp/work", columns: 5, rows: 1)

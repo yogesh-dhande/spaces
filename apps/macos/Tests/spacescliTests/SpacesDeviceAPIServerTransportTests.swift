@@ -1046,7 +1046,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, title: "terminal", workingDirectory: workspaceDir.path, shell: "/bin/zsh", command: nil,
-                createdAt: "2026-06-09T12:00:00Z"), paths: paths)
+                createdAt: "2026-06-09T12:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
         return workspaceDir
     }
 }

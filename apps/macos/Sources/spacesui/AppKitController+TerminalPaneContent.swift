@@ -224,7 +224,7 @@ extension AppKitController {
 
         func appendSessions(from overview: SpacesDeviceOverviewPayload, limitToWorkspaceID: String?) {
             for session in overview.sessions {
-                guard let workspaceID = session.workspaceID else { continue }
+                let workspaceID = session.workspaceID
                 if let limitToWorkspaceID, workspaceID != limitToWorkspaceID { continue }
                 guard let request = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: session.id, overview: overview) else {
                     continue

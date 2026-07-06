@@ -227,6 +227,15 @@ def run(command: list[str], timeout: float = 30) -> subprocess.CompletedProcess[
     return subprocess.run(command, env=base_env, capture_output=True, text=True, timeout=timeout, check=True)
 
 
+def register_workspace_dir() -> str:
+    # Every terminal session is workspace-owned, so this harness registers a plain
+    # (non-git) project directory and uses its default workspace as the launch target.
+    project_dir = work_root / "terminal-latency-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    completed = run([spacese2e, "register-project", "--project-dir", str(project_dir)], timeout=10)
+    return json.loads(completed.stdout)["dir"]
+
+
 def read_performance_events() -> list[dict]:
     if not performance_log_path.exists():
         return []
@@ -360,8 +369,8 @@ def first_mac_frame_apply_after_submit(session_id: str, submit_ns: int) -> tuple
 
 
 def extract_session_id(output: str) -> str:
-    # `spacese2e start-terminal-session` emits the created session as JSON, matching
-    # the remote latency compare harness which reads the same `id` field.
+    # `spacese2e start-workspace-terminal-session` emits the created session as JSON,
+    # matching the remote latency compare harness which reads the same `id` field.
     try:
         session = json.loads(output)
     except json.JSONDecodeError as error:
@@ -419,7 +428,9 @@ def start_terminal(title: str, command: str | None) -> str:
     try:
         arguments = [
             spacese2e,
-            "start-terminal-session",
+            "start-workspace-terminal-session",
+            "--workspace-dir",
+            workspace_dir,
             "--title",
             title,
         ]
@@ -973,6 +984,8 @@ def run_mac_command_output_catchup() -> dict:
         "budget_enforced": True,
     }
 
+
+workspace_dir = register_workspace_dir()
 
 for scenario in scenarios:
     scenario_started_ns = now_ns()

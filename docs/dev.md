@@ -136,8 +136,12 @@ export SPACES_DB_PATH="$TMPDIR/spaces-ghostty/spaces.db"
 export SPACES_RUNTIME_DIR="$(dirname "$SPACES_DB_PATH")/runtime"
 apps/macos/scripts/setup_ghostty.sh
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  terminal command --backend ghostty-embedded --command cat --title verify-ghostty
+mkdir -p "$TMPDIR/spaces-ghostty/workspace"
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spacese2e \
+  register-project --project-dir "$TMPDIR/spaces-ghostty/workspace" >/dev/null
+spaces_cli="$(cd apps/macos/.build/debug && pwd)/spaces"
+(cd "$TMPDIR/spaces-ghostty/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" "$spaces_cli" \
+  terminal command --command cat --title verify-ghostty)
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces terminal list
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal send <session-id> "hello from ghostty" --newline
@@ -304,7 +308,10 @@ export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 pkill -x SpacesApp 2>/dev/null || true
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
+mkdir -p "$TMPDIR/spaces-ios-demo/workspace"
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-project --project-dir "$TMPDIR/spaces-ios-demo/workspace" >/dev/null
+(cd "$TMPDIR/spaces-ios-demo/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" "$(cd apps/macos/.build/debug && pwd)/spaces" \
+  terminal command --command cat --title ios-demo)
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
@@ -336,7 +343,10 @@ scripts/install-ios-device.sh
 export SPACES_DB_PATH="$TMPDIR/spaces-ios-demo/spaces.db"
 mkdir -p "$(dirname "$SPACES_DB_PATH")"
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/SpacesApp
-env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spaces terminal command --backend ghostty-embedded --command cat --title ios-demo
+mkdir -p "$TMPDIR/spaces-ios-demo/workspace"
+env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e register-project --project-dir "$TMPDIR/spaces-ios-demo/workspace" >/dev/null
+(cd "$TMPDIR/spaces-ios-demo/workspace" && env SPACES_DB_PATH="$SPACES_DB_PATH" "$(cd apps/macos/.build/debug && pwd)/spaces" \
+  terminal command --command cat --title ios-demo)
 env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-status
 ```
 

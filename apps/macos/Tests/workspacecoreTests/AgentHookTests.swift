@@ -235,7 +235,7 @@ final class AgentHookTests: XCTestCase {
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = UUID().uuidString
         try withSpacesProfileEnvironment(dbPath: dbPath) {
-            try writeLiveBuiltInTerminalSession(sessionID: sessionID, workspaceDirectory: workspace.dir)
+            try writeLiveBuiltInTerminalSession(sessionID: sessionID, workspaceDirectory: workspace.dir, workspaceID: workspace.id)
         }
 
         let agent = try orchestrator.registerAgentWindow(
@@ -366,12 +366,12 @@ final class AgentHookTests: XCTestCase {
         return (project, workspace)
     }
 
-    private func writeLiveBuiltInTerminalSession(sessionID: String, workspaceDirectory: String) throws {
+    private func writeLiveBuiltInTerminalSession(sessionID: String, workspaceDirectory: String, workspaceID: String) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
                 sessionID: sessionID, backend: .ghosttyEmbedded, title: "shell", workingDirectory: workspaceDirectory, shell: "/bin/zsh",
-                command: nil, createdAt: "2026-06-06T00:00:00Z", workspaceID: nil, kind: .shell), paths: paths)
+                command: nil, createdAt: "2026-06-06T00:00:00Z", workspaceID: workspaceID, kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
