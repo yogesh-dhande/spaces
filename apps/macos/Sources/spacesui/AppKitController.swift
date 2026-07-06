@@ -6179,6 +6179,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return button
     }
 
+    /// The right-edge disclosure chevron for collapsible sidebar rows (projects and
+    /// workspaces). Points down when expanded and right when collapsed. Rendered as a
+    /// button so a click toggles expansion without also triggering the row's own
+    /// mouse-down handling (project row-toggle or workspace selection).
+    func sidebarRowChevronButton(expanded: Bool, tooltip: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.isBordered = false
+        button.imageScaling = .scaleNone
+        button.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: tooltip)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        button.contentTintColor = .tertiaryLabelColor
+        button.toolTip = tooltip
+        button.setAccessibilityLabel(tooltip)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 16), button.heightAnchor.constraint(equalToConstant: 16)])
+        return button
+    }
+
+    @objc func toggleSidebarProjectDisclosure(_ sender: NSButton) {
+        guard let projectID = sender.identifier?.rawValue else { return }
+        sidebar.toggleProjectExpanded(projectID: projectID)
+    }
+
+    @objc func toggleSidebarWorkspaceDisclosure(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        sidebar.toggleWorkspaceExpanded(workspaceID: workspaceID)
+    }
+
     func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton(title: "", target: self, action: action)
         button.bezelStyle = .texturedRounded
