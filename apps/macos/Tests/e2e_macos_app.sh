@@ -1941,63 +1941,19 @@ end run
 APPLESCRIPT
 }
 
+# Clicks a workspace-detail runtime-control button by its stable accessibility identifier.
+# Post-panel-rework these actions live in the detail's footer strip (workspace identity and
+# actions moved below the terminal panel), so this resolves the button by identifier anywhere
+# in the window tree via `ui_click_identifier` rather than a hardcoded scroll-area/splitter path.
 ui_click_workspace_detail_header_button() {
   local description="$1"
   local identifier
   case "$description" in
     Launch|Restart) identifier="workspace-detail-launch-restart" ;;
     Stop) identifier="workspace-detail-stop" ;;
-    *) fail "unsupported workspace detail header button: $description" ;;
+    *) fail "unsupported workspace detail runtime-control button: $description" ;;
   esac
-  python3 - "$SPACES_PID" "$identifier" "$AX_ACTION_TIMEOUT_SECONDS" <<'PY'
-import subprocess
-import sys
-
-target_pid = sys.argv[1]
-target_identifier = sys.argv[2]
-timeout_seconds = float(sys.argv[3])
-script = r'''
-on run argv
-  set targetPID to (item 1 of argv) as integer
-  set targetIdentifier to item 2 of argv
-  tell application "System Events"
-    repeat with proc in every process whose unix id is targetPID
-      repeat with targetWindow in windows of proc
-        set windowTitle to ""
-        set windowIdentifier to ""
-        try
-          set windowTitle to (name of targetWindow) as text
-        end try
-        try
-          set windowIdentifier to (value of attribute "AXIdentifier" of targetWindow) as text
-        end try
-        if windowIdentifier is "spaces-main-window" or windowTitle is "Spaces" then
-          tell scroll area 2 of splitter group 1 of targetWindow
-            repeat with targetButton in buttons
-              try
-                if (value of attribute "AXIdentifier" of targetButton) is targetIdentifier then
-                  click targetButton
-                  return
-                end if
-              end try
-            end repeat
-          end tell
-        end if
-      end repeat
-    end repeat
-  end tell
-  error "workspace-detail header button not found: " & targetIdentifier
-end run
-'''
-try:
-    result = subprocess.run(
-        ["osascript", "-e", script, target_pid, target_identifier],
-        timeout=timeout_seconds,
-    )
-except subprocess.TimeoutExpired:
-    sys.exit(124)
-sys.exit(result.returncode)
-PY
+  ui_click_identifier "$identifier"
 }
 
 ui_set_identifier_value() {
@@ -2386,22 +2342,30 @@ assert_shortcut_focus_surface_state() {
   if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
     return 0
   fi
+  # Post-panel-rework the workspace terminal is a pane inside the main window, so the surface
+  # snapshot reports mainWindowFocused=true whenever a terminal is focused — it can no longer
+  # tell an overview surface from a focused terminal, and its `not mainWindowFocused` primary
+  # always times out before the fallbacks accept. Check the fast, decisive signals first: a
+  # terminal owner-focused or Chrome frontmost each mean the overview surface is not the active
+  # focus. The surface snapshot stays as a last resort for any other legitimately-hidden state.
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    assert_no_spaces_modal_dialog
+    if [[ "$(spaces_built_in_terminal_focus_state 2>/dev/null | tr -d '\n' || true)" == "owner" ]]; then
+      return 0
+    fi
+    case "$(frontmost_app 2>/dev/null | tr -d '\n' || true)" in
+      "Google Chrome")
+        return 0
+        ;;
+    esac
+    sleep 0.2
+  done
   if wait_for_surface_snapshot_python_optional \
     "shortcut focus surface hidden" \
     'spaces = data.get("spaces") or {}
 ok = not spaces.get("modalVisible") and not spaces.get("mainWindowFocused") and not spaces.get("commandPaletteVisible") and not spaces.get("commandPaletteFocused")
 raise SystemExit(0 if ok else 1)'; then
-    return 0
-  fi
-  assert_no_spaces_modal_dialog
-  case "$(frontmost_app 2>/dev/null | tr -d '\n' || true)" in
-    "Google Chrome")
-      log_debug "accepted shortcut surface state from frontmost Chrome after surface snapshot timeout"
-      return 0
-      ;;
-  esac
-  if [[ "$(spaces_built_in_terminal_focus_state 2>/dev/null | tr -d '\n' || true)" == "owner" ]]; then
-    log_debug "accepted shortcut surface state from Spaces terminal owner after surface snapshot timeout"
     return 0
   fi
   if spaces_cycle_surface_hidden_probe; then
@@ -2412,15 +2376,16 @@ raise SystemExit(0 if ok else 1)'; then
 }
 
 assert_cycle_focus_surface_state() {
+  # Best-effort secondary confirmation that the cycle left no modal/palette/overview picker
+  # blocking the focused target. Non-failing. Post-panel-rework the terminal is a pane inside
+  # the main window, so the surface snapshot's mainWindowFocused can no longer tell a focused
+  # terminal from the overview picker (it always reads true) — the fast AX probe distinguishes
+  # them (a focused terminal pane vs. none) and settles quickly instead of double-timing-out.
   if [[ "${LAST_CYCLE_TARGET_FOCUS_VIA_APP_OBSERVATION:-0}" == "1" ]]; then
-    if spaces_cycle_surface_hidden_probe; then
-      log_debug "accepted cycle surface state from lightweight AX probe after request-scoped terminal focus observation"
-    else
-      log_debug "accepted cycle surface state from request-scoped terminal focus observation after AX probes returned unknown"
-    fi
+    spaces_cycle_surface_hidden_probe || true
     return 0
   fi
-  if wait_for_spaces_cycle_surface_hidden; then
+  if wait_for_spaces_cycle_surface_hidden_probe; then
     return 0
   fi
   log_debug "cycle surface state was not independently confirmed after target focus assertion; continuing"
@@ -2732,52 +2697,16 @@ end run
 APPLESCRIPT
 }
 
-spaces_front_window_identifier() {
-  osascript - "$SPACES_PID" <<'APPLESCRIPT'
-on run argv
-  set targetPID to (item 1 of argv) as integer
-  tell application "System Events"
-    repeat with proc in every process whose unix id is targetPID
-      if (count of windows of proc) is 0 then return ""
-      try
-        return value of attribute "AXIdentifier" of front window of proc
-      on error
-        return ""
-      end try
-    end repeat
-  end tell
-  return ""
-end run
-APPLESCRIPT
-}
-
+# Waits until `expected_session_id`'s terminal pane is the front window's active pane while
+# Spaces is frontmost. Post-panel-rework this reads the pane's `terminal-pane-<sessionID>`
+# AXIdentifier off the front window instead of the shared window's identifier, which no longer
+# encodes the session id.
 wait_for_spaces_terminal_frontmost_session_optional() {
   local expected_session_id="$1"
-  local label="Spaces terminal session to become frontmost: $expected_session_id"
   local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
-  local snapshot_file="$TMP_ROOT/surface-snapshot-terminal-frontmost.json"
-  local snapshot_failures=0
   while (( SECONDS < deadline )); do
-    if surface_snapshot_json >"$snapshot_file"; then
-      if surface_snapshot_condition_matches "$snapshot_file" \
-        'expected_identifier = "spaces-terminal:" + sys.argv[2]
-spaces = data.get("spaces") or {}
-spaces_pid = spaces.get("processID")
-ok = (
-    spaces_pid is not None
-    and data.get("frontmostProcessID") == spaces_pid
-    and (spaces.get("frontWindowIdentifier") or "") == expected_identifier
-)
-raise SystemExit(0 if ok else 1)' \
-        "$expected_session_id"; then
-        return 0
-      fi
-    else
-      local snapshot_status=$?
-      snapshot_failures=$((snapshot_failures + 1))
-      if (( snapshot_failures == 1 || snapshot_failures % 5 == 0 )); then
-        log_debug "surface_snapshot failed label=$label status=$snapshot_status failures=$snapshot_failures"
-      fi
+    if [[ "$(frontmost_pid)" == "$SPACES_PID" && "$(spaces_front_terminal_pane_session_id)" == "$expected_session_id" ]]; then
+      return 0
     fi
     sleep "$SURFACE_POLL_INTERVAL_SECONDS"
   done
@@ -2866,24 +2795,16 @@ wait_for_surface_snapshot_python() {
   fail "timed out waiting for surface snapshot condition: $label"
 }
 
+# Waits until the runtime target name (tab title) of Spaces' focused-window terminal pane is
+# `expected_title`. Post-panel-rework this replaces the native window title as the "which
+# session is focused" signal, since the shared window title no longer encodes it. Like the old
+# surface-snapshot title check it reads the app's focused window regardless of whether Spaces is
+# the OS-frontmost app — callers seed focus with the `open`/focus CLIs that may leave another
+# app (e.g. Chrome) frontmost while Spaces' own front window is the target terminal. The wait
+# loop's `assert_no_spaces_modal_dialog` preserves the old `not modalVisible` guard.
 wait_for_spaces_front_window_title() {
   local expected_title="$1"
-  wait_for_surface_snapshot_python \
-    "Spaces front window title: $expected_title" \
-    'expected_title = sys.argv[2]
-spaces = data.get("spaces") or {}
-ok = (spaces.get("frontWindowTitle") or "") == expected_title and not spaces.get("modalVisible")
-raise SystemExit(0 if ok else 1)' \
-    "$expected_title"
-}
-
-spaces_front_window_session_id() {
-  local identifier
-  identifier="$(spaces_front_window_identifier)"
-  case "$identifier" in
-    spaces-terminal:*) printf '%s\n' "${identifier#spaces-terminal:}" ;;
-    *) printf '%s\n' "" ;;
-  esac
+  wait_for_condition "spaces_front_terminal_pane_runtime_title" "$expected_title"
 }
 
 spaces_front_window_kind() {
@@ -2973,16 +2894,63 @@ spaces_command_palette_key() {
   fi
 }
 
+# The window-identity classifier (spaces_front_window_kind) cannot distinguish which terminal
+# session is frontmost, nor its owner/viewer state, on its own: post-panel-rework every terminal
+# session renders as a pane inside one shared window (main or a global panel window) instead of
+# its own dedicated window, so window title/identifier no longer encodes the session id or
+# attachment mode the way a standalone terminal window's title used to. The surface snapshot
+# reads them directly off the focused window's active terminal pane (the `terminal-pane-<sessionID>`
+# AXIdentifier → session id; its AXValue → owner/viewer, kept current by updateInputOwnershipUI;
+# its AXDescription → the runtime target name / tab title, pushed by PanelCoordinator's render).
+# Only the selected tab's pane tree is in the window's AX hierarchy, so the first match is the
+# frontmost session.
+#
+# This runs inside the Swift `surface-snapshot` command over the AXUIElement C API — far cheaper
+# than an equivalent AppleScript/System-Events recursion, which these helpers are polled against
+# in tight wait loops (a System-Events descent ran multiple seconds per call and dominated cycle
+# verification wall-clock).
+spaces_front_terminal_pane_field() {
+  local field="$1"
+  local snapshot_file="$TMP_ROOT/surface-snapshot-pane.json"
+  surface_snapshot_json >"$snapshot_file" 2>/dev/null || { printf '\n'; return 0; }
+  python3 - "$snapshot_file" "$field" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+except Exception:
+    print("")
+    raise SystemExit(0)
+spaces = data.get("spaces") or {}
+print(spaces.get(sys.argv[2]) or "")
+PY
+}
+
+# Owner/viewer attachment mode of the focused window's active terminal pane, empty if none.
+spaces_front_terminal_pane_attachment_mode() {
+  spaces_front_terminal_pane_field "frontTerminalPaneMode"
+}
+
+# Session id of the focused window's active terminal pane, empty if none.
+spaces_front_terminal_pane_session_id() {
+  spaces_front_terminal_pane_field "frontTerminalPaneSessionID"
+}
+
+# Runtime target name (tab title) of the focused window's active terminal pane, empty if none.
+spaces_front_terminal_pane_runtime_title() {
+  spaces_front_terminal_pane_field "frontTerminalPaneTitle"
+}
+
 spaces_built_in_terminal_focus_state() {
   if [[ "$(frontmost_pid)" != "$SPACES_PID" ]]; then
     printf 'none\n'
     return 0
   fi
-  case "$(spaces_front_window_kind)" in
-    terminal_owner)
+  case "$(spaces_front_terminal_pane_attachment_mode)" in
+    owner)
       printf 'owner\n'
       ;;
-    terminal_viewer)
+    viewer)
       printf 'viewer\n'
       ;;
     *)
@@ -3108,6 +3076,13 @@ spaces_cycle_surface_hidden_probe() {
     front_kind="$(spaces_front_window_kind 2>/dev/null | tr -d '\n' || true)"
     case "$front_kind" in
       terminal_owner|terminal_viewer|other|none) ;;
+      main)
+        # Post-panel-rework a focused terminal is a pane inside the main window, so the front
+        # window reads as "main". A terminal pane focused there is a valid surface-hidden state
+        # (the overview picker is not blocking); a main window with no terminal pane focused is
+        # the overview and is not hidden.
+        [[ -n "$(spaces_front_terminal_pane_session_id)" ]] || return 1
+        ;;
       *) return 1 ;;
     esac
   fi
@@ -3122,32 +3097,6 @@ wait_for_spaces_cycle_surface_hidden_probe() {
     fi
     sleep 0.2
   done
-  return 1
-}
-
-wait_for_spaces_cycle_surface_hidden() {
-  if wait_for_surface_snapshot_python_optional \
-    "cycle surface state to settle" \
-    'spaces = data.get("spaces") or {}
-if not spaces or not spaces.get("appVisible"):
-    raise SystemExit(0)
-spaces_pid = spaces.get("processID")
-frontmost_pid = data.get("frontmostProcessID")
-ok = (
-    not spaces.get("modalVisible")
-    and not spaces.get("commandPaletteVisible")
-    and not (
-        frontmost_pid == spaces_pid
-        and (spaces.get("mainWindowFocused") or spaces.get("commandPaletteFocused"))
-    )
-)
-raise SystemExit(0 if ok else 1)'; then
-    return 0
-  fi
-  if wait_for_spaces_cycle_surface_hidden_probe; then
-    log_debug "accepted cycle surface state from lightweight AX probe after surface snapshot timeout"
-    return 0
-  fi
   return 1
 }
 
@@ -5080,7 +5029,7 @@ PY
   transition_pause "$host shortcut focus frontend"
   frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
   KNOWN_SPACES_FRONTEND_SESSION_ID="$frontend_session_id"
-  wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${frontend_session_id}"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "${frontend_session_id}"
   frontend_focus_elapsed_ms="$(( $(timestamp_ms) - frontend_focus_started_at ))"
   record_metric_sample "spaces_detail_ui.keyboard_window_shortcut.process_tracked_tab" "$frontend_focus_elapsed_ms" "$host" "single"
   wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
@@ -5350,10 +5299,10 @@ PY
     send_spaces_window_shortcut_with_ack "$noisy_shortcut_index"
     transition_pause "$host shortcut focus $HIGH_OUTPUT_PROCESS_NAME"
     wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
-    noisy_session_id="$(spaces_front_window_session_id)"
+    noisy_session_id="$(spaces_front_terminal_pane_session_id)"
     [[ -n "$noisy_session_id" ]] || fail "expected focused $HIGH_OUTPUT_PROCESS_NAME terminal to expose session identifier"
     KNOWN_SPACES_NOISY_SESSION_ID="$noisy_session_id"
-    wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${noisy_session_id}"
+    wait_for_condition "spaces_front_terminal_pane_session_id" "${noisy_session_id}"
     assert_shortcut_focus_surface_state
     record_metric_sample \
       "spaces_detail_ui.keyboard_window_shortcut.process_high_output_tracked_tab" \
@@ -5956,13 +5905,13 @@ EOF
   run_spaces_logged /tmp/spaces-e2e-scout-branch-open-frontend.log open frontend "$scout_branch_workspace_dir"
   transition_pause "local scout branch frontend terminal focus"
   scout_branch_frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "frontend" "$scout_branch_dump_file")"
-  wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${scout_branch_frontend_session_id}"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "${scout_branch_frontend_session_id}"
   wait_for_spaces_front_window_title "frontend"
   wait_for_terminal_session_live_render "$scout_branch_frontend_session_id" "local scout branch frontend"
   run_spaces_logged /tmp/spaces-e2e-scout-branch-open-backend.log open backend "$scout_branch_workspace_dir"
   transition_pause "local scout branch backend terminal focus"
   scout_branch_backend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "backend" "$scout_branch_dump_file")"
-  wait_for_condition "spaces_front_window_identifier" "spaces-terminal:${scout_branch_backend_session_id}"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "${scout_branch_backend_session_id}"
   wait_for_spaces_front_window_title "backend"
   wait_for_terminal_session_live_render "$scout_branch_backend_session_id" "local scout branch backend"
   run_spaces_logged /tmp/spaces-e2e-prism-start.log start "$third_workspace_dir"
