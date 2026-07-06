@@ -20,7 +20,19 @@ import Foundation
 
         /// Unix socket the Caddy admin API listens on for the active profile. Callers must embed this
         /// in the generated config (admin.listen) so it matches the address used for reloads.
-        public static func adminSocketPath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy-admin.sock") }
+        ///
+        /// Lives under a short fixed root rather than the profile runtime directory: AF_UNIX socket
+        /// paths are capped at 104 bytes on macOS, and a worktree/branch-derived runtime directory
+        /// (`~/.spaces-dev/profiles/spaces/<branch-slug>-<hash>/runtime/`) can exceed that on its own
+        /// for a long branch name, which fails the bind silently. The filename is a stable hash of the
+        /// runtime directory (mirroring `TerminalServicePaths`) so each profile still gets its own
+        /// distinct socket.
+        public static func adminSocketPath() throws -> String {
+            let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-caddy-sockets", isDirectory: true)
+            try FileManager.default.createDirectory(at: socketRoot, withIntermediateDirectories: true)
+            let hash = SpacesProfile.shortStableHash(SpacesProfile.canonicalPath(try runtimeDirectory()))
+            return socketRoot.appendingPathComponent("admin-\(hash).sock", isDirectory: false).path
+        }
 
         /// Client-owned route registry read by the local macOS daemon when reconciling Caddy.
         public static func routeRegistryPath() throws -> String { try (runtimeDirectory() as NSString).appendingPathComponent("caddy-routes.json") }
