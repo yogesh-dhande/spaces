@@ -26,12 +26,35 @@ import Foundation
         /// (`~/.spaces-dev/profiles/spaces/<branch-slug>-<hash>/runtime/`) can exceed that on its own
         /// for a long branch name, which fails the bind silently. The filename is a stable hash of the
         /// runtime directory (mirroring `TerminalServicePaths`) so each profile still gets its own
-        /// distinct socket.
+        /// distinct socket, and the root (`secureSocketRoot`) is a per-user `0700` directory so no
+        /// other local user can pre-create or observe the admin socket that controls local routing.
         public static func adminSocketPath() throws -> String {
-            let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-caddy-sockets", isDirectory: true)
-            try FileManager.default.createDirectory(at: socketRoot, withIntermediateDirectories: true)
+            let socketRoot = try secureSocketRoot()
             let hash = SpacesProfile.shortStableHash(SpacesProfile.canonicalPath(try runtimeDirectory()))
             return socketRoot.appendingPathComponent("admin-\(hash).sock", isDirectory: false).path
+        }
+
+        /// The per-user root that holds every profile's admin socket, created `0700` and owned by the
+        /// current user. Because the `/tmp` path is predictable (short, fixed prefix + uid), another
+        /// local user could race to pre-create it; `createDirectory` does not touch an existing
+        /// directory's attributes, so this re-validates via `lstat` that the path is a real directory
+        /// (not a symlink), is owned by us, and grants no group/other access. Anything else is a
+        /// hijack attempt (the admin API can rewrite the local router config), so we refuse rather
+        /// than bind into an attacker-controlled directory.
+        ///
+        /// `parentDirectory` defaults to `/tmp` (kept short for the 104-byte AF_UNIX cap); tests
+        /// override it to validate the ownership/mode checks against an isolated temporary base.
+        static func secureSocketRoot(parentDirectory: URL = URL(fileURLWithPath: "/tmp", isDirectory: true)) throws -> URL {
+            let uid = getuid()
+            let root = parentDirectory.appendingPathComponent("spaces-caddy-sockets-\(uid)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            var status = stat()
+            guard lstat(root.path, &status) == 0 else { throw CaddyServiceError.socketRootUntrusted(root.path) }
+            let isDirectory = (status.st_mode & S_IFMT) == S_IFDIR
+            let isOwnedByCurrentUser = status.st_uid == uid
+            let deniesGroupAndOther = (status.st_mode & 0o077) == 0
+            guard isDirectory, isOwnedByCurrentUser, deniesGroupAndOther else { throw CaddyServiceError.socketRootUntrusted(root.path) }
+            return root
         }
 
         /// Client-owned route registry read by the local macOS daemon when reconciling Caddy.
@@ -208,12 +231,15 @@ import Foundation
         case executableNotFound
         case startupTimedOut(String)
         case reloadFailed(String)
+        case socketRootUntrusted(String)
 
         public var errorDescription: String? {
             switch self {
             case .executableNotFound: "The caddy executable is required to route workspace service URLs."
             case .startupTimedOut(let path): "Timed out waiting for caddy to start from \(path)."
             case .reloadFailed(let path): "Failed to reload caddy with config at \(path)."
+            case .socketRootUntrusted(let path):
+                "The caddy admin socket directory \(path) is not a private directory owned by the current user."
             }
         }
     }

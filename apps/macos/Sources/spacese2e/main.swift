@@ -2498,7 +2498,8 @@ private func snapshotSpacesSurface(pid: Int32, frontmostPID: Int?) -> SpacesSurf
     let frontWindowIdentifier = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXIdentifierAttribute as String) }
     let frontWindowTitle = focusedWindow.flatMap { axStringAttribute($0, attribute: kAXTitleAttribute as String) }
     let frontWindowKind = classifySpacesWindow(focusedWindow)
-    let frontTerminalPane = focusedWindow.flatMap { firstTerminalPaneIdentity(in: $0) }
+    let frontTerminalPane =
+        focusedTerminalPaneIdentity(appElement: appElement) ?? focusedWindow.flatMap { firstTerminalPaneIdentity(in: $0) }
 
     let mainWindow = windows.first { window in
         let identifier = axStringAttribute(window, attribute: kAXIdentifierAttribute as String)
@@ -2542,10 +2543,36 @@ private func classifySpacesWindow(_ window: AXUIElement?) -> String {
     return "other"
 }
 
-/// Depth-first search for the focused window's active terminal pane, identified by the
+/// The terminal pane that actually holds keyboard focus, resolved by walking up from the
+/// app's focused AX element to the nearest `terminal-pane-<sessionID>` ancestor. In a split
+/// tab every visible pane is in the window's AX hierarchy, so the first-match DFS in
+/// `firstTerminalPaneIdentity` reports the left/top pane even after focus moved to another
+/// split; this walk targets the pane the harness actually drove. Returns nil when keyboard
+/// focus is not inside a terminal pane (e.g. the sidebar or a rename editor), so the caller
+/// falls back to the first visible pane. Same identity tuple as `firstTerminalPaneIdentity`:
+/// session id (identifier suffix), owner/viewer mode (AXValue), runtime-target name (AXDescription).
+private func focusedTerminalPaneIdentity(appElement: AXUIElement) -> (sessionID: String, mode: String, title: String)? {
+    let prefix = "terminal-pane-"
+    var element = axElementAttribute(appElement, attribute: kAXFocusedUIElementAttribute as String)
+    var depth = 0
+    while let current = element, depth < 48 {
+        if let identifier = axStringAttribute(current, attribute: kAXIdentifierAttribute as String), identifier.hasPrefix(prefix) {
+            return (
+                String(identifier.dropFirst(prefix.count)),
+                axStringAttribute(current, attribute: kAXValueAttribute as String) ?? "",
+                axStringAttribute(current, attribute: kAXDescriptionAttribute as String) ?? "")
+        }
+        element = axElementAttribute(current, attribute: kAXParentAttribute as String)
+        depth += 1
+    }
+    return nil
+}
+
+/// Depth-first search for the selected tab's first (left/top) terminal pane, identified by the
 /// `terminal-pane-<sessionID>` AXIdentifier that `TerminalSessionPaneViewController` sets. Only
-/// the selected tab's pane tree is in the window's AX hierarchy, so the first match is the
-/// frontmost session. Returns its session id (identifier suffix), owner/viewer mode (AXValue),
+/// the selected tab's pane tree is in the window's AX hierarchy. This is the fallback the surface
+/// snapshot uses when keyboard focus is not inside any pane; `focusedTerminalPaneIdentity` handles
+/// the focused-split case. Returns its session id (identifier suffix), owner/viewer mode (AXValue),
 /// and runtime-target name (AXDescription). Runs in-process over the AXUIElement C API, which is
 /// far cheaper than an equivalent AppleScript/System-Events traversal the harness would otherwise
 /// poll in a tight loop.

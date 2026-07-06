@@ -40,6 +40,11 @@ extension AppKitController {
             NSApp.activate(ignoringOtherApps: true)
             window?.makeKeyAndOrderFront(nil)
         case .globalWindow(let panelWindowID):
+            // Same reasoning as the workspace case: fronting a global panel (e.g. a
+            // `spaces terminal show <id>` for a workspace-less session) must foreground
+            // Spaces, otherwise `makeKeyAndOrderFront` leaves the panel window behind the
+            // frontmost app when Spaces is backgrounded and the IPC still reports success.
+            NSApp.activate(ignoringOtherApps: true)
             panelCoordinator.showPanelWindow(panelWindowID: panelWindowID, makeKey: true)
         }
     }
