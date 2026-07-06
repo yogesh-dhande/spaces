@@ -210,22 +210,28 @@ docker run --rm --platform linux/amd64 \
   bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch x86_64'
 ```
 
-Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, creates `~/.spaces/runtime`, `~/spaces/workspaces`, and `~/spaces/repos`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, enables the user service, and restarts it. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry. The Mac app uses the signed release manifest and this install script to set up supported Linux devices automatically over SSH when pairing needs it.
+Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, creates `~/.spaces/runtime`, `~/spaces/workspaces`, and `~/spaces/repos`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, enables the user service, and restarts it. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry.
 
-For development or debugging, install an artifact on a reachable Linux device with:
+The single user-facing Linux install/upgrade path is the published `spaces-install-linux.sh` one-liner, run on the Ubuntu 24.04 device for a specific released version (the Mac app and CLI print this command when a remote daemon is missing or wire-incompatible):
+
+```bash
+curl -fsSL https://github.com/yogesh-dhande/spaces/releases/download/v<version>/spaces-install-linux.sh | bash -s -- <version>
+```
+
+For development or debugging against an unreleased build, install a locally built artifact on a reachable Linux device with scp plus the bundled `install.sh` (this is the offline alternative to the published one-liner):
 
 ```bash
 scp .build/artifacts/spacesd-ubuntu-24.04-x86_64.tar.gz <host>:/tmp/
 ssh <host> 'mkdir -p /tmp/spacesd-install && tar -xzf /tmp/spacesd-ubuntu-24.04-x86_64.tar.gz -C /tmp/spacesd-install && /tmp/spacesd-install/install.sh'
 ```
 
-After install, verify the remote pairing command over strict SSH. The Mac app uses the same command after automatic Linux setup and when connecting an already prepared remote device:
+After install, verify the remote pairing command over strict SSH — the Mac app's `--ssh` pairing path runs the same command to fetch the remote pairing link:
 
 ```bash
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <host> '~/.spaces/bin/spaces pair --json'
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes <host> '~/.spaces/bin/spaces device pair --json'
 ```
 
-Remote Macs are installed from the signed DMG instead of a headless artifact. The DMG install creates `/Applications/Spaces.app`, links `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and `/usr/local/bin/spaces-caddy` to `Spaces.app/Contents/Resources/`, links `~/.spaces/bin/spaces` and `~/.spaces/bin/spacesd` to the same bundled binaries, writes the per-user LaunchAgent with `~/.spaces/bin/spacesd` as its program, and creates the default `~/.spaces` state directories. Remote Mac pairing rejects partial installs before running the pairing command.
+Remote Macs are installed from the signed DMG instead of a headless artifact. The DMG install creates `/Applications/Spaces.app`, links `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and `/usr/local/bin/spaces-caddy` to `Spaces.app/Contents/Resources/`, links `~/.spaces/bin/spaces` and `~/.spaces/bin/spacesd` to the same bundled binaries, writes the per-user LaunchAgent with `~/.spaces/bin/spacesd` as its program, and creates the default `~/.spaces` state directories. When a remote Mac has no Spaces install, pairing fails with guidance to install the Spaces app.
 
 For focused terminal latency probes:
 
@@ -311,7 +317,7 @@ env SPACES_DB_PATH="$SPACES_DB_PATH" apps/macos/.build/debug/spacese2e mobile-st
 xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-On first launch, the iOS client opens its Devices sheet. Open Devices in the Mac sidebar or run `spaces pair`, then scan the QR code. The mobile demo lane opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. The harness stores Mac client metadata in an isolated SQLite file by exporting `SPACES_CLIENT_DB_PATH` and stores harness-only Mac client secrets under `SPACES_CLIENT_SECRET_DIR`; these overrides are for E2E and demo profiles so test pairings do not mix with the user client database or client secret files. Remote mobile scenarios pair the Mac client and iOS simulators with the remote daemon over SSH-backed pairing windows before launching the apps. The demo keeps a local SSH forward to the remote daemon Device API and seeds the demo clients with that forwarded endpoint so the demo works from networks where the remote daemon port is not directly reachable. After pairing, the iOS client stores the issued credential and pinned daemon fingerprint and reconnects automatically on later launches. The client lists workspaces and live terminal sessions from the selected daemon, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
+On first launch, the iOS client opens its Devices sheet. Open Devices in the Mac sidebar or run `spaces device pair`, then scan the QR code. The mobile demo lane opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. The harness stores Mac client metadata in an isolated SQLite file by exporting `SPACES_CLIENT_DB_PATH` and stores harness-only Mac client secrets under `SPACES_CLIENT_SECRET_DIR`; these overrides are for E2E and demo profiles so test pairings do not mix with the user client database or client secret files. Remote mobile scenarios pair the Mac client and iOS simulators with the remote daemon over SSH-backed pairing windows before launching the apps. The demo keeps a local SSH forward to the remote daemon Device API and seeds the demo clients with that forwarded endpoint so the demo works from networks where the remote daemon port is not directly reachable. After pairing, the iOS client stores the issued credential and pinned daemon fingerprint and reconnects automatically on later launches. The client lists workspaces and live terminal sessions from the selected daemon, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
 For the iOS simulator, a seeded pairing link with `127.0.0.1` works because the daemon Device API binds all IPv4 interfaces by default. A real device scans the Mac QR code from the Devices panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
 
 For manual real-device verification of the iOS client:
@@ -577,14 +583,14 @@ Publish macOS releases to GitHub Releases with:
 scripts/release-and-deploy.sh <version> [build-number]
 ```
 
-Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. The Mac app installs these Linux artifacts automatically over SSH during remote pairing when needed. Remote Macs use the signed DMG rather than a separate daemon artifact.
+Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. These Linux artifacts are installed by the user-run `spaces-install-linux.sh` one-liner on the Ubuntu device; Spaces does not install them over SSH. Remote Macs use the signed DMG rather than a separate daemon artifact.
 
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
 - code-signs the app, CLI, and spacesd daemon
 - builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts
-- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key used by the Mac app to verify automatic Linux setup downloads
+- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the `spaces-install-linux.sh` installer uses to verify the Linux artifact download
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
@@ -613,7 +619,7 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts for automatic setup. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates.
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, the `spaces-install-linux.sh` installer, and signed Linux remote artifacts the installer downloads. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates.
 
 ## Website Deploy
 
