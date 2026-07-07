@@ -387,17 +387,16 @@
             let sessionID = payload.sessionID
             switch payload.reason {
             case "attachment_state":
-                NotificationCenter.default.post(name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID)
+                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
             case "session_metadata":
-                NotificationCenter.default.post(name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": sessionID])
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID)
+                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
             case "output":
-                NotificationCenter.default.post(
-                    name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": sessionID, "byteCount": payload.outputByteCount ?? 0])
+                TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID, outputByteCount: payload.outputByteCount ?? 0)
             case "initial", "runtime_state", "terminated":
-                NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
-            default: NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
+            default: TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
             }
         }
 

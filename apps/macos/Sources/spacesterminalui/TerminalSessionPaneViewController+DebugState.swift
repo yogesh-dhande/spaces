@@ -96,16 +96,16 @@ extension TerminalSessionPaneViewController {
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
     func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
     func debugSimulateAttachmentStateDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+        TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID)
     }
     func debugSimulateSessionMetadataDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": sessionID])
+        TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID)
     }
     func debugSimulateRuntimeStateDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": sessionID])
+        TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
     }
     func debugSimulateOutputDidChange() {
-        NotificationCenter.default.post(name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": sessionID, "byteCount": 1])
+        TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID, outputByteCount: 1)
         refreshNow()
     }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }

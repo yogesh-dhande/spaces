@@ -461,8 +461,7 @@
         }
 
         private func postRuntimeStateDidChange() {
-            NotificationCenter.default.post(
-                name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
             TerminalOverviewSignal.post()
         }
 

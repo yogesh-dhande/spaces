@@ -273,12 +273,15 @@
         private var foregroundProcessResolver: (Int32) -> TerminalForegroundProcessSnapshot? = { TerminalForegroundProcessInspector.inspect(pid: $0) }
         private var didLogFirstOutput = false
         private let incomingOutputBuffer = IncomingOutputBuffer()
-        private var inputStateBroadcastScheduled = false
-        private var screenStateChangeBroadcastScheduled = false
+        private let inputStateBroadcastCoalescer = MainActorNextTurnCoalescer()
+        private let screenStateChangeBroadcastCoalescer = MainActorNextTurnCoalescer()
         private var pendingScreenStateChangeBroadcastRevision: UInt64?
-        private var pendingInputOutputResync = false
-        private var localOwnerCommandInputOutputResyncPending = false
-        private var inputOutputResyncWorkItem: DispatchWorkItem?
+        private lazy var inputOutputResyncScheduler = GhosttyInputOutputResyncScheduler { [weak self] in
+            guard let self else { return }
+            self.requestSurfaceRefreshAction()
+            GhosttyEmbeddedAppService.shared.tick()
+            self.broadcastCurrentState(reason: "input_output")
+        }
         private let interactiveOutputGate = InteractiveOutputGate()
         private var ownerEpoch: UInt64 = 0
         private var lastResizeSerialByClientID: [String: UInt64] = [:]
@@ -405,9 +408,7 @@
             let childPID = observedChildPID()
             runtimeStateTimer?.invalidate()
             runtimeStateTimer = nil
-            inputOutputResyncWorkItem?.cancel()
-            inputOutputResyncWorkItem = nil
-            localOwnerCommandInputOutputResyncPending = false
+            inputOutputResyncScheduler.cancelForTermination()
             controlServer?.stop()
             controlServer = nil
             TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
@@ -425,10 +426,8 @@
                 persistExitedRuntimeState(exitedState)
                 broadcastRemoteStatePayload(finalPayload, startedAt: Date(), ownerClient: nil, outputByteCount: nil)
             }
-            NotificationCenter.default.post(
-                name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
-            NotificationCenter.default.post(
-                name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
+            TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
             TerminalOverviewSignal.post()
             rendererHostStorage.terminateSession()
             try? outputHandle?.synchronize()
@@ -949,42 +948,25 @@
         }
 
         private func postAttachmentStateDidChange() {
-            NotificationCenter.default.post(
-                name: .spacesTerminalAttachmentStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
             broadcastCurrentState(reason: "attachment_state")
         }
 
         private func postSessionMetadataDidChange() {
-            NotificationCenter.default.post(
-                name: .spacesTerminalSessionMetadataDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: launchConfiguration.sessionID)
             broadcastCurrentState(reason: "session_metadata")
         }
 
         private func postRuntimeStateDidChange() {
-            NotificationCenter.default.post(
-                name: .spacesTerminalRuntimeStateDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID])
+            TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
             TerminalOverviewSignal.post()
             broadcastCurrentState(reason: "runtime_state")
         }
 
         private func postOutputDidChange(data: Data, outputEndByteOffset: Int?, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
-            NotificationCenter.default.post(
-                name: .spacesTerminalOutputDidChange, object: nil, userInfo: ["sessionID": launchConfiguration.sessionID, "byteCount": data.count])
-            if interactiveResync {
-                if localOwnerCommandInputOutputResyncPending || inputOutputResyncWorkItem != nil {
-                    pendingInputOutputResync = false
-                    localOwnerCommandInputOutputResyncPending = false
-                    scheduleInputOutputResync()
-                } else {
-                    pendingInputOutputResync = false
-                    inputOutputResyncWorkItem?.cancel()
-                    inputOutputResyncWorkItem = nil
-                }
-            } else if pendingInputOutputResync || inputOutputResyncWorkItem != nil {
-                pendingInputOutputResync = false
-                localOwnerCommandInputOutputResyncPending = false
-                scheduleInputOutputResync()
-            }
+            TerminalSessionNotification.post(
+                .spacesTerminalOutputDidChange, sessionID: launchConfiguration.sessionID, outputByteCount: data.count)
+            inputOutputResyncScheduler.handleOutputDidChange(interactive: interactiveResync)
             guard shouldBroadcastState else { return }
             broadcastCurrentState(reason: "output", outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
         }
@@ -997,7 +979,7 @@
                 attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": interactiveInput ? "1" : "0"])
             if interactiveInput { interactiveOutputGate.markActivity(windowNanoseconds: Self.interactiveInputFlushWindowNanoseconds) }
             if ownerClient.kind == .localWindow {
-                pendingInputOutputResync = true
+                inputOutputResyncScheduler.noteLocalOwnerInput()
                 return
             }
             scheduleInputStateBroadcast()
@@ -1005,15 +987,12 @@
 
         private func markLocalOwnerCommandInputOutputResyncPending() {
             guard activeOwnerClient()?.kind == .localWindow else { return }
-            localOwnerCommandInputOutputResyncPending = true
+            inputOutputResyncScheduler.noteLocalOwnerCommand()
         }
 
         private func scheduleInputStateBroadcast() {
-            guard !inputStateBroadcastScheduled else { return }
-            inputStateBroadcastScheduled = true
-            Task { @MainActor [weak self] in
+            inputStateBroadcastCoalescer.schedule { [weak self] in
                 guard let self else { return }
-                self.inputStateBroadcastScheduled = false
                 self.requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
                 self.broadcastCurrentState(reason: "input")
@@ -1023,11 +1002,8 @@
         private func scheduleScreenStateChangeBroadcast(revision: UInt64) {
             guard activeOwnerClient() != nil else { return }
             pendingScreenStateChangeBroadcastRevision = max(pendingScreenStateChangeBroadcastRevision ?? revision, revision)
-            guard !screenStateChangeBroadcastScheduled else { return }
-            screenStateChangeBroadcastScheduled = true
-            Task { @MainActor [weak self] in
+            screenStateChangeBroadcastCoalescer.schedule { [weak self] in
                 guard let self else { return }
-                self.screenStateChangeBroadcastScheduled = false
                 let revision = self.pendingScreenStateChangeBroadcastRevision
                 self.pendingScreenStateChangeBroadcastRevision = nil
                 guard self.screenStateRevisionNeedsExport(revision) else { return }
@@ -1036,21 +1012,6 @@
                 guard self.screenStateRevisionNeedsExport(revision) else { return }
                 self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.stateChange)
             }
-        }
-
-        private func scheduleInputOutputResync() {
-            inputOutputResyncWorkItem?.cancel()
-            let workItem = DispatchWorkItem { [weak self] in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.inputOutputResyncWorkItem = nil
-                    self.requestSurfaceRefreshAction()
-                    GhosttyEmbeddedAppService.shared.tick()
-                    self.broadcastCurrentState(reason: "input_output")
-                }
-            }
-            inputOutputResyncWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: workItem)
         }
 
         private func screenStateRevisionNeedsExport(_ revision: UInt64?) -> Bool {
