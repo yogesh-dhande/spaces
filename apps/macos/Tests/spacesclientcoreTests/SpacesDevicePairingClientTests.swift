@@ -100,6 +100,24 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(message.contains("builder.local"))
     }
 
+    func testRemoteSpacesNotInstalledDetectsMissingBinaryOnFailedCommand() {
+        XCTAssertTrue(
+            SpacesDevicePairingClient.remoteSpacesNotInstalled(
+                exitStatus: 127, standardError: "sh: 1: ~/.spaces/bin/spaces: not found", standardOutput: ""))
+        XCTAssertTrue(
+            SpacesDevicePairingClient.remoteSpacesNotInstalled(
+                exitStatus: 1, standardError: "~/.spaces/bin/spaces: No such file or directory", standardOutput: ""))
+    }
+
+    func testRemoteSpacesNotInstalledIgnoresSuccessfulPairingJSON() {
+        // A successful pair exits 0 with JSON that can legitimately contain "not found" (e.g. a device
+        // name) — that must not be misread as a missing install.
+        XCTAssertFalse(
+            SpacesDevicePairingClient.remoteSpacesNotInstalled(
+                exitStatus: 0, standardError: "",
+                standardOutput: #"{"name":"Lost & not found Mac","host":"studio.local","port":8443}"#))
+    }
+
     func testRemoteShellCommandRunsSnippetsThroughPOSIXShell() {
         let wrapped = SpacesDevicePairingClient.remoteShellCommand("printf 'ok'\nuname -s")
 

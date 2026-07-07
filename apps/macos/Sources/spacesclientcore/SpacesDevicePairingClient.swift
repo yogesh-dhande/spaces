@@ -393,14 +393,17 @@ public enum SpacesDevicePairingClient {
         _ result: SSHCommandResult, destination: String, probe: RemoteInstallProbe, appVersion: String?
     ) throws -> RemotePairingMetadata {
         if result.timedOut { throw SpacesRemoteDevicePairingError.remotePairCommandTimedOut(destination) }
-        // A missing `spaces` binary (exit 127 / "not found") means the remote has no Spaces installed. We
-        // never auto-install; surface actionable install instructions for the remote's OS instead.
-        let combined = "\(result.standardError)\n\(result.standardOutput)".lowercased()
-        if result.exitStatus == 127 || combined.contains("no such file") || combined.contains("not found") {
-            throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
-                installInstructionsMessage(destination: destination, probe: probe, appVersion: appVersion))
-        }
-        guard result.exitStatus == 0 else {
+        // A successful `spaces device pair --json` exits 0 with pairing JSON on stdout; only a failed
+        // command can indicate a missing install. Branch on the nonzero exit first so pairing JSON that
+        // happens to contain "not found"/"no such file" (e.g. inside a device name) is never misread as
+        // not-installed.
+        if result.exitStatus != 0 {
+            // A missing `spaces` binary (exit 127 / "not found") means the remote has no Spaces installed.
+            // We never auto-install; surface actionable install instructions for the remote's OS instead.
+            if remoteSpacesNotInstalled(exitStatus: result.exitStatus, standardError: result.standardError, standardOutput: result.standardOutput) {
+                throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
+                    installInstructionsMessage(destination: destination, probe: probe, appVersion: appVersion))
+            }
             throw SpacesRemoteDevicePairingError.remotePairCommandFailed(
                 remotePairCommandFailureMessage(
                     destination: destination, standardError: result.standardError, standardOutput: result.standardOutput,
@@ -595,6 +598,17 @@ public enum SpacesDevicePairingClient {
         return SSHCommandResult(
             exitStatus: process.terminationStatus, standardOutput: stdout.trimmingCharacters(in: .whitespacesAndNewlines),
             standardError: stderr.trimmingCharacters(in: .whitespacesAndNewlines), timedOut: timedOut)
+    }
+
+    /// Decides whether a failed `spaces device pair --json` means Spaces is not installed for the remote
+    /// user. A missing binary makes the remote shell exit 127 or emit "not found"/"no such file". Only a
+    /// nonzero exit qualifies: a successful pair exits 0 with JSON that could itself contain those words
+    /// (for example inside a device name), so an exit-0 result is never treated as not-installed.
+    static func remoteSpacesNotInstalled(exitStatus: Int32, standardError: String, standardOutput: String) -> Bool {
+        guard exitStatus != 0 else { return false }
+        if exitStatus == 127 { return true }
+        let combined = "\(standardError)\n\(standardOutput)".lowercased()
+        return combined.contains("no such file") || combined.contains("not found")
     }
 
     /// Message for a `spaces device pair` failure that is not the not-installed case (which is handled

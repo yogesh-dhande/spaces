@@ -23,6 +23,11 @@ public enum SpacesDeviceAPIAuthentication {
         message.localizedStandardContains("not paired") || message.localizedStandardContains("invalid device auth token")
             || message.localizedStandardContains("missing device auth token") || message.localizedStandardContains("code=401")
             || message.localizedStandardContains("unauthorized") || message.localizedStandardContains("certificate fingerprint")
+            // The iOS client reports a reachable port whose pinned-TLS handshake never completes as
+            // "The secure Device API transport could not authenticate." That means the daemon's TLS
+            // identity no longer matches the pinned fingerprint (rotated or wrong endpoint), which is
+            // recoverable only by re-pairing — route it into the same recovery flow.
+            || message.localizedStandardContains("secure Device API transport")
     }
 
     private static func isTransportAuthenticationFailure(_ error: Error) -> Bool {
