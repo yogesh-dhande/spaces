@@ -352,7 +352,7 @@ const workflow: WorkflowStepData[] = [
   {
     n: "01",
     label: "Project",
-    body: "Point Spaces at a repo. Define your setup script, named services, browser URLs, and the processes you run. Do this once.",
+    body: "Point Spaces at a repo on your mac or a remote machine. Define your setup script, named services, browser URLs, and the processes you run. Do this once.",
   },
   {
     n: "02",

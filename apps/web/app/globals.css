@@ -74,11 +74,23 @@ body {
 }
 
 /* The base theme (mono type + dark Terminal palette) is now global, in :root and body.
-   `.lp` adds only the landing hero's scanline texture and the large display heading sizes. */
+   `.lp` gives the landing page a CRT-screen texture and the large display heading sizes.
+   Three stacked layers: a teal phosphor bloom from the top and a soft edge vignette, both
+   locked to the viewport (background-attachment: fixed) so the "screen" frame holds steady
+   while you scroll, plus fine teal scanlines that tile down the whole page. The body's
+   top-right teal glow shows through the transparent gaps. Kept static by design — motion
+   would distract on a content page. */
 .lp {
   background-image:
-    linear-gradient(transparent 0 calc(2.2rem - 1px), color-mix(in oklab, var(--line) 38%, transparent) calc(2.2rem - 1px) 2.2rem);
-  background-size: 100% 2.2rem;
+    radial-gradient(78% 52% at 50% -8%, color-mix(in oklab, var(--accent) 11%, transparent), transparent 66%),
+    radial-gradient(125% 135% at 50% 40%, transparent 62%, color-mix(in oklab, #000 40%, transparent) 100%),
+    repeating-linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--accent) 4%, transparent) 0 1px,
+      transparent 1px 3px
+    );
+  background-attachment: fixed, fixed, scroll;
+  background-repeat: no-repeat, no-repeat, repeat;
 }
 
 .lp h1 {
