@@ -972,12 +972,14 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
                     let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
                     guard let certificate = chain?.first else {
+                        terminalServiceTLSTrace("client_verify pin_failure peer_certificate_unavailable")
                         pinFailure(.peerCertificateUnavailable)
                         complete(false)
                         return
                     }
                     let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
                     guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
+                        terminalServiceTLSTrace("client_verify pin_failure mismatch expected=\(expectedFingerprint) actual=\(actualFingerprint)")
                         pinFailure(.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
                         complete(false)
                         return

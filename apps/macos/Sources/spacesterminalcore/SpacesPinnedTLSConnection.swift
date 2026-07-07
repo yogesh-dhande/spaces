@@ -80,28 +80,14 @@ public enum SpacesPinnedTLSConnector {
 #if canImport(Network) && canImport(Security)
     extension SpacesPinnedTLSConnector {
         /// The same pin policy as `connect`, packaged as NWParameters for Apple-platform callers
-        /// that manage their own NWConnections (the iOS Device API client). A fingerprint mismatch
-        /// fails the handshake, surfacing as a connection failure on the caller's state handler.
+        /// that manage their own NWConnections (the iOS Device API client). Deliberately no
+        /// pin-failure reason plumbing: these callers classify a pin failure as a failed or
+        /// stalled handshake on their own state handler (the iOS client distinguishes it from an
+        /// unreachable host with a plain-TCP probe). The shared factory still traces the specific
+        /// reason for diagnostics.
         public static func tlsParameters(certificateFingerprint: String) -> NWParameters {
             let expectedFingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-            let tlsOptions = NWProtocolTLS.Options()
-            let securityOptions = tlsOptions.securityProtocolOptions
-            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-            sec_protocol_options_set_verify_block(
-                securityOptions,
-                { _, trust, complete in
-                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                    let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                    guard let certificate = chain?.first, !expectedFingerprint.isEmpty else {
-                        complete(false)
-                        return
-                    }
-                    complete(
-                        TerminalServiceTLSFingerprint.matches(
-                            expectedFingerprint, TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)))
-                }, DispatchQueue.global(qos: .userInitiated))
-            return NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+            return TerminalServicePinnedTLS.makePinnedTLSParameters(expectedFingerprint: expectedFingerprint, pinFailure: { _ in })
         }
     }
 
@@ -116,33 +102,14 @@ public enum SpacesPinnedTLSConnector {
             guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw SpacesPinnedTLSConnectionError.invalidPort(port) }
             let ready = DispatchSemaphore(value: 0)
             let pinBox = TransportResultBox()
-            let tlsOptions = NWProtocolTLS.Options()
-            let securityOptions = tlsOptions.securityProtocolOptions
-            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-            sec_protocol_options_set_verify_block(
-                securityOptions,
-                { _, trust, complete in
-                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                    let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                    guard let certificate = chain?.first else {
-                        pinBox.setErrorIfUnset(TerminalServiceTLSError.peerCertificateUnavailable)
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
-                    guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
-                        pinBox.setErrorIfUnset(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    complete(true)
-                }, DispatchQueue.global(qos: .userInitiated))
+            let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
+                expectedFingerprint: expectedFingerprint,
+                pinFailure: { error in
+                    pinBox.setErrorIfUnset(error)
+                    ready.signal()
+                })
 
-            let createdConnection = NWConnection(
-                host: NWEndpoint.Host(host), port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+            let createdConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
             createdConnection.stateUpdateHandler = { state in
                 switch state {
                 case .ready: ready.signal()
