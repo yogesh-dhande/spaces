@@ -274,7 +274,7 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES
 APP_PID="$!"
 sleep 3
 
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command cat --title "$SESSION_TITLE")"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --command cat --title "$SESSION_TITLE")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || fail "Failed to parse session ID from: $command_output"
 SERVICE_PID="$(terminal_service_pid "$session_id")"

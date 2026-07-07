@@ -99,7 +99,7 @@ if [[ "${SPACES_E2E_SKIP_GHOSTTYKIT_SETUP:-0}" != "1" ]]; then
 fi
 
 command_payload="python3 -c 'import time; print(\"__idle_shutdown_ready__\", flush=True); time.sleep(120)'"
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "$command_payload" --title idle-shutdown-e2e)"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --command "$command_payload" --title idle-shutdown-e2e)"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse session ID from: $command_output" >&2; exit 1; }
 SERVICE_PID="$(runtime_state_pid "$session_id" service_pid)"

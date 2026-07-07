@@ -635,7 +635,7 @@ def start_terminal(title: str, command: str, terminal_target: str) -> str:
         return json.loads(completed.stdout)["id"].upper()
     try:
         completed = run(
-            [spaces_cli, "terminal", "command", "--backend", "ghostty-embedded", "--command", command, "--title", title],
+            [spaces_cli, "terminal", "command", "--command", command, "--title", title],
             timeout=20,
         )
         return extract_session_id(completed.stdout)
