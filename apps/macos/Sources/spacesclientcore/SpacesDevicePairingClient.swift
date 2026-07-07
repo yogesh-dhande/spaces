@@ -127,21 +127,23 @@ public enum SpacesDevicePairingClient {
         let metadata = try loadRemotePairingMetadata(
             destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion)
 
-        try assertPairingCompatible(
-            deviceProtocolVersion: metadata.protocolVersion, deviceAppVersion: metadata.appVersion, deviceName: metadata.name)
+        try assertPairingCompatible(deviceProtocolVersion: metadata.protocolVersion, deviceAppVersion: metadata.appVersion, deviceName: metadata.name)
         let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
-        let client = try SpacesDeviceAPIRequestClient(host: deviceAPIHost, port: metadata.port, certificateFingerprint: metadata.certificateFingerprint)
+        let client = try SpacesDeviceAPIRequestClient(
+            host: deviceAPIHost, port: metadata.port, certificateFingerprint: metadata.certificateFingerprint)
         let response: SpacesDeviceAPIResponse
         do {
             response = try client.request(
                 SpacesDeviceAPIRequest(
-                    command: .pair(.init(pairingCode: metadata.pairingCode, pairingNonce: metadata.pairingNonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                    command: .pair(
+                        .init(
+                            pairingCode: metadata.pairingCode, pairingNonce: metadata.pairingNonce, clientProtocolVersion: SpacesWireProtocol.version)
+                    ),
                     clientApp: SpacesDeviceClientApp(
                         installationID: request.clientInstallationID, bundleID: request.clientBundleID, platform: clientPlatform,
                         deviceName: request.clientDeviceName, appVersion: request.clientAppVersion)))
         } catch {
-            throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(
-                host: deviceAPIHost, port: metadata.port, message: error.localizedDescription)
+            throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: deviceAPIHost, port: metadata.port, message: error.localizedDescription)
         }
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
@@ -151,8 +153,8 @@ public enum SpacesDevicePairingClient {
         try database.upsert(
             device: SpacesPairedDeviceRecord(
                 id: deviceID, name: metadata.name, platform: "remote", host: deviceAPIHost, port: metadata.port,
-                certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort,
-                createdAt: now, updatedAt: now, lastSelectedAt: now))
+                certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort, createdAt: now,
+                updatedAt: now, lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
         return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)
     }
@@ -177,9 +179,7 @@ public enum SpacesDevicePairingClient {
                     clientApp: SpacesDeviceClientApp(
                         installationID: clientInstallationID, bundleID: clientBundleID, platform: clientPlatform, deviceName: clientDeviceName,
                         appVersion: clientAppVersion)))
-        } catch {
-            throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: link.host, port: link.port, message: error.localizedDescription)
-        }
+        } catch { throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: link.host, port: link.port, message: error.localizedDescription) }
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
@@ -207,8 +207,7 @@ public enum SpacesDevicePairingClient {
     /// redemption gate: whichever side is older is told to update.
     private static func assertPairingCompatible(deviceProtocolVersion: Int, deviceAppVersion: String?, deviceName: String) throws {
         switch SpacesWireCompatibility.evaluate(daemonProtocolVersion: deviceProtocolVersion, localVersion: SpacesWireProtocol.version) {
-        case .compatible:
-            return
+        case .compatible: return
         case .daemonTooOld:
             let version = normalized(deviceAppVersion).map { "Spaces \($0)" } ?? "an older version of Spaces"
             throw SpacesRemoteDevicePairingError.pairingVersionIncompatible(
@@ -220,9 +219,9 @@ public enum SpacesDevicePairingClient {
         }
     }
 
-    public static func openRemotePairingWindow(
-        for device: SpacesPairedDeviceRecord, appVersion: String? = nil
-    ) throws -> SpacesRemoteDevicePairingWindowResult {
+    public static func openRemotePairingWindow(for device: SpacesPairedDeviceRecord, appVersion: String? = nil) throws
+        -> SpacesRemoteDevicePairingWindowResult
+    {
         let sshHost = try normalizedSSHHost(device.sshHost ?? device.host)
         let sshUser = normalized(device.sshUser)
         try validateSSHPort(device.sshPort)
@@ -232,8 +231,7 @@ public enum SpacesDevicePairingClient {
         let deviceAPIHost = try remotePairingWindowDeviceAPIHost(destination: destination, port: device.sshPort, sshHost: sshHost)
         try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
         let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
-        let metadata = try loadRemotePairingMetadata(
-            destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion)
+        let metadata = try loadRemotePairingMetadata(destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion)
         let link = SpacesDevicePairingLink(
             host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
             certificateFingerprint: metadata.certificateFingerprint, name: metadata.name, protocolVersion: metadata.protocolVersion,
@@ -403,8 +401,7 @@ public enum SpacesDevicePairingClient {
             if remoteSpacesNotInstalled(exitStatus: result.exitStatus, standardError: result.standardError, standardOutput: result.standardOutput) {
                 throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
                     installInstructionsMessage(
-                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.",
-                        probe: probe, appVersion: appVersion))
+                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.", probe: probe, appVersion: appVersion))
             }
             throw SpacesRemoteDevicePairingError.remotePairCommandFailed(
                 remotePairCommandFailureMessage(
@@ -423,14 +420,11 @@ public enum SpacesDevicePairingClient {
             if outputReportsMissingBinary(result.standardError) {
                 throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
                     installInstructionsMessage(
-                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.",
-                        probe: probe, appVersion: appVersion))
+                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.", probe: probe, appVersion: appVersion))
             }
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
                 installInstructionsMessage(
-                    lead:
-                        "SSH connected to \(destination), but Spaces there did not return a pairing window.",
-                    probe: probe, appVersion: appVersion))
+                    lead: "SSH connected to \(destination), but Spaces there did not return a pairing window.", probe: probe, appVersion: appVersion))
         }
         do { return try JSONDecoder().decode(RemotePairingMetadata.self, from: data).validated() } catch {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
@@ -451,8 +445,7 @@ public enum SpacesDevicePairingClient {
             return
                 "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again:\n  \(SpacesLinuxInstaller.installCommand(version: normalized(appVersion) ?? "latest"))"
         }
-        return
-            "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."
+        return "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."
     }
 
     // MARK: SSH connection multiplexing

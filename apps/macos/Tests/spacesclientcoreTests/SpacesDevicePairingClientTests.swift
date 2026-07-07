@@ -18,8 +18,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
             linux_version_id=24.04
             """, destination: "builder.local")
 
-        XCTAssertEqual(
-            probe, RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04"))
+        XCTAssertEqual(probe, RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04"))
     }
 
     func testSSHPairingDeviceAPIHostUsesResolvedHostNameForAliases() throws {
@@ -114,8 +113,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         // name) — that must not be misread as a missing install.
         XCTAssertFalse(
             SpacesDevicePairingClient.remoteSpacesNotInstalled(
-                exitStatus: 0, standardError: "",
-                standardOutput: #"{"name":"Lost & not found Mac","host":"studio.local","port":8443}"#))
+                exitStatus: 0, standardError: "", standardOutput: #"{"name":"Lost & not found Mac","host":"studio.local","port":8443}"#))
     }
 
     func testOutputReportsMissingBinaryDetectsShellNotFoundText() {
@@ -143,8 +141,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     func testInstallInstructionsMessageGuidesMacUserToInstallApp() {
         let probe = RemoteInstallProbe(operatingSystem: "Darwin", architecture: "arm64", linuxID: nil, linuxVersionID: nil)
         let message = SpacesDevicePairingClient.installInstructionsMessage(
-            lead: "SSH connected to studio-mac, but Spaces there did not return a pairing window.",
-            probe: probe, appVersion: "0.1.0")
+            lead: "SSH connected to studio-mac, but Spaces there did not return a pairing window.", probe: probe, appVersion: "0.1.0")
 
         XCTAssertTrue(message.contains("studio-mac"))
         XCTAssertTrue(message.contains("Install the Spaces app on the remote Mac"))
@@ -156,8 +153,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     func testInstallInstructionsMessageGivesLinuxUserVersionPinnedInstaller() {
         let probe = RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04")
         let message = SpacesDevicePairingClient.installInstructionsMessage(
-            lead: "SSH connected to builder.local, but Spaces there did not return a pairing window.",
-            probe: probe, appVersion: "0.1.0")
+            lead: "SSH connected to builder.local, but Spaces there did not return a pairing window.", probe: probe, appVersion: "0.1.0")
 
         XCTAssertTrue(message.contains("builder.local"))
         XCTAssertTrue(message.contains("Ubuntu 24.04 device"))
@@ -167,8 +163,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     func testInstallInstructionsMessageFallsBackToLatestWhenAppVersionMissing() {
         let probe = RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04")
         let message = SpacesDevicePairingClient.installInstructionsMessage(
-            lead: "SSH connected to builder.local, but Spaces is not installed for that user.",
-            probe: probe, appVersion: nil)
+            lead: "SSH connected to builder.local, but Spaces is not installed for that user.", probe: probe, appVersion: nil)
 
         XCTAssertTrue(message.contains(SpacesLinuxInstaller.installCommand(version: "latest")))
     }

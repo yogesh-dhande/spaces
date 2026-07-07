@@ -208,6 +208,9 @@ public enum SpacesLeaseCoordinator {
         }
     }
 
+    /// Deliberately hard-coded to `~/.spaces` rather than the active profile root: desktop control
+    /// (Carbon hotkeys, etc.) is machine-wide, so exactly one process — across every dev and
+    /// installed profile — may hold this lease at a time.
     static func desktopControlLeaseDirectory(homeDirectoryURL: URL? = nil, fileManager: FileManager = .default) -> String {
         let resolvedHomeDirectoryURL = homeDirectoryURL ?? currentUserHomeDirectoryURL(fileManager: fileManager)
         return resolvedHomeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("leases", isDirectory: true)

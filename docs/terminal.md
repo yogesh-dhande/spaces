@@ -33,7 +33,7 @@ The session directory keeps:
 - `service.log`: service diagnostics for the session
 
 Each live session also participates in a service-level control path:
-- `/tmp/spaces-terminal-sockets/service-<profile-hash>.sock` is the profile-scoped service command socket used for session creation, listing, and termination.
+- `/tmp/spaces-sockets-<uid>/service-<profile-hash>.sock` is the profile-scoped service command socket used for session creation, listing, and termination.
 
 ## Local and Remote Daemons
 - Every Mac or Linux daemon owns PTYs, headless Ghostty sessions, render-frame export, terminal input, resize, scroll, file-link preview chunks, process execution, and clone or worktree preparation for its own workspaces.
