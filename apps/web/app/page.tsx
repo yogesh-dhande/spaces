@@ -37,7 +37,7 @@ const pillars: Pillar[] = [
   {
     title: "Worktrees",
     description:
-      "Every feature, branch, or experiment gets an isolated git worktree — or a separate clone — with its own directory, env, and processes. Parallel work never collides.",
+      "Every feature, branch, or experiment gets an isolated git worktree — or a separate clone — with its own directory, env, ports, and processes. Parallel work never collides.",
     icon: (
       <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
         <circle cx="5" cy="4.5" r="2" stroke="currentColor" strokeWidth="1.5" />
@@ -161,9 +161,9 @@ const keyFeatures: Feature[] = [
       "Close a workspace and Spaces shuts down its processes and closes its windows. Come back tomorrow, open it, and everything restarts exactly as it was.",
   },
   {
-    title: "Native macOS app under 10 MB",
+    title: "Native macOS app, not Electron",
     description:
-      "Built with Swift and AppKit — not Electron. No 200 MB runtime, no sluggish UI, no fan spinning up just to show you a window list.",
+      "Built with Swift and AppKit. The interface stays fast and stays out of your way — no web runtime, no sluggish UI, no fan spinning up just to show you a window list.",
   },
 ];
 
@@ -440,13 +440,11 @@ export default function HomePage() {
               </Link>
             </div>
 
-            <p className="mt-7 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
-              <span>Jump to any window with</span>
-              <Key>⌘⌥-</Key>
-              <span className="text-line">·</span>
-              <span>focus by number</span>
-              <Key>⌘1–9</Key>
-            </p>
+            <dl className="mt-8 grid max-w-xl grid-cols-3 gap-6 border-t border-line/70 pt-7">
+              <SpecItem label="Client" value="macOS + iOS" />
+              <SpecItem label="Daemon" value="macOS + Linux" />
+              <SpecItem label="Price" value="Free" />
+            </dl>
           </div>
         </div>
 
@@ -459,11 +457,6 @@ export default function HomePage() {
               fetchPriority="high"
             />
           </figure>
-          <dl className="mt-10 grid max-w-3xl grid-cols-3 gap-6 border-t border-line/70 pt-7">
-            <SpecItem label="Size" value="< 10 MB" />
-            <SpecItem label="Runtime" value="Native Swift" />
-            <SpecItem label="Price" value="Free" />
-          </dl>
         </div>
       </section>
 
@@ -472,7 +465,7 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
             <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Run <span className="text-accent">parallel coding sessions.</span>
+              Run <span className="text-accent">parallel coding sessions</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Run a few coding sessions at once and the moving parts multiply —
@@ -940,7 +933,7 @@ function SpecItem({ label, value }: { label: string; value: string }) {
       <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
         {label}
       </dt>
-      <dd className="mt-1.5 text-xl font-semibold tracking-tight tabular-nums md:text-2xl">
+      <dd className="mt-1.5 whitespace-nowrap text-lg font-semibold tracking-tight tabular-nums md:text-xl">
         {value}
       </dd>
     </div>
