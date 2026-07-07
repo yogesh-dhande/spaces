@@ -517,7 +517,7 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
-    /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send --device`).
+    /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send text/bytes --device`).
     @discardableResult public static func sendTerminalInput(
         sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil

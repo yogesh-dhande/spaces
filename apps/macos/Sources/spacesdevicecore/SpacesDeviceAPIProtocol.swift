@@ -1132,7 +1132,7 @@ public struct SpacesDeviceTerminalSessionRequest: Codable, Sendable, Equatable {
     public init(sessionID: String) { self.sessionID = sessionID }
 }
 
-/// One-shot agent input for a terminal session (`spaces terminal send --device`). Unlike
+/// One-shot agent input for a terminal session (`spaces terminal send text/bytes --device`). Unlike
 /// `terminalControl`, this is not attachment- or owner-epoch-gated: orchestrator agents write into
 /// sessions they never render, so the bearer token is the whole authorization.
 public struct SpacesDeviceTerminalInputRequest: Codable, Sendable, Equatable {

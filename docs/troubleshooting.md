@@ -7,7 +7,7 @@ This document is for development-time diagnostics around workspace runtime and w
 List projects and create an explicit workspace:
 ```bash
 spaces project list
-spaces workspace create --project <project-id> --branch debug --title "debug"
+spaces workspace create --project <project-id> --branch debug
 ```
 
 Force a clean runtime restart:

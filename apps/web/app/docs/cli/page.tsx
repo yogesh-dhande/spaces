@@ -57,19 +57,17 @@ spaces agent signal --workspace <id> --session <terminal-session-id> blocked`}</
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Workspace commands list, create, start, and restart workspaces on the same-machine daemon.
         </p>
-        <CodeBlock>{`spaces workspace list
-spaces workspace list --project <project-id> --include-archived
-spaces workspace create --project <project-id> --branch <branch>
+        <CodeBlock>{`spaces workspace list [--project <project-id>] [--include-archived]
+spaces workspace create --project <project-id> --branch <branch> [--base-branch <branch>] [--existing-branch]
 spaces workspace start --workspace <workspace-id>
 spaces workspace restart --workspace <workspace-id>`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="--project <id>" description="Project ID for listing or workspace creation." />
+          <Flag name="--project <id>" description="Project filter for list; project ID for workspace creation." />
+          <Flag name="--include-archived" description="Includes archived workspaces in list output." />
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
+          <Flag name="--base-branch <branch>" description="Base branch. Defaults to the project default branch, then main or master." />
+          <Flag name="--existing-branch" description="Uses an existing branch instead of creating one." />
           <Flag name="--workspace <id>" description="Workspace ID for runtime commands." />
-          <Flag name="--title <title>" description="Optional title for workspace creation." />
-          <Flag name="--base-branch <branch>" description="Optional base branch for new branch creation." />
-          <Flag name="--existing-branch" description="Use an existing branch instead of creating one." />
-          <Flag name="--include-archived" description="Include archived workspaces in list output." />
         </ul>
       </article>
 
@@ -78,21 +76,21 @@ spaces workspace restart --workspace <workspace-id>`}</CodeBlock>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Terminal commands inspect and drive Spaces-owned terminal sessions on the same-machine daemon. Sessions survive app quit, so commands started here stay discoverable through <Cmd>spaces terminal list</Cmd>.
         </p>
-        <CodeBlock>{`spaces terminal list
-spaces terminal command --command "npm run dev" --cwd <path>
-spaces terminal send <session-id> "echo hello" --newline
-spaces terminal key <session-id> ctrl+c
-spaces terminal tail <session-id> --lines 40
-spaces terminal show <session-id>
-spaces terminal takeover <session-id> <client-id>`}</CodeBlock>
+        <CodeBlock>{`spaces terminal list [--device <name-or-id>]
+spaces terminal command [--workspace <workspace-id>] [--command <cmd>] [--title <title>]
+spaces terminal send text <session-id> <text> [--newline] [--device <name-or-id>]
+spaces terminal send bytes <session-id> <byte> [<byte>...] [--device <name-or-id>]
+spaces terminal tail <session-id> [--lines <count>] [--device <name-or-id>]
+spaces terminal show <session-id>`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="list" description="List available terminal sessions by ID, runtime state, and working directory." />
-          <Flag name="command" description="Start a persistent background terminal session. Omit --command for a login shell." />
-          <Flag name="send <session> <text>" description="Send text to a session. Add --newline to submit it." />
-          <Flag name="key <session> <key>" description="Send a named key or chord such as enter, esc, up, ctrl+c, or cmd+k." />
-          <Flag name="tail <session>" description="Print recent output. --lines defaults to 20." />
-          <Flag name="show <session>" description="Open a native Spaces window for the session in owner-seeking mode (macOS)." />
-          <Flag name="takeover <session> <client>" description="Transfer input ownership to another attached client." />
+          <Flag name="--device <name-or-id>" description="Paired device selector for list, send, and tail. Defaults to this machine's local sessions." />
+          <Flag name="--workspace <id>" description="Workspace ID for terminal command; omit inside a workspace." />
+          <Flag name="--command <cmd>" description="Shell command. Defaults to a login shell." />
+          <Flag name="--title <title>" description="Session title. Defaults to shell." />
+          <Flag name="--newline" description="Appends a line feed after text input." />
+          <Flag name="<byte>" description="Decimal byte value from 0 through 255." />
+          <Flag name="--lines <count>" description="Number of lines to print. Defaults to 20." />
+          <Flag name="show <session>" description="Opens a native Spaces window for the session in owner-seeking mode on macOS." />
         </ul>
       </article>
 
@@ -122,13 +120,16 @@ spaces agent signal --workspace <workspace-id> --session <terminal-session-id> e
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces device pair</Cmd> with no source opens a short-lived pairing window on the same-machine daemon and prints a <code>spaces://pair</code> link for connecting an iOS client from the terminal. Add <Cmd>--json</Cmd> for machine-readable output. Pass <Cmd>--link</Cmd> to redeem a link from another device, or <Cmd>--ssh user@host</Cmd> to pair with a remote daemon over SSH.
+          <Cmd>spaces device pair</Cmd> with no source opens a short-lived pairing window on the same-machine daemon and prints a <code>spaces://pair</code> link for connecting an iOS client from the terminal. Add <Cmd>--json</Cmd> for machine-readable output. Pass <Cmd>--link</Cmd> to redeem a link from another device, or <Cmd>--ssh user@host</Cmd> to pair with a remote daemon over SSH. Use <Cmd>--ssh-port</Cmd> for SSH ports other than 22.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           On Ubuntu 24.04 devices, the Linux installer exposes the CLI at <Cmd>~/.local/bin/spaces</Cmd> for terminal use and keeps the managed helper at <Cmd>~/.spaces/bin/spaces</Cmd>.
         </p>
-        <CodeBlock>{`spaces device pair
-spaces device pair --json`}</CodeBlock>
+        <CodeBlock>{`spaces device pair [--json]
+spaces device pair --ssh user@host [--ssh-port <port>]
+spaces device pair --link <spaces-pair-link>
+spaces device list
+spaces device remove <name-or-id>`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

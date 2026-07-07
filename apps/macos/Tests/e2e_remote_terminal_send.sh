@@ -2,7 +2,8 @@
 # Remote agent send/tail E2E: installs the isolated remote E2E daemon, registers a workspace-owned
 # terminal session on it, pairs this machine's CLI with the daemon by redeeming a pairing link
 # (`spaces device pair --link`), then drives the session purely from this machine with
-# `spaces terminal list/send/tail --device` — the orchestrator agent-to-agent path.
+# `spaces terminal list --device`, `spaces terminal send text --device`, and
+# `spaces terminal tail --device` — the orchestrator agent-to-agent path.
 #
 # Every terminal session is workspace-owned, so the session cannot be a standalone shell: the script
 # first creates a git project + default workspace on the remote daemon through the Device API
@@ -88,7 +89,7 @@ CERTIFICATE_FINGERPRINT=""
 
 cleanup() {
   if [[ -n "$REMOTE_SESSION_ID" && -n "$REMOTE_ENV_PREFIX" ]]; then
-    remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces terminal send $REMOTE_SESSION_ID exit --newline" >/dev/null 2>&1 || true
+    remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces terminal send text $REMOTE_SESSION_ID exit --newline" >/dev/null 2>&1 || true
   fi
   if [[ -n "$REMOTE_PROJECT_DIR" ]]; then
     remote_ssh "rm -rf $(shell_quote "$REMOTE_PROJECT_DIR")" >/dev/null 2>&1 || true
@@ -263,7 +264,7 @@ echo "$LIST_OUTPUT"
 printf '%s\n' "$LIST_OUTPUT" | grep -q "$REMOTE_SESSION_ID" || fail "terminal list --device did not show $REMOTE_SESSION_ID"
 
 echo "== sending input through the device =="
-"$SPACES_BIN" terminal send --device "$DEVICE_ID" "$REMOTE_SESSION_ID" "echo $MARKER" --newline
+"$SPACES_BIN" terminal send text "$REMOTE_SESSION_ID" "echo $MARKER" --newline --device "$DEVICE_ID"
 
 echo "== tailing output through the device =="
 deadline=$((SECONDS + 30))
