@@ -3,10 +3,10 @@ import Foundation
 import Network
 import XCTest
 import spacesterminalcore
-import workspacecore
 
 @testable import spacesdeviceapi
 @testable import spacesdevicecore
+@testable import workspacecore
 
 final class SpacesDeviceAPIServerTransportTests: XCTestCase {
     func testReusableRequestSessionConnectsLazily() throws {
@@ -361,6 +361,58 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
             XCTAssertTrue(hideResponse.ok, hideResponse.message)
             XCTAssertEqual(hideResponse.overview?.workspaces.first(where: { $0.id == workspaceID })?.isHidden, true)
+        }
+    }
+
+    func testWorkspaceMetadataBranchRenameSurvivesLaterNotesFailure() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let projectDir = root.appendingPathComponent("metadata-rename-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            try initializeGitRepository(at: projectDir, initialBranch: "develop")
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-METADATA-BRANCH-ROLLBACK", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let createResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .createProject(.init(projectDir: projectDir.path, gitURL: nil)), authToken: pairingStore.authToken, clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(createResponse.ok, createResponse.message)
+            let workspaceID = try XCTUnwrap(createResponse.workspaceID)
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            try store.execute(
+                sql: """
+                    CREATE TRIGGER fail_workspace_notes_update
+                    BEFORE UPDATE OF notes ON workspaces
+                    WHEN NEW.id = '\(workspaceID)'
+                    BEGIN
+                      SELECT RAISE(ABORT, 'forced notes failure');
+                    END
+                    """,
+                bindings: [])
+
+            let updateResponse = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .updateWorkspaceMetadata(
+                        .init(
+                            workspaceID: workspaceID, branch: "feature-api-rename", notes: "this write fails", updatesBranch: true,
+                            updatesNotes: true)),
+                    authToken: pairingStore.authToken,
+                    clientApp: clientApp),
+                port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertFalse(updateResponse.ok)
+            XCTAssertTrue(updateResponse.message.localizedStandardContains("forced notes failure"), updateResponse.message)
+            let updatedWorkspace = try XCTUnwrap(store.workspace(id: workspaceID))
+            XCTAssertEqual(updatedWorkspace.branch, "feature-api-rename")
+            XCTAssertEqual(try currentGitBranch(at: projectDir), "feature-api-rename")
+            XCTAssertNil(updatedWorkspace.notes)
         }
     }
 
@@ -1183,6 +1235,46 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
         guard nameResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         return Int(UInt16(bigEndian: boundAddress.sin_port))
+    }
+
+    private func initializeGitRepository(at directory: URL, initialBranch: String) throws {
+        try runGit(["init", "-b", initialBranch], cwd: directory)
+        try "hello".write(to: directory.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md"], cwd: directory)
+        try runGit(["-c", "user.name=spaces-test", "-c", "user.email=test@example.com", "commit", "-m", "init"], cwd: directory)
+    }
+
+    private func currentGitBranch(at directory: URL) throws -> String {
+        try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: directory).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @discardableResult
+    private func runGit(_ arguments: [String], cwd: URL) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        process.currentDirectoryURL = cwd
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: "GIT_DIR")
+        environment.removeValue(forKey: "GIT_WORK_TREE")
+        environment.removeValue(forKey: "GIT_INDEX_FILE")
+        environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        environment["GIT_CONFIG_SYSTEM"] = "/dev/null"
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        process.environment = environment
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        let outputData = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let outputText = String(data: outputData, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "spaces.tests.git", code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed: \(outputText)"])
+        }
+        return outputText
     }
 
     private func withTemporaryProfile(_ body: (URL) throws -> Void) throws {

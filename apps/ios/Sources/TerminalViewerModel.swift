@@ -330,6 +330,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isInputSurfaceReady = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        streamHandle?.cancel()
+        streamHandle = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
@@ -1468,9 +1470,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isAwaitingTakeoverConfirmation = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        streamHandle?.cancel()
+        streamHandle = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         inputSendQueue.cancelAll()
+        ownershipSynchronizationTask?.cancel()
+        ownershipSynchronizationTask = nil
         bufferedInputText = ""
         hasAttachedToSession = false
         hasConfirmedOwnerInputReadiness = false
