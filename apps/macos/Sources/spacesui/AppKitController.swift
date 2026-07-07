@@ -1725,7 +1725,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         terminalAttachmentStateDidChangeObserver = NotificationCenter.default.addObserver(
             forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main
         ) { [weak self] notification in
-            let changedSessionID = notification.userInfo?["sessionID"] as? String
+            let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
             MainActor.assumeIsolated {
                 guard let self, let changedSessionID else { return }
                 self.handleTerminalAttachmentStateDidChange(sessionID: changedSessionID)

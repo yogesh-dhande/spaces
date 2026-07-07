@@ -791,7 +791,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         notificationObservers.tokens.append(
             NotificationCenter.default.addObserver(forName: .spacesTerminalAttachmentStateDidChange, object: nil, queue: .main) {
                 [weak self] notification in
-                let changedSessionID = notification.userInfo?["sessionID"] as? String
+                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
                 Task { @MainActor [weak self] in
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                     self.refreshNow()
@@ -800,7 +800,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         notificationObservers.tokens.append(
             NotificationCenter.default.addObserver(forName: .spacesTerminalSessionMetadataDidChange, object: nil, queue: .main) {
                 [weak self] notification in
-                let changedSessionID = notification.userInfo?["sessionID"] as? String
+                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                     self.refreshNow()
@@ -809,7 +809,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         notificationObservers.tokens.append(
             NotificationCenter.default.addObserver(forName: .spacesTerminalRuntimeStateDidChange, object: nil, queue: .main) {
                 [weak self] notification in
-                let changedSessionID = notification.userInfo?["sessionID"] as? String
+                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                     self.refreshNow()
@@ -817,7 +817,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
             })
         notificationObservers.tokens.append(
             NotificationCenter.default.addObserver(forName: .spacesTerminalOutputDidChange, object: nil, queue: .main) { [weak self] notification in
-                let changedSessionID = notification.userInfo?["sessionID"] as? String
+                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                     guard self.visibleRenderer == .ghosttyEndedFinalRender || self.visibleRenderer == .textView else { return }
