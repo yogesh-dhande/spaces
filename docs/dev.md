@@ -148,15 +148,15 @@ spaces_cli="$(cd apps/macos/.build/debug && pwd)/spaces"
   terminal command --command cat --title verify-ghostty)
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces terminal list
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  terminal send <session-id> "hello from ghostty" --newline
+  terminal send text <session-id> "hello from ghostty" --newline
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
+  terminal send bytes <session-id> 13
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal tail <session-id> --lines 5
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spacese2e \
   mobile-status
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal show <session-id>
-env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  terminal takeover <session-id> <other-client-id>
 ```
 
 For built-in terminal verification, keep exactly one `SpacesApp` process running for the chosen profile root. The current `ghostty-embedded` slice keeps live Ghostty rendering owner-only on both macOS and iOS. Opening a terminal window or mobile detail view auto-attempts takeover, live non-owner states show takeover or status UI only, and ended sessions may still show the final Ghostty render when it was persisted.
@@ -187,7 +187,7 @@ Mobile terminal latency sweeps target the local paired daemon over the Device AP
 
 The daemon-hosted Device API is a paired Spaces-only transport rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone Device API process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same pinned-TLS transport as the iOS app.
 
-`apps/macos/Tests/e2e_remote_terminal_send.sh` verifies the orchestrator agent path end to end against the configured remote host: it pairs the CLI over SSH with `spaces device pair`, creates a remote terminal session, and drives it from the Mac with `spaces terminal list/send/tail --device`, using an isolated client database and secret directory. The remote daemon must be on the same wire-protocol version as the local build (redeploy with `apps/macos/scripts/deploy_linux_spacesd_e2e.sh` first).
+`apps/macos/Tests/e2e_remote_terminal_send.sh` verifies the orchestrator agent path end to end against the configured remote host: it pairs the CLI over SSH with `spaces device pair`, creates a remote terminal session, and drives it from the Mac with `spaces terminal list --device`, `spaces terminal send text --device`, and `spaces terminal tail --device`, using an isolated client database and secret directory. The remote daemon must be on the same wire-protocol version as the local build (redeploy with `apps/macos/scripts/deploy_linux_spacesd_e2e.sh` first).
 
 Focused paired-device parity checks use one shared Device API flow for local and remote daemons:
 

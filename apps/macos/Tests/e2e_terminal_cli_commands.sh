@@ -270,34 +270,13 @@ owner_client_id="$(attach_control_client "$session_id" owner)"
   exit 1
 }
 
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send "$session_id" "abc" >/dev/null
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal key "$session_id" up >/dev/null
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal key "$session_id" enter >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send text "$session_id" "abc" >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send bytes "$session_id" 27 91 65 >/dev/null
+env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send bytes "$session_id" 13 >/dev/null
 
 tail_output="$(wait_for_tail_contains "$session_id" "b'abc")"
 printf '%s\n' "$tail_output" | grep -Fq "b'abc"
 printf '%s\n' "$tail_output" | grep -Fq "\\x1b[A"
 printf '%s\n' "$tail_output" | grep -Eq "\\\\r'|\\\\n'"
-
-wait_for_control_socket "$session_id"
-viewer_client_id="$(attach_control_client "$session_id" viewer)"
-[[ "$(wait_for_active_attachment_client_id "$session_id" viewer)" == "$viewer_client_id" ]] || {
-  echo "Attached viewer client did not become the active viewer attachment" >&2
-  exit 1
-}
-
-[[ "$viewer_client_id" != "$owner_client_id" ]] || { echo "Viewer and owner client IDs should differ" >&2; exit 1; }
-
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
-[[ "$(wait_for_active_attachment_client_id "$session_id" owner)" == "$viewer_client_id" ]] || {
-  echo "Viewer takeover did not become active owner" >&2
-  exit 1
-}
-
-env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal takeover "$session_id" "$owner_client_id" >/dev/null
-[[ "$(wait_for_active_attachment_client_id "$session_id" owner)" == "$owner_client_id" ]] || {
-  echo "Original owner did not regain ownership" >&2
-  exit 1
-}
 
 echo "Spaces terminal CLI E2E passed for session $session_id"

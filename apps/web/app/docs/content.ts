@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the spaces CLI for same-machine workspace actions, pairing links, Spaces terminal session commands, owner-seeking terminal windows, and ownership takeover.",
+      "Use the spaces CLI for same-machine workspace actions, pairing links, Spaces terminal sessions, text and byte terminal input, and owner-seeking terminal windows.",
   },
   {
     href: "/docs/mcp",
