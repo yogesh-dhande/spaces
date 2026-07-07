@@ -143,19 +143,7 @@ extension WorkspaceOrchestrator {
     }
 
     func withWorkspaceSetupLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
-        workspaceSetupLock.lock()
-        if workspaceSetupInFlight.contains(workspaceID) {
-            workspaceSetupLock.unlock()
-            throw WorkspaceError.invalidArgument(message: "Workspace setup is already in progress.")
-        }
-        workspaceSetupInFlight.insert(workspaceID)
-        workspaceSetupLock.unlock()
-
-        defer {
-            workspaceSetupLock.lock()
-            workspaceSetupInFlight.remove(workspaceID)
-            workspaceSetupLock.unlock()
-        }
-        return try operation()
+        try workspaceSetupGate.withKey(
+            workspaceID, busyError: { WorkspaceError.invalidArgument(message: "Workspace setup is already in progress.") }, operation: operation)
     }
 }

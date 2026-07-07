@@ -25,83 +25,13 @@ public final class WorkspaceOrchestrator {
     /// override that forwards to the client instead of delivering directly.
     public typealias NotificationDeliverer = @Sendable (String, String, String?) -> Void
 
-    #if canImport(UserNotifications)
-        private final class NotificationAuthorizationCache: @unchecked Sendable {
-            private let lock = NSLock()
-            private var status: UNAuthorizationStatus?
-
-            func set(_ status: UNAuthorizationStatus) {
-                lock.lock()
-                self.status = status
-                lock.unlock()
-            }
-
-            func get() -> UNAuthorizationStatus? {
-                lock.lock()
-                defer { lock.unlock() }
-                return status
-            }
-        }
-    #else
-        private final class NotificationAuthorizationCache: @unchecked Sendable {}
-    #endif
-
-    private final class BuiltInTerminalSessionLauncherOverrideStore: @unchecked Sendable {
-        private let lock = NSLock()
-        private var launcher: BuiltInTerminalSessionLauncher?
-
-        func set(_ launcher: BuiltInTerminalSessionLauncher?) {
-            lock.lock()
-            self.launcher = launcher
-            lock.unlock()
-        }
-
-        func get() -> BuiltInTerminalSessionLauncher? {
-            lock.lock()
-            defer { lock.unlock() }
-            return launcher
-        }
-    }
-
-    private final class BuiltInTerminalSessionTerminatorOverrideStore: @unchecked Sendable {
-        private let lock = NSLock()
-        private var terminator: BuiltInTerminalSessionTerminator?
-
-        func set(_ terminator: BuiltInTerminalSessionTerminator?) {
-            lock.lock()
-            self.terminator = terminator
-            lock.unlock()
-        }
-
-        func get() -> BuiltInTerminalSessionTerminator? {
-            lock.lock()
-            defer { lock.unlock() }
-            return terminator
-        }
-    }
-
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
-    private static let notificationAuthorizationCache = NotificationAuthorizationCache()
-    private static let builtInTerminalSessionLauncherOverrideStore = BuiltInTerminalSessionLauncherOverrideStore()
-    private static let builtInTerminalSessionTerminatorOverrideStore = BuiltInTerminalSessionTerminatorOverrideStore()
-    private static let notificationDelivererOverrideStore = NotificationDelivererOverrideStore()
-
-    private final class NotificationDelivererOverrideStore: @unchecked Sendable {
-        private let lock = NSLock()
-        private var deliverer: NotificationDeliverer?
-
-        func set(_ deliverer: NotificationDeliverer?) {
-            lock.lock()
-            self.deliverer = deliverer
-            lock.unlock()
-        }
-
-        func get() -> NotificationDeliverer? {
-            lock.lock()
-            defer { lock.unlock() }
-            return deliverer
-        }
-    }
+    #if canImport(UserNotifications)
+        private static let notificationAuthorizationCache = LockedBox<UNAuthorizationStatus?>(nil)
+    #endif
+    private static let builtInTerminalSessionLauncherOverrideStore = LockedBox<BuiltInTerminalSessionLauncher?>(nil)
+    private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
+    private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -265,10 +195,8 @@ public final class WorkspaceOrchestrator {
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
-    private let workspaceLifecycleLock = NSLock()
-    private var workspaceLifecycleInFlight: Set<String> = []
-    let workspaceSetupLock = NSLock()
-    var workspaceSetupInFlight: Set<String> = []
+    private let workspaceLifecycleGate = PerKeyGate()
+    let workspaceSetupGate = PerKeyGate()
 
     public init(
         store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil, git: GitClient = .init(),
@@ -1117,20 +1045,8 @@ public final class WorkspaceOrchestrator {
     }
 
     func withWorkspaceLifecycleLock<T>(workspaceID: String, operation: () throws -> T) throws -> T {
-        workspaceLifecycleLock.lock()
-        if workspaceLifecycleInFlight.contains(workspaceID) {
-            workspaceLifecycleLock.unlock()
-            throw WorkspaceError.invalidArgument(message: "Workspace action is already in progress.")
-        }
-        workspaceLifecycleInFlight.insert(workspaceID)
-        workspaceLifecycleLock.unlock()
-
-        defer {
-            workspaceLifecycleLock.lock()
-            workspaceLifecycleInFlight.remove(workspaceID)
-            workspaceLifecycleLock.unlock()
-        }
-        return try operation()
+        try workspaceLifecycleGate.withKey(
+            workspaceID, busyError: { WorkspaceError.invalidArgument(message: "Workspace action is already in progress.") }, operation: operation)
     }
 
     #if canImport(UserNotifications)
@@ -1186,7 +1102,7 @@ public final class WorkspaceOrchestrator {
 
         private static func currentNotificationAuthorizationStatus(center: UNUserNotificationCenter) -> UNAuthorizationStatus? {
             if let cached = notificationAuthorizationCache.get(), cached != .notDetermined { return cached }
-            let statusBox = LockedNotificationAuthorizationStatus()
+            let statusBox = LockedBox<UNAuthorizationStatus?>(nil)
             let semaphore = DispatchSemaphore(value: 0)
             center.getNotificationSettings { settings in
                 notificationAuthorizationCache.set(settings.authorizationStatus)
@@ -1209,22 +1125,6 @@ public final class WorkspaceOrchestrator {
             }
         }
 
-        private final class LockedNotificationAuthorizationStatus: @unchecked Sendable {
-            private let lock = NSLock()
-            private var status: UNAuthorizationStatus?
-
-            func set(_ status: UNAuthorizationStatus) {
-                lock.lock()
-                self.status = status
-                lock.unlock()
-            }
-
-            func get() -> UNAuthorizationStatus? {
-                lock.lock()
-                defer { lock.unlock() }
-                return status
-            }
-        }
     #else
         public static func deliverUserNotification(title _: String, body _: String, subtitle _: String? = nil) {}
 
