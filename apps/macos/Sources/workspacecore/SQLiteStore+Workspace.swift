@@ -218,6 +218,29 @@ extension SQLiteStore {
             status: status, errorMessage: errorMessage, startedAt: startedAt, finishedAt: finishedAt, exitCode: exitCode, logPath: logPath)
     }
 
+    /// Batched form of `workspaceSetupState(workspaceID:)`: one full-table SELECT keyed by workspace in
+    /// Swift, eliminating the per-workspace query on the overview hot path. `workspace_id` is the
+    /// primary key of `workspace_settings`, so each workspace maps to at most one row. Workspaces with
+    /// no row are absent from the dictionary (mirroring the `nil` the per-workspace query returns); the
+    /// caller applies the same succeeded default the orchestrator does.
+    public func workspaceSetupStateByWorkspace() throws -> [String: WorkspaceSetupState] {
+        let rows = try queryRows(
+            sql: """
+                SELECT workspace_id, setup_status, setup_error, setup_started_at, setup_finished_at, setup_exit_code, setup_log_path
+                FROM workspace_settings
+                """)
+        var result: [String: WorkspaceSetupState] = [:]
+        for row in rows {
+            guard row.count >= 7 else { continue }
+            let rawStatus = row[1].isEmpty ? WorkspaceSetupStatus.succeeded.rawValue : row[1]
+            let status = WorkspaceSetupStatus(rawValue: rawStatus) ?? .succeeded
+            result[row[0]] = WorkspaceSetupState(
+                status: status, errorMessage: row[2].isEmpty ? nil : row[2], startedAt: row[3].isEmpty ? nil : row[3],
+                finishedAt: row[4].isEmpty ? nil : row[4], exitCode: row[5].isEmpty ? nil : Int(row[5]), logPath: row[6].isEmpty ? nil : row[6])
+        }
+        return result
+    }
+
     public func setWorkspaceSetupState(
         workspaceID: String, status: WorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil,
         exitCode: Int? = nil, logPath: String? = nil

@@ -33,6 +33,21 @@ extension SQLiteStore {
         }
     }
 
+    /// Batched form of `workspacePortsNamed(workspaceID:)`: one full-table SELECT grouped by workspace
+    /// in Swift, eliminating the per-workspace query on the overview hot path. The SELECT orders by
+    /// `workspace_id` then the same `service_index` key the per-workspace query uses, and the
+    /// order-preserving append keeps each group in the same order as `workspacePortsNamed(workspaceID:)`.
+    public func workspacePortsNamedByWorkspace() throws -> [String: [(port: Int, name: String)]] {
+        let rows = try queryRows(
+            sql: "SELECT workspace_id, port, service_name FROM workspace_service_ports ORDER BY workspace_id, service_index")
+        var result: [String: [(port: Int, name: String)]] = [:]
+        for row in rows {
+            guard row.count >= 3, let port = Int(row[1]) else { continue }
+            result[row[0], default: []].append((port: port, name: row[2]))
+        }
+        return result
+    }
+
     public func workspacePortsAssigned(workspaceID: String) throws -> [(definitionID: String, port: Int, name: String)] {
         let rows = try queryRows(
             sql: "SELECT service_id, port, service_name FROM workspace_service_ports WHERE workspace_id = ? ORDER BY service_index",

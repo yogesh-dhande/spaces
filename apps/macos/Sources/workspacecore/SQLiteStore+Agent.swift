@@ -70,6 +70,22 @@ extension SQLiteStore {
         return rows.compactMap { decodeAgentWindow(row: $0) }
     }
 
+    /// Batched form of `agentWindows(workspaceID:)`: one full-table SELECT grouped by workspace in Swift,
+    /// eliminating the per-workspace query on the overview hot path. Grouping preserves element order,
+    /// and the SELECT orders by `workspace_id` then the same `created_at` key the per-workspace query
+    /// uses, so each group matches `agentWindows(workspaceID:)` exactly.
+    public func agentWindowsByWorkspace() throws -> [String: [AgentWindowRecord]] {
+        let rows = try queryRows(
+            sql: """
+                SELECT
+                  \(Self.agentWindowColumns)
+                FROM agent_sessions
+                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                ORDER BY agent_sessions.workspace_id, agent_sessions.created_at
+                """)
+        return Dictionary(grouping: rows.compactMap { decodeAgentWindow(row: $0) }, by: { $0.workspaceID })
+    }
+
     public func agentWindow(workspaceID: String, terminalTrackingID: String) throws -> AgentWindowRecord? {
         guard
             let row = try queryRow(

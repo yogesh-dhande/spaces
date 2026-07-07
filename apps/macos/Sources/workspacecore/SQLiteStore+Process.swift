@@ -4,6 +4,29 @@ import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
+    /// Canonical column order for a full `running_processes` row read, joined against `runtime_targets`
+    /// for the terminal target fields; reused by the per-workspace and batched SELECTs below so both
+    /// decode through `decodeRunningProcess` with an identical row shape.
+    private static let runningProcessColumns = """
+        rp.id,
+        rp.workspace_id,
+        COALESCE(rp.template_id, ''),
+        rp.template_name,
+        rp.command,
+        COALESCE(rp.runtime_target_id, ''),
+        COALESCE(rt.app, ''),
+        COALESCE(rt.name, ''),
+        COALESCE(rt.detail, ''),
+        COALESCE(rt.tracking_id, ''),
+        COALESCE(rp.terminal_session_id, ''),
+        COALESCE(rp.pid, ''),
+        rp.status,
+        COALESCE(rp.log_path, ''),
+        COALESCE(rp.last_output_at, ''),
+        COALESCE(rp.started_at, ''),
+        COALESCE(rp.exited_at, '')
+        """
+
     public func upsert(runningProcess: RunningProcessRecord) throws {
         let runtimeTargetID =
             try runningProcess.runtimeTargetID
@@ -41,29 +64,29 @@ extension SQLiteStore {
         let rows = try queryRows(
             sql: """
                 SELECT
-                  rp.id,
-                  rp.workspace_id,
-                  COALESCE(rp.template_id, ''),
-                  rp.template_name,
-                  rp.command,
-                  COALESCE(rp.runtime_target_id, ''),
-                  COALESCE(rt.app, ''),
-                  COALESCE(rt.name, ''),
-                  COALESCE(rt.detail, ''),
-                  COALESCE(rt.tracking_id, ''),
-                  COALESCE(rp.terminal_session_id, ''),
-                  COALESCE(rp.pid, ''),
-                  rp.status,
-                  COALESCE(rp.log_path, ''),
-                  COALESCE(rp.last_output_at, ''),
-                  COALESCE(rp.started_at, ''),
-                  COALESCE(rp.exited_at, '')
+                  \(Self.runningProcessColumns)
                 FROM running_processes rp
                 LEFT JOIN runtime_targets rt ON rt.id = rp.runtime_target_id
                 WHERE rp.workspace_id = ?
                 ORDER BY started_at
                 """, bindings: [workspaceID])
         return rows.compactMap { decodeRunningProcess(row: $0) }
+    }
+
+    /// Batched form of `runningProcesses(workspaceID:)`: one full-table SELECT grouped by workspace in
+    /// Swift, eliminating the per-workspace query on the overview hot path. Grouping preserves element
+    /// order, and the SELECT orders by `workspace_id` then the same `started_at` key the per-workspace
+    /// query uses, so each group matches `runningProcesses(workspaceID:)` exactly.
+    public func runningProcessesByWorkspace() throws -> [String: [RunningProcessRecord]] {
+        let rows = try queryRows(
+            sql: """
+                SELECT
+                  \(Self.runningProcessColumns)
+                FROM running_processes rp
+                LEFT JOIN runtime_targets rt ON rt.id = rp.runtime_target_id
+                ORDER BY rp.workspace_id, started_at
+                """)
+        return Dictionary(grouping: rows.compactMap { decodeRunningProcess(row: $0) }, by: { $0.workspaceID })
     }
 
     public func deleteRunningProcess(id: String) throws {

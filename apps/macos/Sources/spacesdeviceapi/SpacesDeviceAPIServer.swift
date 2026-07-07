@@ -1320,24 +1320,41 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // rewrites the port to its own live Caddy port before navigation.
         let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
         let projects = try store.projects()
+        // Batch the plain per-workspace table reads into one full-table query each, grouped by
+        // workspace, so building N descriptors costs a constant number of queries instead of O(N).
+        // Each batch preserves the same ORDER BY and WHERE semantics as its per-workspace counterpart,
+        // so the grouped values match `store.<x>(workspaceID:)` element-for-element.
+        let runningProcessesByWorkspace = try store.runningProcessesByWorkspace()
+        let agentWindowsByWorkspace = try store.agentWindowsByWorkspace()
+        let windowsByWorkspace = try store.windowsByWorkspace()
+        let portsByWorkspace = try store.workspacePortsNamedByWorkspace()
+        let setupStateByWorkspace = try store.workspaceSetupStateByWorkspace()
         let workspaces = try projects.flatMap { project in
             try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
                 let slug = SpacesProfile.workspaceHostSlug(
                     branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+                // `resolvedWorkspaceBrowserSessions` and `workspaceSettings` stay per-workspace on
+                // purpose: they rebuild the workspace's env/runtime plan internally rather than reading a
+                // single table, so batching them would require restructuring orchestrator env
+                // construction (out of scope for this N+1 pass).
                 let resolvedBrowserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
                 return SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
-                    runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
-                    agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id),
-                    assignedPorts: (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id).map {
+                    runningProcesses: runningProcessesByWorkspace[workspace.id] ?? [],
+                    agentWindows: agentWindowsByWorkspace[workspace.id] ?? [], windows: windowsByWorkspace[workspace.id] ?? [],
+                    assignedPorts: (portsByWorkspace[workspace.id] ?? []).map {
                         SpacesDeviceAssignedPort(name: $0.name, port: $0.port, url: "http://\($0.name).\(slug).localhost:\(routerPort)")
-                    }) ?? [], resolvedBrowserSessions: resolvedBrowserSessions,
-                    setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id), terminalDaemonEndpoint: nil)
+                    }, resolvedBrowserSessions: resolvedBrowserSessions,
+                    // Mirror `orchestrator.workspaceSetupState`, which returns a succeeded default when no
+                    // `workspace_settings` row exists for the workspace.
+                    setupState: setupStateByWorkspace[workspace.id]
+                        ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil),
+                    terminalDaemonEndpoint: nil)
             }
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
         let sessions = mergedTerminalSessions(localSessions)
-        let workspaceRows = try loadWorkspaceTerminalRows(store: store, workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
+        let workspaceRows = loadWorkspaceTerminalRows(workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
         // Reuse the records the overview already scanned to tally restart impact, so the inline
         // handshake costs no extra store work on the refresh hot path.
         var impact = RestartImpactCounts()
@@ -1357,15 +1374,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return order.compactMap { entriesByID[$0] }
     }
 
+    /// Builds the per-workspace terminal rows for the overview. The descriptors already carry the exact
+    /// records this needs — `descriptor.runningProcesses`/`descriptor.agentWindows` are populated in
+    /// `loadOverview` from the same store queries — so this reuses them instead of re-querying per
+    /// workspace, which otherwise doubled the process/agent reads on the refresh hot path.
     private func loadWorkspaceTerminalRows(
-        store: SQLiteStore, workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
         hasFinalRenderBySessionID: [String: Bool]
-    ) throws -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
+    ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
         var rows: [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] = []
         var representedSessionIDs = Set<String>()
         let sessionsByID = Dictionary(sessions.map { ($0.sessionID, $0) }, uniquingKeysWith: { existing, _ in existing })
         for descriptor in workspaces {
-            let processesBySlot = Dictionary(grouping: try store.runningProcesses(workspaceID: descriptor.workspace.id), by: { processSlotKey($0) })
+            let processesBySlot = Dictionary(grouping: descriptor.runningProcesses, by: { processSlotKey($0) })
             for process in processesBySlot.values.compactMap(preferredProcessRecord).sorted(by: {
                 $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending
             }) {
@@ -1380,7 +1401,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
             }
 
-            let agentsBySlot = Dictionary(grouping: try store.agentWindows(workspaceID: descriptor.workspace.id), by: { agentSlotKey($0) })
+            let agentsBySlot = Dictionary(grouping: descriptor.agentWindows, by: { agentSlotKey($0) })
             for agent in agentsBySlot.values.compactMap(preferredAgentRecord).sorted(by: {
                 ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
             }) {
