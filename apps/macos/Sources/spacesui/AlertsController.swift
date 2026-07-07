@@ -73,10 +73,8 @@ import workspacecore
     func showAlertsDetail() {
         host.clearActiveAddFormStateAndCloseWindows()
         host.stopWorkspaceSetupDetailRefreshTimer()
-        host.visibleDetailWorkspaceID = nil
-        host.visibleCompatibilityBlockDeviceID = nil
+        host.presentDetailPane(.alerts)
         host.showingSettings = false
-        host.showingAlerts = true
         let previousProjectID = host.selectedProjectID
         let previousWorkspaceID = host.selectedWorkspaceID
         host.selectedProjectID = nil

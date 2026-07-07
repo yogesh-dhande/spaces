@@ -146,4 +146,38 @@ import workspacecore
         #expect(statuses["worker"] == RowPrimitives.StatusKind.exited)
     }
 
+    // The detail pane shows exactly one content at a time. `DetailPane` is the single source of truth the
+    // controller's `visibleDetailWorkspaceID` / `showingAlerts` / `visibleCompatibilityBlockDeviceID`
+    // shims read, so asserting the pane's facets asserts the single-pane invariant those shims expose.
+    // Settings is intentionally not a pane case: it floats over whatever pane is shown, so it stays a
+    // separate flag and is not cleared by presenting a pane.
+    @Test func presentingAPaneReplacesThePreviousPanesFacets() {
+        var pane = DetailPane.workspace(id: "workspace-1")
+        #expect(pane.workspaceID == "workspace-1")
+        #expect(!pane.isAlerts)
+        #expect(pane.compatibilityBlockDeviceID == nil)
+
+        pane = .alerts
+        #expect(pane.isAlerts)
+        #expect(pane.workspaceID == nil, "Presenting alerts clears the visible workspace")
+        #expect(pane.compatibilityBlockDeviceID == nil)
+
+        pane = .compatibilityBlock(deviceID: "device-1")
+        #expect(pane.compatibilityBlockDeviceID == "device-1")
+        #expect(!pane.isAlerts, "Presenting the compatibility block clears alerts")
+        #expect(pane.workspaceID == nil)
+
+        pane = .workspace(id: "workspace-2")
+        #expect(pane.workspaceID == "workspace-2")
+        #expect(pane.compatibilityBlockDeviceID == nil, "Presenting a workspace clears the compatibility block")
+        #expect(!pane.isAlerts)
+    }
+
+    @Test func detailPaneNoneClearsEveryFacet() {
+        let pane = DetailPane.none
+        #expect(pane.workspaceID == nil)
+        #expect(!pane.isAlerts)
+        #expect(pane.compatibilityBlockDeviceID == nil)
+    }
+
 }

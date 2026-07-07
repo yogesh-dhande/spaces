@@ -194,10 +194,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localDeviceOverview: SpacesDeviceOverviewPayload?
     var deviceSections: [DeviceSection] = []
     var alertsGroups: [AlertsGroup] = []
-    var visibleDetailWorkspaceID: String?
-    /// Device whose compatibility block is currently shown in the detail pane (when no workspace is
-    /// selected). Lets the block survive background sidebar reloads instead of being replaced.
-    var visibleCompatibilityBlockDeviceID: String?
+    /// The single content the detail pane is showing. Mutually exclusive by construction, so presenting
+    /// one content replaces the previous one. Written only through `presentDetailPane`.
+    var detailPane: DetailPane = .none
+    /// Read-only facets of `detailPane` that the app reads throughout. `showingSettings` is a separate
+    /// stored flag because the Settings dialog floats over, and coexists with, whatever pane is shown.
+    var visibleDetailWorkspaceID: String? { detailPane.workspaceID }
+    var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
+    var showingAlerts: Bool { detailPane.isAlerts }
 
     var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
@@ -329,7 +333,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
-    var showingAlerts = false
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
@@ -957,7 +960,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return
             }
             self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.displayName)")
-            self.showingAlerts = false
+            // Drop a full-pane alerts view so the selection below resolves to the workspace instead of
+            // `refreshSelection` bouncing back to alerts; a shown workspace/compatibility pane is untouched.
+            if case .alerts = self.detailPane { self.presentDetailPane(.none) }
             self.showingSettings = false
             self.selectWorkspace(workspace)
             self.refreshSelection()
@@ -3792,13 +3797,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         requestSidebarReload(forceRemoteRefresh: isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)))
     }
 
+    /// Records which single content the detail pane is showing. The `show*` methods render the pane;
+    /// this only updates the state the app reads. Kept side-effect-free so pane state and pane rendering
+    /// stay independently reasoned about.
+    func presentDetailPane(_ pane: DetailPane) { detailPane = pane }
+
     func showPlaceholder(message: String = "Select a project or workspace.") {
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
-        visibleCompatibilityBlockDeviceID = nil
+        presentDetailPane(.none)
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         clearWorkspaceDetailFooter()
@@ -3825,7 +3833,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func clearCompatibilityBlockIfResolved(deviceID: String) {
         guard visibleCompatibilityBlockDeviceID == deviceID else { return }
         if deviceCompatibility(forDeviceID: deviceID)?.isCompatible == false { return }
-        visibleCompatibilityBlockDeviceID = nil
+        // The guard above establishes the pane is this device's compatibility block, so clearing it
+        // leaves the pane empty until `refreshSelection` re-resolves it.
+        presentDetailPane(.none)
         refreshSelection()
     }
 
@@ -3834,10 +3844,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
-        visibleCompatibilityBlockDeviceID = deviceID
+        presentDetailPane(.compatibilityBlock(deviceID: deviceID))
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         // Clear any prior workspace/project selection so refreshSelection and shortcuts target the block,
@@ -3942,9 +3950,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func showLoadingPlaceholder(message: String, detail: String?) {
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
+        // A visible compatibility block survives the loading placeholder: the reload behind this loading
+        // state re-resolves back to the block. Only a workspace or alerts pane is cleared.
+        if case .compatibilityBlock = detailPane {} else { presentDetailPane(.none) }
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -5024,9 +5033,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func prepareWorkspaceDetailContainer(workspaceID: String) {
         clearActiveAddFormStateAndCloseWindows()
-        visibleDetailWorkspaceID = workspaceID
+        presentDetailPane(.workspace(id: workspaceID))
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         workspaceSetupLogTextView = nil
@@ -5053,7 +5061,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict)
             return
         }
-        visibleCompatibilityBlockDeviceID = nil
+        // This workspace's device is compatible; every branch below presents the workspace pane
+        // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
             prepareWorkspaceDetailContainer(workspaceID: workspace.id)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
