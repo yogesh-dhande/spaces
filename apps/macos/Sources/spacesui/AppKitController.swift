@@ -48,6 +48,13 @@ protocol ProcessLifecyclePolicyController {
     func disableSuddenTermination()
 }
 
+/// Field-reference bundles for a single-instance form. `formTag` is the generation stamped on the
+/// form's controls (`NSControl.tag`) when it is built, letting a control's action confirm it still
+/// belongs to the live form. See `AppKitController.liveFormRefs(_:forSenderTag:)`.
+protocol FormGenerationTagged {
+    var formTag: Int { get }
+}
+
 extension ProcessInfo: ProcessLifecyclePolicyController {}
 
 @MainActor
@@ -250,6 +257,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
     var projectSettingsProjectID: String?
+    // Each of these dialogs is single-instance (one optional window above), so at most one live set of
+    // field references exists at a time. Its controls are stamped with the form's generation tag; see
+    // `liveFormRefs(_:forSenderTag:)` for how a stale control's action is rejected.
+    private var projectSettingsFieldRefs: ProjectFieldRefs?
+    private var addProjectFieldRefs: AddProjectFieldRefs?
+    private var addWorkspaceFieldRefs: AddWorkspaceFieldRefs?
     var workspaceSettingsWindow: NSWindow?
     var workspaceSettingsWorkspaceID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
@@ -4030,7 +4043,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         if closingWindow === projectSettingsWindow {
-            if let projectSettingsProjectID { ProjectFieldCache.shared.cache[projectSettingsProjectID.hashValue] = nil }
+            projectSettingsFieldRefs = nil
             projectSettingsProjectID = nil
             projectHasUnsavedChanges = false
             return
@@ -4519,7 +4532,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             processesSection: processes, browserSessionsSection: browsers, agentLaunchersSection: agents, createButton: createButton,
             spacesYAMLMissingLabel: spacesYAMLMissingLabel)
         activeAddProjectFormTag = id
-        guard let refs = AddProjectFieldCache.shared.cache[id] else { return }
+        guard let refs = addProjectFieldRefs else { return }
         refs.selectedDeviceID = deviceID
         attachAddProjectSourceRowSelection(folderRow, kind: .folder, tag: id)
         attachAddProjectSourceRowSelection(gitRow, kind: .git, tag: id)
@@ -4710,7 +4723,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func selectAddProjectSourceKind(_ kind: AddProjectSourceKind, tag: Int) {
-        guard let refs = AddProjectFieldCache.shared.cache[tag] else { return }
+        guard let refs = Self.liveFormRefs(addProjectFieldRefs, forSenderTag: tag) else { return }
         refs.selectedSourceKind = kind
         updateAddProjectSourceStepUI(refs)
         addProjectWindow?.makeFirstResponder(kind == .folder ? refs.dirField : refs.repoURLField)
@@ -4968,7 +4981,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
             createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
-        if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
+        if let refs = addWorkspaceFieldRefs {
             updateAddWorkspaceBranchInputUI(refs: refs)
             updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: currentAddWorkspaceBranchValue(refs))
         }
@@ -5003,7 +5016,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 existingBranchField.addItems(withObjectValues: options)
                 if !existingValue.isEmpty { existingBranchField.stringValue = existingValue }
             }
-            if let refs = AddWorkspaceFieldCache.shared.cache[formTag] {
+            if let refs = Self.liveFormRefs(self.addWorkspaceFieldRefs, forSenderTag: formTag) {
                 self.updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: self.currentAddWorkspaceBranchValue(refs))
             }
         }
@@ -5709,12 +5722,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func clearActiveAddProjectFormState() {
         // Nothing is cloned until Create, so tearing down the form only clears its cached state.
-        if let activeAddProjectFormTag { AddProjectFieldCache.shared.cache[activeAddProjectFormTag] = nil }
+        addProjectFieldRefs = nil
         activeAddProjectFormTag = nil
     }
 
     private func clearActiveAddWorkspaceFormState() {
-        if let activeAddWorkspaceFormTag { AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag] = nil }
+        addWorkspaceFieldRefs = nil
         activeAddWorkspaceFormTag = nil
     }
 
@@ -6399,14 +6412,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return textView
     }
 
+    /// Resolves the live field references for a control's action, rejecting stale controls. A control
+    /// carries the generation tag of the form it was built for; if that no longer matches the live
+    /// form's `formTag` (the form was rebuilt or closed, or `liveRefs` is already nil), the action is
+    /// dropped. This replaces the previous global tag-keyed caches now that each dialog is single-instance.
+    static func liveFormRefs<Refs: FormGenerationTagged>(_ liveRefs: Refs?, forSenderTag senderTag: Int) -> Refs? {
+        guard let liveRefs, liveRefs.formTag == senderTag else { return nil }
+        return liveRefs
+    }
+
     private func storeProjectFields(
         projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
         importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) -> Int {
         let id = projectID.hashValue
-        ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
-            projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
+        projectSettingsFieldRefs = ProjectFieldRefs(
+            formTag: id, projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
             processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
             importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportedConfigButton)
         return id
@@ -6419,8 +6441,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         agentLaunchersSection: AgentLaunchersSection, createButton: NSButton, spacesYAMLMissingLabel: NSTextField
     ) -> Int {
         let id = UUID().uuidString.hashValue
-        AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
-            folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
+        addProjectFieldRefs = AddProjectFieldRefs(
+            formTag: id, folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
             repoURLField: repoURLField, continueButton: continueButton, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection,
             portsSection: portsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
             agentLaunchersSection: agentLaunchersSection, createButton: createButton, spacesYAMLMissingLabel: spacesYAMLMissingLabel)
@@ -6434,8 +6456,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         baseBranchField: NSComboBox?, notesField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?, createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
-        AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
-            projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
+        addWorkspaceFieldRefs = AddWorkspaceFieldRefs(
+            formTag: id, projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
             newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
             createButton: createButton)
         branchModeSegmented?.tag = id
@@ -6685,7 +6707,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func saveProject(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return }
         do {
             try persistProjectFields(refs)
@@ -6696,7 +6718,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func exportProjectSpacesYAML(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         guard !projectHasUnsavedChanges, !refs.hasOpenSectionEditor else {
             showInfoMessage(title: "Save project settings first", message: "Save or discard pending changes before exporting spaces.yaml.")
             return
@@ -6715,7 +6737,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func importProjectSpacesYAML(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         do {
             if let device = deviceForDaemonStateMutation() {
                 // A non-git project's template always syncs to its single workspace, so it takes the
@@ -6746,7 +6768,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func discardProjectConfigChanges(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         if let config = deviceProjectSummary(projectID: refs.projectID)?.config {
             hydrateProjectSettings(refs, from: config)
             refs.hasPendingImportedConfig = false
@@ -6866,7 +6888,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func createProject(_ sender: NSButton) {
-        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addProjectFieldRefs, forSenderTag: sender.tag) else { return }
         do {
             // The project is created on the device fixed in step 1; folder autocomplete and preview
             // used the same device.
@@ -6932,7 +6954,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func continueFromSourceStep(_ sender: NSButton) {
-        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addProjectFieldRefs, forSenderTag: sender.tag) else { return }
         advanceFromSourceStep(refs)
     }
 
@@ -6999,11 +7021,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func isActiveAddProjectForm(_ refs: AddProjectFieldRefs) -> Bool {
-        activeAddProjectFormTag == refs.createButton.tag && AddProjectFieldCache.shared.cache[refs.createButton.tag] === refs
+        activeAddProjectFormTag == refs.formTag && addProjectFieldRefs === refs
     }
 
     private func addProjectRefs(forDirectoryField field: NSControl) -> AddProjectFieldRefs? {
-        AddProjectFieldCache.shared.cache.values.first { $0.dirField === field }
+        guard let refs = addProjectFieldRefs, refs.dirField === field else { return nil }
+        return refs
     }
 
     private func scheduleAddProjectDirectorySuggestions(_ refs: AddProjectFieldRefs) {
@@ -7103,7 +7126,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func addWorkspaceBranchModeChanged(_ sender: NSSegmentedControl) {
-        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addWorkspaceFieldRefs, forSenderTag: sender.tag) else { return }
         handleAddWorkspaceBranchFieldChange(refs: refs)
         if addWorkspaceBranchMode(refs: refs) == .create {
             window.makeFirstResponder(refs.newBranchField)
@@ -7113,15 +7136,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func addWorkspaceBranchFieldChanged(_ sender: NSControl) {
-        for refs in AddWorkspaceFieldCache.shared.cache.values {
-            guard refs.existingBranchField === sender || refs.newBranchField === sender else { continue }
-            handleAddWorkspaceBranchFieldChange(refs: refs)
-            return
-        }
+        guard let refs = addWorkspaceFieldRefs, refs.existingBranchField === sender || refs.newBranchField === sender else { return }
+        handleAddWorkspaceBranchFieldChange(refs: refs)
     }
 
     @objc private func createWorkspace(_ sender: NSButton) {
-        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addWorkspaceFieldRefs, forSenderTag: sender.tag) else { return }
         do {
             let baseBranch = refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = currentAddWorkspaceBranchValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7184,8 +7204,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             commandPalette.applyCommandPaletteFilter()
             return
         }
-        for refs in AddProjectFieldCache.shared.cache.values {
-            guard refs.repoURLField === changedField else { continue }
+        if let refs = addProjectFieldRefs, refs.repoURLField === changedField {
             updateAddProjectSourceStepUI(refs)
             return
         }
@@ -7194,8 +7213,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             scheduleAddProjectDirectorySuggestions(refs)
             return
         }
-        for refs in AddWorkspaceFieldCache.shared.cache.values {
-            guard refs.existingBranchField === changedField || refs.newBranchField === changedField else { continue }
+        if let refs = addWorkspaceFieldRefs, refs.existingBranchField === changedField || refs.newBranchField === changedField {
             if let existingBranchField = refs.existingBranchField, existingBranchField === changedField {
                 Self.syncExistingWorkspaceBranchSelection(existingBranchField: existingBranchField)
             }
@@ -7206,13 +7224,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     public func comboBoxSelectionDidChange(_ notification: Notification) {
         guard let comboBox = notification.object as? NSComboBox else { return }
-        for refs in AddWorkspaceFieldCache.shared.cache.values {
-            guard refs.existingBranchField === comboBox else { continue }
-            let selectedBranchValue = (comboBox.objectValueOfSelectedItem as? String) ?? comboBox.stringValue
-            comboBox.stringValue = selectedBranchValue
-            handleAddWorkspaceBranchFieldChange(refs: refs, branchValueOverride: selectedBranchValue)
-            return
-        }
+        guard let refs = addWorkspaceFieldRefs, refs.existingBranchField === comboBox else { return }
+        let selectedBranchValue = (comboBox.objectValueOfSelectedItem as? String) ?? comboBox.stringValue
+        comboBox.stringValue = selectedBranchValue
+        handleAddWorkspaceBranchFieldChange(refs: refs, branchValueOverride: selectedBranchValue)
     }
 
     private func handleAddWorkspaceBranchFieldChange(refs: AddWorkspaceFieldRefs, branchValueOverride: String? = nil) {
