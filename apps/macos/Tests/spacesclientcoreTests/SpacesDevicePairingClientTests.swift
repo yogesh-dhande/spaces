@@ -249,15 +249,17 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertLessThan(prepareRange.lowerBound, pairRange.lowerBound)
         XCTAssertTrue(script.contains("deploy_linux_spacesd_e2e.sh"))
         XCTAssertTrue(script.contains("SPACES_DEVICE_API_PORT=$remote_demo_daemon_port"))
-        XCTAssertTrue(script.contains("~/.spaces/bin/spaces mobile status"))
+        XCTAssertTrue(script.contains("remote demo daemon port {port} did not open"))
+        XCTAssertFalse(script.contains("~/.spaces/bin/spaces mobile status"))
     }
 
-    func testDevBuildLaunchVerifiesLinuxUserPathAlias() throws {
+    func testDevBuildLaunchVerifiesRemoteLinuxDaemonWithTcpProbe() throws {
         let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/dev-build-and-launch.sh")
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
 
-        XCTAssertTrue(script.contains("~/.local/bin/spaces mobile status"))
+        XCTAssertTrue(script.contains("remote spacesd Device API port {port} did not open"))
+        XCTAssertFalse(script.contains("~/.local/bin/spaces mobile status"))
     }
 
     func testRemotePairingSSHValidationMessagesAreActionable() {

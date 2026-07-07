@@ -768,7 +768,6 @@ while time.time() < deadline:
         time.sleep(0.5)
 raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
 PY
-  remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null
 }
 
 prepare_remote_demo_daemon() {

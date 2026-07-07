@@ -29,8 +29,7 @@ public struct SpacesCommand: ParsableCommand {
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
             """, version: AppVersion.current,
         subcommands: [
-            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MobileCommand.self,
-            MCPCommand.self,
+            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MCPCommand.self,
         ])
 
     public init() {}
@@ -522,43 +521,6 @@ struct TerminalProxyCommand: ParsableCommand {
         FileHandle.standardOutput.write(Data("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)\n".utf8))
         dispatchMain()
     }
-}
-
-struct MobileCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "mobile", abstract: "Inspect the same-machine Spaces Device API.", subcommands: [MobileStatusCommand.self],
-        defaultSubcommand: MobileStatusCommand.self)
-}
-
-struct MobileStatusCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show the same-machine Spaces Device API address.")
-
-    func run() throws { for line in try mobileStatusLines() { print(line) } }
-}
-
-func mobileStatusLines(
-    loadControlResponse: () throws -> SpacesDeviceAPIControlResponse = { try SpacesDeviceAPIControlClient.statusEnsuringCurrentTerminalService() }
-) throws -> [String] {
-    let response = try loadControlResponse()
-    guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-    guard let status = response.status else {
-        throw WorkspaceError.invalidArgument(message: "Device API status response did not include address details.")
-    }
-    return mobileStatusLines(status: status)
-}
-
-func mobileStatusLines(status: SpacesDeviceAPIStatus) -> [String] {
-    var lines = [
-        "Spaces Device API", "port=\(status.port)", "bonjour=\(status.bonjourServiceName)\ttype=\(status.bonjourServiceType)",
-        "fingerprint=\(status.certificateFingerprint)",
-    ]
-    if status.networkAddresses.isEmpty {
-        lines.append("addresses=(none)")
-    } else {
-        lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
-    }
-    lines.append("pair=Run `spaces device pair` to open a pairing window, or `spaces device pair --json` for SSH-assisted pairing.")
-    return lines
 }
 
 enum AgentEventType: String, CaseIterable, ExpressibleByArgument {
