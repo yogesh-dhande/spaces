@@ -616,12 +616,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func deviceSection(id deviceID: String) -> DeviceSection? { host.deviceSections.first(where: { $0.deviceID == deviceID }) }
 
     func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
-        for project in host.projects {
-            if let workspaces = host.workspacesByProject[project.id], let workspace = workspaces.first(where: { $0.id == id }) {
-                return (project, workspace)
-            }
-        }
-        return nil
+        // host.workspaceIndex is a flat id -> (projectID, workspace) map rebuilt alongside
+        // workspacesByProject (see its didSet), so this is O(1) plus one linear scan over
+        // projects (typically far smaller than projects x workspaces) instead of a nested scan.
+        guard let entry = host.workspaceIndex[id], let project = host.projects.first(where: { $0.id == entry.projectID }) else { return nil }
+        return (project, entry.workspace)
     }
 
     private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isArchived && !workspace.isHidden }

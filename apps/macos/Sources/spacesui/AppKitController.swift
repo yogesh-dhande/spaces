@@ -164,7 +164,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceNotesEditorWorkspaceID: String?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
     var projects: [ProjectSummary] = []
-    var workspacesByProject: [String: [WorkspaceSummary]] = [:] { didSet { sidebar.invalidateVisibleWorkspacesCache() } }
+    var workspacesByProject: [String: [WorkspaceSummary]] = [:] {
+        didSet {
+            sidebar.invalidateVisibleWorkspacesCache()
+            // Flat id -> (projectID, workspace) index, rebuilt alongside workspacesByProject so it can
+            // never go stale. Lets findWorkspace(id:) resolve in O(1) instead of scanning every
+            // project's workspace list, which matters since it's called from ~26 sites including
+            // selection/reload hot paths.
+            workspaceIndex = workspacesByProject.reduce(into: [:]) { index, entry in
+                for workspace in entry.value { index[workspace.id] = (projectID: entry.key, workspace: workspace) }
+            }
+        }
+    }
+    private(set) var workspaceIndex: [String: (projectID: String, workspace: WorkspaceSummary)] = [:]
     var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
     // The macOS app always loads its own local daemon first; these hold that local
     // device and act as the default target when no row is selected. Per-row device
@@ -7498,9 +7510,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func showWorkspaceOverflowMenu(_ sender: NSButton) {
-        guard let workspaceID = sender.identifier?.rawValue,
-            let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == workspaceID })
-        else { return }
+        guard let workspaceID = sender.identifier?.rawValue, let workspace = workspaceIndex[workspaceID]?.workspace else { return }
         let menu = Self.makeWorkspaceOverflowMenu(
             workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace))
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
