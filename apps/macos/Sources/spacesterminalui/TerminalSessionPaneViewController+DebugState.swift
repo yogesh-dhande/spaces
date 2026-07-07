@@ -105,7 +105,7 @@ extension TerminalSessionPaneViewController {
         TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
     }
     func debugSimulateOutputDidChange() {
-        TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID, outputByteCount: 1)
+        TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
         refreshNow()
     }
     func debugSelectRenderedRange(_ range: NSRange) { outputView.setSelectedRange(range) }

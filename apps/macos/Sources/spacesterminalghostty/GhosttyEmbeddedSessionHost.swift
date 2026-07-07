@@ -964,8 +964,7 @@
         }
 
         private func postOutputDidChange(data: Data, outputEndByteOffset: Int?, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
-            TerminalSessionNotification.post(
-                .spacesTerminalOutputDidChange, sessionID: launchConfiguration.sessionID, outputByteCount: data.count)
+            TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: launchConfiguration.sessionID)
             inputOutputResyncScheduler.handleOutputDidChange(interactive: interactiveResync)
             guard shouldBroadcastState else { return }
             broadcastCurrentState(reason: "output", outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)

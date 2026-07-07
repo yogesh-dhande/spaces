@@ -393,7 +393,7 @@
                 TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID)
                 TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
             case "output":
-                TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID, outputByteCount: payload.outputByteCount ?? 0)
+                TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
             case "initial", "runtime_state", "terminated":
                 TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
             default: TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)

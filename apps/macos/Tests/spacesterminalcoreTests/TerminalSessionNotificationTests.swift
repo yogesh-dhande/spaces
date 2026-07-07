@@ -21,7 +21,7 @@ final class TerminalSessionNotificationTests: XCTestCase {
         }
     }
 
-    func testPostCarriesSessionIDAndOmitsByteCountByDefault() throws {
+    func testPostCarriesSessionID() throws {
         let box = NotificationBox()
         let name = Notification.Name("spaces.test.notification.\(UUID().uuidString)")
         let token = NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { box.store($0) }
@@ -32,20 +32,6 @@ final class TerminalSessionNotificationTests: XCTestCase {
         let notification = try XCTUnwrap(box.value())
         XCTAssertEqual(TerminalSessionNotification.sessionID(from: notification), "session-1")
         XCTAssertEqual(notification.userInfo?["sessionID"] as? String, "session-1")
-        XCTAssertNil(notification.userInfo?["byteCount"])
-    }
-
-    func testPostCarriesByteCountWhenProvided() throws {
-        let box = NotificationBox()
-        let name = Notification.Name("spaces.test.notification.\(UUID().uuidString)")
-        let token = NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { box.store($0) }
-        defer { NotificationCenter.default.removeObserver(token) }
-
-        TerminalSessionNotification.post(name, sessionID: "session-2", outputByteCount: 42)
-
-        let notification = try XCTUnwrap(box.value())
-        XCTAssertEqual(notification.userInfo?["sessionID"] as? String, "session-2")
-        XCTAssertEqual(notification.userInfo?["byteCount"] as? Int, 42)
     }
 
     func testSessionIDFromReadsDefensively() {
