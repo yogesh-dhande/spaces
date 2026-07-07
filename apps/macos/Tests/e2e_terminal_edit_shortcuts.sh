@@ -270,11 +270,17 @@ fi
 
 SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_running_app "$SPACES_CLI"
 
+# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
+mkdir -p "$FIXTURE_PROJECT_DIR"
+FIXTURE_WORKSPACE_JSON="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" register-project --project-dir "$FIXTURE_PROJECT_DIR")"
+FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 sleep 3
 
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --command cat --title "$SESSION_TITLE")"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command cat --title "$SESSION_TITLE")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || fail "Failed to parse session ID from: $command_output"
 SERVICE_PID="$(terminal_service_pid "$session_id")"

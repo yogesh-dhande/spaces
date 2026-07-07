@@ -9,6 +9,7 @@ source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
+SPACES_E2E="$BUILD_DIR/spacese2e"
 SPACESD_EXECUTABLE="$BUILD_DIR/spacesd"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
@@ -125,7 +126,7 @@ run_scenario() {
   local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
   local command_output session_id session_dir output_log
 
-  command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --command "$command" --title "stress-${scenario}")"
+  command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "$command" --title "stress-${scenario}")"
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
 
@@ -292,6 +293,7 @@ PY
 
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
+require_binary "$SPACES_E2E"
 require_binary "$SPACESD_EXECUTABLE"
 export SPACESD_EXECUTABLE
 [[ -x "$FIXTURE_SCRIPT" ]] || chmod +x "$FIXTURE_SCRIPT"
@@ -309,6 +311,12 @@ SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 sleep 3
+
+# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
+mkdir -p "$FIXTURE_PROJECT_DIR"
+FIXTURE_WORKSPACE_JSON="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" register-project --project-dir "$FIXTURE_PROJECT_DIR")"
+FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 
 run_scenario "lines" "python3 '$FIXTURE_SCRIPT' --mode lines --lines $LINE_LINES --width 80 --flush-every 50" "$LINE_LINES" 0
 run_scenario "repaint" "python3 '$FIXTURE_SCRIPT' --mode repaint --frames $REPAINT_FRAMES --rows $REPAINT_ROWS --width 72" "$((REPAINT_FRAMES * REPAINT_ROWS))" "$REPAINT_FRAMES"
