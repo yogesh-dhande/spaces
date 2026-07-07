@@ -5,6 +5,100 @@ import { SiteFooter } from "./components/site-footer";
 
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
+// Hero headline cycles through these one at a time (CSS-only crossfade in globals.css).
+const heroWords = ["agent", "worktree", "process", "port", "window"];
+
+type Pillar = {
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  href?: string;
+  hrefLabel?: string;
+};
+
+// The five things Spaces manages for you — the centerpiece of the page.
+const pillars: Pillar[] = [
+  {
+    title: "Agents",
+    description:
+      "Claude Code, Codex, and opencode each report working, blocked, or done. Alerts shows which one needs you next; jump to its terminal with a shortcut.",
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
+        <path
+          d="M2 10h3.5l2-5.5L11 15l2-5h3"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    ),
+  },
+  {
+    title: "Worktrees",
+    description:
+      "Every feature, branch, or experiment gets an isolated git worktree — or a separate clone — with its own directory, env, and processes. Parallel work never collides.",
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
+        <circle cx="5" cy="4.5" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="5" cy="15.5" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="15" cy="7.5" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <path
+          d="M5 6.5v7M5 11h5a3 3 0 0 0 3-3V9.5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    ),
+  },
+  {
+    title: "Ports & processes",
+    description:
+      "Name your services and each workspace gets its own port and a stable URL like web.my-branch.localhost:7391. Dev servers and workers run as tracked processes that restart on demand.",
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
+        <rect x="3" y="3.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+        <rect x="3" y="11.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M6 6h.01M6 14h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
+    title: "Windows & focus",
+    description:
+      "Spaces tracks every window a workspace opens and jumps you back with a keystroke. Cycle within a workspace, hide the rest, and keep your attention on one task at a time.",
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
+        <rect x="2.5" y="4" width="10" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+        <rect x="7.5" y="8" width="10" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+    ),
+  },
+  {
+    title: "Remote machines",
+    description:
+      "Pair a remote Mac or a cloud Linux box and drive them all from one Mac — every device in its own sidebar section, projects and sessions in reach.",
+    href: "#remote",
+    hrefLabel: "See how it works",
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
+        <circle cx="10" cy="4" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="4" cy="16" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="16" cy="16" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <path
+          d="M10 6v3m0 0-4.5 5m4.5-5 4.5 5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    ),
+  },
+];
+
 type Feature = {
   title: string;
   description: string;
@@ -32,6 +126,16 @@ const keyFeatures: Feature[] = [
       "Declare named services and reach each one at a stable, predictable URL like http://web.my-branch.localhost:7391, served by a bundled reverse proxy. Run three instances of your app side by side — isolated, no port conflicts, no `.env` edits.",
   },
   {
+    title: "Run on remote machines",
+    description:
+      "Pair a remote Mac or a cloud Linux box over SSH with pinned TLS. Manage its projects, workspaces, terminals, and agents from the Mac in front of you — each device in its own sidebar section.",
+  },
+  {
+    title: "Sessions that outlive your laptop",
+    description:
+      "Terminals and agents run on the daemon, not your SSH connection. Kick off a build on a remote box, close your laptop, and it keeps running — reattach later exactly where it left off.",
+  },
+  {
     title: "Jump to any workspace",
     description:
       "A global command palette pulls up any window instantly — choose a window and it snaps into focus right where you left it.",
@@ -47,7 +151,7 @@ const keyFeatures: Feature[] = [
       "Coding agents can write context (what's pending, what broke, where they left off) into a per-workspace notes field, surfaced inline in the workspace detail pane.",
   },
   {
-    title: "Move between Mac and iPhone",
+    title: "Take any session to your iPhone",
     description:
       "Pair the Spaces iOS app and your terminal sessions come with you. Pick up the same live session on your phone — watch a build, check a coding agent, or send a command — then step back to your Mac without losing your place.",
   },
@@ -57,7 +161,7 @@ const keyFeatures: Feature[] = [
       "Close a workspace and Spaces shuts down its processes and closes its windows. Come back tomorrow, open it, and everything restarts exactly as it was.",
   },
   {
-    title: "Native MacOS app under 10 MB",
+    title: "Native macOS app under 10 MB",
     description:
       "Built with Swift and AppKit — not Electron. No 200 MB runtime, no sluggish UI, no fan spinning up just to show you a window list.",
   },
@@ -122,6 +226,24 @@ const faqItems: FaqItem[] = [
           cookbook guides
         </Link>{" "}
         for step-by-step setup.
+      </>
+    ),
+  },
+  {
+    question: "Can I use it with a remote or cloud machine?",
+    answer: (
+      <>
+        Yes. Pair another Mac or an Ubuntu 24.04 Linux box — including a cloud
+        VM — over SSH with pinned TLS. Each machine runs its own{" "}
+        <code>spacesd</code> daemon and shows up as its own section in the
+        sidebar, so you manage its projects, workspaces, terminals, and agents
+        from the Mac in front of you. Because sessions run on the daemon, a
+        remote build or agent keeps running after you disconnect or close your
+        laptop — reattach later from your Mac or your phone. See the{" "}
+        <Link href="/docs/cli" className="text-accent hover:underline">
+          CLI docs
+        </Link>{" "}
+        for pairing.
       </>
     ),
   },
@@ -220,30 +342,6 @@ const faqItems: FaqItem[] = [
   },
 ];
 
-type ProblemItem = {
-  n: string;
-  title: string;
-  body: string;
-};
-
-const problems: ProblemItem[] = [
-  {
-    n: "01",
-    title: "Context scattered across surfaces",
-    body: "A single feature lives across four terminal tabs, two editor windows, and a browser session — with nothing connecting them. Coming back after lunch means reconstructing where you were from clues.",
-  },
-  {
-    n: "02",
-    title: "Every switch is a scavenger hunt",
-    body: "You’re hunting for the checkout tab across 80 open tabs in two browser windows. The dev server is running somewhere — you just can't remember which terminal. Port 3000 is taken and you don’t know by what.",
-  },
-  {
-    n: "03",
-    title: "Worktrees make it worse",
-    body: "You spin up a worktree so a PR review doesn’t kill your dev server — now you have two sets of windows to track and both want port 3000. Multiply by three projects and the desktop becomes the problem.",
-  },
-];
-
 type WorkflowStepData = {
   n: string;
   label: string;
@@ -268,56 +366,15 @@ const workflow: WorkflowStepData[] = [
   },
 ];
 
-type ComparisonStep = {
-  n: string;
-  title: string;
-  body: string;
+type RemoteNode = {
+  name: string;
+  detail: string;
 };
 
-const withoutSpaces: ComparisonStep[] = [
-  {
-    n: "1",
-    title: "Find the tab",
-    body: "Dig through 80 open tabs across two browser windows for the checkout page.",
-  },
-  {
-    n: "2",
-    title: "Find the editor",
-    body: "Alt-tab through four VS Code windows to find the one on the right branch.",
-  },
-  {
-    n: "3",
-    title: "Find the agent",
-    body: "Click through three terminals to figure out which one has the agent waiting on you.",
-  },
-  {
-    n: "4",
-    title: "Fix the port",
-    body: "Realize :3000 is taken by last week's project. Kill something. Update the env file. Restart.",
-  },
-];
-
-const withSpaces: ComparisonStep[] = [
-  {
-    n: "1",
-    title: "Open the workspace",
-    body: "One shortcut brings up every window for this task — tabs, terminals, editor, agent — exactly where you left them.",
-  },
-  {
-    n: "2",
-    title: "Jump between windows",
-    body: "Numbered shortcuts focus any window in the workspace instantly. No hunting, no alt-tab.",
-  },
-  {
-    n: "3",
-    title: "Switch projects without cleanup",
-    body: "Each workspace owns its own named services, stable URLs, and env. Spin up a worktree alongside your main branch — both run on their own per-workspace URLs, neither breaks.",
-  },
-  {
-    n: "4",
-    title: "See what needs you",
-    body: "Exited processes and agents waiting on a human all surface in one Alerts view.",
-  },
+const remoteNodes: RemoteNode[] = [
+  { name: "Local Mac", detail: "this machine" },
+  { name: "Remote Mac", detail: "SSH · pinned TLS" },
+  { name: "Cloud Linux", detail: "spacesd on Ubuntu" },
 ];
 
 export default function HomePage() {
@@ -331,18 +388,39 @@ export default function HomePage() {
           <div className="max-w-3xl">
             <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
               <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              macOS · open source
+              macOS + iOS · open source
             </p>
-            <h1 className="mt-5 text-5xl font-semibold leading-[1.02] tracking-tight md:text-6xl lg:text-[4.5rem]">
-              Multiplex work
+            <h1 className="mt-5 text-4xl font-semibold leading-[1.02] tracking-tight md:text-5xl lg:text-6xl">
+              {/* Keep "Manage every {word}" on one line at md+ so the headline is two lines, not three */}
+              <span className="md:whitespace-nowrap">
+                Manage every{" "}
+                <span
+                  className="hero-rotator"
+                  aria-label="agents, worktrees, processes, ports, and windows"
+                >
+                  {/* Invisible sizer reserves the widest word's width so the line never reflows */}
+                  <span className="hero-rotator-sizer" aria-hidden>
+                    worktree
+                  </span>
+                  {heroWords.map((word, i) => (
+                    <span
+                      key={word}
+                      className="hero-rotator-word"
+                      style={{ animationDelay: `${i * 2.5}s` }}
+                      aria-hidden
+                    >
+                      {word}
+                    </span>
+                  ))}
+                </span>
+              </span>
               <br />
-              <span className="text-accent">Not just the terminal</span>
+              in one place
             </h1>
             <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Native macOS app and CLI for orchestrating parallel coding
-              sessions across worktrees, branches, and projects. Each
-              workspace gets isolated named services with stable URLs,
-              environment, and a tracked window set.
+              Group coding agents, processes, ports, browser tabs, and code editor into
+              isolated per-branch workspaces — run them on your Mac or a
+              remote Linux box, and pick any session up on your iPhone.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link
@@ -354,10 +432,10 @@ export default function HomePage() {
                 Download
               </Link>
               <Link
-                href="#tour"
-                className="inline-flex items-center gap-1.5 px-1 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
+                href="/docs"
+                className="inline-flex items-center gap-1.5 rounded-full border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
               >
-                See how it works
+                Read Docs
                 <span aria-hidden>→</span>
               </Link>
             </div>
@@ -389,44 +467,29 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── Problem ── */}
-      <section id="problem" className="mt-24 border-t border-line/70">
-        <div className="mx-auto w-full max-w-7xl px-6 py-20">
+      {/* ── What you manage (pillars) ── */}
+      <section id="manage" className="mt-24 border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
             <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Speed is no longer about{" "}
-              <span className="text-accent">typing code faster.</span>
+              Run <span className="text-accent">parallel coding sessions.</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              The bottleneck isn&apos;t typing — it&apos;s the surrounding
-              state: which terminal owns the dev server, which Chrome tab is
-              the staging admin, which worktree is bound to port 3000, which
-              agent is waiting on you. Managing that is the job now.
+              Run a few coding sessions at once and the moving parts multiply —
+              worktrees, agents, processes, ports, windows. Spaces makes each of
+              those a thing you manage, not a thing you chase.
             </p>
           </div>
 
-          <ol className="mt-14 grid border-t border-line/70 md:grid-cols-3">
-            {problems.map((p, i) => (
-              <li
-                key={p.n}
-                className={`flex flex-col gap-3 border-b border-line/70 py-8 md:border-b-0 md:py-0 md:pt-8 ${
-                  i === 0 ? "md:pr-8" : "md:px-8"
-                } ${i > 0 ? "md:border-l md:border-line/70" : ""}`}
-              >
-                <span className="font-mono text-xs tracking-[0.18em] text-accent tabular-nums">
-                  {p.n}
-                </span>
-                <h3 className="text-lg font-semibold leading-snug tracking-tight">
-                  {p.title}
-                </h3>
-                <p className="text-sm leading-6 text-foreground-soft">{p.body}</p>
-              </li>
+          <ul className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {pillars.map((pillar) => (
+              <PillarCard key={pillar.title} pillar={pillar} />
             ))}
-          </ol>
+          </ul>
         </div>
       </section>
 
-      {/* ── How a workspace works (comparison) ── */}
+      {/* ── Workspace model ── */}
       <section className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-24">
           <div className="max-w-3xl">
@@ -437,40 +500,9 @@ export default function HomePage() {
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               A workspace is one feature, branch, or experiment with its own
               directory, named services on stable URLs, processes, browser
-              sessions, and coding-agent terminals. Launching it starts every process and
-              tracks every window. Stopping it shuts everything down. Reopening
-              restores the state.
-            </p>
-          </div>
-
-          <div className="mt-12 grid gap-5 md:grid-cols-2">
-            <ComparisonColumn
-              variant="without"
-              eyebrow="Without Spaces"
-              steps={withoutSpaces}
-              result="ten minutes of setup before you've typed a line of code."
-            />
-            <ComparisonColumn
-              variant="with"
-              eyebrow="With Spaces"
-              steps={withSpaces}
-              result="you're coding, not context-switching."
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* ── How It Works (timeline) ── */}
-      <section id="tour" className="border-t border-line/70">
-        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
-          <div className="max-w-3xl">
-            <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Project, workspace, <span className="text-accent">runtime.</span>
-            </h2>
-            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Configure each repo once at the project level. Create one
-              workspace per task. Runtime opens or closes processes and
-              windows as a unit.
+              sessions, and coding-agent terminals. Launching it starts every
+              process and tracks every window. Stopping it shuts everything
+              down. Reopening restores the state.
             </p>
           </div>
 
@@ -485,10 +517,7 @@ export default function HomePage() {
                     {step.n}
                   </span>
                   {i < workflow.length - 1 ? (
-                    <span
-                      aria-hidden
-                      className="mt-2 w-px flex-1 bg-line/70"
-                    />
+                    <span aria-hidden className="mt-2 w-px flex-1 bg-line/70" />
                   ) : null}
                 </div>
                 <div className={i < workflow.length - 1 ? "pb-10" : ""}>
@@ -505,8 +534,90 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* ── Remote machines ── */}
+      <section id="remote" className="border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="max-w-3xl">
+            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+              Remote machines
+            </p>
+            <h2 className="mt-5 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+              One Mac. <span className="text-accent">Every machine.</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Pair another Mac or a cloud Linux box over SSH with pinned TLS.
+              Each machine runs its own <code>spacesd</code> and appears as its
+              own section in the sidebar — projects, workspaces, terminals, and
+              agents, all reachable from the Mac in front of you.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+            <RemoteDiagram />
+
+            <div className="rounded-xl border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
+                Sessions outlive your laptop
+              </p>
+              <p className="mt-4 text-lg font-semibold leading-snug tracking-tight text-foreground md:text-xl">
+                Like tmux, for everything a session runs.
+              </p>
+              <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                Terminals and coding agents run on the daemon, not on your SSH
+                connection. Kick off a build or an agent on a remote box, close
+                your laptop, and it keeps running — then reattach later from
+                your Mac or your phone, right where it left off.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Take it with you (mobile) ── */}
+      <section id="mobile" className="border-t border-line/70 bg-background-soft/60">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
+            <div className="max-w-xl">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                iOS companion
+              </p>
+              <h2 className="mt-5 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+                Take it <span className="text-accent">with you.</span>
+              </h2>
+              <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+                Pair the Spaces iOS app with a QR code. Browse live terminal
+                sessions across your workspaces, watch an agent that&apos;s
+                working or waiting, type into the same shell, and run or restart
+                processes — from your phone.
+              </p>
+              <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+                Sessions keep running even if the Mac app quits; acting from your
+                phone brings it back automatically.
+              </p>
+              <Link
+                href="/docs/ios"
+                className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-accent transition-colors hover:underline"
+              >
+                Read the iOS docs
+                <span aria-hidden>→</span>
+              </Link>
+            </div>
+
+            <MediaPlaceholder
+              label="iOS app — live session list & terminal"
+              aspect="aspect-[4/3]"
+            >
+              <PhoneGlyph />
+            </MediaPlaceholder>
+          </div>
+        </div>
+      </section>
+
       {/* ── Built for the keyboard ── */}
-      <section className="border-t border-line/70 bg-background-soft/60">
+      <section className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-24">
           <div className="max-w-3xl">
             <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
@@ -531,7 +642,7 @@ export default function HomePage() {
       </section>
 
       {/* ── In Action ── */}
-      <section className="border-t border-line/70">
+      <section className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-24">
           <div className="max-w-3xl">
             <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
@@ -567,7 +678,7 @@ export default function HomePage() {
       </section>
 
       {/* ── Capabilities index ── */}
-      <section id="features" className="border-t border-line/70 bg-background-soft/40">
+      <section id="features" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
@@ -588,7 +699,7 @@ export default function HomePage() {
       </section>
 
       {/* ── FAQ ── */}
-      <section id="faq" className="border-t border-line/70">
+      <section id="faq" className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
             <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
@@ -629,7 +740,7 @@ export default function HomePage() {
       </section>
 
       {/* ── CTA ── */}
-      <section className="border-t border-line/70 bg-background-soft/40">
+      <section className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-24 md:py-28">
           <h2 className="max-w-2xl text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
             Try it on <span className="text-accent">your repo.</span>
@@ -668,6 +779,132 @@ function Key({ children }: { children: React.ReactNode }) {
     <kbd className="inline-flex items-center rounded-md border border-accent-2/55 bg-accent-2/20 px-2 py-1 font-mono text-xs font-semibold leading-none text-accent-2">
       {children}
     </kbd>
+  );
+}
+
+function PillarCard({ pillar }: { pillar: Pillar }) {
+  return (
+    <li className="flex h-full flex-col gap-4 rounded-xl border border-line/80 bg-surface/50 p-6 transition-colors hover:border-accent/50">
+      <span className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-accent/30 bg-accent/10 text-accent">
+        {pillar.icon}
+      </span>
+      <div className="min-w-0">
+        <h3 className="text-lg font-semibold tracking-tight">{pillar.title}</h3>
+        <p className="mt-2 text-sm leading-6 text-foreground-soft">
+          {pillar.description}
+        </p>
+      </div>
+      {pillar.href ? (
+        <Link
+          href={pillar.href}
+          className="mt-auto inline-flex items-center gap-1.5 pt-1 text-sm font-semibold text-accent transition-colors hover:underline"
+        >
+          {pillar.hrefLabel}
+          <span aria-hidden>→</span>
+        </Link>
+      ) : null}
+    </li>
+  );
+}
+
+function RemoteDiagram() {
+  return (
+    <figure className="rounded-xl border border-line/80 bg-surface/50 p-6 md:p-10">
+      <div className="mx-auto flex max-w-md flex-col items-center">
+        {/* Hub: your Mac */}
+        <div className="w-full max-w-[15rem] rounded-lg border border-accent/45 bg-accent/10 px-5 py-4 text-center">
+          <p className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-accent">
+            Your Mac
+          </p>
+          <p className="mt-1 text-sm font-semibold tracking-tight text-foreground">
+            One command surface
+          </p>
+        </div>
+
+        {/* Vertical spine from the hub */}
+        <span aria-hidden className="h-8 w-px bg-line/80" />
+
+        {/* Horizontal bus + drop ticks (sm+) */}
+        <div className="relative w-full">
+          <span
+            aria-hidden
+            className="absolute left-[16.666%] right-[16.666%] top-0 hidden h-px bg-line/80 sm:block"
+          />
+          <div className="grid gap-4 sm:grid-cols-3">
+            {remoteNodes.map((node) => (
+              <div key={node.name} className="flex flex-col items-center">
+                <span
+                  aria-hidden
+                  className="hidden h-6 w-px bg-line/80 sm:block"
+                />
+                <div className="w-full rounded-lg border border-line/80 bg-background/60 px-4 py-3 text-center">
+                  <p className="text-sm font-semibold tracking-tight text-foreground">
+                    {node.name}
+                  </p>
+                  <p className="mt-1 font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
+                    {node.detail}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <figcaption className="mt-8 text-center font-mono text-[0.7rem] uppercase tracking-[0.16em] text-foreground-soft">
+        One sidebar · every machine
+      </figcaption>
+    </figure>
+  );
+}
+
+function MediaPlaceholder({
+  label,
+  aspect,
+  children,
+}: {
+  label: string;
+  aspect: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <figure
+      className={`relative flex ${aspect} w-full items-center justify-center overflow-hidden rounded-xl border border-dashed border-line bg-surface/40`}
+    >
+      <div className="flex flex-col items-center gap-4 px-6 text-center text-foreground-soft">
+        {children}
+        <figcaption className="font-mono text-[0.7rem] uppercase tracking-[0.16em]">
+          {label}
+        </figcaption>
+      </div>
+    </figure>
+  );
+}
+
+function PhoneGlyph() {
+  return (
+    <svg viewBox="0 0 48 48" fill="none" aria-hidden className="h-12 w-12 text-line">
+      <rect
+        x="15"
+        y="6"
+        width="18"
+        height="36"
+        rx="3.5"
+        stroke="currentColor"
+        strokeWidth="1.75"
+      />
+      <path
+        d="M21 10h6"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+      <path
+        d="M20 20h8M20 25h8M20 30h5"
+        stroke="color-mix(in oklab, var(--accent) 70%, transparent)"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
@@ -735,70 +972,5 @@ function FeatureRow({ n, feature, index }: FeatureRowProps) {
         </p>
       </div>
     </li>
-  );
-}
-
-type ComparisonColumnProps = {
-  variant: "without" | "with";
-  eyebrow: string;
-  steps: ComparisonStep[];
-  result: string;
-};
-
-function ComparisonColumn({
-  variant,
-  eyebrow,
-  steps,
-  result,
-}: ComparisonColumnProps) {
-  const isWith = variant === "with";
-  const containerClasses = isWith
-    ? "border-accent/40 bg-surface/85"
-    : "border-negative/40 bg-[color:color-mix(in_oklab,var(--negative)_7%,var(--surface))]";
-  const eyebrowClasses = isWith ? "text-accent" : "text-negative";
-  const dotClasses = isWith ? "bg-accent" : "bg-negative";
-  const numberClasses = isWith
-    ? "border-accent/40 bg-accent/10 text-accent"
-    : "border-negative/40 bg-[color:color-mix(in_oklab,var(--negative)_12%,transparent)] text-negative";
-  const resultClasses = isWith ? "text-foreground" : "text-foreground-soft";
-
-  return (
-    <article
-      className={`flex flex-col gap-6 rounded-lg border p-6 md:p-8 ${containerClasses}`}
-    >
-      <p
-        className={`inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] ${eyebrowClasses}`}
-      >
-        <span className={`h-1.5 w-1.5 rounded-full ${dotClasses}`} />
-        {eyebrow}
-      </p>
-      <ol className="flex flex-col gap-5">
-        {steps.map((step) => (
-          <li key={step.n} className="flex gap-4">
-            <span
-              className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border font-mono text-xs font-semibold tabular-nums ${numberClasses}`}
-            >
-              {step.n}
-            </span>
-            <div className="min-w-0">
-              <p className="text-sm font-semibold tracking-tight text-foreground md:text-base">
-                {step.title}
-              </p>
-              <p className="mt-1 text-sm leading-6 text-foreground-soft">
-                {step.body}
-              </p>
-            </div>
-          </li>
-        ))}
-      </ol>
-      <p
-        className={`mt-auto border-t border-line/70 pt-4 text-sm leading-6 ${resultClasses}`}
-      >
-        <span className="font-mono text-[0.62rem] uppercase tracking-[0.18em] text-foreground-soft">
-          Result
-        </span>
-        <span className="ml-2">{result}</span>
-      </p>
-    </article>
   );
 }
