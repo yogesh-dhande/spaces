@@ -9,6 +9,7 @@ source "$REPO_ROOT/scripts/spaces-profile-helpers.sh"
 BUILD_DIR="$APP_ROOT/.build/debug"
 SPACES_APP="$BUILD_DIR/SpacesApp"
 SPACES_CLI="$BUILD_DIR/spaces"
+SPACES_E2E="$BUILD_DIR/spacese2e"
 SETUP_GHOSTTYKIT="$APP_ROOT/scripts/setup_ghosttykit.sh"
 FIXTURE_SCRIPT="$SCRIPT_DIR/terminal_stress_fixture.py"
 
@@ -95,6 +96,7 @@ mkdir -p "$(dirname "$DB_PATH")"
 touch "$APP_LOG"
 require_binary "$SPACES_APP"
 require_binary "$SPACES_CLI"
+require_binary "$SPACES_E2E"
 [[ -x "$FIXTURE_SCRIPT" ]] || chmod +x "$FIXTURE_SCRIPT"
 
 cd "$REPO_ROOT"
@@ -107,6 +109,12 @@ SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" spaces_profile_stop_
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_APP" >"$APP_LOG" 2>&1 &
 APP_PID="$!"
 sleep 3
+
+# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
+mkdir -p "$FIXTURE_PROJECT_DIR"
+FIXTURE_WORKSPACE_JSON="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" register-project --project-dir "$FIXTURE_PROJECT_DIR")"
+FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 
 frames=$((DURATION_SECONDS * FRAMES_PER_SECOND))
 sleep_ms=$((1000 / FRAMES_PER_SECOND))
@@ -133,7 +141,7 @@ case "$SOAK_MODE" in
     exit 1
     ;;
 esac
-command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --command "python3 '$FIXTURE_SCRIPT' ${fixture_args[*]}" --title "$session_title")"
+command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --workspace "$FIXTURE_WORKSPACE_ID" --command "python3 '$FIXTURE_SCRIPT' ${fixture_args[*]}" --title "$session_title")"
 session_id="$(extract_session_id "$command_output")"
 [[ -n "$session_id" ]] || { echo "Failed to parse soak session ID" >&2; exit 1; }
 wait_for_log_pattern "spaces: perf metric=terminal_window_summon target=session=${session_id} success=1 .*mode=owner|spaces: perf metric=terminal_window_attach_owner_surface target=session=${session_id} success=1 .*mode=owner"

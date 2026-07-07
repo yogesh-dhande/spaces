@@ -329,6 +329,13 @@ export SPACES_DB_PATH="$DB_PATH"
 export SPACES_RUNTIME_DIR="$RUNTIME_DIR"
 export SPACESD_EXECUTABLE="$TERMINAL_SERVICE"
 export SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERF_JSONL"
+
+# terminal command is workspace-scoped; register a fixture project and use its default workspace.
+FIXTURE_PROJECT_DIR="$WORK_ROOT/terminal-fixture-project"
+mkdir -p "$FIXTURE_PROJECT_DIR"
+FIXTURE_WORKSPACE_JSON="$("$SPACES_E2E" register-project --project-dir "$FIXTURE_PROJECT_DIR")"
+FIXTURE_WORKSPACE_ID="$(printf '%s' "$FIXTURE_WORKSPACE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+
 measure_remote_rtt_ms
 prepare_remote_workspace
 
@@ -412,6 +419,7 @@ PERFORMANCE_LOG_PATH="$PERF_JSONL" \
 WORK_ROOT="$WORK_ROOT" \
 SPACES_CLI="$SPACES_CLI" \
 SPACES_E2E="$SPACES_E2E" \
+FIXTURE_WORKSPACE_ID="$FIXTURE_WORKSPACE_ID" \
 python3 - "${SELECTED_SCENARIOS[@]}" <<'PY'
 import base64
 import json
@@ -450,6 +458,9 @@ performance_log_path = Path(os.environ["PERFORMANCE_LOG_PATH"])
 work_root = Path(os.environ["WORK_ROOT"])
 spaces_cli = os.environ["SPACES_CLI"]
 spacese2e = os.environ["SPACES_E2E"]
+# terminal command is workspace-scoped; the harness registered a fixture project and its
+# default workspace before this script started, so every session it starts targets that workspace.
+fixture_workspace_id = os.environ["FIXTURE_WORKSPACE_ID"]
 base_env = os.environ.copy()
 
 events: list[dict] = []
@@ -584,7 +595,7 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
 def start_terminal(title: str, command: str, terminal_target: str) -> str:
     try:
         completed = run(
-            [spaces_cli, "terminal", "command", "--command", command, "--title", title],
+            [spaces_cli, "terminal", "command", "--workspace", fixture_workspace_id, "--command", command, "--title", title],
             timeout=20,
         )
         return extract_session_id(completed.stdout)
