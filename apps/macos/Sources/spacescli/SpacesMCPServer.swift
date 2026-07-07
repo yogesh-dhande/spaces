@@ -45,7 +45,7 @@ final class SpacesMCPStdioServer {
     private static func toolDescriptors() -> [MCPToolDescriptor] {
         [
             MCPToolDescriptor(name: "spaces_project_list", description: "List Spaces projects.", properties: [:], required: []) { _, _ in
-                try TerminalService.sendProfileCommand(.init(operation: .projectList))
+                try TerminalService.sendProfileCommand(.projectList)
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_list", description: "List Spaces workspaces.",
@@ -53,9 +53,10 @@ final class SpacesMCPStdioServer {
                 required: []
             ) { server, arguments in
                 try TerminalService.sendProfileCommand(
-                    .init(
-                        operation: .workspaceList, projectID: server.optionalString(arguments["project"]),
-                        includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false))
+                    .workspaceList(
+                        .init(
+                            projectID: server.optionalString(arguments["project"]),
+                            includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false)))
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_create", description: "Create a workspace on this device.",
@@ -66,28 +67,29 @@ final class SpacesMCPStdioServer {
                 ], required: ["project", "branch"]
             ) { server, arguments in
                 try TerminalService.sendProfileCommand(
-                    .init(
-                        operation: .workspaceCreate, projectID: try server.requiredString(arguments["project"], field: "project"),
-                        branch: try server.requiredString(arguments["branch"], field: "branch"),
-                        baseBranch: server.optionalString(arguments["baseBranch"]),
-                        existingBranch: server.optionalBool(arguments["existingBranch"]) ?? false))
+                    .workspaceCreate(
+                        .init(
+                            projectID: try server.requiredString(arguments["project"], field: "project"),
+                            branch: try server.requiredString(arguments["branch"], field: "branch"),
+                            baseBranch: server.optionalString(arguments["baseBranch"]),
+                            existingBranch: server.optionalBool(arguments["existingBranch"]) ?? false)))
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_start", description: "Ensure a workspace is running.",
                 properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
             ) { server, arguments in
                 try TerminalService.sendProfileCommand(
-                    .init(operation: .workspaceStart, workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+                    .workspaceStart(workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
             },
             MCPToolDescriptor(
                 name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace.",
                 properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
             ) { server, arguments in
                 try TerminalService.sendProfileCommand(
-                    .init(operation: .workspaceRestart, workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+                    .workspaceRestart(workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
             },
             MCPToolDescriptor(name: "spaces_terminal_list", description: "List available Spaces terminal sessions.", properties: [:], required: []) {
-                _, _ in try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5)
+                _, _ in try TerminalService.sendProfileCommand(.terminalList, timeout: 5)
             },
             MCPToolDescriptor(
                 name: "spaces_terminal_tail", description: "Read recent output from an explicit Spaces terminal session.",
@@ -96,9 +98,10 @@ final class SpacesMCPStdioServer {
                 ], required: ["session"]
             ) { server, arguments in
                 try TerminalService.sendProfileCommand(
-                    .init(
-                        operation: .terminalTail, terminalSessionID: try server.requiredString(arguments["session"], field: "session"),
-                        lineCount: server.optionalInt(arguments["lines"])), timeout: 5)
+                    .terminalTail(
+                        .init(
+                            sessionID: try server.requiredString(arguments["session"], field: "session"),
+                            lineCount: server.optionalInt(arguments["lines"]))), timeout: 5)
             },
             MCPToolDescriptor(
                 name: "spaces_terminal_send", description: "Send text or raw bytes to an explicit Spaces terminal session.",
@@ -109,12 +112,12 @@ final class SpacesMCPStdioServer {
                     "appendNewline": boolSchema("Append a newline after the payload."),
                 ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
             ) { server, arguments in
-                let payload = try server.terminalInputPayload(from: arguments)
+                let input = try server.terminalInputPayload(from: arguments)
                 return try TerminalService.sendProfileCommand(
-                    .init(
-                        operation: .terminalSend, terminalSessionID: try server.requiredString(arguments["session"], field: "session"),
-                        terminalText: payload.text, terminalBytes: payload.bytes,
-                        appendNewline: server.optionalBool(arguments["appendNewline"]) ?? false), timeout: 5)
+                    .terminalSend(
+                        .init(
+                            sessionID: try server.requiredString(arguments["session"], field: "session"), input: input,
+                            appendNewline: server.optionalBool(arguments["appendNewline"]) ?? false)), timeout: 5)
             },
         ]
     }
@@ -220,15 +223,19 @@ final class SpacesMCPStdioServer {
         return nil
     }
 
-    private func terminalInputPayload(from arguments: [String: Any]) throws -> (text: String?, bytes: Data?) {
+    /// Maps the JSON `text`/`bytes` arguments into the typed `TerminalProfileInput`. The typed input
+    /// makes text-xor-bytes structural on the wire, but the enforcement still lives here because MCP
+    /// arguments are untyped JSON where both keys can be supplied at once; this is the only layer that
+    /// must reject that. Internal (not private) so the arg-mapping rejection is unit-testable.
+    func terminalInputPayload(from arguments: [String: Any]) throws -> TerminalProfileInput {
         let textValue = arguments["text"]
         let bytesValue = arguments["bytes"]
         let hasText = textValue != nil
         let hasBytes = bytesValue != nil
         guard hasText || hasBytes else { throw MCPError.invalidArguments("text or bytes is required.") }
         guard !(hasText && hasBytes) else { throw MCPError.invalidArguments("Provide text or bytes, not both.") }
-        if hasText { return (try requiredRawString(textValue, field: "text"), nil) }
-        return (nil, try requiredBytes(bytesValue, field: "bytes"))
+        if hasText { return .text(try requiredRawString(textValue, field: "text")) }
+        return .bytes(try requiredBytes(bytesValue, field: "bytes"))
     }
 
     private func requiredBytes(_ value: Any?, field: String) throws -> Data {

@@ -554,30 +554,33 @@ import workspacecore
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func handleProfileCommand(_ command: TerminalServiceProfileCommandRequest) -> TerminalServiceResponse {
+    private func handleProfileCommand(_ command: TerminalServiceProfileCommand) -> TerminalServiceResponse {
         do {
             let profile = try runProfileCommand(command)
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return TerminalServiceResponse(ok: false, message: Self.errorMessage(error)) }
     }
 
-    private func runProfileCommand(_ command: TerminalServiceProfileCommandRequest) throws -> TerminalServiceProfileCommandResponse {
-        switch command.operation {
+    /// Dispatches a decoded profile command. The typed union already enforced required fields (trim +
+    /// reject empty) at the wire boundary, so this switch destructures payloads and only performs
+    /// genuinely daemon-side validation (existence lookups, event-name recognition).
+    private func runProfileCommand(_ command: TerminalServiceProfileCommand) throws -> TerminalServiceProfileCommandResponse {
+        switch command {
         case .terminalList:
             let response = listSessions()
             guard response.ok else { throw SpacesRuntimeError.invalidArgument(message: response.message) }
             return TerminalServiceProfileCommandResponse(message: response.message, terminalSessions: response.sessions ?? [])
-        case .terminalSend: return try sendProfileTerminalInput(command)
-        case .terminalTail: return try tailProfileTerminalOutput(command)
+        case .terminalSend(let payload): return try sendProfileTerminalInput(payload)
+        case .terminalTail(let payload): return try tailProfileTerminalOutput(payload)
         case .projectList:
             let orchestrator = try makeProfileOrchestrator()
             let projects = try orchestrator.listProjects().map(profileProjectSummary)
             return TerminalServiceProfileCommandResponse(message: "Listed projects.", projects: projects)
-        case .workspaceList:
+        case .workspaceList(let payload):
             let orchestrator = try makeProfileOrchestrator()
-            let includeArchived = command.includeArchived ?? false
+            let includeArchived = payload.includeArchived
             let workspaces: [WorkspaceRecord]
-            if let projectID = normalizedProfileArgument(command.projectID) {
+            if let projectID = normalizedProfileArgument(payload.projectID) {
                 workspaces = try orchestrator.store.workspaces(projectID: projectID, includeArchived: includeArchived)
             } else {
                 workspaces = try orchestrator.store.projects().flatMap {
@@ -585,54 +588,49 @@ import workspacecore
                 }
             }
             return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(profileWorkspaceRecord))
-        case .workspaceCreate:
+        case .workspaceCreate(let payload):
             let orchestrator = try makeProfileOrchestrator()
-            let projectID = try requiredProfileArgument(command.projectID, name: "projectID")
-            let branch = try requiredProfileArgument(command.branch, name: "branch")
-            guard let project = try orchestrator.store.project(id: projectID) else {
-                throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(projectID).")
+            guard let project = try orchestrator.store.project(id: payload.projectID) else {
+                throw SpacesRuntimeError.invalidArgument(message: "Project not found for id \(payload.projectID).")
             }
             let workspace = try orchestrator.createWorkspaceOnDevice(
-                projectID: project.id, branch: branch, baseBranch: command.baseBranch, allowExistingBranchReuse: command.existingBranch ?? false)
+                projectID: project.id, branch: payload.branch, baseBranch: payload.baseBranch, allowExistingBranchReuse: payload.existingBranch)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
-        case .workspaceStart:
+        case .workspaceStart(let workspaceID):
             let orchestrator = try makeProfileOrchestrator()
-            let workspaceID = try requiredProfileArgument(command.workspaceID, name: "workspaceID")
             try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: false, background: true)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             return TerminalServiceProfileCommandResponse(message: "Workspace is running.", workspace: profileWorkspaceRecord(workspace))
-        case .workspaceRestart:
+        case .workspaceRestart(let workspaceID):
             let orchestrator = try makeProfileOrchestrator()
-            let workspaceID = try requiredProfileArgument(command.workspaceID, name: "workspaceID")
             try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: true, background: true)
             let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
             return TerminalServiceProfileCommandResponse(message: "Workspace restarted.", workspace: profileWorkspaceRecord(workspace))
-        case .agentSignal:
+        case .agentSignal(let payload):
             let orchestrator = try makeProfileOrchestrator()
-            return try recordProfileAgentSignal(command, orchestrator: orchestrator)
-        case .terminalCommand:
+            return try recordProfileAgentSignal(payload, orchestrator: orchestrator)
+        case .terminalCommand(let payload):
             let orchestrator = try makeProfileOrchestrator()
-            let cwd = try requiredProfileArgument(command.cwd, name: "cwd")
-            let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: command.workspaceID, cwd: cwd)
+            let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             let session = try orchestrator.createWorkspaceTerminalSession(
-                workspaceID: workspaceID, title: command.terminalTitle, command: command.terminalCommand)
+                workspaceID: workspaceID, title: payload.title, command: payload.command)
             return TerminalServiceProfileCommandResponse(message: "Started terminal session.", terminalSession: session)
         }
     }
 
-    private func sendProfileTerminalInput(_ command: TerminalServiceProfileCommandRequest) throws -> TerminalServiceProfileCommandResponse {
-        let sessionID = try requiredProfileArgument(command.terminalSessionID, name: "terminalSessionID")
-        let hasText = command.terminalText != nil
-        let hasBytes = command.terminalBytes != nil
-        guard hasText || hasBytes else { throw SpacesRuntimeError.invalidArgument(message: "terminalText or terminalBytes is required.") }
-        guard !(hasText && hasBytes) else { throw SpacesRuntimeError.invalidArgument(message: "Provide terminalText or terminalBytes, not both.") }
+    private func sendProfileTerminalInput(_ payload: TerminalServiceTerminalSendPayload) throws -> TerminalServiceProfileCommandResponse {
+        let text: String?
+        let bytes: Data?
+        switch payload.input {
+        case .text(let value): (text, bytes) = (value, nil)
+        case .bytes(let value): (text, bytes) = (nil, value)
+        }
         let controlResponse = try sendProfileTerminalControl(
-            sessionID: sessionID,
+            sessionID: payload.sessionID,
             request: TerminalControlRequest(
                 command: .send(
                     TerminalControlSendPayload(
-                        text: command.terminalText, bytes: command.terminalBytes, clientID: nil, ownerEpoch: nil,
-                        appendNewline: command.appendNewline ?? false))))
+                        text: text, bytes: bytes, clientID: nil, ownerEpoch: nil, appendNewline: payload.appendNewline))))
         guard controlResponse.ok else { throw SpacesRuntimeError.invalidArgument(message: controlResponse.message) }
         return TerminalServiceProfileCommandResponse(message: controlResponse.message)
     }
@@ -649,9 +647,9 @@ import workspacecore
         return try TerminalControlClient.send(request: request, socketPath: paths.controlSocketPath)
     }
 
-    private func tailProfileTerminalOutput(_ command: TerminalServiceProfileCommandRequest) throws -> TerminalServiceProfileCommandResponse {
-        let sessionID = try requiredProfileArgument(command.terminalSessionID, name: "terminalSessionID")
-        let lineCount = max(command.lineCount ?? 20, 1)
+    private func tailProfileTerminalOutput(_ payload: TerminalServiceTerminalTailPayload) throws -> TerminalServiceProfileCommandResponse {
+        let sessionID = payload.sessionID
+        let lineCount = max(payload.lineCount ?? 20, 1)
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.outputPath) else {
             throw SpacesRuntimeError.invalidArgument(message: "Terminal session '\(sessionID)' has no output yet.")
@@ -736,16 +734,10 @@ import workspacecore
         return workspace
     }
 
-    private func requiredProfileArgument(_ value: String?, name: String) throws -> String {
-        guard let normalized = normalizedProfileArgument(value) else { throw SpacesRuntimeError.invalidArgument(message: "\(name) is required.") }
-        return normalized
-    }
-
-    private func normalizedProfileArgument(_ value: String?) -> String? {
-        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let trimmed, !trimmed.isEmpty else { return nil }
-        return trimmed
-    }
+    /// Normalizes an optional daemon-side string argument. Required profile-command fields are already
+    /// enforced at wire decode; this stays for the genuinely optional cases the daemon reads (the
+    /// `workspaceList` project filter and agent-window labels).
+    private func normalizedProfileArgument(_ value: String?) -> String? { normalizedNonEmpty(value) }
 
     private enum ProfileAgentEventType: String {
         case `init` = "init"
@@ -772,12 +764,12 @@ import workspacecore
         }
     }
 
-    private func recordProfileAgentSignal(_ command: TerminalServiceProfileCommandRequest, orchestrator: WorkspaceOrchestrator) throws
+    private func recordProfileAgentSignal(_ payload: TerminalServiceProfileAgentSignalPayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
-        let workspaceID = try requiredProfileArgument(command.workspaceID, name: "workspaceID")
-        let sessionID = try requiredProfileArgument(command.terminalSessionID, name: "terminalSessionID")
-        let eventValue = try requiredProfileArgument(command.agentEvent, name: "agentEvent")
+        let workspaceID = payload.workspaceID
+        let sessionID = payload.terminalSessionID
+        let eventValue = payload.event
         guard let type = ProfileAgentEventType(rawValue: eventValue) else {
             throw SpacesRuntimeError.invalidArgument(message: "Unsupported agent event '\(eventValue)'.")
         }

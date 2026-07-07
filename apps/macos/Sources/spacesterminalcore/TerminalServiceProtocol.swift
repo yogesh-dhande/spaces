@@ -134,7 +134,7 @@ public enum TerminalServiceCommand: Sendable, Equatable {
     case control(TerminalServiceControlCommandRequest)
     case agentSignal(TerminalServiceAgentSignalRequest)
     case ackAgentSignals(TerminalServiceAgentSignalAcknowledgementRequest)
-    case profileCommand(TerminalServiceProfileCommandRequest)
+    case profileCommand(TerminalServiceProfileCommand)
     case mobileCredential(TerminalServiceMobileCredentialRequest)
     case resolveTerminalLink(TerminalServiceTerminalLinkResolveRequest)
     case readTerminalLinkChunk(TerminalServiceTerminalLinkChunkRequest)
@@ -228,7 +228,7 @@ extension TerminalServiceCommand: Codable {
         case .control: self = .control(try container.decode(TerminalServiceControlCommandRequest.self, forKey: key))
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceAgentSignalRequest.self, forKey: key))
         case .ackAgentSignals: self = .ackAgentSignals(try container.decode(TerminalServiceAgentSignalAcknowledgementRequest.self, forKey: key))
-        case .profileCommand: self = .profileCommand(try container.decode(TerminalServiceProfileCommandRequest.self, forKey: key))
+        case .profileCommand: self = .profileCommand(try container.decode(TerminalServiceProfileCommand.self, forKey: key))
         case .mobileCredential: self = .mobileCredential(try container.decode(TerminalServiceMobileCredentialRequest.self, forKey: key))
         case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(TerminalServiceTerminalLinkResolveRequest.self, forKey: key))
         case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(TerminalServiceTerminalLinkChunkRequest.self, forKey: key))
@@ -303,64 +303,6 @@ public struct TerminalServiceMobileCredential: Codable, Sendable, Equatable, Ide
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
         self.revokedAt = revokedAt
-    }
-}
-
-public enum TerminalServiceProfileCommandOperation: String, Codable, Sendable, Equatable {
-    case projectList
-    case workspaceList
-    case workspaceCreate
-    case workspaceStart
-    case workspaceRestart
-    case agentSignal
-    case terminalList
-    case terminalSend
-    case terminalTail
-    case terminalCommand
-}
-
-public struct TerminalServiceProfileCommandRequest: Codable, Sendable, Equatable {
-    public let operation: TerminalServiceProfileCommandOperation
-    public let projectID: String?
-    public let includeArchived: Bool?
-    public let workspaceID: String?
-    public let branch: String?
-    public let baseBranch: String?
-    public let existingBranch: Bool?
-    public let terminalSessionID: String?
-    public let agentEvent: String?
-    public let terminalText: String?
-    public let terminalBytes: Data?
-    public let appendNewline: Bool?
-    public let lineCount: Int?
-    /// Working directory used to derive the owning workspace for `openWorkspaceTerminal`
-    /// when `workspaceID` is omitted (deepest workspace whose directory contains it).
-    public let cwd: String?
-    public let terminalCommand: String?
-    public let terminalTitle: String?
-
-    public init(
-        operation: TerminalServiceProfileCommandOperation, projectID: String? = nil, includeArchived: Bool? = nil, workspaceID: String? = nil,
-        branch: String? = nil, baseBranch: String? = nil, existingBranch: Bool? = nil, terminalSessionID: String? = nil, agentEvent: String? = nil,
-        terminalText: String? = nil, terminalBytes: Data? = nil, appendNewline: Bool? = nil, lineCount: Int? = nil, cwd: String? = nil,
-        terminalCommand: String? = nil, terminalTitle: String? = nil
-    ) {
-        self.operation = operation
-        self.projectID = projectID
-        self.includeArchived = includeArchived
-        self.workspaceID = workspaceID
-        self.branch = branch
-        self.baseBranch = baseBranch
-        self.existingBranch = existingBranch
-        self.terminalSessionID = terminalSessionID
-        self.agentEvent = agentEvent
-        self.terminalText = terminalText
-        self.terminalBytes = terminalBytes
-        self.appendNewline = appendNewline
-        self.lineCount = lineCount
-        self.cwd = cwd
-        self.terminalCommand = terminalCommand
-        self.terminalTitle = terminalTitle
     }
 }
 

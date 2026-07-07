@@ -15,7 +15,12 @@ public enum SpacesWireProtocol {
     //    payload to the owning daemon and injects the daemon-local temp path into the
     //    terminal). Both are new mutating wire operations a protocol-2 daemon cannot decode,
     //    so clients and daemons must update in lockstep.
-    public static let version = 3
+    // 4: The `profileCommand` payload changes from a flat operation-enum struct (one `operation`
+    //    plus fifteen optionals) to `TerminalServiceProfileCommand`, a one-key-tagged union whose
+    //    per-operation payload owns only that operation's fields, and terminal-send input becomes
+    //    the tagged `TerminalProfileInput` (text xor bytes). A protocol-3 daemon cannot decode the
+    //    new shape, so clients and daemons must update in lockstep.
+    public static let version = 4
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

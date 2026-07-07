@@ -2096,10 +2096,7 @@ private func normalizeRemoteRoot(_ path: String) -> String {
     return "/" + trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 }
 
-private func normalizedOptional(_ value: String?) -> String? {
-    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
-    return value
-}
+private func normalizedOptional(_ value: String?) -> String? { normalizedNonEmpty(value) }
 
 private func required(_ value: String, label: String) throws -> String {
     guard let normalized = normalizedOptional(value) else { throw ValidationError("Missing \(label).") }

@@ -66,7 +66,7 @@ import Foundation
             return response.sessions ?? []
         }
 
-        public static func sendProfileCommand(_ profileCommand: TerminalServiceProfileCommandRequest, timeout: TimeInterval = 15) throws
+        public static func sendProfileCommand(_ profileCommand: TerminalServiceProfileCommand, timeout: TimeInterval = 15) throws
             -> TerminalServiceProfileCommandResponse
         {
             try ensureRunning(timeout: min(timeout, 5))
@@ -402,7 +402,7 @@ import Foundation
             return response.sessions ?? []
         }
 
-        public static func sendProfileCommand(_ profileCommand: TerminalServiceProfileCommandRequest, timeout: TimeInterval = 15) throws
+        public static func sendProfileCommand(_ profileCommand: TerminalServiceProfileCommand, timeout: TimeInterval = 15) throws
             -> TerminalServiceProfileCommandResponse
         {
             try ensureRunning(timeout: min(timeout, 5))

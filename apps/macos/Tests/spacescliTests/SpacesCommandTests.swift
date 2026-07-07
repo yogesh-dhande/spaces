@@ -242,6 +242,23 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
     }
 
+    func testMCPTerminalInputMapsTextAndBytesToTypedInput() throws {
+        let server = SpacesMCPStdioServer()
+        XCTAssertEqual(try server.terminalInputPayload(from: ["text": ""]), .text(""))
+        XCTAssertEqual(try server.terminalInputPayload(from: ["text": "hello"]), .text("hello"))
+        XCTAssertEqual(try server.terminalInputPayload(from: ["bytes": [0, 10, 255]]), .bytes(Data([0, 10, 255])))
+    }
+
+    func testMCPTerminalInputRejectsMissingAndBothArguments() {
+        let server = SpacesMCPStdioServer()
+        XCTAssertThrowsError(try server.terminalInputPayload(from: [:])) { error in
+            XCTAssertEqual(error.localizedDescription, "text or bytes is required.")
+        }
+        XCTAssertThrowsError(try server.terminalInputPayload(from: ["text": "hi", "bytes": [1]])) { error in
+            XCTAssertEqual(error.localizedDescription, "Provide text or bytes, not both.")
+        }
+    }
+
     func testAgentSignalRejectsUnknownEnumValue() {
         XCTAssertThrowsError(try AgentSignalCommand.parse(["--workspace", "workspace-1", "--session", "session-1", "bogus"])) { error in
             let rendered = String(describing: error)

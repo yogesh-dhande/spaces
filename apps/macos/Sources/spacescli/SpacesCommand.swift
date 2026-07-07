@@ -45,7 +45,7 @@ struct ProjectListCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        let projects = try TerminalService.sendProfileCommand(.init(operation: .projectList)).projects ?? []
+        let projects = try TerminalService.sendProfileCommand(.projectList).projects ?? []
         context.output.emitLines(projects.map { "\($0.id)\tname=\($0.name)\tdir=\($0.dir)" })
     }
 }
@@ -65,7 +65,7 @@ struct WorkspaceListCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         let workspaces =
-            try TerminalService.sendProfileCommand(.init(operation: .workspaceList, projectID: project, includeArchived: includeArchived)).workspaces
+            try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: project, includeArchived: includeArchived))).workspaces
             ?? []
         context.output.emitLines(
             workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\tname=\($0.displayName)" })
@@ -84,7 +84,7 @@ struct WorkspaceCreateCommand: ParsableCommand {
         let context = CLIContext()
         let workspace = try requireProfileWorkspace(
             try TerminalService.sendProfileCommand(
-                .init(operation: .workspaceCreate, projectID: project, branch: branch, baseBranch: baseBranch, existingBranch: existingBranch)))
+                .workspaceCreate(.init(projectID: project, branch: branch, baseBranch: baseBranch, existingBranch: existingBranch))))
         context.output.emit("Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")")
     }
 }
@@ -96,7 +96,7 @@ struct WorkspaceStartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceStart, workspaceID: workspace)))
+        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceStart(workspaceID: workspace)))
         context.output.emit("Workspace is running \(workspace)")
     }
 }
@@ -108,7 +108,7 @@ struct WorkspaceRestartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceRestart, workspaceID: workspace)))
+        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceRestart(workspaceID: workspace)))
         context.output.emit("Workspace restarted \(workspace)")
     }
 }
@@ -130,7 +130,7 @@ struct AgentSignalCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         _ = try TerminalService.sendProfileCommand(
-            .init(operation: .agentSignal, workspaceID: workspace, terminalSessionID: session, agentEvent: type.rawValue))
+            .agentSignal(.init(workspaceID: workspace, terminalSessionID: session, event: type.rawValue)))
         context.output.emit("Agent \(type.rawValue): workspace=\(workspace)")
     }
 }
@@ -225,7 +225,7 @@ struct TerminalListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List available Spaces terminal sessions.")
 
     func run() throws {
-        let sessions = try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5).terminalSessions ?? []
+        let sessions = try TerminalService.sendProfileCommand(.terminalList, timeout: 5).terminalSessions ?? []
         let rows = terminalSessionRows(sessions)
         if rows.isEmpty {
             print("No terminal sessions.")
@@ -263,9 +263,8 @@ struct TerminalCommandCommand: ParsableCommand {
         // path — the default 15s profile-command timeout can trip before a slow launch finishes,
         // even though the daemon keeps creating the session in the background.
         let response = try TerminalService.sendProfileCommand(
-            .init(
-                operation: .terminalCommand, workspaceID: workspace, cwd: context.currentDirectoryPath(), terminalCommand: command,
-                terminalTitle: title), timeout: TerminalService.createSessionRequestTimeout())
+            .terminalCommand(.init(cwd: context.currentDirectoryPath(), workspaceID: workspace, command: command, title: title)),
+            timeout: TerminalService.createSessionRequestTimeout())
         guard let session = response.terminalSession else {
             throw WorkspaceError.invalidArgument(message: "spacesd did not return a terminal session.")
         }
