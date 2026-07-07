@@ -5,7 +5,7 @@
 # downloads the signed remote-artifact manifest for the requested version,
 # verifies its Ed25519 signature against the embedded public key, downloads and
 # checksums the matching Ubuntu 24.04 archive, then runs the bundled install.sh
-# (which lays out ~/.spaces and the systemd user service).
+# (which lays out ~/.spaces, ~/.local/bin/spaces, and the systemd user service).
 #
 # Run over the version-pinned one-liner rendered by the Spaces app/CLI, e.g.:
 #   curl -fsSL https://github.com/yogesh-dhande/spaces/releases/download/v0.1.0/spaces-install-linux.sh | bash -s -- 0.1.0

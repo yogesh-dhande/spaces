@@ -118,6 +118,61 @@ final class SpacesDevicePairingClientTests: XCTestCase {
                 standardOutput: #"{"name":"Lost & not found Mac","host":"studio.local","port":8443}"#))
     }
 
+    func testOutputReportsMissingBinaryDetectsShellNotFoundText() {
+        // Tailscale SSH (and some other transports) return exit 0 even when the remote command failed, so
+        // a missing `~/.spaces/bin/spaces` surfaces only as this stderr text. The content check must catch
+        // both the macOS and Linux shell phrasings.
+        XCTAssertTrue(SpacesDevicePairingClient.outputReportsMissingBinary("sh: /Users/x/.spaces/bin/spaces: No such file or directory"))
+        XCTAssertTrue(SpacesDevicePairingClient.outputReportsMissingBinary("sh: 1: ~/.spaces/bin/spaces: not found"))
+    }
+
+    func testOutputReportsMissingBinaryIgnoresUnrelatedOutput() {
+        XCTAssertFalse(SpacesDevicePairingClient.outputReportsMissingBinary(""))
+        XCTAssertFalse(SpacesDevicePairingClient.outputReportsMissingBinary("could not reach spacesd control socket"))
+    }
+
+    func testRemoteSpacesNotInstalledStillIgnoresExitZeroToProtectPairingJSON() {
+        // The exit-code path must never treat exit 0 as not-installed: a successful pair exits 0 with JSON
+        // that can contain "not found" (e.g. a device name). The exit-0 case is instead handled by reading
+        // stderr only when stdout carries no pairing JSON.
+        XCTAssertFalse(
+            SpacesDevicePairingClient.remoteSpacesNotInstalled(
+                exitStatus: 0, standardError: "sh: ~/.spaces/bin/spaces: No such file or directory", standardOutput: ""))
+    }
+
+    func testInstallInstructionsMessageGuidesMacUserToInstallApp() {
+        let probe = RemoteInstallProbe(operatingSystem: "Darwin", architecture: "arm64", linuxID: nil, linuxVersionID: nil)
+        let message = SpacesDevicePairingClient.installInstructionsMessage(
+            lead: "SSH connected to studio-mac, but Spaces there did not return a pairing window.",
+            probe: probe, appVersion: "0.1.0")
+
+        XCTAssertTrue(message.contains("studio-mac"))
+        XCTAssertTrue(message.contains("Install the Spaces app on the remote Mac"))
+        XCTAssertTrue(message.contains("open it once"))
+        // Mac users install the app, not the Linux one-liner.
+        XCTAssertFalse(message.contains("spaces-install-linux.sh"))
+    }
+
+    func testInstallInstructionsMessageGivesLinuxUserVersionPinnedInstaller() {
+        let probe = RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04")
+        let message = SpacesDevicePairingClient.installInstructionsMessage(
+            lead: "SSH connected to builder.local, but Spaces there did not return a pairing window.",
+            probe: probe, appVersion: "0.1.0")
+
+        XCTAssertTrue(message.contains("builder.local"))
+        XCTAssertTrue(message.contains("Ubuntu 24.04 device"))
+        XCTAssertTrue(message.contains(SpacesLinuxInstaller.installCommand(version: "0.1.0")))
+    }
+
+    func testInstallInstructionsMessageFallsBackToLatestWhenAppVersionMissing() {
+        let probe = RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04")
+        let message = SpacesDevicePairingClient.installInstructionsMessage(
+            lead: "SSH connected to builder.local, but Spaces is not installed for that user.",
+            probe: probe, appVersion: nil)
+
+        XCTAssertTrue(message.contains(SpacesLinuxInstaller.installCommand(version: "latest")))
+    }
+
     func testRemoteShellCommandRunsSnippetsThroughPOSIXShell() {
         let wrapped = SpacesDevicePairingClient.remoteShellCommand("printf 'ok'\nuname -s")
 
@@ -149,6 +204,16 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains(#"ln -sfn "$release_dir/bin/spaces" "$bin_root/spaces""#))
         XCTAssertTrue(script.contains("ExecStart=%h/.spaces/bin/spacesd"))
         XCTAssertTrue(script.contains("systemctl --user restart spacesd.service"))
+    }
+
+    func testLinuxArtifactInstallerCreatesUserPathAlias() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/build_linux_spacesd_artifact.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains(#"user_bin_root="$HOME/.local/bin""#))
+        XCTAssertTrue(script.contains(#"ln -sfn "$bin_root/spaces" "$user_bin_root/spaces""#))
+        XCTAssertTrue(script.contains(#""path_aliases": ["~/.local/bin/spaces"],"#))
     }
 
     func testDMGInstallerUsesAppResourcesAsCanonicalMacBinarySource() throws {
@@ -190,6 +255,14 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains("deploy_linux_spacesd_e2e.sh"))
         XCTAssertTrue(script.contains("SPACES_DEVICE_API_PORT=$remote_demo_daemon_port"))
         XCTAssertTrue(script.contains("~/.spaces/bin/spaces mobile status"))
+    }
+
+    func testDevBuildLaunchVerifiesLinuxUserPathAlias() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/dev-build-and-launch.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains("~/.local/bin/spaces mobile status"))
     }
 
     func testRemotePairingSSHValidationMessagesAreActionable() {

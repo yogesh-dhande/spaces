@@ -402,7 +402,9 @@ public enum SpacesDevicePairingClient {
             // We never auto-install; surface actionable install instructions for the remote's OS instead.
             if remoteSpacesNotInstalled(exitStatus: result.exitStatus, standardError: result.standardError, standardOutput: result.standardOutput) {
                 throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
-                    installInstructionsMessage(destination: destination, probe: probe, appVersion: appVersion))
+                    installInstructionsMessage(
+                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.",
+                        probe: probe, appVersion: appVersion))
             }
             throw SpacesRemoteDevicePairingError.remotePairCommandFailed(
                 remotePairCommandFailureMessage(
@@ -410,26 +412,47 @@ public enum SpacesDevicePairingClient {
                     exitStatus: result.exitStatus))
         }
         let trimmedOutput = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        // No stdout means `spaces` produced no pairing window. Because the exit code is unreliable over
+        // Tailscale SSH and similar transports (they report 0 even when the remote command failed), the
+        // earlier nonzero-exit not-installed check can be bypassed entirely, landing a missing binary
+        // here under a reported exit 0. With no pairing JSON on stdout, stderr can be read safely: a
+        // "no such file" / "not found" there means the binary is missing, so give the precise
+        // not-installed guidance. Otherwise `spaces` ran but returned nothing (e.g. a broken or
+        // never-opened install), which the same install/setup guidance still resolves.
         guard let data = trimmedOutput.data(using: .utf8), !data.isEmpty else {
+            if outputReportsMissingBinary(result.standardError) {
+                throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
+                    installInstructionsMessage(
+                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.",
+                        probe: probe, appVersion: appVersion))
+            }
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
-                "SSH connected to \(destination), but `\(remotePairCommand)` did not return pairing JSON.")
+                installInstructionsMessage(
+                    lead:
+                        "SSH connected to \(destination), but Spaces there did not return a pairing window.",
+                    probe: probe, appVersion: appVersion))
         }
         do { return try JSONDecoder().decode(RemotePairingMetadata.self, from: data).validated() } catch {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
-                "SSH connected to \(destination), but `\(remotePairCommand)` returned invalid pairing JSON. \(error.localizedDescription)")
+                installInstructionsMessage(
+                    lead:
+                        "SSH connected to \(destination), but Spaces there returned an unreadable pairing response (\(error.localizedDescription)).",
+                    probe: probe, appVersion: appVersion))
         }
     }
 
-    /// Builds the actionable message shown when SSH reaches the remote but Spaces is not installed for that
-    /// user. Spaces never auto-installs remote daemons: Linux users run the version-pinned installer
-    /// one-liner on the device, and Mac users install the Spaces app there.
-    static func installInstructionsMessage(destination: String, probe: RemoteInstallProbe, appVersion: String?) -> String {
+    /// Builds the actionable message shown when SSH reaches the remote but Spaces there cannot hand back a
+    /// pairing window — because it is not installed for that user, or is installed but not returning
+    /// pairing metadata. `lead` states what went wrong; this appends platform-specific install/setup
+    /// guidance. Spaces never auto-installs remote daemons: Linux users run the version-pinned installer
+    /// one-liner on the device, and Mac users install and open the Spaces app there.
+    static func installInstructionsMessage(lead: String, probe: RemoteInstallProbe, appVersion: String?) -> String {
         if probe.operatingSystem == "Linux" {
             return
-                "SSH connected to \(destination), but Spaces is not installed for that user. On the Ubuntu 24.04 device, run:\n  \(SpacesLinuxInstaller.installCommand(version: normalized(appVersion) ?? "latest"))\nthen pair again."
+                "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again:\n  \(SpacesLinuxInstaller.installCommand(version: normalized(appVersion) ?? "latest"))"
         }
         return
-            "SSH connected to \(destination), but Spaces is not installed on that device. Install the Spaces app on the remote Mac, open it once, then pair again."
+            "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."
     }
 
     // MARK: SSH connection multiplexing
@@ -602,13 +625,25 @@ public enum SpacesDevicePairingClient {
 
     /// Decides whether a failed `spaces device pair --json` means Spaces is not installed for the remote
     /// user. A missing binary makes the remote shell exit 127 or emit "not found"/"no such file". Only a
-    /// nonzero exit qualifies: a successful pair exits 0 with JSON that could itself contain those words
-    /// (for example inside a device name), so an exit-0 result is never treated as not-installed.
+    /// nonzero exit qualifies here: a successful pair exits 0 with JSON that could itself contain those
+    /// words (for example inside a device name), so an exit-0 result is never treated as not-installed by
+    /// this path. The exit-0-with-empty-stdout case is handled separately in
+    /// `parseRemotePairingMetadataResult`, which can safely read stderr because there is no pairing JSON
+    /// to misread.
     static func remoteSpacesNotInstalled(exitStatus: Int32, standardError: String, standardOutput: String) -> Bool {
         guard exitStatus != 0 else { return false }
         if exitStatus == 127 { return true }
-        let combined = "\(standardError)\n\(standardOutput)".lowercased()
-        return combined.contains("no such file") || combined.contains("not found")
+        return outputReportsMissingBinary("\(standardError)\n\(standardOutput)")
+    }
+
+    /// True when command output carries the shell's missing-binary signature ("no such file" / "not
+    /// found"). The remote exit code is not always trustworthy — Tailscale SSH (and some other transports)
+    /// return 0 regardless of the remote command's real status — so a missing `~/.spaces/bin/spaces` can
+    /// surface only as this stderr text under a reported exit 0. This content check backstops the exit
+    /// code so a not-installed remote is still recognized.
+    static func outputReportsMissingBinary(_ output: String) -> Bool {
+        let lowered = output.lowercased()
+        return lowered.contains("no such file") || lowered.contains("not found")
     }
 
     /// Message for a `spaces device pair` failure that is not the not-installed case (which is handled
