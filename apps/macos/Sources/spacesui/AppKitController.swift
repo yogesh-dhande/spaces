@@ -1194,16 +1194,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func resolveSessionSummaryMatch(sessionID: String) async -> TerminalSessionSummaryMatch? {
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         if localPairedDevice == nil {
-            guard
-                let device = await Task.detached(
-                    priority: .userInitiated, operation: { try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) }
-                ).value
-            else { return nil }
+            let bootstrapStartedAt = Date()
+            let device = await Task.detached(
+                priority: .userInitiated, operation: { try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) }
+            ).value
+            logPerfMetric(
+                "terminal_session_resolve_bootstrap", target: "session=\(sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: bootstrapStartedAt), success: device != nil)
+            guard let device else { return nil }
             localPairedDevice = device
             localDeviceID = device.id
         }
         guard let device = terminalSessionOwningDevice(sessionID: sessionID) else { return nil }
-        return await Self.resolveSessionSummaryMatchOffMain(sessionID: sessionID, device: device, clientApp: clientApp)
+        let overviewStartedAt = Date()
+        let match = await Self.resolveSessionSummaryMatchOffMain(sessionID: sessionID, device: device, clientApp: clientApp)
+        logPerfMetric(
+            "terminal_session_resolve_overview", target: "session=\(sessionID)",
+            elapsedMS: TerminalPerformance.elapsedMS(since: overviewStartedAt), success: match != nil)
+        return match
     }
 
     nonisolated static func resolveSessionSummaryMatchOffMain(
@@ -1284,11 +1292,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
         let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
-        guard let request = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID), panelCoordinator.openOrFocusTerminalPane(request)
-        else {
+        guard let request = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
-                detail: "mode=\(mode.rawValue) route=pane\(requestDetail)")
+                detail: "mode=\(mode.rawValue) route=pane reason=resolve_nil\(requestDetail)")
+            return false
+        }
+        guard panelCoordinator.openOrFocusTerminalPane(request) else {
+            logPerfMetric(
+                "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail: "mode=\(mode.rawValue) route=pane reason=pane_open_failed\(requestDetail)")
             return false
         }
         if mode == .owner { panelCoordinator.content(forSessionID: sessionID)?.requestOwnershipIfNeeded() }

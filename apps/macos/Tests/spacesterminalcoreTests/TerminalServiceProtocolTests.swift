@@ -153,6 +153,43 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
     }
 
+    func testRelaunchIfIdleLeavesBusyDaemonRunningWhenItRefuses() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let originalRuntimeDir = getenv(SpacesProfile.runtimeDirectoryEnvironmentVariable).map { String(cString: $0) }
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.path, 1)
+        defer {
+            if let originalRuntimeDir { setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDir, 1) }
+            else { unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable) }
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let socketPath = try TerminalServicePaths.socketPath()
+        let queue = DispatchQueue(label: "terminal-service-relaunch-if-idle-test")
+        let shutdownIfIdleRequests = ThreadSafeCounter()
+        let server = TerminalServiceServer(socketPath: socketPath, queue: queue) { request in
+            switch request.command {
+            case .shutdownIfIdle:
+                shutdownIfIdleRequests.increment()
+                return TerminalServiceResponse(ok: false, message: "spacesd has 1 active session(s).", servicePID: getpid())
+            case .ping:
+                return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid())
+            default:
+                return TerminalServiceResponse(ok: false, message: "unexpected command")
+            }
+        }
+        try server.start()
+        defer { server.stop() }
+
+        // A daemon that refuses `shutdownIfIdle` (it has live sessions) must be left running, and relaunchIfIdle
+        // must report false rather than killing or respawning anything.
+        XCTAssertFalse(try TerminalService.relaunchIfIdle(timeout: 1))
+        XCTAssertEqual(shutdownIfIdleRequests.value, 1)
+
+        let ping = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath)
+        XCTAssertEqual(ping, TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid()))
+    }
+
     func testTerminalServiceInstanceLockRejectsSecondOwnerAndReleases() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -375,6 +412,25 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 return
             }
         }
+    }
+}
+
+/// File-scope thread-safe counter usable from the `@Sendable` service-server handler on macOS and Linux
+/// (unlike the `LockedCounter` nested under the Network/Security-only extension below).
+private final class ThreadSafeCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
     }
 }
 
