@@ -341,28 +341,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let expiresAt: Date
     }
 
-    private final class StartupSignal: @unchecked Sendable {
-        private let lock = NSLock()
-        private let semaphore = DispatchSemaphore(value: 0)
-        private var result: Result<Void, Error>?
-
-        func signal(_ result: Result<Void, Error>) {
-            lock.lock()
-            let shouldSignal = self.result == nil
-            if shouldSignal { self.result = result }
-            lock.unlock()
-            if shouldSignal { semaphore.signal() }
-        }
-
-        func wait(timeout: TimeInterval) -> Result<Void, Error> {
-            guard semaphore.wait(timeout: .now() + timeout) == .success else { return .failure(POSIXError(.ETIMEDOUT)) }
-            lock.lock()
-            let result = self.result ?? .failure(POSIXError(.EIO))
-            lock.unlock()
-            return result
-        }
-    }
-
     #if os(Linux) && canImport(OpenSSL)
         private struct LinuxSubscription: Sendable {
             let sessionID: String
@@ -890,9 +868,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             listener = createdListener
             createdListener.start(queue: queue)
 
-            switch startup.wait(timeout: timeout) {
-            case .success: break
-            case .failure(let error):
+            if case .failure(let error) = startup.wait(timeout: timeout) ?? .failure(POSIXError(.ETIMEDOUT)) {
                 createdListener.stateUpdateHandler = nil
                 createdListener.newConnectionHandler = nil
                 createdListener.cancel()
