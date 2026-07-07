@@ -59,4 +59,24 @@ final class SpacesDeviceAPIAuthenticationTests: XCTestCase {
     func testRecoveryMessageIgnoresConnectionRefused() {
         XCTAssertNil(SpacesDeviceAPIAuthentication.recoveryMessage(for: NWError.posix(.ECONNREFUSED)))
     }
+
+    func testIsAuthenticationFailureRecognizesUnauthorizedCode() {
+        XCTAssertTrue(SpacesDeviceAPIAuthentication.isAuthenticationFailure(code: .unauthorized))
+        XCTAssertFalse(SpacesDeviceAPIAuthentication.isAuthenticationFailure(code: .sessionNotRunning))
+        XCTAssertFalse(SpacesDeviceAPIAuthentication.isAuthenticationFailure(code: nil))
+    }
+
+    func testRecoveryMessageBranchesOnCodeOverMessageSubstring() {
+        // A response that carries a category is authoritative. An unauthorized code triggers recovery,
+        // and a non-auth code suppresses it even when the message would otherwise match the substrings.
+        struct CodedError: LocalizedError, SpacesDeviceErrorCodeProviding {
+            let code: SpacesDeviceErrorCode
+            var errorDescription: String? { "unauthorized" }
+            var spacesDeviceErrorCode: SpacesDeviceErrorCode? { code }
+        }
+        XCTAssertEqual(
+            SpacesDeviceAPIAuthentication.recoveryMessage(for: CodedError(code: .unauthorized)),
+            "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+        XCTAssertNil(SpacesDeviceAPIAuthentication.recoveryMessage(for: CodedError(code: .notFound)))
+    }
 }

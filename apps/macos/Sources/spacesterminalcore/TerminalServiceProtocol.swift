@@ -622,6 +622,7 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case ok
         case message
+        case errorCode
         case session
         case sessions
         case servicePID
@@ -637,6 +638,8 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
 
     public let ok: Bool
     public let message: String
+    /// Machine-readable failure category. Nil on success and omitted from the wire when nil.
+    public let errorCode: SpacesDeviceErrorCode?
     public let session: TerminalServiceSessionSummary?
     public let sessions: [TerminalServiceSessionSummary]?
     public let servicePID: Int32?
@@ -651,14 +654,16 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     let streamSocketPath: String?
 
     public init(
-        ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
-        servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
-        controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
-        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil,
-        profile: TerminalServiceProfileCommandResponse? = nil, daemonStatus: TerminalServiceDaemonStatus? = nil, streamSocketPath: String? = nil
+        ok: Bool, message: String, errorCode: SpacesDeviceErrorCode? = nil, session: TerminalServiceSessionSummary? = nil,
+        sessions: [TerminalServiceSessionSummary]? = nil, servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil,
+        sessionState: GhosttyRemoteSessionStatePayload? = nil, controlResponse: TerminalControlResponse? = nil,
+        terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil, terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil,
+        agentSignals: [TerminalServiceAgentSignalEvent]? = nil, profile: TerminalServiceProfileCommandResponse? = nil,
+        daemonStatus: TerminalServiceDaemonStatus? = nil, streamSocketPath: String? = nil
     ) {
         self.ok = ok
         self.message = message
+        self.errorCode = errorCode
         self.session = session
         self.sessions = sessions
         self.servicePID = servicePID
@@ -674,14 +679,15 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
     }
 
     public init(
-        ok: Bool, message: String, session: TerminalServiceSessionSummary? = nil, sessions: [TerminalServiceSessionSummary]? = nil,
-        servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil, sessionState: GhosttyRemoteSessionStatePayload? = nil,
-        controlResponse: TerminalControlResponse? = nil, terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil,
-        terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil, agentSignals: [TerminalServiceAgentSignalEvent]? = nil
+        ok: Bool, message: String, errorCode: SpacesDeviceErrorCode? = nil, session: TerminalServiceSessionSummary? = nil,
+        sessions: [TerminalServiceSessionSummary]? = nil, servicePID: Int32? = nil, commandResult: TerminalServiceCommandResult? = nil,
+        sessionState: GhosttyRemoteSessionStatePayload? = nil, controlResponse: TerminalControlResponse? = nil,
+        terminalLinkMetadata: TerminalServiceTerminalLinkMetadata? = nil, terminalLinkChunk: TerminalServiceTerminalLinkChunk? = nil,
+        agentSignals: [TerminalServiceAgentSignalEvent]? = nil
     ) {
         self.init(
-            ok: ok, message: message, session: session, sessions: sessions, servicePID: servicePID, commandResult: commandResult,
-            sessionState: sessionState, controlResponse: controlResponse, terminalLinkMetadata: terminalLinkMetadata,
+            ok: ok, message: message, errorCode: errorCode, session: session, sessions: sessions, servicePID: servicePID,
+            commandResult: commandResult, sessionState: sessionState, controlResponse: controlResponse, terminalLinkMetadata: terminalLinkMetadata,
             terminalLinkChunk: terminalLinkChunk, agentSignals: agentSignals, profile: nil)
     }
 
@@ -689,6 +695,7 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             ok: try container.decode(Bool.self, forKey: .ok), message: try container.decode(String.self, forKey: .message),
+            errorCode: try container.decodeIfPresent(SpacesDeviceErrorCode.self, forKey: .errorCode),
             session: try container.decodeIfPresent(TerminalServiceSessionSummary.self, forKey: .session),
             sessions: try container.decodeIfPresent([TerminalServiceSessionSummary].self, forKey: .sessions),
             servicePID: try container.decodeIfPresent(Int32.self, forKey: .servicePID),
@@ -701,6 +708,12 @@ public struct TerminalServiceResponse: Codable, Sendable, Equatable {
             profile: try container.decodeIfPresent(TerminalServiceProfileCommandResponse.self, forKey: .profile),
             daemonStatus: try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus))
     }
+
+    /// Whether delivering this response must close the connection afterward. An unauthorized peer is
+    /// not permitted to keep a pipelined connection open, so the daemon hangs up after replying. Both
+    /// TLS server transports (Network and OpenSSL) share this single decision, keyed on the typed
+    /// error code rather than the human-readable message.
+    public var closesConnectionAfterDelivery: Bool { !ok && errorCode == .unauthorized }
 }
 
 enum TerminalServiceCodec {

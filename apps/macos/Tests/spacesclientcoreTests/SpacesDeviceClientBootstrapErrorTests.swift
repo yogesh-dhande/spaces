@@ -27,12 +27,12 @@ final class SpacesDeviceClientBootstrapErrorTests: XCTestCase {
         // etc.). This must surface, not hide behind the offline sidebar.
         XCTAssertFalse(
             SpacesDeviceClient.isLocalDaemonUnreachableError(
-                SpacesDeviceClientError.requestRejected("Overview failed: database disk image is malformed.")))
+                SpacesDeviceClientError.requestRejected(message: "Overview failed: database disk image is malformed.", code: .internalError)))
     }
 
     func testDeviceAPINotRunningRejectionIsTreatedAsUnreachable() {
         // The daemon answered but its Device API is not running — recoverable, so degrade to offline.
-        let error = SpacesDeviceClientError.requestRejected(SpacesDeviceAPIControlClient.deviceAPINotRunningMessage)
+        let error = SpacesDeviceClientError.requestRejected(message: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, code: nil)
         XCTAssertTrue(SpacesDeviceClient.isLocalDaemonUnreachableError(error))
     }
 
@@ -51,7 +51,7 @@ final class SpacesDeviceClientBootstrapErrorTests: XCTestCase {
         // These must surface, not hide behind an offline sidebar.
         XCTAssertFalse(
             SpacesDeviceClient.isLocalDaemonUnreachableError(
-                SpacesDeviceClientError.requestRejected("Couldn't save the device credential to the Keychain.")))
+                SpacesDeviceClientError.requestRejected(message: "Couldn't save the device credential to the Keychain.", code: nil)))
         XCTAssertFalse(SpacesDeviceClient.isLocalDaemonUnreachableError(SpacesDeviceClientError.missingLocalBootstrap))
         XCTAssertFalse(
             SpacesDeviceClient.isLocalDaemonUnreachableError(

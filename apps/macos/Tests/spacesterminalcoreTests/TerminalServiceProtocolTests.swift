@@ -81,6 +81,42 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertThrowsError(try TerminalServiceCodec.decodeRequest(multipleCommands))
     }
 
+    func testResponseErrorCodeEncodesWhenSetAndIsAbsentWhenNil() throws {
+        let failure = TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.", errorCode: .unauthorized)
+        let failureData = try TerminalServiceCodec.encodeResponse(failure)
+        XCTAssertTrue(String(decoding: failureData, as: UTF8.self).contains(#""errorCode":"unauthorized""#))
+        XCTAssertEqual(try TerminalServiceCodec.decodeResponse(failureData), failure)
+
+        let success = TerminalServiceResponse(ok: true, message: "pong")
+        let successData = try TerminalServiceCodec.encodeResponse(success)
+        XCTAssertFalse(String(decoding: successData, as: UTF8.self).contains("errorCode"))
+        XCTAssertNil(try TerminalServiceCodec.decodeResponse(successData).errorCode)
+    }
+
+    func testResponseDecodesNilErrorCodeWhenAbsentFromJSON() throws {
+        let json = #"{"ok":false,"message":"Terminal session 'abc' is not running."}"#.data(using: .utf8)!
+        XCTAssertNil(try TerminalServiceCodec.decodeResponse(json).errorCode)
+    }
+
+    func testTerminalControlResponseErrorCodeRoundTrips() throws {
+        let response = TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
+        let data = try JSONEncoder().encode(response)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(#""errorCode":"ownershipRejected""#))
+        XCTAssertEqual(try JSONDecoder().decode(TerminalControlResponse.self, from: data), response)
+
+        let successData = try JSONEncoder().encode(TerminalControlResponse(ok: true, message: "Sent input."))
+        XCTAssertFalse(String(decoding: successData, as: UTF8.self).contains("errorCode"))
+    }
+
+    func testClosesConnectionAfterDeliveryOnlyForUnauthorizedCode() {
+        // The close decision keys on the typed code, not the message: an unauthorized code closes the
+        // connection, while a message that merely contains "unauthorized" without the code does not.
+        XCTAssertTrue(TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.", errorCode: .unauthorized).closesConnectionAfterDelivery)
+        XCTAssertFalse(TerminalServiceResponse(ok: false, message: "unauthorized-looking message").closesConnectionAfterDelivery)
+        XCTAssertFalse(TerminalServiceResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning).closesConnectionAfterDelivery)
+        XCTAssertFalse(TerminalServiceResponse(ok: true, message: "pong").closesConnectionAfterDelivery)
+    }
+
     func testProfileCommandRoundTripsEveryOperation() throws {
         let commands: [TerminalServiceProfileCommand] = [
             .projectList, .terminalList, .workspaceList(.init(projectID: "project-1", includeArchived: true)), .workspaceList(.init()),
@@ -311,7 +347,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let requestCount = LockedCounter()
             let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
                 let count = requestCount.increment()
-                if count == 1 { return TerminalServiceResponse(ok: false, message: "Unauthorized test connection close.") }
+                if count == 1 {
+                    return TerminalServiceResponse(ok: false, message: "Unauthorized test connection close.", errorCode: .unauthorized)
+                }
                 return TerminalServiceResponse(ok: true, message: "\(request.commandName)-\(request.authToken ?? "")-\(count)")
             }
             try server.start()
@@ -324,7 +362,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let first = try client.send(request: TerminalServiceRequest(command: .ping))
             let second = try client.send(request: TerminalServiceRequest(command: .list))
 
-            XCTAssertEqual(first, TerminalServiceResponse(ok: false, message: "Unauthorized test connection close."))
+            XCTAssertEqual(first, TerminalServiceResponse(ok: false, message: "Unauthorized test connection close.", errorCode: .unauthorized))
             XCTAssertEqual(second, TerminalServiceResponse(ok: true, message: "list-SECRET-2"))
             XCTAssertEqual(requestCount.value, 2)
         }

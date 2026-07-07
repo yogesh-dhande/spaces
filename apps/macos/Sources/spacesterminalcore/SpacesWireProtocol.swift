@@ -33,7 +33,12 @@ public enum SpacesWireProtocol {
     //    per-operation payload owns only that operation's fields, and terminal-send input becomes
     //    the tagged `TerminalProfileInput` (text xor bytes). A protocol-5 daemon cannot decode the
     //    new shape, so clients and daemons must update in lockstep.
-    public static let version = 6
+    // 7: Failure responses carry a machine-readable `errorCode` (`SpacesDeviceErrorCode`) alongside
+    //    the human-readable `message` on `SpacesDeviceAPIResponse`, `TerminalServiceResponse`, and
+    //    `TerminalControlResponse`. Clients branch on the code instead of substring-matching the
+    //    message. The field is optional and encoded only on failures, so the JSON shape differs from
+    //    a protocol-6 peer; both sides must update in lockstep.
+    public static let version = 7
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

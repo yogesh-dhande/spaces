@@ -41,7 +41,7 @@ public enum SpacesDeviceClientError: LocalizedError, Equatable {
     case missingLocalBootstrap
     case missingOverview
     case missingCertificateFingerprint(deviceName: String, isLocal: Bool)
-    case requestRejected(String)
+    case requestRejected(message: String, code: SpacesDeviceErrorCode?)
     case unavailable(String)
 
     public var errorDescription: String? {
@@ -59,9 +59,16 @@ public enum SpacesDeviceClientError: LocalizedError, Equatable {
             isLocal
                 ? "Missing secure device identity for \(deviceName). Restart Spaces to reconnect this device."
                 : "Missing secure device identity for \(deviceName). Remove this device and pair it again."
-        case .requestRejected(let message): message
+        case .requestRejected(let message, _): message
         case .unavailable(let message): message
         }
+    }
+}
+
+extension SpacesDeviceClientError: SpacesDeviceErrorCodeProviding {
+    public var spacesDeviceErrorCode: SpacesDeviceErrorCode? {
+        if case .requestRejected(_, let code) = self { return code }
+        return nil
     }
 }
 
@@ -91,7 +98,9 @@ public enum SpacesDeviceClient {
         // tokens held by live Device API connections (terminal streams and control requests).
         let presentedToken = (try? SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: profile)) ?? nil
         let response = try bootstrap(clientApp, presentedToken)
-        guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        // The local control socket's response carries no error code; pairing-related rejections
+        // from it are classified by the message heuristics kept for uncoded errors.
+        guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: nil) }
         guard let bootstrap = response.localClientBootstrap else { throw SpacesDeviceClientError.missingLocalBootstrap }
         let timestamp = ISO8601DateFormatter().string(from: now)
         let existingCreatedAt = (try? database.pairedDevice(id: bootstrap.deviceID)?.createdAt) ?? timestamp
@@ -142,7 +151,7 @@ public enum SpacesDeviceClient {
                 }
             }
         #endif
-        if case SpacesDeviceClientError.requestRejected(let message) = error {
+        if case SpacesDeviceClientError.requestRejected(let message, _) = error {
             return message == SpacesDeviceAPIControlClient.deviceAPINotRunningMessage
         }
         return false
@@ -223,7 +232,7 @@ public enum SpacesDeviceClient {
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
     ) throws -> TerminalServiceDaemonStatus {
         let response = try requestProvider(.init(command: .daemonStatus), device, clientApp, profile)
-        guard let status = response.daemonStatus else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        guard let status = response.daemonStatus else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
         return status
     }
 
@@ -284,7 +293,7 @@ public enum SpacesDeviceClient {
         let response = try request(
             .init(command: .workspaceCreateOptions(.init(projectID: selectedProjectID))), device: device, clientApp: clientApp, profile: profile)
         guard let options = response.workspaceCreateOptions else {
-            throw SpacesDeviceClientError.requestRejected("The device did not return workspace create options.")
+            throw SpacesDeviceClientError.requestRejected(message: "The device did not return workspace create options.", code: nil)
         }
         return options
     }
@@ -293,7 +302,7 @@ public enum SpacesDeviceClient {
         dir: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceProjectPreview {
         let response = try request(.init(command: .previewProject(.init(dir: dir))), device: device, clientApp: clientApp, profile: profile)
-        guard let preview = response.projectPreview else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        guard let preview = response.projectPreview else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
         return preview
     }
 
@@ -319,7 +328,7 @@ public enum SpacesDeviceClient {
         gitURL: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceGitProjectPreview {
         let response = try request(.init(command: .previewGitProject(.init(gitURL: gitURL))), device: device, clientApp: clientApp, profile: profile)
-        guard let preview = response.gitProjectPreview else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        guard let preview = response.gitProjectPreview else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
         return preview
     }
 
@@ -525,7 +534,7 @@ public enum SpacesDeviceClient {
     ) throws -> String {
         let response = try request(
             .init(command: .tailTerminalOutput(.init(sessionID: sessionID, lines: lines))), device: device, clientApp: clientApp, profile: profile)
-        guard let output = response.terminalOutput else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        guard let output = response.terminalOutput else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
         return output
     }
 
@@ -576,7 +585,7 @@ public enum SpacesDeviceClient {
             host: device.host, port: device.port, certificateFingerprint: certificateFingerprint,
             timeoutSeconds: requestTimeoutSeconds(for: request.command))
         let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
-        guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
         return response
     }
 

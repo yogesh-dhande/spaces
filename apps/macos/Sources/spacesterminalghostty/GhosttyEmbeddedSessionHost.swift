@@ -456,7 +456,9 @@
         private func startControlServer() throws {
             let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
                 Self.runOnMainActorSynchronously {
-                    guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
+                    guard let self else {
+                        return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
+                    }
                     return self.handleControlRequest(request)
                 }
             }
@@ -508,7 +510,8 @@
                 TerminalPerformance.logMetric(
                     "terminal_control_\(commandName)", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "owner=stale")
-                return TerminalControlResponse(ok: false, message: "Only the active owner can \(commandName) the terminal.")
+                return TerminalControlResponse(
+                    ok: false, message: "Only the active owner can \(commandName) the terminal.", errorCode: .ownershipRejected)
             }
             guard let requestedOwnerEpoch = request.ownerEpoch else { return nil }
             guard requestedOwnerEpoch == ownerEpoch else {
@@ -517,7 +520,8 @@
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false,
                     detail: "owner_epoch=\(requestedOwnerEpoch) current_owner_epoch=\(ownerEpoch)")
                 return TerminalControlResponse(
-                    ok: false, message: "Ignoring stale owner epoch \(requestedOwnerEpoch); current owner epoch is \(ownerEpoch).")
+                    ok: false, message: "Ignoring stale owner epoch \(requestedOwnerEpoch); current owner epoch is \(ownerEpoch).",
+                    errorCode: .ownershipRejected)
             }
             return nil
         }
@@ -530,7 +534,8 @@
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false,
                 detail: "resize_serial=\(resizeSerial) last_resize_serial=\(lastResizeSerial)")
             return TerminalControlResponse(
-                ok: false, message: "Ignoring stale resize serial \(resizeSerial); latest accepted serial is \(lastResizeSerial).")
+                ok: false, message: "Ignoring stale resize serial \(resizeSerial); latest accepted serial is \(lastResizeSerial).",
+                errorCode: .ownershipRejected)
         }
 
         private func recordAcceptedResizeSerial(from request: TerminalControlRequest) {
@@ -547,12 +552,12 @@
 
         private func controlResponseForAttachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
+            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             guard let client = request.client else {
                 TerminalPerformance.logMetric(
                     "terminal_control_attach", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                return TerminalControlResponse(ok: false, message: "Missing client payload.")
+                return TerminalControlResponse(ok: false, message: "Missing client payload.", errorCode: .invalidArgument)
             }
             let mode = request.attachmentMode ?? .viewer
             let attachedAt = nowISO8601()
@@ -586,7 +591,7 @@
                 TerminalPerformance.logMetric(
                     "terminal_control_detach", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                return TerminalControlResponse(ok: false, message: "Missing client ID.")
+                return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
                 let hasActiveAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).contains { $0.clientID == clientID }
@@ -609,7 +614,7 @@
                 TerminalPerformance.logMetric(
                     "terminal_control_heartbeat", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                return TerminalControlResponse(ok: false, message: "Missing client ID.")
+                return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
                 try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
@@ -627,10 +632,12 @@
 
         private func controlResponseForSendRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
+            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
-            guard var payload = request.inputPayload else { return TerminalControlResponse(ok: false, message: "Missing input payload.") }
+            guard var payload = request.inputPayload else {
+                return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+            }
             if request.appendNewline { payload.append(0x0A) }
             markLocalOwnerCommandInputOutputResyncPending()
             rendererHostStorage.sendRawBytes(payload)
@@ -642,7 +649,7 @@
 
         private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
+            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "key", startedAt: startedAt) { return rejection }
             if let key = request.key, TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
@@ -652,7 +659,7 @@
                 TerminalPerformance.logMetric(
                     "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
-                return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
+                return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
             if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
             rendererHostStorage.sendRawBytes(Data(bytes))
@@ -665,7 +672,7 @@
         private func controlResponseForClearScreenRequest(_ request: TerminalControlRequest, startedAt: Date = Date(), touchClient: Bool = true)
             -> TerminalControlResponse
         {
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
+            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             if touchClient, let clientID = request.clientID {
                 try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
             }
@@ -681,7 +688,7 @@
 
         private func controlResponseForScrollRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
+            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "scroll", startedAt: startedAt) { return rejection }
             let horizontal = CGFloat(request.scrollHorizontal ?? 0)
@@ -705,8 +712,8 @@
 
         private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
-            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
+            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument) }
             do {
                 try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
                 flushPendingIncomingOutputForStateExport()
@@ -734,12 +741,12 @@
 
         private func controlResponseForResizeRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.") }
+            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "resize", startedAt: startedAt) { return rejection }
             if let rejection = staleResizeSerialRejection(for: request, startedAt: startedAt) { return rejection }
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
-                return TerminalControlResponse(ok: false, message: "Missing terminal size.")
+                return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
             let currentSize = observedSurfaceSize()
             if currentSize?.columns == columns, currentSize?.rows == rows {

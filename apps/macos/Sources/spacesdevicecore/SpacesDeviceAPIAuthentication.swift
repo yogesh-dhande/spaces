@@ -5,13 +5,30 @@ import spacesterminalcore
     import Network
 #endif
 
+/// An error that carries a machine-readable Spaces failure category. Auth-failure classification
+/// branches on the code when present instead of substring-matching the message; errors without a
+/// code (raw transport failures) fall through to the message heuristics.
+public protocol SpacesDeviceErrorCodeProviding {
+    var spacesDeviceErrorCode: SpacesDeviceErrorCode? { get }
+}
+
 public enum SpacesDeviceAPIAuthentication {
+    private static let reAuthenticationMessage = "This Mac no longer recognizes this device. Open Devices and pair this device again."
+
     public static func recoveryMessage(for error: Error) -> String? {
-        if isTransportAuthenticationFailure(error) { return "This Mac no longer recognizes this device. Open Devices and pair this device again." }
+        if isTransportAuthenticationFailure(error) { return reAuthenticationMessage }
+        // A daemon response that carries a category is authoritative: branch on it directly and do
+        // not fall back to message substrings. Errors without a code (raw transport failures) still
+        // route through the message heuristics below.
+        if let coded = error as? SpacesDeviceErrorCodeProviding, let code = coded.spacesDeviceErrorCode {
+            return isAuthenticationFailure(code: code) ? reAuthenticationMessage : nil
+        }
         let message = apiMessage(for: error)
         guard isAuthenticationFailure(message: message) else { return nil }
-        return "This Mac no longer recognizes this device. Open Devices and pair this device again."
+        return reAuthenticationMessage
     }
+
+    public static func isAuthenticationFailure(code: SpacesDeviceErrorCode?) -> Bool { code == .unauthorized }
 
     private static func apiMessage(for error: Error) -> String {
         let localized = error.localizedDescription
@@ -21,7 +38,7 @@ public enum SpacesDeviceAPIAuthentication {
 
     private static func isAuthenticationFailure(message: String) -> Bool {
         message.localizedStandardContains("not paired") || message.localizedStandardContains("invalid device auth token")
-            || message.localizedStandardContains("missing device auth token") || message.localizedStandardContains("code=401")
+            || message.localizedStandardContains("missing device auth token")
             || message.localizedStandardContains("unauthorized") || message.localizedStandardContains("certificate fingerprint")
             // The iOS client reports a reachable port whose pinned-TLS handshake never completes as
             // "The secure Device API transport could not authenticate." That means the daemon's TLS

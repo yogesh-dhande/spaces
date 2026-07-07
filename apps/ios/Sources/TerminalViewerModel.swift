@@ -1456,8 +1456,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private static func isTerminalSessionUnavailableError(_ error: Error) -> Bool {
         switch error {
-        case SpacesDeviceAPIClientError.requestFailed(let message),
-             SpacesDeviceAPIClientError.streamFailed(let message):
+        // Kept on the message: the daemon's `.sessionNotAvailable` code is coarser than this iOS
+        // distinction — it also covers a still-starting session with no live state stream yet — so
+        // branching on it would show "session ended" for a session that is merely not ready.
+        case SpacesDeviceAPIClientError.requestFailed(let message, _),
+             SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("terminal session") && message.localizedStandardContains("is not available")
         default:
             return false
@@ -1505,7 +1508,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         switch error {
         case SpacesDeviceAPIClientError.requestTimedOut:
             return true
-        case SpacesDeviceAPIClientError.requestFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message, _):
             return message.localizedStandardContains("cancelled")
                 || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
@@ -1527,8 +1530,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         switch error {
         case SpacesDeviceAPIClientError.requestTimedOut:
             return true
-        case SpacesDeviceAPIClientError.requestFailed(let message),
-             SpacesDeviceAPIClientError.streamFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message, _),
+             SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("cancelled")
                 || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
@@ -1540,8 +1543,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private static func isMissingLiveStateStreamError(_ error: Error) -> Bool {
         switch error {
-        case SpacesDeviceAPIClientError.requestFailed(let message),
-             SpacesDeviceAPIClientError.streamFailed(let message):
+        // Kept on the message: "no live state stream" shares the daemon's `.sessionNotAvailable` code
+        // with an ended/unavailable session, so the code cannot single out the still-starting case.
+        case SpacesDeviceAPIClientError.requestFailed(let message, _),
+             SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("no live state stream")
         default:
             return false
@@ -1554,8 +1559,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private static func isTerminalNoLongerLiveError(_ error: Error) -> Bool {
         switch error {
-        case SpacesDeviceAPIClientError.requestFailed(let message),
-             SpacesDeviceAPIClientError.streamFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message, let code),
+             SpacesDeviceAPIClientError.streamFailed(let message, let code):
+            // The daemon's `.sessionNotRunning` maps 1:1 to "is not running" / "is not live", so branch
+            // on the code when the response carries one and fall back to the message otherwise.
+            if let code { return code == .sessionNotRunning }
             return message.localizedStandardContains("terminal session")
                 && (message.localizedStandardContains("not running") || message.localizedStandardContains("not live"))
         default:

@@ -108,7 +108,9 @@ public final class TerminalControlTCPServer: @unchecked Sendable {
     }
 
     private func validateAndHandle(request: TerminalControlRequest) throws -> TerminalControlResponse {
-        if let authToken, authToken != request.authToken { return TerminalControlResponse(ok: false, message: "Unauthorized terminal client.") }
+        if let authToken, authToken != request.authToken {
+            return TerminalControlResponse(ok: false, message: "Unauthorized terminal client.", errorCode: .unauthorized)
+        }
         return try handleRequest(request)
     }
 

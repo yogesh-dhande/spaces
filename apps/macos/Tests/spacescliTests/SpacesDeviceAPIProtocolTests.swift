@@ -13,6 +13,20 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
+    func testResponseErrorCodeEncodesWhenSetAndDecodesNilWhenAbsent() throws {
+        let failure = SpacesDeviceAPIResponse(ok: false, message: "Terminal session 'abc' is not running.", errorCode: .sessionNotRunning)
+        let failureData = try SpacesDeviceAPICodec.encodeResponse(failure)
+        XCTAssertTrue(String(decoding: failureData, as: UTF8.self).contains(#""errorCode":"sessionNotRunning""#))
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeResponse(failureData), failure)
+
+        let success = SpacesDeviceAPIResponse(ok: true, message: "pong")
+        let successData = try SpacesDeviceAPICodec.encodeResponse(success)
+        XCTAssertFalse(String(decoding: successData, as: UTF8.self).contains("errorCode"))
+
+        let jsonWithoutErrorCode = #"{"ok":false,"message":"Provide a project directory."}"#.data(using: .utf8)!
+        XCTAssertNil(try SpacesDeviceAPICodec.decodeResponse(jsonWithoutErrorCode).errorCode)
+    }
+
     func testDeviceOverviewStreamCodecRoundTripsPayload() throws {
         let payload = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
         let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)

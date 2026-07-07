@@ -962,8 +962,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         switch error {
         case SpacesDeviceAPIClientError.requestTimedOut:
             return true
-        case SpacesDeviceAPIClientError.requestFailed(let message),
-            SpacesDeviceAPIClientError.streamFailed(let message):
+        case SpacesDeviceAPIClientError.requestFailed(let message, _),
+            SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("timed out")
         default:
             return false

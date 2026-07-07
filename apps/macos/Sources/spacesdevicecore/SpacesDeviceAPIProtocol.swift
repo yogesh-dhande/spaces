@@ -1690,11 +1690,14 @@ extension SpacesDeviceAPIResult: Codable {
 public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public let ok: Bool
     public let message: String
+    /// Machine-readable failure category. Nil on success and omitted from the wire when nil.
+    public let errorCode: SpacesDeviceErrorCode?
     public let result: SpacesDeviceAPIResult?
 
-    public init(ok: Bool, message: String, result: SpacesDeviceAPIResult? = nil) {
+    public init(ok: Bool, message: String, errorCode: SpacesDeviceErrorCode? = nil, result: SpacesDeviceAPIResult? = nil) {
         self.ok = ok
         self.message = message
+        self.errorCode = errorCode
         self.result = result
     }
 
