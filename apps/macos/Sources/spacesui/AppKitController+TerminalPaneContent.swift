@@ -124,12 +124,13 @@ extension AppKitController {
     nonisolated static func panelWindowRestoreDecision(layoutJSON: String, loadedDeviceIDs: Set<String>, liveSessionIDs: Set<String>)
         -> PanelWindowRestoreDecision
     {
-        guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)),
-            layout.version == PanelLayout.currentVersion
+        guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion
         else { return .skip }
         let referencedDeviceIDs = Set(
             PanelLayoutEngine.allPanes(in: layout).map { pane in
-                switch pane.content { case .terminalSession(let deviceID, _): deviceID }
+                switch pane.content {
+                case .terminalSession(let deviceID, _): deviceID
+                }
             })
         guard referencedDeviceIDs.isSubset(of: loadedDeviceIDs) else { return .waitForDevices }
         let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: liveSessionIDs)
@@ -173,9 +174,8 @@ extension AppKitController {
     /// Presents the command palette in session-picker mode for filling a pane split and
     /// delivers the resulting open request (creating a fresh session when "New terminal
     /// session" is chosen), or nil when dismissed.
-    func presentPaneSplitSessionPicker(
-        scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void
-    ) {
+    func presentPaneSplitSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void)
+    {
         let presentation = sessionPickerPresentation(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID)
         commandPalette.presentSessionPicker(
             scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, items: presentation.items, choicesByItemID: presentation.choices
@@ -202,8 +202,7 @@ extension AppKitController {
         }
 
         func appendItem(
-            id: String, workspaceID: String, workspace: SpacesDeviceWorkspaceSummary?, label: String, detail: String?,
-            choice: SessionPickerChoice
+            id: String, workspaceID: String, workspace: SpacesDeviceWorkspaceSummary?, label: String, detail: String?, choice: SessionPickerChoice
         ) {
             items.append(
                 CommandPaletteItem(
@@ -219,8 +218,8 @@ extension AppKitController {
         let newTerminalOverview = overview(forWorkspaceID: newTerminalWorkspaceID)
         appendItem(
             id: "picker:new", workspaceID: newTerminalWorkspaceID,
-            workspace: newTerminalOverview.flatMap { workspaceSummary(workspaceID: newTerminalWorkspaceID, in: $0) },
-            label: "New terminal session", detail: "Start a fresh terminal", choice: .newTerminalSession(workspaceID: newTerminalWorkspaceID))
+            workspace: newTerminalOverview.flatMap { workspaceSummary(workspaceID: newTerminalWorkspaceID, in: $0) }, label: "New terminal session",
+            detail: "Start a fresh terminal", choice: .newTerminalSession(workspaceID: newTerminalWorkspaceID))
 
         func appendSessions(from overview: SpacesDeviceOverviewPayload, limitToWorkspaceID: String?) {
             for session in overview.sessions {

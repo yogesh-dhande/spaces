@@ -152,9 +152,9 @@ extension WorkspaceOrchestrator {
         }
     }
 
-    func restartProcessInTerminal(
+    @discardableResult func restartProcessInTerminal(
         workspaceID: String, process: RunningProcessRecord, templateOverride: ProcessTemplate? = nil, background: Bool = false
-    ) throws {
+    ) throws -> RunningProcessRecord {
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         _ = background
         let previousSessionID = process.terminalNativeID ?? process.terminalTrackingID
@@ -199,6 +199,7 @@ extension WorkspaceOrchestrator {
             orderIndex: existingWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
             lastSeenAt: now)
         try store.upsert(window: restoredWindow)
+        return restartedProcess
     }
 
     func terminateProcessForRestart(_ process: RunningProcessRecord) -> Bool {
@@ -499,7 +500,9 @@ extension WorkspaceOrchestrator {
         }
     }
 
-    public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws {
+    @discardableResult public func recoverMissingConfiguredProcess(workspaceID: String, processKey: String, processTemplateID: String? = nil) throws
+        -> RunningProcessRecord
+    {
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         let recoverStartedAt = currentDate()
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
@@ -514,9 +517,12 @@ extension WorkspaceOrchestrator {
         let running = try store.runningProcesses(workspaceID: workspaceID)
         let expectedKey = configuredProcessMatchKey(name: template.name)
         if let existing = running.first(where: { runningProcessMatchesTemplate($0, template: template, fallbackKey: expectedKey) }) {
-            if existing.status == .exited { try restartProcessInTerminal(workspaceID: workspaceID, process: existing, templateOverride: template) }
+            let process =
+                if existing.status == .exited {
+                    try restartProcessInTerminal(workspaceID: workspaceID, process: existing, templateOverride: template)
+                } else { existing }
             try markWorkspaceRunningIfNeeded(workspace)
-            return
+            return process
         }
 
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
@@ -524,20 +530,21 @@ extension WorkspaceOrchestrator {
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
             runtimeManifest: runtimePlan.manifest)
-        _ = try launchConfiguredProcess(template: template, workspace: workspace, env: env)
+        let process = try launchConfiguredProcess(template: template, workspace: workspace, env: env)
         try markWorkspaceRunningIfNeeded(workspace)
         logPerfMetric(
             "process_recover", workspaceID: workspaceID, target: configuredProcessMatchKey(name: template.name),
             detail: "host=\(TerminalHost.spaces.rawValue)", elapsedMS: elapsedMS(since: recoverStartedAt), success: true)
+        return process
     }
 
-    public func runConfiguredProcess(workspaceID: String, processKey: String) throws {
+    @discardableResult public func runConfiguredProcess(workspaceID: String, processKey: String) throws -> RunningProcessRecord {
         try recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
     }
 
-    public func runConfiguredProcess(workspaceID: String, processTemplateID: String, processKey: String) throws {
-        try recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID)
-    }
+    @discardableResult public func runConfiguredProcess(workspaceID: String, processTemplateID: String, processKey: String) throws
+        -> RunningProcessRecord
+    { try recoverMissingConfiguredProcess(workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID) }
 
     func configuredProcessMatchesKey(_ template: ProcessTemplate, key: String) -> Bool {
         let trimmedName = template.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

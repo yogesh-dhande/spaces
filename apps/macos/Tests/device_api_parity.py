@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spacese2e", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--transport-key", required=True)
+    parser.add_argument("--certificate-fingerprint", required=True)
     parser.add_argument("--auth-token", required=True)
     parser.add_argument("--project-dir", required=True)
     parser.add_argument("--label", required=True)
@@ -59,9 +59,7 @@ def send(command: str, payload: dict | None, args: argparse.Namespace, app: dict
         args.host,
         "--port",
         str(args.port),
-        # Equals form: transport keys are base64url and may start with "-", which argparse would
-        # otherwise treat as another option.
-        f"--transport-key={args.transport_key}",
+        f"--certificate-fingerprint={args.certificate_fingerprint}",
         "--request-json",
         json.dumps(typed_request(command, payload, args, app), separators=(",", ":")),
     ]
@@ -497,6 +495,28 @@ def run(args: argparse.Namespace) -> dict:
         latency_output_path = Path(args.terminal_latency_json)
         latency_output_path.parent.mkdir(parents=True, exist_ok=True)
         latency_output_path.write_text(json.dumps(terminal_latency_summary, indent=2, sort_keys=True) + "\n")
+    # Agent send/tail round trip: one-shot input lands without any attach/owner handshake and
+    # the rendered tail echoes it back.
+    tail_marker = f"parity-send-tail-{uuid.uuid4().hex[:8]}"
+    require_ok(
+        send(
+            "sendTerminalInput",
+            {"sessionID": terminal_session_id, "text": f"echo {tail_marker}", "appendNewline": True},
+            args,
+            app,
+        ),
+        "sendTerminalInput",
+    )
+
+    def tail_shows_marker():
+        response = send("tailTerminalOutput", {"sessionID": terminal_session_id, "lines": 50}, args, app)
+        text = result(response, "terminalOutput", "tailTerminalOutput").get("text") or ""
+        # The echoed command line also contains the marker, so require an output line that is
+        # exactly the marker.
+        return any(line.strip() == tail_marker for line in text.splitlines())
+
+    wait_for(tail_shows_marker, f"tailTerminalOutput to show '{tail_marker}'", timeout=30.0)
+
     rename_title = "parity-renamed-shell"
     renamed_overview = overview_from_mutation(
         send(

@@ -281,6 +281,7 @@ jobs:
           release_title="Spaces ${{ steps.version.outputs.version }}"
           release_assets=(
             "$DMG_PATH"
+            "scripts/spaces-install-linux.sh"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
             "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"

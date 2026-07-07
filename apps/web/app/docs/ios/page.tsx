@@ -16,7 +16,7 @@ export default function IOSDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• On your Mac, open the Devices panel to show a pairing QR code, or run <code>spaces pair</code> to print a <code>spaces://pair</code> link.</li>
+          <li>• On your Mac, open the Devices panel to show a pairing QR code, or run <code>spaces device pair</code> to print a <code>spaces://pair</code> link.</li>
           <li>• Scan the QR code with the Spaces iOS app, or open the printed link on your phone.</li>
           <li>• The iOS app pairs with any Mac or Linux device running Spaces. Pair more than one and switch between them from the app.</li>
         </ul>

@@ -87,7 +87,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     @ObservationIgnored private var externalLinkPreviewDownloadTask: Task<URL, Error>?
 
     private let bridgeClient: SpacesDeviceAPIClient
-    private let directDaemonClient: SpacesDeviceTerminalDaemonClient?
     private var commandChannel: SpacesDeviceAPICommandChannel
     @ObservationIgnored private let openExternalURL: @MainActor (URL) -> Void
     @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL) async throws -> URL
@@ -96,7 +95,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var streamHandle: SpacesDeviceAPIStreamHandle?
     private var reconnectTask: Task<Void, Never>?
-    private var directHeartbeatTask: Task<Void, Never>?
     private var bufferedInputText = ""
     private var bufferedInputFlushTask: Task<Void, Never>?
     private let inputSendQueue = TerminalInputSerialQueue()
@@ -143,7 +141,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let postResizeStateSettleIterations = 6
     private static let dismissalDetachTimeout: Duration = .seconds(3)
     private static let linkPreviewChunkLimit = 256 * 1024
-    private static let directHeartbeatInterval: Duration = .seconds(20)
 
     init(
         session: SpacesDeviceTerminalSessionSummary,
@@ -159,9 +156,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         self.onAuthenticationRequired = onAuthenticationRequired
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings)
         self.bridgeClient = resolvedBridgeClient
-        directDaemonClient = SpacesMobileDirectCredentialStore.endpoint(from: session.daemonEndpoint).map {
-            SpacesDeviceTerminalDaemonClient(endpoint: $0)
-        }
         commandChannel = resolvedBridgeClient.makeCommandChannel()
         self.openExternalURL = openExternalURL
         self.remoteMediaDownloader = remoteMediaDownloader
@@ -174,7 +168,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                 label: UIDevice.current.name,
                 hostName: nil,
                 deviceName: UIDevice.current.name,
-                networkAddress: session.daemonEndpoint?.host ?? settings.trimmedHost
+                networkAddress: settings.trimmedHost
             ),
             connectedAt: ISO8601DateFormatter().string(from: Date())
         )
@@ -334,7 +328,14 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         hasAttemptedAutomaticTakeover = false
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
-        cancelTerminalTasks(cancelScroll: true, cancelStream: true)
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        bufferedInputFlushTask?.cancel()
+        bufferedInputFlushTask = nil
+        scrollCoalescer.cancel()
+        inputSendQueue.cancelAll()
+        ownershipSynchronizationTask?.cancel()
+        ownershipSynchronizationTask = nil
         bufferedInputText = ""
         viewportSize = nil
         lastSentResizeSize = nil
@@ -355,22 +356,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         return (commandChannel, shouldDetach)
     }
 
-    private func cancelTerminalTasks(cancelScroll: Bool, cancelStream: Bool) {
-        reconnectTask?.cancel()
-        reconnectTask = nil
-        directHeartbeatTask?.cancel()
-        directHeartbeatTask = nil
-        bufferedInputFlushTask?.cancel()
-        bufferedInputFlushTask = nil
-        if cancelScroll { scrollCoalescer.cancel() }
-        inputSendQueue.cancelAll()
-        ownershipSynchronizationTask?.cancel()
-        ownershipSynchronizationTask = nil
-        if cancelStream {
-            streamHandle?.cancel()
-            streamHandle = nil
-        }
-    }
 
     private func detachForStop(using currentChannel: SpacesDeviceAPICommandChannel, shouldDetach: Bool, timeout: Duration) async {
         if shouldDetach {
@@ -385,10 +370,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func detachTerminal(timeout: Duration, commandChannel: SpacesDeviceAPICommandChannel) async throws {
-        if let directDaemonClient {
-            try await directDaemonClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
-            return
-        }
         try await bridgeClient.detach(sessionID: session.id, clientID: remoteClient.id, timeout: timeout, commandChannel: commandChannel)
     }
 
@@ -448,12 +429,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func takeOverTerminal(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload? {
-        if let directDaemonClient {
-            return try await directDaemonClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
-        }
-        if session.daemonEndpoint != nil {
-            throw SpacesDeviceAPIClientError.requestFailed("Remote terminal credential is missing. Refresh the mobile overview from the paired Mac.")
-        }
         let takeoverState = try await bridgeClient.takeOver(sessionID: session.id, clientID: remoteClient.id, timeout: timeout)
         replaceCommandChannel()
         return takeoverState
@@ -531,28 +506,18 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         defer { completeLinkPreviewRequest(requestGeneration) }
 
         do {
-            if let directDaemonClient {
-                let metadata = try await directDaemonClient.resolveTerminalLink(sessionID: session.id, link: normalizedLink)
-                try Task.checkCancellation()
-                try ensureCurrentLinkPreviewRequest(requestGeneration)
-                try await handleResolvedTerminalLink(
-                    metadata,
-                    commandChannel: nil,
-                    requestGeneration: requestGeneration)
-            } else {
-                let previewCommandChannel = bridgeClient.makeCommandChannel()
-                defer { Task { await previewCommandChannel.close() } }
-                let metadata = try await bridgeClient.resolveTerminalLink(
-                    sessionID: session.id,
-                    link: normalizedLink,
-                    commandChannel: previewCommandChannel)
-                try Task.checkCancellation()
-                try ensureCurrentLinkPreviewRequest(requestGeneration)
-                try await handleResolvedTerminalLink(
-                    metadata,
-                    commandChannel: previewCommandChannel,
-                    requestGeneration: requestGeneration)
-            }
+            let previewCommandChannel = bridgeClient.makeCommandChannel()
+            defer { Task { await previewCommandChannel.close() } }
+            let metadata = try await bridgeClient.resolveTerminalLink(
+                sessionID: session.id,
+                link: normalizedLink,
+                commandChannel: previewCommandChannel)
+            try Task.checkCancellation()
+            try ensureCurrentLinkPreviewRequest(requestGeneration)
+            try await handleResolvedTerminalLink(
+                metadata,
+                commandChannel: previewCommandChannel,
+                requestGeneration: requestGeneration)
         } catch {
             if error is TerminalLinkPreviewRequestError { return }
             if Task.isCancelled { return }
@@ -613,12 +578,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func performSendTextRequest(_ text: String, appendNewline: Bool = false) async throws {
         let ownerEpoch = currentOwnerEpoch
-        if let directDaemonClient {
-            try await directDaemonClient.sendText(
-                sessionID: session.id, clientID: remoteClient.id, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline,
-                timeout: Self.inputRequestTimeout)
-            return
-        }
         try await performRequestUsingInputChannel {
             [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline] commandChannel in
             try await bridgeClient.sendText(
@@ -636,11 +595,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func performSendKeyRequest(_ key: String) async throws {
         let ownerEpoch = currentOwnerEpoch
         if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
-            if let directDaemonClient {
-                try await directDaemonClient.clearScreen(
-                    sessionID: session.id, clientID: remoteClient.id, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout)
-                return
-            }
             try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
                 try await bridgeClient.clearScreen(
                     sessionID: sessionID,
@@ -650,11 +604,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                     commandChannel: commandChannel
                 )
             }
-            return
-        }
-        if let directDaemonClient {
-            try await directDaemonClient.sendKey(
-                sessionID: session.id, clientID: remoteClient.id, key: key, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout)
             return
         }
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
@@ -671,12 +620,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func performSendScrollRequest(horizontal: Double, vertical: Double, scrollMods: Int32) async throws {
         let ownerEpoch = currentOwnerEpoch
-        if let directDaemonClient {
-            try await directDaemonClient.scroll(
-                sessionID: session.id, clientID: remoteClient.id, horizontal: horizontal, vertical: vertical, ownerEpoch: ownerEpoch,
-                scrollMods: scrollMods == 0 ? nil : scrollMods, timeout: Self.inputRequestTimeout)
-            return
-        }
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.scroll(
                 sessionID: sessionID,
@@ -904,11 +847,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         limit: Int,
         commandChannel: SpacesDeviceAPICommandChannel?
     ) async throws -> SpacesDeviceTerminalLinkChunk {
-        if let directDaemonClient {
-            return try await directDaemonClient.readTerminalLinkChunk(
-                sessionID: session.id, linkID: linkID, offset: offset, limit: limit)
-        }
-        return try await bridgeClient.readTerminalLinkChunk(
+        try await bridgeClient.readTerminalLinkChunk(
             sessionID: session.id, linkID: linkID, offset: offset, limit: limit, commandChannel: commandChannel)
     }
 
@@ -1003,17 +942,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         } else {
             isConnecting = true
         }
-        if directDaemonClient != nil {
-            await connectDirectDaemon(reconnectSilently: reconnectSilently)
-            return
-        }
-        if session.daemonEndpoint != nil {
-            reconnectTask = nil
-            isConnecting = false
-            errorMessage = "Remote terminal credential is missing. Refresh the mobile overview from the paired Mac."
-            trace("direct_connect_missing_credential")
-            return
-        }
         do {
             if shouldAttachBeforeSubscribing {
                 try await bridgeClient.attach(
@@ -1047,57 +975,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             isConnecting = false
             trace("connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
             await handleConnectError(error)
-        }
-    }
-
-    private func connectDirectDaemon(reconnectSilently: Bool) async {
-        do {
-            guard let directDaemonClient else { return }
-            if shouldAttachBeforeSubscribing {
-                try await directDaemonClient.attach(
-                    sessionID: session.id,
-                    client: remoteClient,
-                    mode: .viewer
-                )
-                hasAttachedToSession = true
-                trace("direct_connect_attach_success")
-            }
-            let handle = try directDaemonClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
-                guard let self else { return }
-                applyLatestState(payload)
-            } onDisconnect: { [weak self] error in
-                Task { @MainActor [weak self] in
-                    await self?.handleDisconnect(error)
-                }
-            }
-            streamHandle = handle
-            startDirectHeartbeat()
-            errorMessage = nil
-            reconnectTask = nil
-            trace("direct_connect_subscribe_success")
-        } catch {
-            reconnectTask = nil
-            isConnecting = false
-            trace("direct_connect_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
-            await handleConnectError(error)
-        }
-    }
-
-    private func startDirectHeartbeat() {
-        guard let directDaemonClient, hasAttachedToSession, !isStopping, !isEndedState else { return }
-        directHeartbeatTask?.cancel()
-        directHeartbeatTask = Task { [weak self, directDaemonClient, sessionID = session.id, clientID = remoteClient.id] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: Self.directHeartbeatInterval)
-                guard !Task.isCancelled else { break }
-                do {
-                    try await directDaemonClient.heartbeat(sessionID: sessionID, clientID: clientID, timeout: Self.inputRequestTimeout)
-                } catch {
-                    await MainActor.run { [weak self] in
-                        self?.trace("direct_heartbeat_failure error=\(self?.sanitizedTraceDetail(error.localizedDescription) ?? "unknown")")
-                    }
-                }
-            }
         }
     }
 
@@ -1163,10 +1040,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     private func fetchTerminalState(timeout: Duration) async throws -> GhosttyRemoteSessionStatePayload {
-        if let directDaemonClient {
-            return try await directDaemonClient.fetchState(sessionID: session.id, timeout: timeout)
-        }
-        return try await bridgeClient.fetchState(sessionID: session.id, timeout: timeout)
+        try await bridgeClient.fetchState(sessionID: session.id, timeout: timeout)
     }
 
     private func handleDisconnect(_ error: Error?) async {
@@ -1446,26 +1320,15 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                     lastSentResizeSize = targetViewportSize
                     resizeSerial &+= 1
                     let currentResizeSerial = resizeSerial
-                    if let directDaemonClient {
-                        try await directDaemonClient.resize(
-                            sessionID: session.id,
-                            clientID: remoteClient.id,
-                            columns: targetViewportSize.columns,
-                            rows: targetViewportSize.rows,
-                            ownerEpoch: currentOwnerEpoch,
-                            resizeSerial: currentResizeSerial,
-                            timeout: Self.inputRequestTimeout)
-                    } else {
-                        try await bridgeClient.resize(
-                            sessionID: session.id,
-                            clientID: remoteClient.id,
-                            columns: targetViewportSize.columns,
-                            rows: targetViewportSize.rows,
-                            ownerEpoch: currentOwnerEpoch,
-                            resizeSerial: currentResizeSerial,
-                            timeout: Self.inputRequestTimeout
-                        )
-                    }
+                    try await bridgeClient.resize(
+                        sessionID: session.id,
+                        clientID: remoteClient.id,
+                        columns: targetViewportSize.columns,
+                        rows: targetViewportSize.rows,
+                        ownerEpoch: currentOwnerEpoch,
+                        resizeSerial: currentResizeSerial,
+                        timeout: Self.inputRequestTimeout
+                    )
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
                 } catch {
                     trace("ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))")
@@ -1601,13 +1464,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func handleAuthenticationFailure(_ error: Error) -> Bool {
         guard let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) else { return false }
-        if session.daemonEndpoint != nil {
-            errorMessage = "Remote terminal credential was rejected. Refresh terminals from the paired Mac to reprovision direct access."
-            return true
-        }
         isStopping = true
         isAwaitingTakeoverConfirmation = false
-        cancelTerminalTasks(cancelScroll: false, cancelStream: true)
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        bufferedInputFlushTask?.cancel()
+        bufferedInputFlushTask = nil
+        inputSendQueue.cancelAll()
         bufferedInputText = ""
         hasAttachedToSession = false
         hasConfirmedOwnerInputReadiness = false
@@ -1755,7 +1618,16 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             hasAttachedToSession = activeAttachmentExists(in: payload.attachmentSnapshot)
         }
         if isEndedState {
-            cancelTerminalTasks(cancelScroll: true, cancelStream: true)
+            streamHandle?.cancel()
+            streamHandle = nil
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            bufferedInputFlushTask?.cancel()
+            bufferedInputFlushTask = nil
+            scrollCoalescer.cancel()
+            inputSendQueue.cancelAll()
+            ownershipSynchronizationTask?.cancel()
+            ownershipSynchronizationTask = nil
             bufferedInputText = ""
             viewportSize = nil
             lastSentResizeSize = nil

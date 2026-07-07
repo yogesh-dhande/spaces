@@ -239,7 +239,6 @@ struct ConnectionSettingsView: View {
             var pairedSettings = settings
             pairedSettings.host = pairingLink.host
             pairedSettings.port = pairingLink.port
-            pairedSettings.transportKey = pairingLink.transportKey
             pairedSettings.certificateFingerprint = pairingLink.certificateFingerprint
             let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings)
             let commandChannel = bridgeClient.makeCommandChannel()

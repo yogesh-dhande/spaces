@@ -41,8 +41,6 @@ final class TerminalServiceProtocolTests: XCTestCase {
             TerminalServiceRequest(command: .agentSignal(.init(event: agentSignal))),
             TerminalServiceRequest(command: .ackAgentSignals(.init(sessionID: "session-1", eventIDs: ["event-1"]))),
             TerminalServiceRequest(command: .profileCommand(profileCommand)),
-            TerminalServiceRequest(
-                command: .mobileCredential(.init(operation: .issue, installationID: "installation-1", deviceName: "iPhone", platform: "ios"))),
         ]
         let response = TerminalServiceResponse(
             ok: true, message: "Started.",
@@ -67,12 +65,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 workspace: TerminalServiceProfileWorkspaceRecord(
                     id: "workspace-1", projectID: "project-1", dir: "/srv/work", runtimePath: "/srv/work", dirname: "feature", branch: "feature",
                     baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
-                terminalOutput: "recent output"), mobileCredentialToken: "MOBILE",
-            mobileCredentials: [
-                TerminalServiceMobileCredential(
-                    id: "credential-1", installationID: "installation-1", deviceName: "iPhone", platform: "ios", scopes: ["terminal"],
-                    createdAt: "2026-06-14T00:00:00Z", lastUsedAt: nil, revokedAt: nil)
-            ],
+                terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(
                 version: "1.2.3", artifactVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 
@@ -90,19 +83,14 @@ final class TerminalServiceProtocolTests: XCTestCase {
 
     func testProfileCommandRoundTripsEveryOperation() throws {
         let commands: [TerminalServiceProfileCommand] = [
-            .projectList,
-            .terminalList,
-            .workspaceList(.init(projectID: "project-1", includeArchived: true)),
-            .workspaceList(.init()),
+            .projectList, .terminalList, .workspaceList(.init(projectID: "project-1", includeArchived: true)), .workspaceList(.init()),
             .workspaceCreate(.init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true)),
-            .workspaceCreate(.init(projectID: "project-1", branch: "feature")),
-            .workspaceStart(workspaceID: "workspace-1"),
+            .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(workspaceID: "workspace-1"),
             .workspaceRestart(workspaceID: "workspace-1"),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
             .terminalSend(.init(sessionID: "session-1", input: .text("hello"), appendNewline: true)),
             .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
-            .terminalTail(.init(sessionID: "session-1", lineCount: 40)),
-            .terminalTail(.init(sessionID: "session-1")),
+            .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),
             .terminalCommand(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "ls", title: "list")),
             .terminalCommand(.init(cwd: "/tmp/work")),
         ]
@@ -129,17 +117,14 @@ final class TerminalServiceProtocolTests: XCTestCase {
     func testProfileCommandDecodeRejectsAmbiguousPayloads() {
         let decoder = JSONDecoder()
         XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data("{}".utf8)))
-        XCTAssertThrowsError(
-            try decoder.decode(
-                TerminalServiceProfileCommand.self, from: Data(#"{"projectList":{},"terminalList":{}}"#.utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"projectList":{},"terminalList":{}}"#.utf8)))
     }
 
     func testTerminalProfileInputRejectsZeroAndTwoKeyPayloads() throws {
         let decoder = JSONDecoder()
 
         XCTAssertEqual(try decoder.decode(TerminalProfileInput.self, from: Data(#"{"text":""}"#.utf8)), .text(""))
-        XCTAssertEqual(
-            try decoder.decode(TerminalProfileInput.self, from: Data(#"{"bytes":"AAr/"}"#.utf8)), .bytes(Data([0, 10, 255])))
+        XCTAssertEqual(try decoder.decode(TerminalProfileInput.self, from: Data(#"{"bytes":"AAr/"}"#.utf8)), .bytes(Data([0, 10, 255])))
 
         XCTAssertThrowsError(try decoder.decode(TerminalProfileInput.self, from: Data("{}".utf8)))
         XCTAssertThrowsError(try decoder.decode(TerminalProfileInput.self, from: Data(#"{"text":"hi","bytes":"AA=="}"#.utf8)))
@@ -327,6 +312,24 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.keychain.passphrase").path))
         XCTAssertEqual(second.certificateFingerprint, first.certificateFingerprint)
     }
+
+    #if os(macOS)
+        func testTLSIdentityStoreCreatesIdentityWithSystemLibreSSL() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let originalPath = getenv("PATH").map { String(cString: $0) }
+            setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+            defer { if let originalPath { setenv("PATH", originalPath, 1) } else { unsetenv("PATH") } }
+
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+
+            XCTAssertFalse(identity.certificateFingerprint.isEmpty)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.key.der").path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.certificate.der").path))
+        }
+    #endif
 
     func testTLSIdentityStoreRemovesObsoleteIdentityFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -47,9 +47,7 @@ public final class SQLiteStore {
     /// `withImmediateTransaction` calls the wrapped mutations make internally share a
     /// single physical transaction, with inner levels expressed as savepoints. Only
     /// the outermost commit is durable and posts the change signal.
-    public func withTransaction<T>(_ body: () throws -> T) throws -> T {
-        try withImmediateTransaction(body)
-    }
+    public func withTransaction<T>(_ body: () throws -> T) throws -> T { try withImmediateTransaction(body) }
 
     /// Runs `body` inside a write transaction. At depth zero this opens a real
     /// `BEGIN IMMEDIATE`/`COMMIT` (rolling back on error); nested calls open a
@@ -117,9 +115,7 @@ public final class SQLiteStore {
 
     /// The explicitly-stored Caddy router port, or nil when none is set — so callers can tell an
     /// override apart from the default and avoid overwriting a user-chosen port when seeding.
-    public func storedRouterPort() throws -> Int? {
-        try setting(key: SettingsKey.appRouterPort).flatMap(Int.init)
-    }
+    public func storedRouterPort() throws -> Int? { try setting(key: SettingsKey.appRouterPort).flatMap(Int.init) }
 
     public func appConfig() throws -> AppConfig {
         let start = try setting(key: SettingsKey.appPortRangeStart).flatMap(Int.init) ?? 20000

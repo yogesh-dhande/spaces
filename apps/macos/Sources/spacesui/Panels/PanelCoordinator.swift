@@ -8,9 +8,7 @@ import spacesdevicecore
 @MainActor final class PanelCoordinator {
     unowned let host: AppKitController
 
-    init(host: AppKitController) {
-        self.host = host
-    }
+    init(host: AppKitController) { self.host = host }
 
     struct PanePlacement: Equatable {
         let scope: PanelScope
@@ -82,9 +80,7 @@ import spacesdevicecore
                 ordered.append(contentsOf: PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout))
             case .globalWindow:
                 for sessionID in PanelLayoutEngine.orderedTerminalSessionIDs(in: state.layout)
-                where contentControllers[sessionID]?.workspaceID == workspaceID {
-                    ordered.append(sessionID)
-                }
+                where contentControllers[sessionID]?.workspaceID == workspaceID { ordered.append(sessionID) }
             }
         }
         return ordered
@@ -298,9 +294,7 @@ import spacesdevicecore
     /// on it (arrow-key workspace switching), without stealing keyboard focus from the
     /// sidebar.
     func restoreSelection(scope: PanelScope) {
-        for tab in layout(for: scope).tabs {
-            for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) }
-        }
+        for tab in layout(for: scope).tabs { for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) } }
         render(scope: scope)
     }
 
@@ -315,9 +309,8 @@ import spacesdevicecore
     private func activateContentIfVisible(scope: PanelScope, pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers[sessionID] else { return }
         let layout = layout(for: scope)
-        let isInSelectedTab = layout.tabs.first { $0.id == layout.selectedTabID }.map {
-            PanelLayoutEngine.panes(in: $0).contains { $0.id == pane.id }
-        } ?? false
+        let isInSelectedTab =
+            layout.tabs.first { $0.id == layout.selectedTabID }.map { PanelLayoutEngine.panes(in: $0).contains { $0.id == pane.id } } ?? false
         if isInSelectedTab { content.activate(focus: false) } else { content.deactivate() }
     }
 
@@ -364,9 +357,7 @@ import spacesdevicecore
     /// Detaches every open pane's terminal client at app termination without stopping
     /// sessions (daemon-owned sessions keep running across quit; panes are rebuilt on
     /// relaunch from the persisted layout).
-    func closeAllContentForTermination() {
-        for content in contentControllers.values { content.close() }
-    }
+    func closeAllContentForTermination() { for content in contentControllers.values { content.close() } }
 
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
@@ -445,9 +436,9 @@ import spacesdevicecore
         if let existing = contentControllers[request.sessionID] { return existing }
         guard let content = host.makeTerminalPaneContent(request: request) else { return nil }
         content.onTitleChanged = { [weak self, weak content] title in
-            guard let self, let content, let sessionID = content.descriptor.terminalSessionID,
-                self.placement(forSessionID: sessionID) != nil
-            else { return }
+            guard let self, let content, let sessionID = content.descriptor.terminalSessionID, self.placement(forSessionID: sessionID) != nil else {
+                return
+            }
             self.refreshTabTitles(forSessionID: sessionID)
         }
         contentControllers[request.sessionID] = content
@@ -541,9 +532,7 @@ import spacesdevicecore
         panels[scope] = state
         if rerender { render(scope: scope) }
         if previousVisibility != state.layout.selectedTabID {
-            for tab in state.layout.tabs {
-                for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) }
-            }
+            for tab in state.layout.tabs { for pane in PanelLayoutEngine.panes(in: tab) { activateContentIfVisible(scope: scope, pane: pane) } }
         }
         onLayoutChanged?(scope, state.layout)
         // A global panel exists only while it has content: an emptied layout (last tab
@@ -555,8 +544,7 @@ import spacesdevicecore
         guard let state = panels[scope], let view = state.view else { return }
         var titles: [String: String] = [:]
         for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
-        view.apply(
-            layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+        view.apply(layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
         syncPaneAccessibilityTitles(scope: scope)
         syncPanelWindowTitle(scope: scope)
         syncFocusedPaneFooter(scope: scope)

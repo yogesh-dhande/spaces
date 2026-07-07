@@ -40,10 +40,8 @@ remote_pairing_window_json=""
 pairing_link=""
 pairing_code=""
 pairing_nonce=""
-transport_key=""
 certificate_fingerprint=""
 remote_pairing_link=""
-remote_transport_key=""
 remote_certificate_fingerprint=""
 remote_forward_pid=""
 remote_forward_host="127.0.0.1"
@@ -651,7 +649,6 @@ print(f"device_api_port={shlex.quote(str(payload['port']))}")
 print(f"pairing_link={shlex.quote(payload['pairingLink'])}")
 print(f"pairing_code={shlex.quote(payload['pairingCode'])}")
 print(f"pairing_nonce={shlex.quote(payload['pairingNonce'])}")
-print(f"transport_key={shlex.quote(payload['transportKey'])}")
 print(f"certificate_fingerprint={shlex.quote(payload['certificateFingerprint'])}")
 print(f"expires_at={shlex.quote(payload['expiresAt'])}")
 PY
@@ -771,7 +768,6 @@ while time.time() < deadline:
         time.sleep(0.5)
 raise SystemExit(f"remote demo daemon port {port} did not open: {last_error}")
 PY
-  remote_ssh "~/.spaces/bin/spaces mobile status" >/dev/null
 }
 
 prepare_remote_demo_daemon() {
@@ -907,7 +903,6 @@ import sys
 
 payload = json.load(open(sys.argv[1]))
 print(f"remote_pairing_link={shlex.quote(payload['pairingLink'])}")
-print(f"remote_transport_key={shlex.quote(payload['transportKey'])}")
 print(f"remote_certificate_fingerprint={shlex.quote(payload['certificateFingerprint'])}")
 print(f"remote_device_host={shlex.quote(payload['host'])}")
 print(f"remote_device_port={shlex.quote(str(payload['port']))}")
@@ -956,12 +951,12 @@ PY
       HOME="$demo_home" \
       SPACES_DB_PATH="$spaces_db_path" \
       SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
-      python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_transport_key" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_dir" <<'PY'
+      python3 - "$spacese2e" "$bundle_id" "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$iphone_remote_token" "$iphone_installation_id" "$remote_project_dir" <<'PY'
 import json
 import subprocess
 import sys
 
-spacese2e, bundle_id, host, port, transport_key, auth_token, installation_id, project_dir = sys.argv[1:]
+spacese2e, bundle_id, host, port, certificate_fingerprint, auth_token, installation_id, project_dir = sys.argv[1:]
 request = {
     "authToken": auth_token,
     "clientApp": {
@@ -975,7 +970,7 @@ request = {
 }
 try:
     completed = subprocess.run(
-        [spacese2e, "mobile-request", "--host", host, "--port", port, "--transport-key=" + transport_key, "--request-json", json.dumps(request)],
+        [spacese2e, "mobile-request", "--host", host, "--port", port, "--certificate-fingerprint=" + certificate_fingerprint, "--request-json", json.dumps(request)],
         capture_output=True,
         text=True,
         check=True,
@@ -1123,10 +1118,12 @@ def pair(pairing_link, installation_id, device_name):
     query = parse_qs(urlparse(pairing_link).query)
     pairing_code = query.get("code", [""])[0]
     pairing_nonce = query.get("nonce", [""])[0]
-    if not pairing_code or not pairing_nonce:
-        raise SystemExit(f"pairing link missing code or nonce: {pairing_link}")
+    protocol_version = query.get("pv", [""])[0]
+    if not pairing_code or not pairing_nonce or not protocol_version:
+        raise SystemExit(f"pairing link missing code, nonce, or pv: {pairing_link}")
     response = send(pairing_link, {
-        "command": {"pair": {"pairingCode": pairing_code, "pairingNonce": pairing_nonce}},
+        # Version-gated pairing: echo the daemon's advertised wire-protocol version (pv from the v3 link).
+        "command": {"pair": {"pairingCode": pairing_code, "pairingNonce": pairing_nonce, "clientProtocolVersion": int(protocol_version)}},
         "clientApp": {
             "installationID": installation_id,
             "bundleID": bundle_id,
@@ -1147,20 +1144,18 @@ PY
 make_device_seed_json() {
   local local_auth_token="$1"
   local remote_auth_token="${2:-}"
-  python3 - "$device_api_host" "$device_api_port" "$transport_key" "$certificate_fingerprint" "$local_auth_token" "$remote_device_name" "$remote_device_host" "$remote_device_port" "$remote_transport_key" "$remote_certificate_fingerprint" "$remote_auth_token" <<'PY'
+  python3 - "$device_api_host" "$device_api_port" "$certificate_fingerprint" "$local_auth_token" "$remote_device_name" "$remote_device_host" "$remote_device_port" "$remote_certificate_fingerprint" "$remote_auth_token" <<'PY'
 import json
 import sys
 
 (
     local_host,
     local_port,
-    local_transport_key,
     local_certificate_fingerprint,
     local_auth_token,
     remote_name,
     remote_host,
     remote_port,
-    remote_transport_key,
     remote_certificate_fingerprint,
     remote_auth_token,
 ) = sys.argv[1:]
@@ -1170,17 +1165,15 @@ devices = [
         "name": "This Mac",
         "host": local_host,
         "port": int(local_port),
-        "transportKey": local_transport_key,
         "certificateFingerprint": local_certificate_fingerprint,
         "authToken": local_auth_token,
     }
 ]
-if remote_auth_token and remote_host and remote_port and remote_transport_key and remote_certificate_fingerprint:
+if remote_auth_token and remote_host and remote_port and remote_certificate_fingerprint:
     devices.append({
         "name": remote_name or f"Spaces {remote_host}",
         "host": remote_host,
         "port": int(remote_port),
-        "transportKey": remote_transport_key,
         "certificateFingerprint": remote_certificate_fingerprint,
         "authToken": remote_auth_token,
     })
@@ -1195,15 +1188,14 @@ write_pairing_json() {
   local ipad_token="$3"
   local iphone_installation_id="$4"
   local iphone_token="$5"
-  python3 - "$output_path" "$transport_key" "$certificate_fingerprint" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token" \
-    "$remote_forward_host" "$remote_forward_port" "$remote_transport_key" "$remote_certificate_fingerprint" "$remote_project_dir" "$remote_workspace_id" \
+  python3 - "$output_path" "$certificate_fingerprint" "$ipad_installation_id" "$ipad_token" "$iphone_installation_id" "$iphone_token" \
+    "$remote_forward_host" "$remote_forward_port" "$remote_certificate_fingerprint" "$remote_project_dir" "$remote_workspace_id" \
     "$ipad_remote_token" "$iphone_remote_token" <<'PY'
 import json
 import sys
 
 (
     output_path,
-    transport_key,
     certificate_fingerprint,
     ipad_installation_id,
     ipad_token,
@@ -1211,7 +1203,6 @@ import sys
     iphone_token,
     remote_host,
     remote_port,
-    remote_transport_key,
     remote_certificate_fingerprint,
     remote_project_dir,
     remote_workspace_id,
@@ -1222,13 +1213,11 @@ payload = {
     "ipad": {
         "installationID": ipad_installation_id,
         "authToken": ipad_token,
-        "transportKey": transport_key,
         "certificateFingerprint": certificate_fingerprint,
     },
     "iphone": {
         "installationID": iphone_installation_id,
         "authToken": iphone_token,
-        "transportKey": transport_key,
         "certificateFingerprint": certificate_fingerprint,
     },
 }
@@ -1239,7 +1228,6 @@ if remote_workspace_id:
     payload["remote"] = {
         "host": remote_host,
         "port": int(remote_port),
-        "transportKey": remote_transport_key,
         "certificateFingerprint": remote_certificate_fingerprint,
         "projectDir": remote_project_dir,
         "workspaceID": remote_workspace_id,
@@ -1261,14 +1249,14 @@ write_simulator_settings() {
   xcrun simctl uninstall "$udid" "$bundle_id" >/dev/null 2>&1 || true
   xcrun simctl install "$udid" "$ios_app_path" >/dev/null
 
-  python3 - "$udid" "$bundle_id" "$device_api_host" "$device_api_port" "$transport_key" "$certificate_fingerprint" "$installation_id" "$auth_token" <<'PY'
+  python3 - "$udid" "$bundle_id" "$device_api_host" "$device_api_port" "$certificate_fingerprint" "$installation_id" "$auth_token" <<'PY'
 import json
 import pathlib
 import plistlib
 import subprocess
 import sys
 
-udid, bundle_id, host, port_text, transport_key, certificate_fingerprint, installation_id, auth_token = sys.argv[1:]
+udid, bundle_id, host, port_text, certificate_fingerprint, installation_id, auth_token = sys.argv[1:]
 port = int(port_text)
 container = subprocess.check_output(["xcrun", "simctl", "get_app_container", udid, bundle_id, "data"], text=True).strip()
 prefs_path = pathlib.Path(container) / "Library" / "Preferences" / f"{bundle_id}.plist"
@@ -1276,7 +1264,6 @@ prefs_path.parent.mkdir(parents=True, exist_ok=True)
 payload = {
     "host": host,
     "port": port,
-    "transportKey": transport_key,
     "certificateFingerprint": certificate_fingerprint,
     "authToken": auth_token,
     "installationID": installation_id,
@@ -1398,7 +1385,7 @@ export SPACESD_EXECUTABLE=$(printf '%q' "$terminal_service")
 export SPACES_DEVICE_API_HOST=$(printf '%q' "$device_api_bind_host")
 export SPACES_DEVICE_API_PORT=$(printf '%q' "$device_api_port")
 export SPACES_MOBILE_PAIRING_LINK=$(printf '%q' "$pairing_link")
-export SPACES_MOBILE_TRANSPORT_KEY=$(printf '%q' "$transport_key")
+export SPACES_MOBILE_CERTIFICATE_FINGERPRINT=$(printf '%q' "$certificate_fingerprint")
 export SPACES_DEMO_ROOT=$(printf '%q' "$temp_root")
 export SPACES_DEMO_SESSION_ID=$(printf '%q' "$local_session_id")
 export SPACES_DEMO_LOCAL_SESSION_ID=$(printf '%q' "$local_session_id")

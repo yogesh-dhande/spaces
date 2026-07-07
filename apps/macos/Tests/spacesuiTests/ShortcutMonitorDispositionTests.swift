@@ -30,15 +30,13 @@ import workspacecore
                 == .runAppShortcutsThenTerminal)
         #expect(
             AppKitController.shortcutMonitorDisposition(
-                eventModifiers: [.control], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers)
-                == .passEventToTerminal)
+                eventModifiers: [.control], firstResponderIsTerminalPane: true, shortcutLeaderModifiers: leaderModifiers) == .passEventToTerminal)
     }
 
     @Test func commandChordsRunAppShortcutsEvenWithTerminalFocus() {
         #expect(AppKitController.shortcutMonitorDisposition(eventModifiers: [.command], firstResponderIsTerminalPane: true) == .runAppShortcuts)
         #expect(
-            AppKitController.shortcutMonitorDisposition(eventModifiers: [.command, .option], firstResponderIsTerminalPane: true)
-                == .runAppShortcuts)
+            AppKitController.shortcutMonitorDisposition(eventModifiers: [.command, .option], firstResponderIsTerminalPane: true) == .runAppShortcuts)
     }
 
     @Test func closePaneShortcutMatchesPlainCommandWOnly() {

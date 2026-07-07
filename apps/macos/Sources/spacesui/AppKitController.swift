@@ -51,9 +51,7 @@ protocol ProcessLifecyclePolicyController {
 /// Field-reference bundles for a single-instance form. `formTag` is the generation stamped on the
 /// form's controls (`NSControl.tag`) when it is built, letting a control's action confirm it still
 /// belongs to the live form. See `AppKitController.liveFormRefs(_:forSenderTag:)`.
-protocol FormGenerationTagged {
-    var formTag: Int { get }
-}
+protocol FormGenerationTagged { var formTag: Int { get } }
 
 extension ProcessInfo: ProcessLifecyclePolicyController {}
 
@@ -1446,10 +1444,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             switch result {
             case .success(let response):
                 self.applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                guard let sessionID = response.sessionID,
-                    let request = Self.deviceTerminalOpenRequest(
-                        workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? self.overview(forWorkspaceID: workspaceID))
-                else {
+                guard let request = self.terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID) else {
                     completion(nil)
                     return
                 }
@@ -1459,6 +1454,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 completion(nil)
             }
         }
+    }
+
+    private func terminalOpenRequest(fromMutationResponse response: SpacesDeviceAPIResponse, workspaceID: String) -> DeviceTerminalOpenRequest? {
+        guard let sessionID = response.sessionID else { return nil }
+        return Self.deviceTerminalOpenRequest(
+            workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? overview(forWorkspaceID: workspaceID))
     }
 
     nonisolated static func deviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws
@@ -2186,7 +2187,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // record so "This Mac" still has an identity to render; with no stored record (a first launch
                 // while the daemon is down) there is no device to show, so it stays a genuine snapshot failure.
                 // Only reachability failures degrade to offline: a bootstrap that reaches the daemon but then
-                // fails writing the paired-device record or saving Keychain credentials is a real error, not
+                // fails writing the paired-device record or saving stored credentials is a real error, not
                 // an offline state, so it must surface rather than be hidden behind an empty offline sidebar.
                 let localDevice: SpacesPairedDeviceRecord
                 let bootstrapOfflineMessage: String?
@@ -2685,6 +2686,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .openEditor: "Open editor"
             case .revealInFinder: "Reveal in Finder"
             }
+        }
+    }
+
+    final class WorkspacePathActionContext {
+        let workspaceID: String
+        let path: String
+
+        init(workspaceID: String, path: String) {
+            self.workspaceID = workspaceID
+            self.path = path
         }
     }
 
@@ -3345,10 +3356,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return container
     }
 
-    nonisolated static func pairedDeviceHasRequiredCredentials(deviceID: String) -> Bool {
-        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: deviceID)) ?? false
-        let hasTransportKey = (try? SpacesDeviceCredentialStore.hasTransportKey(deviceID: deviceID)) ?? false
-        return hasToken && hasTransportKey
+    /// A paired device is usable when its auth token secret is present and its record carries the
+    /// daemon's pinned TLS certificate fingerprint (non-secret record data).
+    nonisolated static func pairedDeviceHasRequiredCredentials(device: SpacesPairedDeviceRecord) -> Bool {
+        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: device.id)) ?? false
+        return hasToken && !device.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @objc func alertsRowClicked() { alerts.showAlertsDetail() }
@@ -3419,7 +3431,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func selectWorkspace(_ workspace: WorkspaceSummary) { sidebar.selectWorkspace(workspace) }
     func orderedSidebarWorkspaces() -> [WorkspaceSummary] { sidebar.orderedSidebarWorkspaces() }
     func navigateSidebarSelection(direction: Int) -> Bool { sidebar.navigateSidebarSelection(direction: direction) }
-    func handleSidebarArrowNavigation(event: NSEvent) -> Bool { sidebar.handleSidebarArrowNavigation(event: event) }
     func toggleProjectExpanded(projectID: String) { sidebar.toggleProjectExpanded(projectID: projectID) }
     func canPreserveDetailPaneAfterSidebarReload() -> Bool { sidebar.canPreserveDetailPaneAfterSidebarReload() }
     func rebuildFlatSidebarData() { sidebar.rebuildFlatSidebarData() }
@@ -3594,7 +3605,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deviceSection(id: deviceID).map { !$0.isLocal } ?? (deviceID != SpacesPairedDeviceRecord.localDeviceID)
     }
 
-    private func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
+    func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
+
+    /// Hides a workspace from the sidebar (stopping it first if it is running), routed through the
+    /// workspace-visibility controller so the sidebar row's right-click menu and the visibility
+    /// dialog share one hide path. The sidebar refreshes from the mutation response, so no explicit
+    /// reload callback is needed here.
+    func hideWorkspace(id: String) { workspaceVisibility.hideWorkspace(workspaceID: id) }
 
     /// The device that owns the current selection, so mutations route to the
     /// daemon that actually hosts the selected workspace/project rather than
@@ -3865,21 +3882,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let card = CompatibilityBlockView(
-            verdict: verdict, status: status,
+            verdict: verdict, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, status: status,
             onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.confirmDaemonRestart(deviceID: deviceID) })
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 24),
-            card.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 24),
+            card.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
+            card.leadingAnchor.constraint(greaterThanOrEqualTo: detailContainer.leadingAnchor, constant: 24),
             card.trailingAnchor.constraint(lessThanOrEqualTo: detailContainer.trailingAnchor, constant: -24),
             card.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
         ])
     }
 
-    /// Confirms the restart-impact with the user, then restarts the device's daemon. A remote Linux
-    /// daemon is updated from the signed artifact over SSH (which restarts it); every other device
-    /// restarts through the `requestDaemonRestart` RPC, after which launchd/systemd respawns it.
+    /// Confirms the restart-impact with the user, then restarts the device's daemon through the
+    /// `requestDaemonRestart` RPC, after which launchd/systemd respawns it (applying any update already
+    /// staged on disk). A remote Linux daemon that is too old for this app is not updated over SSH: the
+    /// user re-runs the version-pinned installer on the Linux device — surfaced in the compatibility
+    /// block — which replaces the binary and restarts the service.
     private func confirmDaemonRestart(deviceID: String) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let alert = NSAlert()
@@ -3892,32 +3912,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showDeviceNotLoadedError()
             return
         }
-        // The daemon reports its own OS, so route on that rather than probing SSH: a non-Linux daemon
-        // must not run the Linux SSH preflight, or a stale/unavailable SSH path would block restarting a
-        // remote Mac whose Device API is still reachable.
-        let isLinuxDaemon = status?.isLinuxDaemon ?? false
         Task { @MainActor [weak self] in
             let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
                 do {
-                    if isLinuxDaemon {
-                        // A remote Linux daemon must be reinstalled from the signed artifact to actually
-                        // update (a plain restart respawns the same old binary); the installer restarts it.
-                        // `false` means the SSH path could not confirm a Linux host, so nothing happened —
-                        // surface that instead of reloading as if it succeeded.
-                        let updated = try SpacesDevicePairingClient.updateRemoteLinuxDaemon(
-                            for: device, appVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey)
-                        guard updated else {
-                            throw NSError(
-                                domain: "SpacesCompatibility", code: 1,
-                                userInfo: [
-                                    NSLocalizedDescriptionKey:
-                                        "Couldn't update this device's daemon over SSH. Check the SSH connection to the device and try again."
-                                ])
-                        }
-                    } else {
-                        // Local or remote Mac: restart through the RPC, applying any update already staged on disk.
-                        try SpacesDeviceClient.requestDaemonRestart(device: device)
-                    }
+                    try SpacesDeviceClient.requestDaemonRestart(device: device)
                     return .success(())
                 } catch { return .failure(error) }
             }.value
@@ -6277,6 +6275,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return button
     }
 
+    /// The right-edge disclosure chevron for collapsible sidebar rows (projects and
+    /// workspaces). Points down when expanded and right when collapsed. Rendered as a
+    /// button so a click toggles expansion without also triggering the row's own
+    /// mouse-down handling (project row-toggle or workspace selection).
+    func sidebarRowChevronButton(expanded: Bool, tooltip: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.isBordered = false
+        button.imageScaling = .scaleNone
+        button.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: tooltip)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        button.contentTintColor = .tertiaryLabelColor
+        button.toolTip = tooltip
+        button.setAccessibilityLabel(tooltip)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 16), button.heightAnchor.constraint(equalToConstant: 16)])
+        return button
+    }
+
+    @objc func toggleSidebarProjectDisclosure(_ sender: NSButton) {
+        guard let projectID = sender.identifier?.rawValue else { return }
+        sidebar.toggleProjectExpanded(projectID: projectID)
+    }
+
+    @objc func toggleSidebarWorkspaceDisclosure(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        sidebar.toggleWorkspaceExpanded(workspaceID: workspaceID)
+    }
+
     func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton(title: "", target: self, action: action)
         button.bezelStyle = .texturedRounded
@@ -6437,9 +6465,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     ) -> Int {
         let id = projectID.hashValue
         projectSettingsFieldRefs = ProjectFieldRefs(
-            formTag: id, projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportedConfigButton)
+            formTag: id, projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection,
+            portsSection: portsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
+            agentLaunchersSection: agentLaunchersSection, importButton: importButton, exportButton: exportButton,
+            discardImportedConfigButton: discardImportedConfigButton)
         return id
     }
 
@@ -6466,9 +6495,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     ) -> Int {
         let id = UUID().uuidString.hashValue
         addWorkspaceFieldRefs = AddWorkspaceFieldRefs(
-            formTag: id, projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
-            newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
-            createButton: createButton)
+            formTag: id, projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented,
+            existingBranchField: existingBranchField, newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField,
+            autoNameState: autoNameState, createButton: createButton)
         branchModeSegmented?.tag = id
         return id
     }
@@ -6487,6 +6516,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc func openDevicePairingWindow() { devicePairing.openDevicePairingWindow() }
     @objc func pairIOSWithConnectedDevice(_ sender: NSButton) { devicePairing.pairIOSWithConnectedDevice(sender) }
     @objc func connectRemoteDeviceFromPairingPanel() { devicePairing.connectRemoteDeviceFromPairingPanel() }
+    @objc func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) { devicePairing.toggleRemoteDeviceAdvancedFields(sender) }
     @objc func restartLocalDaemon() { devicePairing.restartLocalDaemon() }
     @objc func removeMacPairedDevice(_ sender: NSButton) { devicePairing.removeMacPairedDevice(sender) }
     @objc func beginClientDeviceRename(_ sender: NSMenuItem) { devicePairing.beginClientDeviceRename(sender) }
@@ -7296,25 +7326,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.launchWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performLaunchWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    /// Sender-free entry point for the sidebar workspace row's right-click menu, which fires from
+    /// an `NSMenuItem` rather than the footer's `NSButton`.
+    func launchWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performLaunchWorkspace(id: id) } }
+
+    private func performLaunchWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.launchWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7322,30 +7359,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.restartWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performRestartWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response):
-                    // Restart goes through the daemon stop path; the daemon does not own the
-                    // client-side dedicated Chrome windows, so close them here too for a clean
-                    // restarted state (a later browser focus then opens a fresh window).
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    func restartWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performRestartWorkspace(id: id) } }
+
+    private func performRestartWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.restartWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response):
+                // Restart goes through the daemon stop path; the daemon does not own the
+                // client-side dedicated Chrome windows, so close them here too for a clean
+                // restarted state (a later browser focus then opens a fresh window).
+                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7353,27 +7395,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.stopWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performStopWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response):
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    func stopWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performStopWorkspace(id: id) } }
+
+    private func performStopWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.stopWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response):
+                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7486,6 +7533,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func revealDirectoryInFinder(_ sender: Any) {
+        if let context = Self.senderWorkspacePathActionContext(sender) {
+            if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: context.workspaceID) { return }
+            NSWorkspace.shared.selectFile(context.path, inFileViewerRootedAtPath: "")
+            return
+        }
         if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
         guard let path = Self.senderIdentifier(sender) else { return }
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
@@ -7500,17 +7552,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
+    /// Accepts the per-row workspace path context from menu items whose action must resolve
+    /// remote/local state against the clicked workspace rather than the current selection.
+    static func senderWorkspacePathActionContext(_ sender: Any) -> WorkspacePathActionContext? {
+        if let menuItem = sender as? NSMenuItem { return menuItem.representedObject as? WorkspacePathActionContext }
+        return nil
+    }
+
     /// Stock `NSMenu` for the workspace detail ⋯ overflow. Items carry the
     /// workspace path (for Copy/Reveal) or workspace ID (for Archive/Hide) in their
-    /// `identifier.rawValue`, letting the underlying action methods stay
-    /// unchanged whether they're triggered by a button or a menu item.
+    /// `identifier.rawValue`. Reveal also carries the workspace id in
+    /// `representedObject` so remote/local gating resolves the action target itself.
     static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool = true) -> NSMenu {
         let menu = NSMenu()
 
-        func addItem(title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String) {
+        func addItem(
+            title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String,
+            representedObject: Any? = nil
+        ) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
             item.keyEquivalentModifierMask = modifiers
             item.identifier = NSUserInterfaceItemIdentifier(identifier)
+            item.representedObject = representedObject
             item.target = target
             if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
             menu.addItem(item)
@@ -7524,7 +7587,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if isLocalDevice {
             addItem(
                 title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
-                modifiers: [.command, .shift], identifier: path)
+                modifiers: [.command, .shift], identifier: path, representedObject: WorkspacePathActionContext(workspaceID: workspaceID, path: path))
         }
         menu.addItem(.separator())
         addItem(
@@ -7956,7 +8019,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.handleClosePaneShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
-            if self.handleSidebarArrowNavigation(event: event) { return nil }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
                 // In a global panel window the new tab opens there, targeting the
@@ -8626,76 +8688,76 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
         case .openTerminal(let request):
-            // Window-focus terminal targets are always workspace-backed (they come from a
-            // workspace's run-target list), so a missing device is a not-loaded state.
-            guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
-                showDeviceNotLoadedError()
-                return nil
-            }
-            Self.setClientActiveWorkspaceID(request.workspaceID)
-            // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
-            // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
-            // fires just after we foreground the terminal and re-hides the app, leaving
-            // `NSApp.isActive` false — which breaks window-cycle current-target resolution
-            // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
-            cancelDeferredExternalWindowHide()
-            // A row-built resolution can predate the session's overview entry and lack the
-            // real shell/command; recover them through the cold overview fetch so the pane's
-            // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
-            let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
-            guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return nil }
-            // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
-            // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
-            // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
-            // closed and reopened (or is currently a viewer) reattaches as owner instead of the
-            // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
-            // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
-            panelCoordinator.content(forSessionID: request.sessionID)?.requestOwnershipIfNeeded()
-            if let requestID, !requestID.isEmpty {
-                logPerfMetric(
-                    "terminal_window_focus_ipc", target: "session=\(request.sessionID)", elapsedMS: 0, success: true,
-                    detail: "route=pane request_id=\(requestID)")
-            }
+            guard await openOrFocusTerminalTarget(request, requestID: requestID) else { return nil }
             return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
-            guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-                showDeviceNotLoadedError()
-                return nil
-            }
-            let result = await Self.deviceMutation(device: device) { device in
+            return await runTerminalSessionMutationAndOpenPane(workspaceID: workspaceID) { device in
                 try SpacesDeviceClient.runWorkspaceProcess(
                     workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
-            switch result {
-            case .success(let response):
-                Self.setClientActiveWorkspaceID(workspaceID)
-                applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                return .open(hidesApp: false)
-            case .failure(let error):
-                showError(error)
-                return nil
-            }
         case .runCodingAgent(let workspaceID, let agentName, let agentLauncherID):
-            guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-                showDeviceNotLoadedError()
-                return nil
-            }
-            let result = await Self.deviceMutation(device: device) { device in
+            return await runTerminalSessionMutationAndOpenPane(workspaceID: workspaceID) { device in
                 try SpacesDeviceClient.runCodingAgent(
                     workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
-            switch result {
-            case .success(let response):
-                Self.setClientActiveWorkspaceID(workspaceID)
-                applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                return .open(hidesApp: false)
-            case .failure(let error):
-                showError(error)
-                return nil
-            }
         case .noWorkspace, .noMatch: return nil
+        }
+    }
+
+    @discardableResult private func openOrFocusTerminalTarget(_ request: DeviceTerminalOpenRequest, requestID: String? = nil) async -> Bool {
+        // Window-focus terminal targets are always workspace-backed (they come from a
+        // workspace's run-target list), so a missing device is a not-loaded state.
+        guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
+            showDeviceNotLoadedError()
+            return false
+        }
+        Self.setClientActiveWorkspaceID(request.workspaceID)
+        // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
+        // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
+        // fires just after we foreground the terminal and re-hides the app, leaving
+        // `NSApp.isActive` false — which breaks window-cycle current-target resolution
+        // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
+        cancelDeferredExternalWindowHide()
+        // A row-built resolution can predate the session's overview entry and lack the
+        // real shell/command; recover them through the cold overview fetch so the pane's
+        // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
+        let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
+        guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return false }
+        // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
+        // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
+        // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
+        // closed and reopened (or is currently a viewer) reattaches as owner instead of the
+        // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
+        // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
+        panelCoordinator.content(forSessionID: openRequest.sessionID)?.requestOwnershipIfNeeded()
+        if let requestID, !requestID.isEmpty {
+            logPerfMetric(
+                "terminal_window_focus_ipc", target: "session=\(openRequest.sessionID)", elapsedMS: 0, success: true,
+                detail: "route=pane request_id=\(requestID)")
+        }
+        return true
+    }
+
+    private func runTerminalSessionMutationAndOpenPane(
+        workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
+    ) async -> ExternalWindowAction? {
+        guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
+            showDeviceNotLoadedError()
+            return nil
+        }
+        let result = await Self.deviceMutation(device: device, operation: operation)
+        switch result {
+        case .success(let response):
+            applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+            guard let request = terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID),
+                await openOrFocusTerminalTarget(request)
+            else { return nil }
+            return .focus(hidesApp: false)
+        case .failure(let error):
+            showError(error)
+            return nil
         }
     }
 

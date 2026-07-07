@@ -119,7 +119,9 @@ public enum TerminalServiceTLSFingerprint {
             ])
             chmod(keyPEMURL.path, S_IRUSR | S_IWUSR)
             chmod(certificatePEMURL.path, S_IRUSR | S_IWUSR)
-            try runOpenSSL(["rsa", "-in", keyPEMURL.path, "-outform", "der", "-out", generatedKeyURL.path])
+            // Security expects PKCS#1 RSA private-key DER. `pkcs8` without `-topk8`
+            // emits that format from the unencrypted key produced by `req`.
+            try runOpenSSL(["pkcs8", "-nocrypt", "-in", keyPEMURL.path, "-outform", "der", "-out", generatedKeyURL.path])
             try runOpenSSL(["x509", "-in", certificatePEMURL.path, "-outform", "der", "-out", generatedCertificateURL.path])
             chmod(generatedKeyURL.path, S_IRUSR | S_IWUSR)
             chmod(generatedCertificateURL.path, S_IRUSR | S_IWUSR)

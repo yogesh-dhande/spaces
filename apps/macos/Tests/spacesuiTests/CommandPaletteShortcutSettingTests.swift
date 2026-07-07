@@ -20,6 +20,14 @@ import workspacecore
         #expect(commandPaletteIndex == hotkeyIndex.map { $0 + 1 })
     }
 
+    @Test func sidebarNavigationShortcutsAreConfigurableInSettingsPanel() {
+        // Sidebar selection moves only via leader+up/down, so those shortcuts must be user-overridable
+        // from the settings panel rather than hidden functional-only bindings.
+        let cases = AppKitController.ShortcutSetting.settingsPanelCases
+        #expect(cases.contains(.guiSidebarNextShortcut))
+        #expect(cases.contains(.guiSidebarPreviousShortcut))
+    }
+
     @Test func commandPaletteDismissShortcutUsesLeaderPlusX() {
         #expect(
             AppKitController.commandPaletteDismissShortcutMatches(
@@ -36,15 +44,11 @@ import workspacecore
     }
 
     @Test func shortcutLeaderSettingRequiresAtLeastTwoModifiers() throws {
-        let resolver = AppKitController.ShortcutSettingResolver { key in
-            key == SettingsKey.guiLeaderHotkey ? "ctrl" : nil
-        }
+        let resolver = AppKitController.ShortcutSettingResolver { key in key == SettingsKey.guiLeaderHotkey ? "ctrl" : nil }
         do {
             _ = try resolver.normalizedValue(for: .guiLeaderHotkey, rawValue: "ctrl")
             Issue.record("expected single-modifier leader to be rejected")
-        } catch {
-            #expect(error.localizedDescription == "Hotkey leader must contain at least two modifiers")
-        }
+        } catch { #expect(error.localizedDescription == "Hotkey leader must contain at least two modifiers") }
     }
 
     @Test func shortcutLeaderSettingNormalizesModifierOrder() throws {

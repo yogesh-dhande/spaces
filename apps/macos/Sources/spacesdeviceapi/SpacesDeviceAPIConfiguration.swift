@@ -7,9 +7,6 @@ import spacesterminalcore
 #elseif canImport(Glibc)
     import Glibc
 #endif
-#if canImport(Security)
-    import Security
-#endif
 
 public enum SpacesDeviceAPIDefaults {
     public static let host = SpacesDeviceAPIEndpointDefaults.host
@@ -21,8 +18,6 @@ public enum SpacesDeviceAPIDefaults {
     public static let disabledEnvironmentVariable = "SPACES_DEVICE_API_DISABLED"
     public static let hostEnvironmentVariable = "SPACES_DEVICE_API_HOST"
     public static let portEnvironmentVariable = "SPACES_DEVICE_API_PORT"
-    public static let transportKeyEnvironmentVariable = "SPACES_MOBILE_TRANSPORT_KEY"
-    public static let certificateFingerprintEnvironmentVariable = "SPACESD_CERTIFICATE_FINGERPRINT"
 
     public static func isWildcardHost(_ host: String) -> Bool {
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -42,67 +37,23 @@ public enum SpacesDeviceAPIDefaults {
 public struct SpacesDeviceAPISettings: Codable, Equatable, Sendable {
     public var host: String
     public var port: Int
-    public var transportKey: String
-    public var certificateFingerprint: String
 
-    public init(
-        host: String = SpacesDeviceAPIDefaults.host, port: Int = SpacesDeviceAPIDefaults.port,
-        transportKey: String = SpacesDeviceAPISettings.generateTransportKey(),
-        certificateFingerprint: String = SpacesDeviceAPISettings.generateCertificateFingerprint()
-    ) {
+    public init(host: String = SpacesDeviceAPIDefaults.host, port: Int = SpacesDeviceAPIDefaults.port) {
         self.host = host
         self.port = port
-        self.transportKey = transportKey
-        self.certificateFingerprint = certificateFingerprint
-    }
-
-    public static func generateTransportKey() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        #if canImport(Security)
-            let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-            if status == errSecSuccess { return SpacesDeviceAPITransport.encodeTransportKey(Data(bytes)) }
-            let fallbackBytes = Array((UUID().uuidString + UUID().uuidString).utf8.prefix(32))
-            return SpacesDeviceAPITransport.encodeTransportKey(Data(fallbackBytes))
-        #else
-            bytes = bytes.map { _ in UInt8.random(in: .min ... .max) }
-            return SpacesDeviceAPITransport.encodeTransportKey(Data(bytes))
-        #endif
     }
 
     private enum CodingKeys: String, CodingKey {
         case host
         case port
-        case pairingCode
-        case transportKey
-        case certificateFingerprint
     }
 
+    /// Tolerates settings files written by earlier versions: missing keys fall back to defaults and
+    /// extra keys (e.g. the retired transport-key identity fields) are ignored.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? SpacesDeviceAPIDefaults.host
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? SpacesDeviceAPIDefaults.port
-        transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? Self.generateTransportKey()
-        certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint) ?? Self.generateCertificateFingerprint()
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(host, forKey: .host)
-        try container.encode(port, forKey: .port)
-        try container.encode(transportKey, forKey: .transportKey)
-        try container.encode(certificateFingerprint, forKey: .certificateFingerprint)
-    }
-
-    public static func generateCertificateFingerprint() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        #if canImport(Security)
-            let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-            let data = status == errSecSuccess ? Data(bytes) : Data((UUID().uuidString + UUID().uuidString).utf8.prefix(32))
-        #else
-            bytes = bytes.map { _ in UInt8.random(in: .min ... .max) }
-            let data = Data(bytes)
-        #endif
-        return "SHA256:\(SpacesDeviceAPITransport.encodeTransportKey(data))"
     }
 }
 
@@ -143,7 +94,6 @@ public final class SpacesDeviceAPISettingsStore {
         if fileManager.fileExists(atPath: path) {
             let data = try Data(contentsOf: URL(fileURLWithPath: path))
             storedSettings = try JSONDecoder().decode(SpacesDeviceAPISettings.self, from: data)
-            if try !storedSettingsFileHasCurrentIdentityFields(data: data) { try save(storedSettings) }
         } else {
             storedSettings = SpacesDeviceAPISettings()
             try save(storedSettings)
@@ -151,19 +101,12 @@ public final class SpacesDeviceAPISettingsStore {
         return storedSettings
     }
 
-    public func status() throws -> SpacesDeviceAPIStatus {
+    public func status(certificateFingerprint: String) throws -> SpacesDeviceAPIStatus {
         let settings = try loadOrCreate()
         return SpacesDeviceAPIStatus(
             host: settings.host, port: settings.port, bonjourServiceName: try Self.bonjourServiceName(),
             bonjourServiceType: SpacesDeviceAPIDefaults.bonjourServiceType, networkAddresses: SpacesDeviceAPINetworkInterfaces.ipv4Addresses(),
-            certificateFingerprint: settings.certificateFingerprint)
-    }
-
-    @discardableResult public func rotateTransportKey() throws -> SpacesDeviceAPISettings {
-        var settings = try loadStoredOrCreate()
-        settings.transportKey = SpacesDeviceAPISettings.generateTransportKey()
-        try save(settings)
-        return applyingEnvironmentOverrides(to: settings)
+            certificateFingerprint: certificateFingerprint)
     }
 
     public static func bonjourServiceName() throws -> String {
@@ -183,14 +126,6 @@ public final class SpacesDeviceAPISettingsStore {
         try data.write(to: url, options: [.atomic])
     }
 
-    private func storedSettingsFileHasCurrentIdentityFields(data: Data) throws -> Bool {
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        guard let transportKey = object["transportKey"] as? String else { return false }
-        guard let certificateFingerprint = object["certificateFingerprint"] as? String else { return false }
-        return !transportKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     private func settingsPath() throws -> String {
         let root = try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager)
         return root.appendingPathComponent("device-api.json", isDirectory: false).path
@@ -201,10 +136,6 @@ public final class SpacesDeviceAPISettingsStore {
         if let host = trimmed(environment[SpacesDeviceAPIDefaults.hostEnvironmentVariable]) { resolved.host = host }
         if let port = trimmed(environment[SpacesDeviceAPIDefaults.portEnvironmentVariable]).flatMap(Int.init), (0...65_535).contains(port) {
             resolved.port = port
-        }
-        if let transportKey = trimmed(environment[SpacesDeviceAPIDefaults.transportKeyEnvironmentVariable]) { resolved.transportKey = transportKey }
-        if let certificateFingerprint = trimmed(environment[SpacesDeviceAPIDefaults.certificateFingerprintEnvironmentVariable]) {
-            resolved.certificateFingerprint = certificateFingerprint
         }
         return resolved
     }

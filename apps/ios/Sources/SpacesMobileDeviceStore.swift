@@ -36,9 +36,7 @@ enum SpacesMobileDeviceStore {
                 let host = seededDevice.host.trimmingCharacters(in: .whitespacesAndNewlines)
                 let fingerprint = seededDevice.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
                 let authToken = seededDevice.authToken.trimmingCharacters(in: .whitespacesAndNewlines)
-                let transportKey = seededDevice.transportKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !host.isEmpty, (1...65_535).contains(seededDevice.port), !fingerprint.isEmpty,
-                      !authToken.isEmpty, !transportKey.isEmpty
+                guard !host.isEmpty, (1...65_535).contains(seededDevice.port), !fingerprint.isEmpty, !authToken.isEmpty
                 else { return nil }
 
                 let id = seededDevice.id?.nilIfBlank ?? deviceID(
@@ -47,7 +45,6 @@ enum SpacesMobileDeviceStore {
                     port: seededDevice.port
                 )
                 saveSecret(authToken, deviceID: id, kind: .authToken)
-                saveSecret(transportKey, deviceID: id, kind: .transportKey)
                 return SpacesMobilePairedDeviceRecord(
                     id: id,
                     name: seededDevice.name.nilIfBlank ?? host,
@@ -82,7 +79,6 @@ enum SpacesMobileDeviceStore {
             var port: Int
             var certificateFingerprint: String
             var authToken: String
-            var transportKey: String
             var createdAt: String?
             var updatedAt: String?
             var lastSelectedAt: String?
@@ -99,7 +95,6 @@ enum SpacesMobileDeviceStore {
             devices = [record]
             activeDeviceID = record.id
             saveSecret(fallbackSettings.authToken, deviceID: record.id, kind: .authToken)
-            saveSecret(fallbackSettings.transportKey, deviceID: record.id, kind: .transportKey)
             saveDevices(devices)
             UserDefaults.standard.set(record.id, forKey: activeDeviceKey)
         }
@@ -118,7 +113,6 @@ enum SpacesMobileDeviceStore {
             settings = Self.settings(from: active, installationID: fallbackSettings.installationID)
         } else if !fallbackSettings.isPaired {
             settings.authToken = ""
-            settings.transportKey = ""
             settings.certificateFingerprint = ""
         }
 
@@ -142,7 +136,6 @@ enum SpacesMobileDeviceStore {
         devices.removeAll { $0.id == record.id }
         devices.insert(record, at: 0)
         saveSecret(settings.authToken, deviceID: record.id, kind: .authToken)
-        saveSecret(settings.transportKey, deviceID: record.id, kind: .transportKey)
         saveDevices(devices)
         UserDefaults.standard.set(record.id, forKey: activeDeviceKey)
         return load(fallbackSettings: settings)
@@ -175,7 +168,6 @@ enum SpacesMobileDeviceStore {
     static func remove(deviceID: String, fallbackSettings: SpacesMobileConnectionSettings) -> SpacesMobileDeviceStoreState {
         let devices = loadDevices().filter { $0.id != deviceID }
         deleteSecret(deviceID: deviceID, kind: .authToken)
-        deleteSecret(deviceID: deviceID, kind: .transportKey)
         let activeDeviceID = UserDefaults.standard.string(forKey: activeDeviceKey)
         if activeDeviceID == deviceID {
             if let firstDeviceID = devices.first?.id {
@@ -188,7 +180,6 @@ enum SpacesMobileDeviceStore {
         var fallback = fallbackSettings
         if devices.isEmpty {
             fallback.authToken = ""
-            fallback.transportKey = ""
             fallback.certificateFingerprint = ""
         }
         return load(fallbackSettings: fallback)
@@ -228,7 +219,6 @@ enum SpacesMobileDeviceStore {
         settings.port = device.port
         settings.certificateFingerprint = device.certificateFingerprint
         settings.authToken = secret(deviceID: device.id, kind: .authToken) ?? ""
-        settings.transportKey = secret(deviceID: device.id, kind: .transportKey) ?? ""
         settings.installationID = installationID
         return settings
     }
@@ -242,7 +232,6 @@ enum SpacesMobileDeviceStore {
 
     private enum SecretKind: String {
         case authToken
-        case transportKey
     }
 
     private static func saveSecret(_ value: String, deviceID: String, kind: SecretKind) {

@@ -90,12 +90,20 @@ extension AppKitController {
         visibleWorkspacePortsSection = portsSection
         visiblePortsWorkspaceID = workspace.id
 
+        // Read-only reference: the authoritative env vars the daemon injects into this workspace's
+        // processes and terminals (identity vars plus the per-service port/host/URL triple). Placed
+        // after Ports because the named ports produce most of these variables.
+        let envSection = WorkspaceEnvSection(environment: detail.environment)
+
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
             value: config.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
         stopScriptSection.onCommit = { value in commit { $0.stopScript = value.isEmpty ? nil : value } }
 
-        for section in [browserSessionsSection.view, processesSection.view, agentLaunchersSection.view, portsSection.view, stopScriptSection.view] {
+        for section in [
+            browserSessionsSection.view, processesSection.view, agentLaunchersSection.view, portsSection.view, envSection.view,
+            stopScriptSection.view,
+        ] {
             stack.addArrangedSubview(section)
             constrainFormFieldToFillWidth(section, in: stack)
         }

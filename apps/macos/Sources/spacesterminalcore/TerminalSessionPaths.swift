@@ -27,8 +27,7 @@ public struct TerminalSessionPaths: Sendable, Equatable {
         let profileRootDirectory = try spacesProfileRootDirectory()
         let root = runtimeDirectory.appendingPathComponent("terminal", isDirectory: true).appendingPathComponent("sessions", isDirectory: true)
             .appendingPathComponent(id, isDirectory: true)
-        let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-terminal-sockets", isDirectory: true)
-        try FileManager.default.createDirectory(at: socketRoot, withIntermediateDirectories: true)
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
         let socketNamePrefix = socketPathComponent(for: profileRootDirectory.path, sessionID: id)
         let controlSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix).sock").path
         let subscriptionSocketPath = socketRoot.appendingPathComponent("\(socketNamePrefix)-subscription.sock").path

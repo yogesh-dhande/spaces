@@ -93,6 +93,10 @@ import workspacecore
     private weak var remoteDeviceSSHHostField: NSTextField?
     private weak var remoteDeviceSSHUserField: NSTextField?
     private weak var remoteDeviceSSHPortField: NSTextField?
+    /// The collapsible row holding the optional username/port fields. Hidden until the user
+    /// expands "Advanced" so the form reads as host-only by default.
+    private weak var remoteDeviceAdvancedRow: NSView?
+    private weak var remoteDeviceAdvancedToggle: NSButton?
     private weak var remoteDevicePairingStatusLabel: NSTextField?
     private var currentDevicePairingWindow: ClientDevicePairingWindow?
     private var devicePanelStatusMessage: (message: String, isError: Bool)?
@@ -318,32 +322,52 @@ import workspacecore
         var rows: [NSView] = []
         rows.append(
             devicePairingInstructionLabel(
-                "Enter the SSH details for a Mac or Linux device. Macs need the Spaces app installed first. Linux is set up automatically over SSH."))
+                "Enter the SSH details for a Mac or Linux device. Install Spaces on the device first: the Spaces app on a Mac, or the Spaces installer on Ubuntu 24.04."
+            ))
 
         let sshHostField = NSTextField()
         sshHostField.placeholderString = "SSH host"
         sshHostField.setAccessibilityIdentifier("remote-device-ssh-host")
+        sshHostField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         remoteDeviceSSHHostField = sshHostField
+        rows.append(sshHostField)
+
+        // Username and port are optional (they default to the SSH login and port 22), so they live
+        // behind a collapsed "Advanced" disclosure to keep the common case a single host field.
+        let advancedToggle = NSButton(title: "Advanced", target: host, action: #selector(AppKitController.toggleRemoteDeviceAdvancedFields(_:)))
+        advancedToggle.isBordered = false
+        advancedToggle.bezelStyle = .inline
+        advancedToggle.setButtonType(.momentaryChange)
+        advancedToggle.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Advanced")
+        advancedToggle.imagePosition = .imageLeading
+        advancedToggle.imageHugsTitle = true
+        advancedToggle.font = .systemFont(ofSize: 12, weight: .medium)
+        advancedToggle.contentTintColor = .secondaryLabelColor
+        advancedToggle.toolTip = "Optional SSH username and port"
+        advancedToggle.setAccessibilityIdentifier("remote-device-advanced-toggle")
+        remoteDeviceAdvancedToggle = advancedToggle
+        rows.append(mobilePanelButtonRow([advancedToggle]))
 
         let sshUserField = NSTextField()
-        sshUserField.placeholderString = "username"
+        sshUserField.placeholderString = "username (defaults to SSH login)"
         sshUserField.setAccessibilityIdentifier("remote-device-ssh-user")
         remoteDeviceSSHUserField = sshUserField
 
         let sshPortField = NSTextField()
-        sshPortField.placeholderString = "port"
+        sshPortField.placeholderString = "port (22)"
         sshPortField.setAccessibilityIdentifier("remote-device-ssh-port")
         remoteDeviceSSHPortField = sshPortField
 
-        let sshRow = NSStackView(views: [sshHostField, sshUserField, sshPortField])
-        sshRow.orientation = .horizontal
-        sshRow.alignment = .centerY
-        sshRow.spacing = 8
-        sshRow.translatesAutoresizingMaskIntoConstraints = false
-        sshHostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        let advancedRow = NSStackView(views: [sshUserField, sshPortField])
+        advancedRow.orientation = .horizontal
+        advancedRow.alignment = .centerY
+        advancedRow.spacing = 8
+        advancedRow.translatesAutoresizingMaskIntoConstraints = false
         sshUserField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         sshPortField.widthAnchor.constraint(equalToConstant: 70).isActive = true
-        rows.append(sshRow)
+        advancedRow.isHidden = true
+        remoteDeviceAdvancedRow = advancedRow
+        rows.append(advancedRow)
 
         let connectButton = host.actionButton(
             title: "Connect Remote Device", symbol: "link", tooltip: "Connect this Mac with another device over SSH",
@@ -356,6 +380,15 @@ import workspacecore
         rows.append(statusLabel)
 
         return mobilePanelSection(icon: "link.badge.plus", title: "Add Remote Device", rows: rows)
+    }
+
+    /// Expands or collapses the optional username/port fields and rotates the disclosure chevron.
+    func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) {
+        guard let advancedRow = remoteDeviceAdvancedRow else { return }
+        let willExpand = advancedRow.isHidden
+        advancedRow.isHidden = !willExpand
+        let symbol = willExpand ? "chevron.down" : "chevron.right"
+        sender.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Advanced")
     }
 
     private func mobilePanelSection(icon: String, title: String, rows: [NSView]) -> NSView {
@@ -484,10 +517,8 @@ import workspacecore
         Task { [weak self] in
             do {
                 let appVersion = AppVersion.short
-                let remoteArtifactPublicKey = AppVersion.remoteArtifactPublicKey
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try SpacesDevicePairingClient.openRemotePairingWindow(
-                        for: device, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey)
+                    try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: appVersion)
                 }.value
                 let expiresAt = result.expiresAt.flatMap { Self.iso8601Formatter.date(from: $0) } ?? Date().addingTimeInterval(300)
                 self?.currentDevicePairingWindow = ClientDevicePairingWindow(
@@ -508,7 +539,6 @@ import workspacecore
         let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
         let deviceName = Host.current().localizedName ?? "Mac"
         let appVersion = AppVersion.short
-        let remoteArtifactPublicKey = AppVersion.remoteArtifactPublicKey
         setRemoteDevicePairingStatus("Validating SSH and preparing the remote device...", isError: false)
         Task { [weak self] in
             do {
@@ -519,7 +549,7 @@ import workspacecore
                         SpacesRemoteDevicePairingRequest(
                             sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
                             clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey))
+                            clientAppVersion: appVersion))
                 }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
@@ -599,7 +629,6 @@ import workspacecore
             let database = try host.clientDatabase()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
-            try SpacesDeviceCredentialStore.deleteTransportKey(deviceID: deviceID)
             refreshVisibleDeviceSettingsAfterClientDeviceChange()
             host.requestSidebarReload()
         } catch { host.showError(error) }
@@ -651,7 +680,7 @@ import workspacecore
             id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", host: localHost, port: localStatus?.port, sshHost: nil, sshUser: nil,
             sshPort: nil, isLocal: true, isAvailable: !requireLocalStatus || localStatus != nil, requiresReconnect: false)
         let remote = host.macPairedDevices().map {
-            let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(deviceID: $0.id)
+            let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
                 id: $0.id, name: $0.name, host: $0.host, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort, isLocal: false,
                 isAvailable: hasCredentials, requiresReconnect: !hasCredentials)

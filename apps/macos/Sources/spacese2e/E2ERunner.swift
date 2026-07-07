@@ -103,7 +103,8 @@ private struct E2EScenarioDescriptor: Sendable {
     }
 
     fileprivate static let app: [E2EScenarioDescriptor] = [
-        E2EScenarioDescriptor(name: "full", kind: .script(scriptName: "e2e_macos_app.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: true) })),
+        E2EScenarioDescriptor(
+            name: "full", kind: .script(scriptName: "e2e_macos_app.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: true) })),
         E2EScenarioDescriptor(
             name: "smoke",
             kind: .script(
@@ -146,7 +147,8 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(
             name: "stress",
             kind: .script(scriptName: "profile_built_in_terminal_stress.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
-        E2EScenarioDescriptor(name: "soak", kind: .script(scriptName: "soak_built_in_terminal.sh", arguments: [], environment: { $0.soakEnvironment() })),
+        E2EScenarioDescriptor(
+            name: "soak", kind: .script(scriptName: "soak_built_in_terminal.sh", arguments: [], environment: { $0.soakEnvironment() })),
         E2EScenarioDescriptor(
             name: "device-api-profile",
             kind: .script(scriptName: "profile_device_api.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
@@ -879,9 +881,7 @@ private struct E2ERunner {
     private static func slug(_ value: String) -> String {
         let slug = value.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
             in: CharacterSet(charactersIn: "-"))
-        let capped = slug.count > maxSlugLength
-            ? String(slug.prefix(maxSlugLength)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-            : slug
+        let capped = slug.count > maxSlugLength ? String(slug.prefix(maxSlugLength)).trimmingCharacters(in: CharacterSet(charactersIn: "-")) : slug
         return capped.isEmpty ? "step" : capped
     }
 
