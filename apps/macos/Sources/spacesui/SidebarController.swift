@@ -34,6 +34,20 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     init(host: AppKitController) {
         self.host = host
         super.init()
+        reloadCoordinator = SidebarReloadCoordinator<SidebarDataSnapshot>(
+            loadSnapshot: { await AppKitController.initialSidebarDataSnapshot() },
+            applySnapshot: { [weak self] snapshot, forceRemoteRefresh in
+                self?.applySidebarDataSnapshot(snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh)
+            },
+            handleFailure: { [weak self] error, failurePlaceholderMessage in
+                guard let self else { return }
+                if let failurePlaceholderMessage {
+                    self.host.showError(error)
+                    self.host.showPlaceholder(message: failurePlaceholderMessage)
+                } else {
+                    self.host.handleBackgroundRefreshFailure(error, source: "sidebar_reload")
+                }
+            })
     }
 
     typealias OutlineItem = AppKitController.OutlineItem
@@ -95,10 +109,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// duplicate connections.
     private var remoteOverviewSubscribing: Set<String> = []
     private var remoteOverviewSubscriptionsEnabled = false
-    private var sidebarReloadTask: Task<Void, Never>?
-    private var pendingSidebarReloadRequest = false
-    private var pendingSidebarReloadFailureMessage: String?
-    private var pendingSidebarReloadForceRemoteRefresh = false
+    private var reloadCoordinator: SidebarReloadCoordinator<SidebarDataSnapshot>!
     /// Set when a database-change signal arrives while the user is mid-edit;
     /// flushed at idle points so a deferred change is not lost.
     private var pendingDatabaseReload = false
@@ -166,14 +177,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// teardown and termination paths.
     func stopSidebarTasks() {
         pendingDatabaseReload = false
-        sidebarReloadTask?.cancel()
-        sidebarReloadTask = nil
-        pendingSidebarReloadRequest = false
-        pendingSidebarReloadFailureMessage = nil
+        reloadCoordinator.stop()
         stopRemoteOverviewSubscriptions()
     }
 
-    func cancelSidebarReloadTask() { sidebarReloadTask?.cancel() }
+    func cancelSidebarReloadTask() { reloadCoordinator.cancelCurrentTask() }
 
     /// Reloads sidebar metadata after a database write, signaled by whichever
     /// process committed it (`IPCNotification.databaseDidChange`). Catches external
@@ -227,37 +235,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false) {
-        if let sidebarReloadTask, !sidebarReloadTask.isCancelled {
-            pendingSidebarReloadRequest = true
-            pendingSidebarReloadForceRemoteRefresh = pendingSidebarReloadForceRemoteRefresh || forceRemoteRefresh
-            pendingSidebarReloadFailureMessage = pendingSidebarReloadFailureMessage ?? failurePlaceholderMessage
-            return
-        }
-        let currentFailurePlaceholderMessage = failurePlaceholderMessage
-        sidebarReloadTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let result = await AppKitController.initialSidebarDataSnapshot()
-            guard !Task.isCancelled else { return }
-            switch result {
-            case .success(let snapshot): self.applySidebarDataSnapshot(snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh)
-            case .failure(let error):
-                if let currentFailurePlaceholderMessage {
-                    self.host.showError(error)
-                    self.host.showPlaceholder(message: currentFailurePlaceholderMessage)
-                } else {
-                    self.host.handleBackgroundRefreshFailure(error, source: "sidebar_reload")
-                }
-            }
-            self.sidebarReloadTask = nil
-            if self.pendingSidebarReloadRequest {
-                let pendingFailurePlaceholderMessage = self.pendingSidebarReloadFailureMessage
-                let pendingForceRemoteRefresh = self.pendingSidebarReloadForceRemoteRefresh
-                self.pendingSidebarReloadRequest = false
-                self.pendingSidebarReloadFailureMessage = nil
-                self.pendingSidebarReloadForceRemoteRefresh = false
-                self.requestSidebarReload(failurePlaceholderMessage: pendingFailurePlaceholderMessage, forceRemoteRefresh: pendingForceRemoteRefresh)
-            }
-        }
+        reloadCoordinator.request(failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh)
     }
 
     func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false) {
@@ -668,12 +646,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func deviceSection(id deviceID: String) -> DeviceSection? { host.deviceSections.first(where: { $0.deviceID == deviceID }) }
 
     func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? {
-        for project in host.projects {
-            if let workspaces = host.workspacesByProject[project.id], let workspace = workspaces.first(where: { $0.id == id }) {
-                return (project, workspace)
-            }
-        }
-        return nil
+        // host.workspaceIndex is a flat id -> (projectID, workspace) map rebuilt alongside
+        // workspacesByProject (see its didSet), so this is O(1) plus one linear scan over
+        // projects (typically far smaller than projects x workspaces) instead of a nested scan.
+        guard let entry = host.workspaceIndex[id], let project = host.projects.first(where: { $0.id == entry.projectID }) else { return nil }
+        return (project, entry.workspace)
     }
 
     private func isVisibleWorkspace(_ workspace: WorkspaceSummary) -> Bool { !workspace.isArchived && !workspace.isHidden }

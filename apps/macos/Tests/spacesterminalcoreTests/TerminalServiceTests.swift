@@ -103,6 +103,42 @@ import XCTest
             XCTAssertEqual(TerminalService.parseSocketOwnerProcessIDs(output, socketPath: socketPath), [222, 333])
         }
 
+        func testDaemonWireCompatibleWhenVersionsMatch() {
+            let response = TerminalServiceResponse(
+                ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version))
+            XCTAssertNil(TerminalService.daemonWireIncompatibility(response))
+            XCTAssertNoThrow(try TerminalService.assertDaemonWireCompatible(response))
+        }
+
+        func testDaemonWireIncompatibleWhenDaemonIsOlder() throws {
+            let response = TerminalServiceResponse(
+                ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version - 1, activeSessionCount: 2))
+            let message = try XCTUnwrap(TerminalService.daemonWireIncompatibility(response))
+            XCTAssertTrue(message.contains("Restart the daemon"))
+            // Impact suffix appears when a restart would interrupt running work.
+            XCTAssertTrue(message.contains("Restarting stops"))
+            XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response))
+        }
+
+        func testDaemonWireIncompatibleWhenClientIsOlder() throws {
+            let response = TerminalServiceResponse(
+                ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version + 1))
+            let message = try XCTUnwrap(TerminalService.daemonWireIncompatibility(response))
+            XCTAssertTrue(message.contains("Update Spaces"))
+        }
+
+        func testDaemonWireIncompatibleWhenStatusIsMissing() throws {
+            // A daemon predating wire-version negotiation omits daemonStatus entirely; treat it as too old.
+            let response = TerminalServiceResponse(ok: true, message: "pong")
+            XCTAssertNotNil(TerminalService.daemonWireIncompatibility(response))
+        }
+
+        private func makeDaemonStatus(protocolVersion: Int, activeSessionCount: Int = 0) -> TerminalServiceDaemonStatus {
+            TerminalServiceDaemonStatus(
+                version: "0.1.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: activeSessionCount,
+                protocolVersion: protocolVersion)
+        }
+
         func testCreateSessionRequestTimeoutUsesPositiveEnvironmentOverride() {
             XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACESD_CREATE_TIMEOUT": "45"]), 45)
             XCTAssertEqual(TerminalService.createSessionRequestTimeout(environment: ["SPACESD_CREATE_TIMEOUT": "0"]), 30)

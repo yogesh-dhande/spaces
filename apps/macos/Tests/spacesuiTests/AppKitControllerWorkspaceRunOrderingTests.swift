@@ -8,11 +8,14 @@ import workspacecore
         let configuredProcesses = [ProcessTemplate(name: "api", command: "run api"), ProcessTemplate(name: "web", command: "run web")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "session-web", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
+                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "session-web",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-api", workspaceID: "workspace", app: "Spaces", title: "api", targetURL: nil, terminalTrackingID: "session-api", role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                id: "win-api", workspaceID: "workspace", app: "Spaces", title: "api", targetURL: nil, terminalTrackingID: "session-api",
+                role: "terminal", orderIndex: 201, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-shell", workspaceID: "workspace", app: "Spaces", title: "* zsh", targetURL: nil, terminalTrackingID: "session-shell", role: "terminal", orderIndex: 202, lastSeenAt: "now"),
+                id: "win-shell", workspaceID: "workspace", app: "Spaces", title: "* zsh", targetURL: nil, terminalTrackingID: "session-shell",
+                role: "terminal", orderIndex: 202, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
@@ -35,7 +38,8 @@ import workspacecore
         let configuredProcesses = [ProcessTemplate(name: "api", command: "run api"), ProcessTemplate(name: "web", command: "run web")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "session-web", role: "terminal", orderIndex: 200, lastSeenAt: "now")
+                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "session-web",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
@@ -57,7 +61,8 @@ import workspacecore
         let configuredProcesses = [ProcessTemplate(name: "web server", command: "PORT=20003 npm run dev")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web server", targetURL: nil, terminalTrackingID: "session-web", role: "terminal", orderIndex: 200, lastSeenAt: "now")
+                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web server", targetURL: nil, terminalTrackingID: "session-web",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
@@ -78,7 +83,8 @@ import workspacecore
         let configuredProcesses = [ProcessTemplate(name: "name:api", command: "npm run api")]
         let windows = [
             WindowRecord(
-                id: "win-api", workspaceID: "workspace", app: "Spaces", title: "name:api", targetURL: nil, terminalTrackingID: "session-api", role: "terminal", orderIndex: 200, lastSeenAt: "now")
+                id: "win-api", workspaceID: "workspace", app: "Spaces", title: "name:api", targetURL: nil, terminalTrackingID: "session-api",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
@@ -99,9 +105,11 @@ import workspacecore
         let configuredProcesses = [ProcessTemplate(name: "api", command: "run api")]
         let windows = [
             WindowRecord(
-                id: "win-agent", workspaceID: "workspace", app: "Spaces", title: "agent", targetURL: nil, terminalTrackingID: "session-agent", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
+                id: "win-agent", workspaceID: "workspace", app: "Spaces", title: "agent", targetURL: nil, terminalTrackingID: "session-agent",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-api", workspaceID: "workspace", app: "Spaces", title: "api", targetURL: nil, terminalTrackingID: "session-api", role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                id: "win-api", workspaceID: "workspace", app: "Spaces", title: "api", targetURL: nil, terminalTrackingID: "session-api",
+                role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
@@ -132,7 +140,8 @@ import workspacecore
                 id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "spaces-web",
                 role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-shell", workspaceID: "workspace", app: "Spaces", title: "shell-1", targetURL: nil, terminalTrackingID: "spaces-spaces-token", role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                id: "win-shell", workspaceID: "workspace", app: "Spaces", title: "shell-1", targetURL: nil, terminalTrackingID: "spaces-spaces-token",
+                role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
@@ -157,9 +166,11 @@ import workspacecore
         let configuredProcesses = [ProcessTemplate(name: "web", command: "run web")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "Spaces", name: "web", detail: nil, targetURL: nil, terminalTrackingID: "spaces-web", terminalNativeID: "spaces-web", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
+                id: "win-web", workspaceID: "workspace", app: "Spaces", name: "web", detail: nil, targetURL: nil, terminalTrackingID: "spaces-web",
+                terminalNativeID: "spaces-web", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-shell", workspaceID: "workspace", app: "Spaces", name: "shell-1", detail: nil, targetURL: nil, terminalTrackingID: "spaces-spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                id: "win-shell", workspaceID: "workspace", app: "Spaces", name: "shell-1", detail: nil, targetURL: nil,
+                terminalTrackingID: "spaces-spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
@@ -185,8 +196,8 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: "codex --model gpt-5",
-                targetURL: nil, terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal",
-                orderIndex: 200, lastSeenAt: "now")
+                targetURL: nil, terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200,
+                lastSeenAt: "now")
         ]
         let agentWindows = [
             AgentWindowRecord(
@@ -203,8 +214,7 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: "codex", targetURL: nil,
-                terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200,
-                lastSeenAt: "now")
+                terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let agentWindows = [
             AgentWindowRecord(
@@ -221,8 +231,7 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200,
-                lastSeenAt: "now")
+                terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
 
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(configuredProcesses: [], windows: windows, processes: [], agentWindows: [])
@@ -235,9 +244,11 @@ import workspacecore
     @Test func preferredTerminalWindowsByTrackingKeyKeepsLowestOrderWhenKeysCollide() {
         let windows = [
             WindowRecord(
-                id: "win-newer", workspaceID: "workspace", app: "Spaces", name: "shell-2", detail: "newer", targetURL: nil, terminalTrackingID: "spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 205, lastSeenAt: "now"),
+                id: "win-newer", workspaceID: "workspace", app: "Spaces", name: "shell-2", detail: "newer", targetURL: nil,
+                terminalTrackingID: "spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 205, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-older", workspaceID: "workspace", app: "Spaces", name: "shell-1", detail: "older", targetURL: nil, terminalTrackingID: "spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                id: "win-older", workspaceID: "workspace", app: "Spaces", name: "shell-1", detail: "older", targetURL: nil,
+                terminalTrackingID: "spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
 
         let linkedWindows = AppKitController.preferredTerminalWindowsByTrackingKey(windows)
@@ -251,7 +262,8 @@ import workspacecore
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "session-web", role: "terminal", orderIndex: 200, lastSeenAt: "now")
+                id: "win-web", workspaceID: "workspace", app: "Spaces", title: "web", targetURL: nil, terminalTrackingID: "session-web",
+                role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let processes = [
             RunningProcessRecord(
@@ -270,12 +282,21 @@ import workspacecore
             browserSessions: browserSessions, processEntries: processEntries,
             processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), configuredAgentLaunchers: configuredAgentLaunchers,
             agentWindows: agentWindows)
+        let runtimeIndex = AppKitController.workspaceRuntimeTargetIndex(
+            browserSessions: browserSessions, processEntries: processEntries,
+            processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), configuredAgentLaunchers: configuredAgentLaunchers,
+            agentWindows: agentWindows)
 
         #expect(shortcutTargets.map(\.kind) == [.browser, .process, .agentLauncher, .agent])
+        #expect(runtimeIndex.orderedTargets.map(\.kind) == shortcutTargets.map(\.kind))
         #expect(shortcutTargets.first?.targetURL == "http://localhost:3000")
         #expect(shortcutTargets[1].processID == "process-web")
         #expect(shortcutTargets[2].launcherName == "claude")
         #expect(shortcutTargets[3].agentWindow?.id == "agent")
+        #expect(runtimeIndex.targetsByURL["http://localhost:3000"]?.kind == .browser)
+        #expect(runtimeIndex.targetsByProcessID["process-web"]?.kind == .process)
+        #expect(runtimeIndex.targetsByTerminalSessionID["session-web"]?.processID == "process-web")
+        #expect(runtimeIndex.targetsByAgentID["agent"]?.kind == .agent)
     }
 
     @Test func configuredAndAdHocAgentsShareOneVisibleShortcutRunOrder() {
@@ -303,9 +324,11 @@ import workspacecore
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
         let windows = [
             WindowRecord(
-                id: "win-web", workspaceID: "workspace", app: "Spaces", name: "web", detail: "npm run dev", targetURL: nil, terminalTrackingID: "session-web", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
+                id: "win-web", workspaceID: "workspace", app: "Spaces", name: "web", detail: "npm run dev", targetURL: nil,
+                terminalTrackingID: "session-web", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: "win-shell", workspaceID: "workspace", app: "Spaces", name: nil, detail: "* zsh", targetURL: nil, terminalTrackingID: "session-shell", role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                id: "win-shell", workspaceID: "workspace", app: "Spaces", name: nil, detail: "* zsh", targetURL: nil,
+                terminalTrackingID: "session-shell", role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(

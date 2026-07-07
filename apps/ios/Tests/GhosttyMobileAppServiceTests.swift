@@ -123,6 +123,110 @@
             }
         }
 
+        private actor AuthenticationPromptRecorder {
+            private var messages: [String] = []
+
+            func append(_ message: String) { messages.append(message) }
+
+            func firstMessage() -> String? { messages.first }
+        }
+
+        private final class HoldOpenTCPServer: @unchecked Sendable {
+            private let socketFD: Int32
+            private let acceptQueue = DispatchQueue(label: "spaces.mobile.tests.hold-open-tcp")
+            private let lock = NSLock()
+            private var acceptedSockets: [Int32] = []
+            private var isStopped = false
+            let port: Int
+
+            init() throws {
+                let fd = socket(AF_INET, SOCK_STREAM, 0)
+                guard fd >= 0 else { throw Self.currentPOSIXError() }
+                var reuse: Int32 = 1
+                guard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                    close(fd)
+                    throw Self.currentPOSIXError()
+                }
+
+                var address = sockaddr_in()
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_port = in_port_t(0)
+                inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+                let bindResult = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                        Darwin.bind(fd, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                guard bindResult == 0 else {
+                    close(fd)
+                    throw Self.currentPOSIXError()
+                }
+                guard listen(fd, SOMAXCONN) == 0 else {
+                    close(fd)
+                    throw Self.currentPOSIXError()
+                }
+
+                var boundAddress = sockaddr_in()
+                var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                        getsockname(fd, sockaddrPointer, &length)
+                    }
+                }
+                guard nameResult == 0 else {
+                    close(fd)
+                    throw Self.currentPOSIXError()
+                }
+
+                socketFD = fd
+                port = Int(UInt16(bigEndian: boundAddress.sin_port))
+                acceptQueue.async { [weak self] in self?.acceptConnections() }
+            }
+
+            func stop() {
+                lock.lock()
+                guard !isStopped else {
+                    lock.unlock()
+                    return
+                }
+                isStopped = true
+                let sockets = acceptedSockets
+                acceptedSockets.removeAll()
+                lock.unlock()
+
+                shutdown(socketFD, SHUT_RDWR)
+                close(socketFD)
+                for socket in sockets {
+                    shutdown(socket, SHUT_RDWR)
+                    close(socket)
+                }
+            }
+
+            deinit {
+                stop()
+            }
+
+            private func acceptConnections() {
+                while true {
+                    let acceptedSocket = Darwin.accept(socketFD, nil, nil)
+                    guard acceptedSocket >= 0 else { return }
+                    lock.lock()
+                    if isStopped {
+                        lock.unlock()
+                        shutdown(acceptedSocket, SHUT_RDWR)
+                        close(acceptedSocket)
+                        return
+                    }
+                    acceptedSockets.append(acceptedSocket)
+                    lock.unlock()
+                }
+            }
+
+            private static func currentPOSIXError() -> POSIXError {
+                POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
+
         private func settings() -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
             settings.host = "127.0.0.1"
@@ -312,6 +416,76 @@
             XCTAssertEqual(model.renderMode, "ended")
             XCTAssertFalse(model.showsTakeOverAction)
             XCTAssertFalse(model.acceptsInput)
+        }
+
+        func testStopCancelsActiveStreamBeforeRestartingViewer() async throws {
+            let streamServer = try HoldOpenTCPServer()
+            defer { streamServer.stop() }
+            var settings = settings()
+            settings.port = streamServer.port
+            let recorder = DeviceAPIRequestRecorder()
+            let runningState = Self.runningTerminalState()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if case .state = request.command { return Self.terminalStateResponse(runningState) }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.start()
+            let didAttachInitially = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didAttachInitially, "Expected the initial viewer start to attach before subscribing.")
+            let didRefreshStateInitially = try await waitForStateRequestCount(1, recorder: recorder)
+            XCTAssertTrue(didRefreshStateInitially, "Expected the initial viewer start to reach the post-subscribe state refresh.")
+
+            model.stop()
+            model.start()
+
+            let didAttachAfterRestart = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
+            XCTAssertTrue(didAttachAfterRestart, "Expected restarting the same viewer model after stop() to open a fresh stream.")
+        }
+
+        func testAuthenticationFailureAfterSubscribingCancelsStreamBeforeRestartingViewer() async throws {
+            let streamServer = try HoldOpenTCPServer()
+            defer { streamServer.stop() }
+            var settings = settings()
+            settings.port = streamServer.port
+            let recorder = DeviceAPIRequestRecorder()
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if case .state = request.command {
+                    return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { message in
+                    Task { await authenticationRecorder.append(message) }
+                },
+                bridgeClient: bridgeClient)
+            defer { model.stop() }
+
+            model.start()
+            let didAttachInitially = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
+            XCTAssertTrue(didAttachInitially, "Expected the initial viewer start to attach before subscribing.")
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(
+                authenticationMessage,
+                "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+
+            model.start()
+
+            let didAttachAfterAuthentication = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
+            XCTAssertTrue(
+                didAttachAfterAuthentication,
+                "Expected restarting after an authentication failure to open a fresh stream.")
         }
 
         func testOpenTerminalLinkOpensNonMediaExternalURL() async {
@@ -905,6 +1079,54 @@
                     byteCount: chunk.count,
                     isFinal: true,
                     base64Data: Data(chunk).base64EncodedString()))
+        }
+
+        private func waitForTerminalControlAction(
+            _ action: SpacesDeviceTerminalControlAction,
+            count expectedCount: Int,
+            recorder: DeviceAPIRequestRecorder
+        ) async throws -> Bool {
+            for _ in 0..<40 {
+                if await recorder.countTerminalControlAction(action) >= expectedCount { return true }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            return await recorder.countTerminalControlAction(action) >= expectedCount
+        }
+
+        private func waitForAuthenticationMessage(recorder: AuthenticationPromptRecorder) async throws -> String? {
+            for _ in 0..<40 {
+                if let message = await recorder.firstMessage() { return message }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            return await recorder.firstMessage()
+        }
+
+        private func waitForStateRequestCount(_ expectedCount: Int, recorder: DeviceAPIRequestRecorder) async throws -> Bool {
+            for _ in 0..<40 {
+                if await recorder.countStateRequests() >= expectedCount { return true }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            return await recorder.countStateRequests() >= expectedCount
+        }
+
+        private nonisolated static func runningTerminalState() -> GhosttyRemoteSessionStatePayload {
+            GhosttyRemoteSessionStatePayload(
+                sessionID: "terminal-session",
+                reason: TerminalRemoteSessionStateReason.initial,
+                emittedAt: "2026-06-04T14:23:30Z",
+                sessionStateRevision: nil,
+                sessionStateFlags: nil,
+                screenStateRevision: nil,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: "terminal-session",
+                    servicePID: 100,
+                    childPID: 200,
+                    state: .running,
+                    updatedAt: "2026-06-04T14:23:30Z"),
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "terminal",
+                workingDirectory: "/tmp/work",
+                outputByteCount: 0)
         }
 
         private nonisolated static func metadataResponse(_ metadata: SpacesDeviceTerminalLinkMetadata) -> SpacesDeviceAPIResponse {

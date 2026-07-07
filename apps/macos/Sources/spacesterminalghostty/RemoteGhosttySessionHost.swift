@@ -447,8 +447,9 @@
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             inputQueue.enqueue(priority: .userInitiated) {
                 _ = try Self.sendControlRequest(
-                    TerminalControlRequest(command: "send", text: text, clientID: clientID, ownerEpoch: ownerEpoch), sessionID: sessionID,
-                    socketPath: socketPath, requestSender: requestSender)
+                    TerminalControlRequest(
+                        command: .send(.init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false))),
+                    sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
             }
         }
@@ -469,7 +470,7 @@
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             inputQueue.enqueue(priority: .userInitiated) {
                 _ = try Self.sendControlRequest(
-                    TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch), sessionID: sessionID,
+                    TerminalControlRequest(command: .key(.init(key: key, clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                     socketPath: socketPath, requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
             }
@@ -487,7 +488,7 @@
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             inputQueue.enqueue(priority: .userInitiated) {
                 _ = try Self.sendControlRequest(
-                    TerminalControlRequest(command: "clearScreen", clientID: clientID, ownerEpoch: ownerEpoch), sessionID: sessionID,
+                    TerminalControlRequest(command: .clearScreen(.init(clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                     socketPath: socketPath, requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
             }
@@ -513,9 +514,11 @@
                 defer { Task { @MainActor in onFinished() } }
                 _ = try Self.sendControlRequest(
                     TerminalControlRequest(
-                        command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal,
-                        scrollVertical: batch.vertical, scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods), sessionID: sessionID,
-                    socketPath: socketPath, requestSender: requestSender)
+                        command: .scroll(
+                            .init(
+                                clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal, scrollVertical: batch.vertical,
+                                scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods))), sessionID: sessionID, socketPath: socketPath,
+                    requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
             }
         }
@@ -555,8 +558,9 @@
             pendingViewportResizeTask = Task.detached(priority: .utility) {
                 let response = try? Self.sendControlRequest(
                     TerminalControlRequest(
-                        command: "resize", clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: currentResizeSerial
-                    ), sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                        command: .resize(
+                            .init(clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: currentResizeSerial))),
+                    sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "resize") } }
                 await finishResizeRequest(response?.ok == true)
             }

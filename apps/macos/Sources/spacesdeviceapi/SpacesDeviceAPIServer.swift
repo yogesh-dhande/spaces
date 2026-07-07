@@ -58,7 +58,6 @@ private func deviceAPIStreamRelayAttributes(for data: Data) -> [String: String] 
 }
 
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
-    private static let ownerGatedTerminalCommands: Set<SpacesDeviceTerminalControlAction> = [.send, .key, .clearScreen, .resize, .scroll]
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
     static let terminalPasteImageMaxBytes = 10 * 1024 * 1024
@@ -198,15 +197,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private final class StreamSendSequencer: @unchecked Sendable {
             typealias Operation = @Sendable (@escaping @Sendable (Error?) -> Void) -> Void
 
+            private let queueKey: DispatchSpecificKey<Void>
             private var pendingOperations: [Operation] = []
             private var isRunning = false
 
+            init(queueKey: DispatchSpecificKey<Void>) { self.queueKey = queueKey }
+
             func enqueue(_ operation: @escaping Operation) {
+                assertOnOwningQueue()
                 pendingOperations.append(operation)
                 startNextIfNeeded()
             }
 
             private func startNextIfNeeded() {
+                assertOnOwningQueue()
                 guard !isRunning, !pendingOperations.isEmpty else { return }
                 isRunning = true
                 let operation = pendingOperations.removeFirst()
@@ -214,8 +218,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             private func finishCurrent() {
+                assertOnOwningQueue()
                 isRunning = false
                 startNextIfNeeded()
+            }
+
+            private func assertOnOwningQueue() {
+                precondition(DispatchQueue.getSpecific(key: queueKey) != nil, "StreamSendSequencer must be used on its owning queue.")
             }
         }
 
@@ -330,28 +339,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let sessionID: String
         let resolvedPath: String
         let expiresAt: Date
-    }
-
-    private final class StartupSignal: @unchecked Sendable {
-        private let lock = NSLock()
-        private let semaphore = DispatchSemaphore(value: 0)
-        private var result: Result<Void, Error>?
-
-        func signal(_ result: Result<Void, Error>) {
-            lock.lock()
-            let shouldSignal = self.result == nil
-            if shouldSignal { self.result = result }
-            lock.unlock()
-            if shouldSignal { semaphore.signal() }
-        }
-
-        func wait(timeout: TimeInterval) -> Result<Void, Error> {
-            guard semaphore.wait(timeout: .now() + timeout) == .success else { return .failure(POSIXError(.ETIMEDOUT)) }
-            lock.lock()
-            let result = self.result ?? .failure(POSIXError(.EIO))
-            lock.unlock()
-            return result
-        }
     }
 
     #if os(Linux) && canImport(OpenSSL)
@@ -886,9 +873,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             listener = createdListener
             createdListener.start(queue: queue)
 
-            switch startup.wait(timeout: timeout) {
-            case .success: break
-            case .failure(let error):
+            if case .failure(let error) = startup.wait(timeout: timeout) ?? .failure(POSIXError(.ETIMEDOUT)) {
                 createdListener.stateUpdateHandler = nil
                 createdListener.newConnectionHandler = nil
                 createdListener.cancel()
@@ -1034,7 +1019,43 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     public func pairingWindowSnapshot() -> SpacesDevicePairingWindowSnapshot? { pairingCoordinator.snapshot() }
 
+    /// Per-request database access shared across a single request's handler,
+    /// `refreshedMutationResponse`, and overview build so one request pays a single
+    /// `SQLiteStore` open (schema check + integrity check) instead of two or three.
+    ///
+    /// The store opens lazily on first use so commands that never touch the database
+    /// (ping, pairing, terminal control, directory listing, terminal-link chunk reads,
+    /// and the conditional non-file `resolveTerminalLink` path) pay no open.
+    ///
+    /// Confinement: a context is created inside `handleRequest`, which runs only on the
+    /// serial `spaces.device.api` queue, and it never escapes that request's stack frame.
+    /// It must not be stored on the server or captured into an escaping closure — the
+    /// off-request paths (overview-stream `lineProvider`, `loadDaemonStatus`, and the two
+    /// background launch/setup paths) each open their own store on their own queue.
+    private final class RequestContext {
+        private let orchestratorFactory: (SQLiteStore) -> WorkspaceOrchestrator
+        private var openedStore: SQLiteStore?
+        private var openedOrchestrator: WorkspaceOrchestrator?
+
+        init(orchestratorFactory: @escaping (SQLiteStore) -> WorkspaceOrchestrator) { self.orchestratorFactory = orchestratorFactory }
+
+        func store() throws -> SQLiteStore {
+            if let openedStore { return openedStore }
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            openedStore = store
+            return store
+        }
+
+        func orchestrator() throws -> WorkspaceOrchestrator {
+            if let openedOrchestrator { return openedOrchestrator }
+            let orchestrator = orchestratorFactory(try store())
+            openedOrchestrator = orchestrator
+            return orchestrator
+        }
+    }
+
     private func handleRequest(_ request: SpacesDeviceAPIRequest, peerID: String) throws -> SpacesDeviceAPIResponse {
+        let context = RequestContext { [self] store in deviceOrchestrator(store: store) }
         switch request.command {
         case .pair(let payload):
             guard let clientApp = request.clientApp else {
@@ -1060,39 +1081,40 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: true, message: "spacesd is restarting.")
         case .overview:
             return SpacesDeviceAPIResponse(
-                ok: true, message: "Loaded device overview.", result: .overview(try loadOverview(clientApp: request.clientApp)))
-        case .createProject(let payload): return try handleCreateProjectRequest(payload)
-        case .previewGitProject(let payload): return try handleGitPreviewRequest(payload)
-        case .deleteProject(let payload): return try handleDeleteProjectRequest(payload)
-        case .importProject(let payload): return try handleImportProjectRequest(payload)
-        case .exportProject(let payload): return try handleExportProjectRequest(payload)
-        case .previewProject(let payload): return try handlePreviewProjectRequest(payload)
+                ok: true, message: "Loaded device overview.",
+                result: .overview(try loadOverview(store: context.store(), clientApp: request.clientApp)))
+        case .createProject(let payload): return try handleCreateProjectRequest(payload, context: context)
+        case .previewGitProject(let payload): return try handleGitPreviewRequest(payload, context: context)
+        case .deleteProject(let payload): return try handleDeleteProjectRequest(payload, context: context)
+        case .importProject(let payload): return try handleImportProjectRequest(payload, context: context)
+        case .exportProject(let payload): return try handleExportProjectRequest(payload, context: context)
+        case .previewProject(let payload): return try handlePreviewProjectRequest(payload, context: context)
         case .listDirectories(let payload): return try handleListDirectoriesRequest(payload)
-        case .workspaceCreateOptions(let payload): return try handleWorkspaceCreateOptionsRequest(payload)
-        case .createWorkspace(let payload): return try handleCreateWorkspaceRequest(payload)
-        case .launchWorkspace(let payload): return try handleLaunchWorkspaceRequest(payload)
-        case .stopWorkspace(let payload): return try handleStopWorkspaceRequest(payload)
-        case .restartWorkspace(let payload): return try handleRestartWorkspaceRequest(payload)
-        case .archiveWorkspace(let payload): return try handleArchiveWorkspaceRequest(payload)
-        case .runWorkspaceSetup(let payload): return try handleRunWorkspaceSetupRequest(payload)
-        case .updateProjectConfig(let payload): return try handleUpdateProjectConfigRequest(payload)
-        case .updateWorkspaceConfig(let payload): return try handleUpdateWorkspaceConfigRequest(payload)
-        case .updateWorkspaceMetadata(let payload): return try handleUpdateWorkspaceMetadataRequest(payload)
-        case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload)
-        case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload)
-        case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload)
-        case .runWorkspaceProcess(let payload): return try handleRunWorkspaceProcessRequest(payload)
-        case .stopWorkspaceProcess(let payload): return try handleStopWorkspaceProcessRequest(payload)
-        case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload)
-        case .runCodingAgent(let payload): return try handleRunCodingAgentRequest(payload)
-        case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload)
-        case .restartCodingAgent(let payload): return try handleRestartCodingAgentRequest(payload)
+        case .workspaceCreateOptions(let payload): return try handleWorkspaceCreateOptionsRequest(payload, context: context)
+        case .createWorkspace(let payload): return try handleCreateWorkspaceRequest(payload, context: context)
+        case .launchWorkspace(let payload): return try handleLaunchWorkspaceRequest(payload, context: context)
+        case .stopWorkspace(let payload): return try handleStopWorkspaceRequest(payload, context: context)
+        case .restartWorkspace(let payload): return try handleRestartWorkspaceRequest(payload, context: context)
+        case .archiveWorkspace(let payload): return try handleArchiveWorkspaceRequest(payload, context: context)
+        case .runWorkspaceSetup(let payload): return try handleRunWorkspaceSetupRequest(payload, context: context)
+        case .updateProjectConfig(let payload): return try handleUpdateProjectConfigRequest(payload, context: context)
+        case .updateWorkspaceConfig(let payload): return try handleUpdateWorkspaceConfigRequest(payload, context: context)
+        case .updateWorkspaceMetadata(let payload): return try handleUpdateWorkspaceMetadataRequest(payload, context: context)
+        case .openWorkspaceTerminal(let payload): return try handleOpenWorkspaceTerminalRequest(payload, context: context)
+        case .stopWorkspaceTerminal(let payload): return try handleStopWorkspaceTerminalRequest(payload, context: context)
+        case .renameTerminalSession(let payload): return try handleRenameTerminalSessionRequest(payload, context: context)
+        case .runWorkspaceProcess(let payload): return try handleRunWorkspaceProcessRequest(payload, context: context)
+        case .stopWorkspaceProcess(let payload): return try handleStopWorkspaceProcessRequest(payload, context: context)
+        case .restartWorkspaceProcess(let payload): return try handleRestartWorkspaceProcessRequest(payload, context: context)
+        case .runCodingAgent(let payload): return try handleRunCodingAgentRequest(payload, context: context)
+        case .stopCodingAgent(let payload): return try handleStopCodingAgentRequest(payload, context: context)
+        case .restartCodingAgent(let payload): return try handleRestartCodingAgentRequest(payload, context: context)
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
         case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
-        case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload)
+        case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.")
@@ -1113,9 +1135,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         trace(
             "terminal_control_request source_session=\(sessionID) target_session=\(sessionID) client=\(clientID ?? payload.client?.id ?? "-") command=\(payload.action.rawValue)"
         )
-        if Self.ownerGatedTerminalCommands.contains(payload.action), clientID == nil {
-            return SpacesDeviceAPIResponse(ok: false, message: "Missing device client ID.")
-        }
+        let terminalCommand = Self.terminalControlCommand(from: payload, clientID: clientID)
+        if terminalCommand.requiresOwnerClientID, clientID == nil { return SpacesDeviceAPIResponse(ok: false, message: "Missing device client ID.") }
 
         let startedAt = Date()
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1129,11 +1150,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let attributes: [String: String] = [
             "action": payload.action.rawValue, "client_id": clientID ?? "nil", "owner_epoch": payload.ownerEpoch.map(String.init) ?? "nil",
         ]
-        let terminalRequest = TerminalControlRequest(
-            command: payload.action.rawValue, text: payload.text, key: payload.key, clientID: clientID, client: payload.client,
-            attachmentMode: payload.attachmentMode, columns: payload.columns, rows: payload.rows, ownerEpoch: payload.ownerEpoch,
-            resizeSerial: payload.resizeSerial, scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical,
-            scrollMods: payload.scrollMods, appendNewline: payload.appendNewline, appearance: payload.appearance)
+        let terminalRequest = TerminalControlRequest(command: terminalCommand)
         let dispatchStartedAt = Date()
         logDeviceAPIPerformance(sessionID: sessionID, name: "terminal_control_dispatch_begin", attributes: attributes)
         let response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath)
@@ -1145,12 +1162,38 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         TerminalPerformance.logMetric(
             "device_api_\(payload.action.rawValue)", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: response.ok)
-        let sessionState = response.ok && payload.action == .takeover ? try? loadCurrentState(sessionID: sessionID) : nil
+        let sessionState = response.ok && terminalCommand.includesSessionStateOnSuccess ? try? loadCurrentState(sessionID: sessionID) : nil
         responseAttributes["include_session_state"] = sessionState == nil ? "0" : "1"
         logDeviceAPIPerformance(
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: responseAttributes)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, result: sessionState.map(SpacesDeviceAPIResult.terminalState))
+    }
+
+    private static func terminalControlCommand(from payload: SpacesDeviceTerminalControlRequest, clientID: String?) -> TerminalControlCommand {
+        switch payload.action {
+        case .attach:
+            .attach(TerminalControlAttachPayload(client: payload.client, attachmentMode: payload.attachmentMode, appearance: payload.appearance))
+        case .detach: .detach(TerminalControlClientPayload(clientID: clientID))
+        case .heartbeat: .heartbeat(TerminalControlClientPayload(clientID: clientID))
+        case .takeover: .takeover(TerminalControlClientPayload(clientID: clientID))
+        case .send:
+            .send(
+                TerminalControlSendPayload(
+                    text: payload.text, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: payload.appendNewline))
+        case .key: .key(TerminalControlKeyPayload(key: payload.key, clientID: clientID, ownerEpoch: payload.ownerEpoch))
+        case .clearScreen: .clearScreen(TerminalControlOwnerPayload(clientID: clientID, ownerEpoch: payload.ownerEpoch))
+        case .resize:
+            .resize(
+                TerminalControlResizePayload(
+                    clientID: clientID, columns: payload.columns, rows: payload.rows, ownerEpoch: payload.ownerEpoch,
+                    resizeSerial: payload.resizeSerial))
+        case .scroll:
+            .scroll(
+                TerminalControlScrollPayload(
+                    clientID: clientID, ownerEpoch: payload.ownerEpoch, scrollHorizontal: payload.scrollHorizontal,
+                    scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods))
+        }
     }
 
     /// Agent-facing one-shot input: token-authorized like every command but deliberately not
@@ -1171,7 +1214,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
         }
         let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "send", text: payload.text, bytes: payload.bytes, appendNewline: payload.appendNewline),
+            request: TerminalControlRequest(
+                command: .send(
+                    TerminalControlSendPayload(
+                        text: payload.text, bytes: payload.bytes, clientID: nil, ownerEpoch: nil, appendNewline: payload.appendNewline))),
             socketPath: paths.controlSocketPath)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message)
     }
@@ -1219,7 +1265,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
         let remotePath = "/tmp/spaces-paste-\(UUID().uuidString).\(fileExtension)"
         try Self.writeUserOnlyPasteImage(payload.imageData, toPath: remotePath)
-        let terminalRequest = TerminalControlRequest(command: "send", text: remotePath, clientID: clientID, ownerEpoch: payload.ownerEpoch)
+        let terminalRequest = TerminalControlRequest(
+            command: .send(
+                TerminalControlSendPayload(text: remotePath, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: false)))
         let response: TerminalControlResponse
         do { response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath) } catch {
             try? FileManager.default.removeItem(atPath: remotePath)
@@ -1322,9 +1370,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents)
     }
 
-    private func loadOverview(clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload {
+    /// Builds the device overview. Request handlers pass their shared per-request `store` so a
+    /// mutation reuses one store end-to-end; the off-request overview-stream `lineProvider` passes
+    /// no store and opens its own on the `overviewStreamQueue`.
+    private func loadOverview(store providedStore: SQLiteStore? = nil, clientApp: SpacesDeviceClientApp? = nil) throws -> SpacesDeviceOverviewPayload
+    {
         if let overviewLoaderForTesting { return try overviewLoaderForTesting(clientApp) }
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+        let store = try providedStore ?? SQLiteStore(path: DatabaseLocator.defaultPath())
         let orchestrator = deviceOrchestrator(store: store)
         // The router port is a Mac-only concept (only the macOS client runs Caddy), so remote
         // daemons never seed one and this fallback yields the canonical `AppConfig.defaultRouterPort`.
@@ -1332,27 +1384,44 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // rewrites the port to its own live Caddy port before navigation.
         let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
         let projects = try store.projects()
+        // Batch the plain per-workspace table reads into one full-table query each, grouped by
+        // workspace, so building N descriptors costs a constant number of queries instead of O(N).
+        // Each batch preserves the same ORDER BY and WHERE semantics as its per-workspace counterpart,
+        // so the grouped values match `store.<x>(workspaceID:)` element-for-element.
+        let runningProcessesByWorkspace = try store.runningProcessesByWorkspace()
+        let agentWindowsByWorkspace = try store.agentWindowsByWorkspace()
+        let windowsByWorkspace = try store.windowsByWorkspace()
+        let portsByWorkspace = try store.workspacePortsNamedByWorkspace()
+        let setupStateByWorkspace = try store.workspaceSetupStateByWorkspace()
         let workspaces = try projects.flatMap { project in
             try store.workspaces(projectID: project.id, includeArchived: false).map { workspace in
                 let slug = SpacesProfile.workspaceHostSlug(
                     branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
+                // `resolvedWorkspaceBrowserSessions` and `workspaceSettings` stay per-workspace on
+                // purpose: they rebuild the workspace's env/runtime plan internally rather than reading a
+                // single table, so batching them would require restructuring orchestrator env
+                // construction (out of scope for this N+1 pass).
                 let resolvedBrowserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
-                let namedPorts = (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id)) ?? []
+                let namedPorts = portsByWorkspace[workspace.id] ?? []
                 return SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
-                    runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
-                    agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id),
+                    runningProcesses: runningProcessesByWorkspace[workspace.id] ?? [], agentWindows: agentWindowsByWorkspace[workspace.id] ?? [],
+                    windows: windowsByWorkspace[workspace.id] ?? [],
                     assignedPorts: namedPorts.map {
                         SpacesDeviceAssignedPort(name: $0.name, port: $0.port, url: "http://\($0.name).\(slug).localhost:\(routerPort)")
                     },
                     environment: orchestrator.buildWorkspaceEnv(
                         project: project, workspace: workspace, namedPorts: namedPorts.map { (port: $0.port, name: $0.name) }),
-                    resolvedBrowserSessions: resolvedBrowserSessions, setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id))
+                    resolvedBrowserSessions: resolvedBrowserSessions,
+                    // Mirror `orchestrator.workspaceSetupState`, which returns a succeeded default when no
+                    // `workspace_settings` row exists for the workspace.
+                    setupState: setupStateByWorkspace[workspace.id]
+                        ?? WorkspaceSetupState(status: .succeeded, errorMessage: nil, startedAt: nil, finishedAt: nil))
             }
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
         let sessions = mergedTerminalSessions(localSessions)
-        let workspaceRows = try loadWorkspaceTerminalRows(store: store, workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
+        let workspaceRows = loadWorkspaceTerminalRows(workspaces: workspaces, sessions: sessions, hasFinalRenderBySessionID: [:])
         // Reuse the records the overview already scanned to tally restart impact, so the inline
         // handshake costs no extra store work on the refresh hot path.
         var impact = RestartImpactCounts()
@@ -1372,15 +1441,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return order.compactMap { entriesByID[$0] }
     }
 
+    /// Builds the per-workspace terminal rows for the overview. The descriptors already carry the exact
+    /// records this needs — `descriptor.runningProcesses`/`descriptor.agentWindows` are populated in
+    /// `loadOverview` from the same store queries — so this reuses them instead of re-querying per
+    /// workspace, which otherwise doubled the process/agent reads on the refresh hot path.
     private func loadWorkspaceTerminalRows(
-        store: SQLiteStore, workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
+        workspaces: [SpacesDeviceOverviewBuilder.WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry],
         hasFinalRenderBySessionID: [String: Bool]
-    ) throws -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
+    ) -> [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] {
         var rows: [SpacesDeviceOverviewBuilder.WorkspaceTerminalRow] = []
         var representedSessionIDs = Set<String>()
         let sessionsByID = Dictionary(sessions.map { ($0.sessionID, $0) }, uniquingKeysWith: { existing, _ in existing })
         for descriptor in workspaces {
-            let processesBySlot = Dictionary(grouping: try store.runningProcesses(workspaceID: descriptor.workspace.id), by: { processSlotKey($0) })
+            let processesBySlot = Dictionary(grouping: descriptor.runningProcesses, by: { processSlotKey($0) })
             for process in processesBySlot.values.compactMap(preferredProcessRecord).sorted(by: {
                 $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending
             }) {
@@ -1395,7 +1468,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         hasFinalRender: hasFinalRenderBySessionID[sessionID] ?? terminalFinalRenderAvailable(sessionID: sessionID)))
             }
 
-            let agentsBySlot = Dictionary(grouping: try store.agentWindows(workspaceID: descriptor.workspace.id), by: { agentSlotKey($0) })
+            let agentsBySlot = Dictionary(grouping: descriptor.agentWindows, by: { agentSlotKey($0) })
             for agent in agentsBySlot.values.compactMap(preferredAgentRecord).sorted(by: {
                 ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
             }) {
@@ -1521,9 +1594,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func handleWorkspaceCreateOptionsRequest(_ request: SpacesDeviceWorkspaceCreateOptionsRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let orchestrator = deviceOrchestrator(store: store)
+    private func handleWorkspaceCreateOptionsRequest(_ request: SpacesDeviceWorkspaceCreateOptionsRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let store = try context.store()
+        let orchestrator = try context.orchestrator()
         let projects = try store.projects().map {
             SpacesDeviceProjectSummary(id: $0.id, name: $0.name, dir: $0.dir, isGitRepo: $0.isGitRepo, defaultBranch: $0.defaultBranch)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -1540,10 +1615,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 SpacesDeviceWorkspaceCreateOptions(projects: projects, selectedProjectID: selectedProjectID, branchOptions: branchOptions)))
     }
 
-    private func handlePreviewProjectRequest(_ request: SpacesDeviceProjectPreviewRequest) throws -> SpacesDeviceAPIResponse {
+    private func handlePreviewProjectRequest(_ request: SpacesDeviceProjectPreviewRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse
+    {
         guard let dir = normalizedString(request.dir) else { return SpacesDeviceAPIResponse(ok: false, message: "Provide a project directory.") }
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let project = try deviceOrchestrator(store: store).previewProject(dir: dir)
+        let project = try context.orchestrator().previewProject(dir: dir)
         let preview = SpacesDeviceProjectPreview(
             name: project.name, dir: project.dir, isGitRepo: project.isGitRepo, defaultBranch: project.defaultBranch,
             config: SpacesDeviceOverviewBuilder.projectConfig(from: project))
@@ -1590,15 +1665,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func handleCreateProjectRequest(_ request: SpacesDeviceProjectCreateRequest) throws -> SpacesDeviceAPIResponse {
+    private func handleCreateProjectRequest(_ request: SpacesDeviceProjectCreateRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
         let projectDir = normalizedString(request.projectDir)
         let gitURL = normalizedString(request.gitURL)
         guard (projectDir == nil) != (gitURL == nil) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide exactly one project directory or Git URL.")
         }
 
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let orchestrator = deviceOrchestrator(store: store)
+        let store = try context.store()
+        let orchestrator = try context.orchestrator()
         let project: ProjectRecord
         if let projectDir {
             if let config = request.config {
@@ -1624,18 +1699,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide exactly one project directory or Git URL.")
         }
         let defaultWorkspaceID = try store.workspaces(projectID: project.id, includeArchived: false).first(where: \.isDefault)?.id
-        return try refreshedMutationResponse(message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID)
+        return try refreshedMutationResponse(
+            context: context, message: "Created project '\(project.name)'.", projectID: project.id, workspaceID: defaultWorkspaceID)
     }
 
     /// Loads a git repository's `spaces.yaml` for the add-project preview by fetching only that single
     /// file (no clone), returning the detected config to populate the add form plus any managed
     /// directories a later Create would replace. The full clone is deferred to `createProject`.
-    private func handleGitPreviewRequest(_ request: SpacesDeviceGitProjectPreviewRequest) throws -> SpacesDeviceAPIResponse {
+    private func handleGitPreviewRequest(_ request: SpacesDeviceGitProjectPreviewRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
         guard let gitURL = normalizedString(request.gitURL) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Git repository URL is required.")
         }
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let preview = try deviceOrchestrator(store: store).previewGitProject(gitURL: gitURL)
+        let preview = try context.orchestrator().previewGitProject(gitURL: gitURL)
         let candidates = preview.replacementCandidates.map { SpacesDeviceManagedDirectoryReplacementCandidate(kind: $0.kind.rawValue, path: $0.path) }
         return SpacesDeviceAPIResponse(
             ok: true, message: "Loaded git project preview.",
@@ -1645,30 +1720,30 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     spacesYAMLFound: preview.spacesYAMLFound)))
     }
 
-    private func handleDeleteProjectRequest(_ request: SpacesDeviceProjectReference) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let orchestrator = deviceOrchestrator(store: store)
+    private func handleDeleteProjectRequest(_ request: SpacesDeviceProjectReference, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        let store = try context.store()
+        let orchestrator = try context.orchestrator()
         guard let project = try store.project(id: request.projectID) else { return SpacesDeviceAPIResponse(ok: false, message: "Project not found.") }
         try orchestrator.removeProject(dir: project.dir)
-        return try refreshedMutationResponse(message: "Deleted project '\(project.name)'.")
+        return try refreshedMutationResponse(context: context, message: "Deleted project '\(project.name)'.")
     }
 
-    private func handleImportProjectRequest(_ request: SpacesDeviceProjectImportRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        _ = try deviceOrchestrator(store: store).importSpacesYAML(projectID: request.projectID, updateAllWorkspaces: request.updateAllWorkspaces)
-        return try refreshedMutationResponse(message: "Imported spaces.yaml.", projectID: request.projectID)
+    private func handleImportProjectRequest(_ request: SpacesDeviceProjectImportRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        _ = try context.orchestrator().importSpacesYAML(projectID: request.projectID, updateAllWorkspaces: request.updateAllWorkspaces)
+        return try refreshedMutationResponse(context: context, message: "Imported spaces.yaml.", projectID: request.projectID)
     }
 
-    private func handleExportProjectRequest(_ request: SpacesDeviceProjectReference) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let url = try deviceOrchestrator(store: store).exportSpacesYAML(projectID: request.projectID)
-        return try refreshedMutationResponse(message: "Exported spaces.yaml to \(url.path).", projectID: request.projectID)
+    private func handleExportProjectRequest(_ request: SpacesDeviceProjectReference, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        let url = try context.orchestrator().exportSpacesYAML(projectID: request.projectID)
+        return try refreshedMutationResponse(context: context, message: "Exported spaces.yaml to \(url.path).", projectID: request.projectID)
     }
 
-    private func handleCreateWorkspaceRequest(_ request: SpacesDeviceWorkspaceCreateRequest) throws -> SpacesDeviceAPIResponse {
+    private func handleCreateWorkspaceRequest(_ request: SpacesDeviceWorkspaceCreateRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         let projectID = request.projectID
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let orchestrator = deviceOrchestrator(store: store)
+        let store = try context.store()
+        let orchestrator = try context.orchestrator()
         let project = try store.project(id: projectID)
         // Create the workspace record and worktree synchronously, but leave the setup script
         // deferred (status `.pending`). A long-running setup script (e.g. a full build) would
@@ -1682,7 +1757,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let notes = normalizedOptionalString(request.notes) { try orchestrator.updateWorkspaceNotes(workspaceID: workspace.id, notes: notes) }
         runWorkspaceSetupInBackground(workspaceID: workspace.id)
         let message = "Created workspace '\(workspace.displayName)'\(project.map { " in \($0.name)" } ?? "")."
-        return try refreshedMutationResponse(message: message, workspaceID: workspace.id)
+        return try refreshedMutationResponse(context: context, message: message, workspaceID: workspace.id)
     }
 
     /// Runs a newly created workspace's deferred setup script on a background queue.
@@ -1712,41 +1787,45 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    private func handleLaunchWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        try deviceOrchestrator(store: store).launchWorkspace(workspaceID: request.workspaceID)
-        return try refreshedMutationResponse(message: "Launched workspace.", workspaceID: request.workspaceID)
+    private func handleLaunchWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        try context.orchestrator().launchWorkspace(workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Launched workspace.", workspaceID: request.workspaceID)
     }
 
-    private func handleStopWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        _ = try deviceOrchestrator(store: store).stopWorkspace(workspaceID: request.workspaceID)
-        return try refreshedMutationResponse(message: "Stopped workspace.", workspaceID: request.workspaceID)
+    private func handleStopWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        _ = try context.orchestrator().stopWorkspace(workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Stopped workspace.", workspaceID: request.workspaceID)
     }
 
-    private func handleRestartWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        try deviceOrchestrator(store: store).upWorkspace(workspaceID: request.workspaceID, restartIfRunning: true, background: true)
-        return try refreshedMutationResponse(message: "Restarted workspace.", workspaceID: request.workspaceID)
+    private func handleRestartWorkspaceRequest(_ request: SpacesDeviceWorkspaceLifecycleRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        try context.orchestrator().upWorkspace(workspaceID: request.workspaceID, restartIfRunning: true, background: true)
+        return try refreshedMutationResponse(context: context, message: "Restarted workspace.", workspaceID: request.workspaceID)
     }
 
-    private func handleArchiveWorkspaceRequest(_ request: SpacesDeviceWorkspaceArchiveRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        _ = try deviceOrchestrator(store: store).archiveWorkspace(
+    private func handleArchiveWorkspaceRequest(_ request: SpacesDeviceWorkspaceArchiveRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        _ = try context.orchestrator().archiveWorkspace(
             workspaceID: request.workspaceID, deleteLocalBranch: request.deleteLocalBranch, deleteRemoteBranch: request.deleteRemoteBranch)
-        return try refreshedMutationResponse(message: "Archived workspace.", workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Archived workspace.", workspaceID: request.workspaceID)
     }
 
-    private func handleRunWorkspaceSetupRequest(_ request: SpacesDeviceWorkspaceReference) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        try deviceOrchestrator(store: store).runWorkspaceSetup(workspaceID: request.workspaceID)
-        return try refreshedMutationResponse(message: "Ran workspace setup.", workspaceID: request.workspaceID)
+    private func handleRunWorkspaceSetupRequest(_ request: SpacesDeviceWorkspaceReference, context: RequestContext) throws -> SpacesDeviceAPIResponse
+    {
+        try context.orchestrator().runWorkspaceSetup(workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Ran workspace setup.", workspaceID: request.workspaceID)
     }
 
-    private func handleUpdateProjectConfigRequest(_ request: SpacesDeviceProjectConfigUpdateRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        try deviceOrchestrator(store: store).updateProjectConfig(projectID: request.projectID, updateAllWorkspaces: request.updateAllWorkspaces) {
-            config in
+    private func handleUpdateProjectConfigRequest(_ request: SpacesDeviceProjectConfigUpdateRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        try context.orchestrator().updateProjectConfig(projectID: request.projectID, updateAllWorkspaces: request.updateAllWorkspaces) { config in
             config.setupScript = normalizedOptionalString(request.config.setupScript)
             config.stopScript = normalizedOptionalString(request.config.stopScript)
             config.ports = request.config.ports.map(workspacePort)
@@ -1754,43 +1833,50 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             config.browserSessions = request.config.browserSessions.map(workspaceBrowserSession)
             config.agentLaunchers = request.config.agentLaunchers.map(workspaceAgentLauncher)
         }
-        return try refreshedMutationResponse(message: "Updated project settings.", projectID: request.projectID)
+        return try refreshedMutationResponse(context: context, message: "Updated project settings.", projectID: request.projectID)
     }
 
-    private func handleUpdateWorkspaceConfigRequest(_ request: SpacesDeviceWorkspaceConfigUpdateRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        try deviceOrchestrator(store: store).updateWorkspaceSettings(workspaceID: request.workspaceID) { config in
+    private func handleUpdateWorkspaceConfigRequest(_ request: SpacesDeviceWorkspaceConfigUpdateRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        try context.orchestrator().updateWorkspaceSettings(workspaceID: request.workspaceID) { config in
             config.stopScript = normalizedOptionalString(request.config.stopScript)
             config.ports = request.config.ports.map(workspacePort)
             config.processes = request.config.processes.map(workspaceProcess)
             config.browserSessions = request.config.browserSessions.map(workspaceBrowserSession)
             config.agentLaunchers = request.config.agentLaunchers.map(workspaceAgentLauncher)
         }
-        return try refreshedMutationResponse(message: "Updated workspace settings.", workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Updated workspace settings.", workspaceID: request.workspaceID)
     }
 
-    private func handleUpdateWorkspaceMetadataRequest(_ request: SpacesDeviceWorkspaceMetadataUpdateRequest) throws -> SpacesDeviceAPIResponse {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let orchestrator = deviceOrchestrator(store: store)
+    private func handleUpdateWorkspaceMetadataRequest(_ request: SpacesDeviceWorkspaceMetadataUpdateRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let orchestrator = try context.orchestrator()
         if request.updatesBranch {
             try orchestrator.updateWorkspaceMetadata(workspaceID: request.workspaceID, branch: normalizedString(request.branch) ?? "")
         }
-        if request.updatesNotes {
-            try orchestrator.updateWorkspaceNotes(workspaceID: request.workspaceID, notes: normalizedOptionalString(request.notes))
+        if request.updatesNotes || request.updatesHidden {
+            try context.store().withTransaction {
+                if request.updatesNotes {
+                    try orchestrator.updateWorkspaceNotes(workspaceID: request.workspaceID, notes: normalizedOptionalString(request.notes))
+                }
+                if request.updatesHidden { try orchestrator.updateWorkspaceHidden(workspaceID: request.workspaceID, isHidden: request.isHidden == true) }
+            }
         }
-        if request.updatesHidden { try orchestrator.updateWorkspaceHidden(workspaceID: request.workspaceID, isHidden: request.isHidden == true) }
-        return try refreshedMutationResponse(message: "Updated workspace metadata.", workspaceID: request.workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Updated workspace metadata.", workspaceID: request.workspaceID)
     }
 
-    private func handleOpenWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceReference) throws -> SpacesDeviceAPIResponse {
+    private func handleOpenWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceReference, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         let workspaceID = request.workspaceID
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let orchestrator = deviceOrchestrator(store: store)
+        let orchestrator = try context.orchestrator()
         let reservation = try orchestrator.reserveWorkspaceTerminalLaunch(workspaceID: workspaceID)
         let response: SpacesDeviceAPIResponse
         do {
             response = try refreshedMutationResponse(
-                message: "Opened workspace terminal.", workspaceID: workspaceID, sessionID: reservation.sessionID)
+                context: context, message: "Opened workspace terminal.", workspaceID: workspaceID, sessionID: reservation.sessionID)
         } catch {
             orchestrator.cancelReservedWorkspaceTerminalLaunch(reservation)
             throw error
@@ -1799,100 +1885,110 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return response
     }
 
-    private func handleStopWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceTerminalRequest) throws -> SpacesDeviceAPIResponse {
+    private func handleStopWorkspaceTerminalRequest(_ request: SpacesDeviceWorkspaceTerminalRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         let workspaceID = request.workspaceID
         let sessionID = request.sessionID
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        guard try deviceOrchestrator(store: store).stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID) else {
-            return try refreshedMutationResponse(message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
+        guard try context.orchestrator().stopAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID) else {
+            return try refreshedMutationResponse(context: context, message: "Workspace terminal was already stopped.", workspaceID: workspaceID)
         }
-        return try refreshedMutationResponse(message: "Stopped workspace terminal.", workspaceID: workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Stopped workspace terminal.", workspaceID: workspaceID)
     }
 
-    private func handleRenameTerminalSessionRequest(_ request: SpacesDeviceTerminalSessionRenameRequest) throws -> SpacesDeviceAPIResponse {
+    private func handleRenameTerminalSessionRequest(_ request: SpacesDeviceTerminalSessionRenameRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         let workspaceID = request.workspaceID
         let sessionID = request.sessionID
         guard let title = normalizedString(request.title) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide a terminal session title.")
         }
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        guard try deviceOrchestrator(store: store).renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title)
-        else { return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not a renamable workspace terminal.") }
-        return try refreshedMutationResponse(message: "Renamed terminal session.", workspaceID: workspaceID, sessionID: sessionID)
-    }
-
-    private func handleRunWorkspaceProcessRequest(_ request: SpacesDeviceRunWorkspaceProcessRequest) throws -> SpacesDeviceAPIResponse {
-        let workspaceID = request.workspaceID
-        let processKey = request.processKey
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let record =
-            if let processTemplateID = normalizedString(request.processTemplateID) {
-                try deviceOrchestrator(store: store).runConfiguredProcess(
-                    workspaceID: workspaceID, processTemplateID: processTemplateID, processKey: processKey)
-            } else { try deviceOrchestrator(store: store).runConfiguredProcess(workspaceID: workspaceID, processKey: processKey) }
-        return try refreshedMutationResponse(
-            message: "Ran process '\(processKey)'.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
-    }
-
-    private func handleStopWorkspaceProcessRequest(_ request: SpacesDeviceWorkspaceProcessMutationRequest) throws -> SpacesDeviceAPIResponse {
-        let workspaceID = request.workspaceID
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let processID = try resolvedRunningProcessID(request: request, store: store)
-        try deviceOrchestrator(store: store).stopWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-        return try refreshedMutationResponse(message: "Stopped process.", workspaceID: workspaceID)
-    }
-
-    private func handleRestartWorkspaceProcessRequest(_ request: SpacesDeviceWorkspaceProcessMutationRequest) throws -> SpacesDeviceAPIResponse {
-        let workspaceID = request.workspaceID
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let processID = try resolvedRunningProcessID(request: request, store: store)
-        try deviceOrchestrator(store: store).restartWorkspaceProcess(workspaceID: workspaceID, processID: processID)
-        return try refreshedMutationResponse(message: "Restarted process.", workspaceID: workspaceID)
-    }
-
-    private func handleRunCodingAgentRequest(_ request: SpacesDeviceRunCodingAgentRequest) throws -> SpacesDeviceAPIResponse {
-        let workspaceID = request.workspaceID
-        let agentName = request.agentName
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        let record =
-            if let agentLauncherID = normalizedString(request.agentLauncherID) {
-                try deviceOrchestrator(store: store).launchAgentLauncher(workspaceID: workspaceID, launcherID: agentLauncherID)
-            } else { try deviceOrchestrator(store: store).launchAgentLauncher(workspaceID: workspaceID, name: agentName) }
-        return try refreshedMutationResponse(
-            message: "Ran coding agent '\(agentName)'.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
-    }
-
-    private func handleStopCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest) throws -> SpacesDeviceAPIResponse {
-        let workspaceID = request.workspaceID
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        guard let agentID = try resolvedAgentID(request: request, store: store) else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.")
+        guard try context.orchestrator().renameAdHocBuiltInTerminalSession(workspaceID: workspaceID, sessionID: sessionID, title: title) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not a renamable workspace terminal.")
         }
-        try deviceOrchestrator(store: store).stopCodingAgent(workspaceID: workspaceID, agentID: agentID)
-        return try refreshedMutationResponse(message: "Stopped coding agent.", workspaceID: workspaceID)
+        return try refreshedMutationResponse(context: context, message: "Renamed terminal session.", workspaceID: workspaceID, sessionID: sessionID)
     }
 
-    private func handleRestartCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest) throws -> SpacesDeviceAPIResponse {
-        let workspaceID = request.workspaceID
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        guard let agentID = try resolvedAgentID(request: request, store: store) else {
-            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.")
-        }
-        let record = try deviceOrchestrator(store: store).restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
-        return try refreshedMutationResponse(
-            message: "Restarted coding agent.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
-    }
-
-    private func refreshedMutationResponse(message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil) throws
+    private func handleRunWorkspaceProcessRequest(_ request: SpacesDeviceRunWorkspaceProcessRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
+        let workspaceID = request.workspaceID
+        let processKey = request.processKey
+        let orchestrator = try context.orchestrator()
+        let record =
+            if let processTemplateID = normalizedString(request.processTemplateID) {
+                try orchestrator.runConfiguredProcess(workspaceID: workspaceID, processTemplateID: processTemplateID, processKey: processKey)
+            } else { try orchestrator.runConfiguredProcess(workspaceID: workspaceID, processKey: processKey) }
+        return try refreshedMutationResponse(
+            context: context, message: "Ran process '\(processKey)'.", workspaceID: workspaceID,
+            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+    }
+
+    private func handleStopWorkspaceProcessRequest(_ request: SpacesDeviceWorkspaceProcessMutationRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        let processID = try resolvedRunningProcessID(request: request, store: context.store())
+        try context.orchestrator().stopWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+        return try refreshedMutationResponse(context: context, message: "Stopped process.", workspaceID: workspaceID)
+    }
+
+    private func handleRestartWorkspaceProcessRequest(_ request: SpacesDeviceWorkspaceProcessMutationRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        let processID = try resolvedRunningProcessID(request: request, store: context.store())
+        try context.orchestrator().restartWorkspaceProcess(workspaceID: workspaceID, processID: processID)
+        return try refreshedMutationResponse(context: context, message: "Restarted process.", workspaceID: workspaceID)
+    }
+
+    private func handleRunCodingAgentRequest(_ request: SpacesDeviceRunCodingAgentRequest, context: RequestContext) throws -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        let agentName = request.agentName
+        let orchestrator = try context.orchestrator()
+        let record =
+            if let agentLauncherID = normalizedString(request.agentLauncherID) {
+                try orchestrator.launchAgentLauncher(workspaceID: workspaceID, launcherID: agentLauncherID)
+            } else { try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: agentName) }
+        return try refreshedMutationResponse(
+            context: context, message: "Ran coding agent '\(agentName)'.", workspaceID: workspaceID,
+            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+    }
+
+    private func handleStopCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        guard let agentID = try resolvedAgentID(request: request, store: context.store()) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.")
+        }
+        try context.orchestrator().stopCodingAgent(workspaceID: workspaceID, agentID: agentID)
+        return try refreshedMutationResponse(context: context, message: "Stopped coding agent.", workspaceID: workspaceID)
+    }
+
+    private func handleRestartCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let workspaceID = request.workspaceID
+        guard let agentID = try resolvedAgentID(request: request, store: context.store()) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing coding agent ID.")
+        }
+        let record = try context.orchestrator().restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
+        return try refreshedMutationResponse(
+            context: context, message: "Restarted coding agent.", workspaceID: workspaceID,
+            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+    }
+
+    private func refreshedMutationResponse(
+        context: RequestContext, message: String, projectID: String? = nil, workspaceID: String? = nil, sessionID: String? = nil
+    ) throws -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(
             ok: true, message: message,
             result: .mutation(
-                SpacesDeviceMutationResult(overview: try loadOverview(), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID)))
+                SpacesDeviceMutationResult(
+                    overview: try loadOverview(store: context.store()), projectID: projectID, workspaceID: workspaceID, sessionID: sessionID)))
     }
 
     private func resolvedRunningProcessID(request: SpacesDeviceWorkspaceProcessMutationRequest, store: SQLiteStore) throws -> String {
@@ -1975,15 +2071,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIResponse(ok: true, message: "Loaded terminal state.", result: .terminalState(payload))
     }
 
-    private func handleResolveTerminalLinkRequest(_ request: SpacesDeviceTerminalLinkResolveRequest) throws -> SpacesDeviceAPIResponse {
+    private func handleResolveTerminalLinkRequest(_ request: SpacesDeviceTerminalLinkResolveRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
         let sessionID = request.sessionID
         pruneTerminalLinkTransferAuthorizations(now: Date())
         let metadata: SpacesDeviceTerminalLinkMetadata
         if canResolveTerminalLinkWithoutLocalState(request.terminalLink) {
+            // Non-file links resolve without workspace roots, so this path opens no store.
             metadata = try SpacesDeviceTerminalLinkResolver.resolve(
                 sessionID: sessionID, link: request.terminalLink, workingDirectory: nil, workspaceRoots: [])
         } else {
-            let workspaceRoots = try loadWorkspaceRoots()
+            let workspaceRoots = try loadWorkspaceRoots(store: context.store())
             metadata = try SpacesDeviceTerminalLinkResolver.resolve(
                 sessionID: sessionID, link: request.terminalLink, workingDirectory: terminalWorkingDirectory(sessionID: sessionID),
                 workspaceRoots: workspaceRoots)
@@ -2036,8 +2135,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
     }
 
-    private func loadWorkspaceRoots() throws -> [String] {
-        let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+    private func loadWorkspaceRoots(store: SQLiteStore) throws -> [String] {
         let projects = try store.projects()
         var roots = Set(projects.map(\.dir))
         for project in projects {
@@ -2091,7 +2189,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 timer.schedule(deadline: .now() + .seconds(20), repeating: .seconds(20))
                 timer.setEventHandler { [controlSocketPath = subscription.controlSocketPath] in
                     _ = try? TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "heartbeat", clientID: clientID), socketPath: controlSocketPath)
+                        request: TerminalControlRequest(command: .heartbeat(TerminalControlClientPayload(clientID: clientID))),
+                        socketPath: controlSocketPath)
                 }
                 heartbeatTimer = timer
                 timer.resume()
@@ -2192,7 +2291,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 timer.schedule(deadline: .now() + .seconds(20), repeating: .seconds(20))
                 timer.setEventHandler {
                     _ = try? TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "heartbeat", clientID: clientID), socketPath: paths.controlSocketPath)
+                        request: TerminalControlRequest(command: .heartbeat(TerminalControlClientPayload(clientID: clientID))),
+                        socketPath: paths.controlSocketPath)
                 }
                 heartbeatTimer = timer
             } else {
@@ -2201,7 +2301,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             streamRelays[ObjectIdentifier(connection)] = StreamRelay(
                 sessionID: sessionID, installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue, relaySource: relaySource,
-                heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer())
+                heartbeatTimer: heartbeatTimer, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey))
 
             relaySource.resume()
             heartbeatTimer?.resume()
@@ -2227,7 +2327,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             relaySource.setCancelHandler { close(relaySocketFD) }
             streamRelays[ObjectIdentifier(connection)] = StreamRelay(
                 sessionID: "device-overview", installationID: installationID, relaySocketFD: relaySocketFD, relayQueue: relayQueue,
-                relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer())
+                relaySource: relaySource, heartbeatTimer: nil, connection: connection, sendSequencer: StreamSendSequencer(queueKey: queueKey))
             relaySource.resume()
         }
 

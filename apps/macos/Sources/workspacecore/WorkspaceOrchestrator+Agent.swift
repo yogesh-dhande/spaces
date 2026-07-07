@@ -31,7 +31,7 @@ extension WorkspaceOrchestrator {
 
     func insertAdHocDetectedAgent(detectedAgent: (label: String, displayCommand: String?), workspace: WorkspaceRecord, sessionID: String) throws {
         let terminalWindow = try store.windows(workspaceID: workspace.id).first { window in
-            window.role == "terminal" && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
+            window.roleValue == .terminal && terminalHost(for: window.app) == .spaces && terminalSessionID(for: window) == sessionID
         }
         let terminalTarget = TerminalTargetRecord(runtimeTargetID: terminalWindow?.id, trackingID: sessionID)
         let now = nowISO8601()
@@ -81,8 +81,8 @@ extension WorkspaceOrchestrator {
         try store.upsert(
             window: WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: nextDetail, targetURL: window.targetURL,
-                terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
-                role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID, role: window.role,
+                orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
         return true
     }
 
@@ -96,7 +96,7 @@ extension WorkspaceOrchestrator {
     }
 
     func preservesForegroundAgentCommandDetail(_ window: WindowRecord) -> Bool {
-        guard window.role == "terminal", terminalHost(for: window.app) == .spaces, let sessionID = terminalSessionID(for: window) else {
+        guard window.roleValue == .terminal, terminalHost(for: window.app) == .spaces, let sessionID = terminalSessionID(for: window) else {
             return false
         }
         guard terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind == .shell else { return false }
@@ -151,7 +151,7 @@ extension WorkspaceOrchestrator {
         // workspace launch finishes. Preserve those rows when replacing the workspace
         // window snapshot so stop/restart can still close the actual agent terminals.
         return try store.windows(workspaceID: workspaceID).filter { window in
-            guard window.role == "terminal" else { return false }
+            guard window.roleValue == .terminal else { return false }
             if let trackingKey = window.terminalTrackingKey, trackedAgentTerminalKeys.contains(trackingKey) { return true }
             return false
         }
@@ -295,13 +295,13 @@ extension WorkspaceOrchestrator {
         let windows = try store.windows(workspaceID: workspaceID)
         if provider == .spaces, let terminalTrackingID, !terminalTrackingID.isEmpty,
             let trackedWindow = windows.first(where: {
-                $0.role == "terminal" && $0.app == TerminalHost.spaces.appName && $0.terminalTrackingID == terminalTrackingID
+                $0.roleValue == .terminal && $0.app == TerminalHost.spaces.appName && $0.terminalTrackingID == terminalTrackingID
             })
         {
             return trackedWindow
         }
         if let targetID = agentTerminalTargetID(terminalTrackingID: terminalTrackingID),
-            let trackedWindow = windows.first(where: { $0.role == "terminal" && $0.terminalTrackingKey == targetID })
+            let trackedWindow = windows.first(where: { $0.roleValue == .terminal && $0.terminalTrackingKey == targetID })
         {
             return trackedWindow
         }

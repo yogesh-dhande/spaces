@@ -28,7 +28,12 @@ public enum SpacesWireProtocol {
     //    whose clientProtocolVersion does not match before it validates the code. A v4 client
     //    and v5 daemon can still complete the TLS handshake, so the pairing gate — not the
     //    transport — is what stops the mismatch.
-    public static let version = 5
+    // 6: The `profileCommand` payload changes from a flat operation-enum struct (one `operation`
+    //    plus fifteen optionals) to `TerminalServiceProfileCommand`, a one-key-tagged union whose
+    //    per-operation payload owns only that operation's fields, and terminal-send input becomes
+    //    the tagged `TerminalProfileInput` (text xor bytes). A protocol-5 daemon cannot decode the
+    //    new shape, so clients and daemons must update in lockstep.
+    public static let version = 6
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

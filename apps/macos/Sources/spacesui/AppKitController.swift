@@ -48,6 +48,11 @@ protocol ProcessLifecyclePolicyController {
     func disableSuddenTermination()
 }
 
+/// Field-reference bundles for a single-instance form. `formTag` is the generation stamped on the
+/// form's controls (`NSControl.tag`) when it is built, letting a control's action confirm it still
+/// belongs to the live form. See `AppKitController.liveFormRefs(_:forSenderTag:)`.
+protocol FormGenerationTagged { var formTag: Int { get } }
+
 extension ProcessInfo: ProcessLifecyclePolicyController {}
 
 @MainActor
@@ -164,7 +169,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceNotesEditorWorkspaceID: String?
     // workspaceShortcutFooterLabels removed — footer rebuilt on each refresh
     var projects: [ProjectSummary] = []
-    var workspacesByProject: [String: [WorkspaceSummary]] = [:] { didSet { sidebar.invalidateVisibleWorkspacesCache() } }
+    var workspacesByProject: [String: [WorkspaceSummary]] = [:] {
+        didSet {
+            sidebar.invalidateVisibleWorkspacesCache()
+            // Flat id -> (projectID, workspace) index, rebuilt alongside workspacesByProject so it can
+            // never go stale. Lets findWorkspace(id:) resolve in O(1) instead of scanning every
+            // project's workspace list, which matters since it's called from ~26 sites including
+            // selection/reload hot paths.
+            workspaceIndex = workspacesByProject.reduce(into: [:]) { index, entry in
+                for workspace in entry.value { index[workspace.id] = (projectID: entry.key, workspace: workspace) }
+            }
+        }
+    }
+    private(set) var workspaceIndex: [String: (projectID: String, workspace: WorkspaceSummary)] = [:]
     var workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus] = [:]
     // The macOS app always loads its own local daemon first; these hold that local
     // device and act as the default target when no row is selected. Per-row device
@@ -175,10 +192,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localDeviceOverview: SpacesDeviceOverviewPayload?
     var deviceSections: [DeviceSection] = []
     var alertsGroups: [AlertsGroup] = []
-    var visibleDetailWorkspaceID: String?
-    /// Device whose compatibility block is currently shown in the detail pane (when no workspace is
-    /// selected). Lets the block survive background sidebar reloads instead of being replaced.
-    var visibleCompatibilityBlockDeviceID: String?
+    /// The single content the detail pane is showing. Mutually exclusive by construction, so presenting
+    /// one content replaces the previous one. Written only through `presentDetailPane`.
+    var detailPane: DetailPane = .none
+    /// Read-only facets of `detailPane` that the app reads throughout. `showingSettings` is a separate
+    /// stored flag because the Settings dialog floats over, and coexists with, whatever pane is shown.
+    var visibleDetailWorkspaceID: String? { detailPane.workspaceID }
+    var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
+    var showingAlerts: Bool { detailPane.isAlerts }
 
     var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
@@ -238,6 +259,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var addWorkspaceWindow: NSWindow?
     private var projectSettingsWindow: NSWindow?
     var projectSettingsProjectID: String?
+    // Each of these dialogs is single-instance (one optional window above), so at most one live set of
+    // field references exists at a time. Its controls are stamped with the form's generation tag; see
+    // `liveFormRefs(_:forSenderTag:)` for how a stale control's action is rejected.
+    private var projectSettingsFieldRefs: ProjectFieldRefs?
+    private var addProjectFieldRefs: AddProjectFieldRefs?
+    private var addWorkspaceFieldRefs: AddWorkspaceFieldRefs?
     var workspaceSettingsWindow: NSWindow?
     var workspaceSettingsWorkspaceID: String?
     private var pathCompletionFieldEditor: PathCompletionTextView?
@@ -304,7 +331,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var activeAddProjectFormTag: Int? { didSet { if oldValue != nil, activeAddProjectFormTag == nil { flushDeferredSidebarReloadsIfNeeded() } } }
     private lazy var iso8601Formatter: ISO8601DateFormatter = ISO8601DateFormatter()
 
-    var showingAlerts = false
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
@@ -932,7 +958,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return
             }
             self.logWorkspaceDetailIPC("selecting id=\(workspaceID) title=\(workspace.displayName)")
-            self.showingAlerts = false
+            // Drop a full-pane alerts view so the selection below resolves to the workspace instead of
+            // `refreshSelection` bouncing back to alerts; a shown workspace/compatibility pane is untouched.
+            if case .alerts = self.detailPane { self.presentDetailPane(.none) }
             self.showingSettings = false
             self.selectWorkspace(workspace)
             self.refreshSelection()
@@ -1296,7 +1324,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
             let device = deviceForMutation(deviceID: resolvedDeviceID)
             let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
-            let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
+            let createdAt = request.createdAt ?? iso8601Formatter.string(from: Date())
             // The seed launch configuration wins over the state model's own summary lookup,
             // and the live Device API state payload never resends shell/command, so seed one
             // only when a real shell is known — from the request (resolved from the source
@@ -1333,15 +1361,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 remoteClientStore.set(client.id)
                 let response = try Self.sendDeviceTerminalControl(
                     sessionID: sessionID,
-                    request: TerminalControlRequest(command: "attach", client: client, attachmentMode: attachmentMode, appearance: themeAppearance),
+                    request: TerminalControlRequest(
+                        command: .attach(TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: themeAppearance))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
             let detachClientAction: @Sendable (String) throws -> Void = { clientID in
                 if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
                 let response = try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), requestSender: requestSender,
-                    refreshStateAfterControl: true, applyState: applyControlState)
+                    sessionID: sessionID, request: TerminalControlRequest(command: .detach(TerminalControlClientPayload(clientID: clientID))),
+                    requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
             let sendInputAction: @Sendable (String, Bool) throws -> TerminalControlResponse = { text, appendNewline in
@@ -1350,7 +1379,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 return try Self.sendDeviceTerminalControl(
                     sessionID: sessionID,
-                    request: TerminalControlRequest(command: "send", text: text, clientID: clientID, appendNewline: appendNewline),
+                    request: TerminalControlRequest(
+                        command: .send(
+                            TerminalControlSendPayload(text: text, bytes: nil, clientID: clientID, ownerEpoch: nil, appendNewline: appendNewline))),
                     requestSender: requestSender, applyState: applyControlState)
             }
             let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse = { key in
@@ -1358,8 +1389,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     return TerminalControlResponse(ok: false, message: "Terminal pane is not attached.")
                 }
                 return try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "key", key: key, clientID: clientID), requestSender: requestSender,
-                    applyState: applyControlState)
+                    sessionID: sessionID,
+                    request: TerminalControlRequest(command: .key(TerminalControlKeyPayload(key: key, clientID: clientID, ownerEpoch: nil))),
+                    requestSender: requestSender, applyState: applyControlState)
             }
             let pasteImageAction: @MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse = { image in
                 guard let clientID = remoteClientStore.current() else {
@@ -1370,8 +1402,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
                 try Self.sendDeviceTerminalControl(
-                    sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), requestSender: requestSender,
-                    refreshStateAfterControl: true, applyState: applyControlState)
+                    sessionID: sessionID, request: TerminalControlRequest(command: .takeover(TerminalControlClientPayload(clientID: clientID))),
+                    requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
             }
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
@@ -1436,8 +1468,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard request.bytes == nil else {
             throw WorkspaceError.invalidArgument(message: "Raw byte terminal control is not supported for active remote devices.")
         }
-        guard let action = SpacesDeviceTerminalControlAction(rawValue: request.command) else {
-            throw WorkspaceError.invalidArgument(message: "Unsupported remote terminal command '\(request.command)'.")
+        let command = request.commandValue
+        guard let action = SpacesDeviceTerminalControlAction(rawValue: command.name) else {
+            throw WorkspaceError.invalidArgument(message: "Unsupported remote terminal command '\(command.name)'.")
         }
         return SpacesDeviceTerminalControlRequest(
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
@@ -2063,6 +2096,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
+    // ISO8601DateFormatter construction is expensive and this is shared by the `nonisolated`
+    // overview-mapping helpers below (buildOverviewAlertsGroups, agentWindows,
+    // deviceTerminalWindows), which run off the main actor. ISO8601DateFormatter is documented
+    // thread-safe, so a single nonisolated instance is safe to reuse instead of allocating a
+    // fresh formatter per call. Kept separate from the instance-scoped `iso8601Formatter` lazy
+    // var above, which isn't reachable from these static/nonisolated contexts.
+    nonisolated(unsafe) private static let staticISO8601Formatter = ISO8601DateFormatter()
+
     /// Builds attention alerts for a device from its overview payload — used for both the local and
     /// remote devices so alerts aggregate identically across the sidebar without the client ever
     /// opening `spaces.db`. Window-role styling (browser/editor icons, per-window focus) is
@@ -2070,7 +2111,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// so an exited process shows as a process alert and clicking it focuses the process. Recency
     /// (and dismissal identity) come from the daemon-supplied `exitedAt`/`updatedAt` timestamps.
     nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> [AlertsGroup] {
-        let iso8601Formatter = ISO8601DateFormatter()
+        let iso8601Formatter = staticISO8601Formatter
         var groups: [AlertsGroup] = []
         for workspace in overview.workspaces where !workspace.isArchived {
             var items: [AlertsAttentionEntry] = []
@@ -2391,7 +2432,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     nonisolated private static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = staticISO8601Formatter.string(from: Date())
         return rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
             return AgentWindowRecord(
@@ -2402,7 +2443,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     nonisolated static func deviceTerminalWindows(from rows: [SpacesDeviceWorkspaceTerminalRow]) -> [WindowRecord] {
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = staticISO8601Formatter.string(from: Date())
         return rows.enumerated().map { index, row in
             WindowRecord(
                 id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,
@@ -2467,6 +2508,80 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let processKey: String?
         let launcherName: String?
         let agentWindow: AgentWindowRecord?
+    }
+
+    struct WorkspaceRuntimeTargetIndex: Sendable {
+        let orderedTargets: [WorkspaceRunShortcutTarget]
+        let targetsByProcessID: [String: WorkspaceRunShortcutTarget]
+        let targetsByTerminalSessionID: [String: WorkspaceRunShortcutTarget]
+        let targetsByAgentID: [String: WorkspaceRunShortcutTarget]
+        let targetsByURL: [String: WorkspaceRunShortcutTarget]
+        let shortcutIndices: WorkspaceDetailShortcutIndices
+
+        init(
+            browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
+            configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+        ) {
+            let orderedTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+                configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
+            self.orderedTargets = orderedTargets
+
+            var targetsByProcessID: [String: WorkspaceRunShortcutTarget] = [:]
+            var targetsByTerminalSessionID: [String: WorkspaceRunShortcutTarget] = [:]
+            var targetsByAgentID: [String: WorkspaceRunShortcutTarget] = [:]
+            var targetsByURL: [String: WorkspaceRunShortcutTarget] = [:]
+            var browserSessionsByURL: [String: Int] = [:]
+            var processesByName: [String: Int] = [:]
+            var codingAgentsByName: [String: Int] = [:]
+            var codingAgentsByIdentity: [String: Int] = [:]
+
+            for (offset, target) in orderedTargets.enumerated() {
+                let index = offset + 1
+                switch target.kind {
+                case .browser:
+                    if let targetURL = target.targetURL, !targetURL.isEmpty {
+                        targetsByURL[targetURL, default: target] = target
+                        if index <= 10 { browserSessionsByURL[targetURL] = index }
+                    }
+                case .process:
+                    if let processID = target.processID, let process = processesByID[processID] {
+                        targetsByProcessID[processID, default: target] = target
+                        if let sessionID = process.terminalTrackingID, !sessionID.isEmpty {
+                            targetsByTerminalSessionID[sessionID, default: target] = target
+                        }
+                        if index <= 10 { processesByName[process.templateName] = index }
+                    }
+                case .missingConfiguredProcess:
+                    if let processKey = target.processKey, !processKey.isEmpty, index <= 10 { processesByName[processKey] = index }
+                case .agentLauncher:
+                    if let launcherName = target.launcherName, !launcherName.isEmpty, index <= 10 {
+                        codingAgentsByName[launcherName] = index
+                        codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: launcherName)] = index
+                    }
+                case .agent:
+                    if let agentWindow = target.agentWindow {
+                        targetsByAgentID[agentWindow.id, default: target] = target
+                        if let sessionID = agentWindow.terminalTrackingID, !sessionID.isEmpty {
+                            targetsByTerminalSessionID[sessionID, default: target] = target
+                        }
+                        if index <= 10 {
+                            if let label = agentWindow.label, !label.isEmpty { codingAgentsByName[label] = index }
+                            codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(agentWindowID: agentWindow.id)] = index
+                        }
+                    }
+                case .window: break
+                }
+            }
+
+            self.targetsByProcessID = targetsByProcessID
+            self.targetsByTerminalSessionID = targetsByTerminalSessionID
+            self.targetsByAgentID = targetsByAgentID
+            self.targetsByURL = targetsByURL
+            shortcutIndices = WorkspaceDetailShortcutIndices(
+                browserSessionsByURL: browserSessionsByURL, processesByName: processesByName, codingAgentsByName: codingAgentsByName,
+                codingAgentsByIdentity: codingAgentsByIdentity)
+        }
     }
 
     struct DeviceTerminalOpenRequest: Sendable, Equatable {
@@ -2720,7 +2835,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func preferredTerminalWindowsByTrackingKey(_ windows: [WindowRecord]) -> [String: WindowRecord] {
         windows.reduce(into: [:]) { result, window in
-            guard window.role == "terminal", let trackingKey = window.terminalTrackingKey else { return }
+            guard window.roleValue == .terminal, let trackingKey = window.terminalTrackingKey else { return }
             // Duplicate keys can exist transiently while Ghostty rows are being reconciled.
             // Prefer the earliest ordered tracked window instead of crashing on duplicates.
             let existingOrder = result[trackingKey]?.orderIndex ?? Int.max
@@ -2732,7 +2847,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         configuredProcesses: [ProcessTemplate], windows: [WindowRecord], processes: [RunningProcessRecord], agentWindows: [AgentWindowRecord]
     ) -> [WorkspaceRunProcessEntry] {
         let terminalOrderByTargetID: [String: Int] = windows.reduce(into: [:]) { result, window in
-            guard window.role == "terminal", let targetID = window.terminalTrackingKey else { return }
+            guard window.roleValue == .terminal, let targetID = window.terminalTrackingKey else { return }
             let existingOrder = result[targetID] ?? Int.max
             result[targetID] = min(existingOrder, window.orderIndex)
         }
@@ -2795,17 +2910,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     processCommand: process.command))
         }
 
-        for (windowIdx, window) in windows.enumerated() where window.role != "browser" {
+        for (windowIdx, window) in windows.enumerated() where window.roleValue != .browser {
             let windowProcesses: [RunningProcessRecord]
-            if window.role == "terminal" {
+            if window.roleValue == .terminal {
                 windowProcesses = window.terminalTrackingKey.flatMap { processesByTerminalID[$0] } ?? []
             } else {
                 windowProcesses = []
             }
             let isAgentClaimedWindow = window.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false
             let nonAgentWindowProcesses = windowProcesses.filter { process in !(process.terminalTrackingKey.map(agentTerminalIDs.contains) ?? false) }
-            if isAgentClaimedWindow && (window.role != "terminal" || windowProcesses.isEmpty) { continue }
-            if window.role == "terminal", !nonAgentWindowProcesses.isEmpty {
+            if isAgentClaimedWindow && (window.roleValue != .terminal || windowProcesses.isEmpty) { continue }
+            if window.roleValue == .terminal, !nonAgentWindowProcesses.isEmpty {
                 for process in nonAgentWindowProcesses where !matchedProcessIDs.contains(process.id) {
                     matchedProcessIDs.insert(process.id)
                     entries.append(
@@ -2904,9 +3019,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let processEntries = orderedWorkspaceRunProcessEntries(
             configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindows)
         let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
-        return orderedWorkspaceRunShortcutTargets(
+        return workspaceRuntimeTargetIndex(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
-            configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows)
+            configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindows
+        ).orderedTargets
     }
 
     /// Maps a single focusable target to a device-agnostic focus resolution.
@@ -2982,40 +3098,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
         configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
     ) -> WorkspaceDetailShortcutIndices {
-        let targets = orderedWorkspaceRunShortcutTargets(
+        workspaceRuntimeTargetIndex(
+            browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+            configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows
+        ).shortcutIndices
+    }
+
+    nonisolated static func workspaceRuntimeTargetIndex(
+        browserSessions: [BrowserSession], processEntries: [WorkspaceRunProcessEntry], processesByID: [String: RunningProcessRecord],
+        configuredAgentLaunchers: [AgentLauncher], agentWindows: [AgentWindowRecord]
+    ) -> WorkspaceRuntimeTargetIndex {
+        WorkspaceRuntimeTargetIndex(
             browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
             configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
-
-        var browserSessionsByURL: [String: Int] = [:]
-        var processesByName: [String: Int] = [:]
-        var codingAgentsByName: [String: Int] = [:]
-        var codingAgentsByIdentity: [String: Int] = [:]
-
-        for (offset, target) in targets.enumerated() {
-            let index = offset + 1
-            guard index <= 10 else { break }
-            switch target.kind {
-            case .browser: if let targetURL = target.targetURL, !targetURL.isEmpty { browserSessionsByURL[targetURL] = index }
-            case .process:
-                if let processID = target.processID, let process = processesByID[processID] { processesByName[process.templateName] = index }
-            case .missingConfiguredProcess: if let processKey = target.processKey, !processKey.isEmpty { processesByName[processKey] = index }
-            case .agentLauncher:
-                if let launcherName = target.launcherName, !launcherName.isEmpty {
-                    codingAgentsByName[launcherName] = index
-                    codingAgentsByIdentity[codingAgentShortcutIdentity(launcherName: launcherName)] = index
-                }
-            case .agent:
-                if let agentWindow = target.agentWindow {
-                    if let label = agentWindow.label, !label.isEmpty { codingAgentsByName[label] = index }
-                    codingAgentsByIdentity[codingAgentShortcutIdentity(agentWindowID: agentWindow.id)] = index
-                }
-            case .window: break
-            }
-        }
-
-        return WorkspaceDetailShortcutIndices(
-            browserSessionsByURL: browserSessionsByURL, processesByName: processesByName, codingAgentsByName: codingAgentsByName,
-            codingAgentsByIdentity: codingAgentsByIdentity)
     }
 
     nonisolated static func workspaceProcessStatusByName(_ processes: [RunningProcessRecord]) -> [String: RowPrimitives.StatusKind] {
@@ -3719,13 +3814,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         requestSidebarReload(forceRemoteRefresh: isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)))
     }
 
+    /// Records which single content the detail pane is showing. The `show*` methods render the pane;
+    /// this only updates the state the app reads. Kept side-effect-free so pane state and pane rendering
+    /// stay independently reasoned about.
+    func presentDetailPane(_ pane: DetailPane) { detailPane = pane }
+
     func showPlaceholder(message: String = "Select a project or workspace.") {
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
-        visibleCompatibilityBlockDeviceID = nil
+        presentDetailPane(.none)
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         clearWorkspaceDetailFooter()
@@ -3752,7 +3850,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func clearCompatibilityBlockIfResolved(deviceID: String) {
         guard visibleCompatibilityBlockDeviceID == deviceID else { return }
         if deviceCompatibility(forDeviceID: deviceID)?.isCompatible == false { return }
-        visibleCompatibilityBlockDeviceID = nil
+        // The guard above establishes the pane is this device's compatibility block, so clearing it
+        // leaves the pane empty until `refreshSelection` re-resolves it.
+        presentDetailPane(.none)
         refreshSelection()
     }
 
@@ -3761,10 +3861,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
-        visibleCompatibilityBlockDeviceID = deviceID
+        presentDetailPane(.compatibilityBlock(deviceID: deviceID))
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         // Clear any prior workspace/project selection so refreshSelection and shortcuts target the block,
@@ -3850,9 +3948,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func showLoadingPlaceholder(message: String, detail: String?) {
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
-        visibleDetailWorkspaceID = nil
+        // A visible compatibility block survives the loading placeholder: the reload behind this loading
+        // state re-resolves back to the block. Only a workspace or alerts pane is cleared.
+        if case .compatibilityBlock = detailPane {} else { presentDetailPane(.none) }
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         for view in detailContainer.subviews { view.removeFromSuperview() }
@@ -3951,7 +4050,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         if closingWindow === projectSettingsWindow {
-            if let projectSettingsProjectID { ProjectFieldCache.shared.cache[projectSettingsProjectID.hashValue] = nil }
+            projectSettingsFieldRefs = nil
             projectSettingsProjectID = nil
             projectHasUnsavedChanges = false
             return
@@ -4440,7 +4539,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             processesSection: processes, browserSessionsSection: browsers, agentLaunchersSection: agents, createButton: createButton,
             spacesYAMLMissingLabel: spacesYAMLMissingLabel)
         activeAddProjectFormTag = id
-        guard let refs = AddProjectFieldCache.shared.cache[id] else { return }
+        guard let refs = addProjectFieldRefs else { return }
         refs.selectedDeviceID = deviceID
         attachAddProjectSourceRowSelection(folderRow, kind: .folder, tag: id)
         attachAddProjectSourceRowSelection(gitRow, kind: .git, tag: id)
@@ -4631,7 +4730,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func selectAddProjectSourceKind(_ kind: AddProjectSourceKind, tag: Int) {
-        guard let refs = AddProjectFieldCache.shared.cache[tag] else { return }
+        guard let refs = Self.liveFormRefs(addProjectFieldRefs, forSenderTag: tag) else { return }
         refs.selectedSourceKind = kind
         updateAddProjectSourceStepUI(refs)
         addProjectWindow?.makeFirstResponder(kind == .folder ? refs.dirField : refs.repoURLField)
@@ -4889,7 +4988,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
             createButton: createButton)
         activeAddWorkspaceFormTag = createButton.tag
-        if let refs = AddWorkspaceFieldCache.shared.cache[createButton.tag] {
+        if let refs = addWorkspaceFieldRefs {
             updateAddWorkspaceBranchInputUI(refs: refs)
             updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: currentAddWorkspaceBranchValue(refs))
         }
@@ -4924,7 +5023,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 existingBranchField.addItems(withObjectValues: options)
                 if !existingValue.isEmpty { existingBranchField.stringValue = existingValue }
             }
-            if let refs = AddWorkspaceFieldCache.shared.cache[formTag] {
+            if let refs = Self.liveFormRefs(self.addWorkspaceFieldRefs, forSenderTag: formTag) {
                 self.updateAddWorkspaceProgressiveDisclosure(refs: refs, branchValue: self.currentAddWorkspaceBranchValue(refs))
             }
         }
@@ -4932,9 +5031,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func prepareWorkspaceDetailContainer(workspaceID: String) {
         clearActiveAddFormStateAndCloseWindows()
-        visibleDetailWorkspaceID = workspaceID
+        presentDetailPane(.workspace(id: workspaceID))
         showingSettings = false
-        showingAlerts = false
         updateAlertsRowAppearance()
         activeShortcutCaptureSetting = nil
         workspaceSetupLogTextView = nil
@@ -4961,7 +5059,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict)
             return
         }
-        visibleCompatibilityBlockDeviceID = nil
+        // This workspace's device is compatible; every branch below presents the workspace pane
+        // (`prepareWorkspaceDetailContainer`), which replaces any prior device's compatibility block.
         guard let deviceWorkspaceSummary = deviceWorkspaceSummary(workspaceID: workspace.id) else {
             prepareWorkspaceDetailContainer(workspaceID: workspace.id)
             showWorkspaceDetailLoadingPlaceholder(workspace: workspace)
@@ -5525,7 +5624,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         agentWindows.reduce(into: [:]) { result, agentWindow in
             guard
                 let window = trackedWindows.first(where: {
-                    guard $0.role == "terminal" else { return false }
+                    guard $0.roleValue == .terminal else { return false }
                     if let trackingID = agentWindow.terminalTrackingID, !trackingID.isEmpty, $0.terminalTrackingID == trackingID { return true }
                     if let nativeID = agentWindow.terminalNativeID, !nativeID.isEmpty, $0.terminalNativeID == nativeID { return true }
                     return false
@@ -5630,12 +5729,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func clearActiveAddProjectFormState() {
         // Nothing is cloned until Create, so tearing down the form only clears its cached state.
-        if let activeAddProjectFormTag { AddProjectFieldCache.shared.cache[activeAddProjectFormTag] = nil }
+        addProjectFieldRefs = nil
         activeAddProjectFormTag = nil
     }
 
     private func clearActiveAddWorkspaceFormState() {
-        if let activeAddWorkspaceFormTag { AddWorkspaceFieldCache.shared.cache[activeAddWorkspaceFormTag] = nil }
+        addWorkspaceFieldRefs = nil
         activeAddWorkspaceFormTag = nil
     }
 
@@ -6350,16 +6449,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return textView
     }
 
+    /// Resolves the live field references for a control's action, rejecting stale controls. A control
+    /// carries the generation tag of the form it was built for; if that no longer matches the live
+    /// form's `formTag` (the form was rebuilt or closed, or `liveRefs` is already nil), the action is
+    /// dropped. This replaces the previous global tag-keyed caches now that each dialog is single-instance.
+    static func liveFormRefs<Refs: FormGenerationTagged>(_ liveRefs: Refs?, forSenderTag senderTag: Int) -> Refs? {
+        guard let liveRefs, liveRefs.formTag == senderTag else { return nil }
+        return liveRefs
+    }
+
     private func storeProjectFields(
         projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
         importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) -> Int {
         let id = projectID.hashValue
-        ProjectFieldCache.shared.cache[id] = ProjectFieldRefs(
-            projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection, portsSection: portsSection,
-            processesSection: processesSection, browserSessionsSection: browserSessionsSection, agentLaunchersSection: agentLaunchersSection,
-            importButton: importButton, exportButton: exportButton, discardImportedConfigButton: discardImportedConfigButton)
+        projectSettingsFieldRefs = ProjectFieldRefs(
+            formTag: id, projectID: projectID, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection,
+            portsSection: portsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
+            agentLaunchersSection: agentLaunchersSection, importButton: importButton, exportButton: exportButton,
+            discardImportedConfigButton: discardImportedConfigButton)
         return id
     }
 
@@ -6370,8 +6479,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         agentLaunchersSection: AgentLaunchersSection, createButton: NSButton, spacesYAMLMissingLabel: NSTextField
     ) -> Int {
         let id = UUID().uuidString.hashValue
-        AddProjectFieldCache.shared.cache[id] = AddProjectFieldRefs(
-            folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
+        addProjectFieldRefs = AddProjectFieldRefs(
+            formTag: id, folderRow: folderRow, gitRow: gitRow, folderInputRow: folderInputRow, gitInputRow: gitInputRow, dirField: dirField,
             repoURLField: repoURLField, continueButton: continueButton, setupScriptSection: setupScriptSection, stopScriptSection: stopScriptSection,
             portsSection: portsSection, processesSection: processesSection, browserSessionsSection: browserSessionsSection,
             agentLaunchersSection: agentLaunchersSection, createButton: createButton, spacesYAMLMissingLabel: spacesYAMLMissingLabel)
@@ -6385,10 +6494,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         baseBranchField: NSComboBox?, notesField: NSTextField?, autoNameState: AddWorkspaceAutoNameState?, createButton: NSButton
     ) -> Int {
         let id = UUID().uuidString.hashValue
-        AddWorkspaceFieldCache.shared.cache[id] = AddWorkspaceFieldRefs(
-            projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented, existingBranchField: existingBranchField,
-            newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField, autoNameState: autoNameState,
-            createButton: createButton)
+        addWorkspaceFieldRefs = AddWorkspaceFieldRefs(
+            formTag: id, projectID: projectID, isGitRepo: isGitRepo, branchModeSegmented: branchModeSegmented,
+            existingBranchField: existingBranchField, newBranchField: newBranchField, baseBranchField: baseBranchField, notesField: notesField,
+            autoNameState: autoNameState, createButton: createButton)
         branchModeSegmented?.tag = id
         return id
     }
@@ -6637,7 +6746,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func saveProject(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return }
         do {
             try persistProjectFields(refs)
@@ -6648,7 +6757,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func exportProjectSpacesYAML(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         guard !projectHasUnsavedChanges, !refs.hasOpenSectionEditor else {
             showInfoMessage(title: "Save project settings first", message: "Save or discard pending changes before exporting spaces.yaml.")
             return
@@ -6667,7 +6776,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func importProjectSpacesYAML(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         do {
             if let device = deviceForDaemonStateMutation() {
                 // A non-git project's template always syncs to its single workspace, so it takes the
@@ -6698,7 +6807,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func discardProjectConfigChanges(_ sender: NSButton) {
         commitEditing()
-        guard let refs = ProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
         if let config = deviceProjectSummary(projectID: refs.projectID)?.config {
             hydrateProjectSettings(refs, from: config)
             refs.hasPendingImportedConfig = false
@@ -6818,7 +6927,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func createProject(_ sender: NSButton) {
-        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addProjectFieldRefs, forSenderTag: sender.tag) else { return }
         do {
             // The project is created on the device fixed in step 1; folder autocomplete and preview
             // used the same device.
@@ -6884,7 +6993,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func continueFromSourceStep(_ sender: NSButton) {
-        guard let refs = AddProjectFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addProjectFieldRefs, forSenderTag: sender.tag) else { return }
         advanceFromSourceStep(refs)
     }
 
@@ -6951,11 +7060,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func isActiveAddProjectForm(_ refs: AddProjectFieldRefs) -> Bool {
-        activeAddProjectFormTag == refs.createButton.tag && AddProjectFieldCache.shared.cache[refs.createButton.tag] === refs
+        activeAddProjectFormTag == refs.formTag && addProjectFieldRefs === refs
     }
 
     private func addProjectRefs(forDirectoryField field: NSControl) -> AddProjectFieldRefs? {
-        AddProjectFieldCache.shared.cache.values.first { $0.dirField === field }
+        guard let refs = addProjectFieldRefs, refs.dirField === field else { return nil }
+        return refs
     }
 
     private func scheduleAddProjectDirectorySuggestions(_ refs: AddProjectFieldRefs) {
@@ -7055,7 +7165,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func addWorkspaceBranchModeChanged(_ sender: NSSegmentedControl) {
-        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addWorkspaceFieldRefs, forSenderTag: sender.tag) else { return }
         handleAddWorkspaceBranchFieldChange(refs: refs)
         if addWorkspaceBranchMode(refs: refs) == .create {
             window.makeFirstResponder(refs.newBranchField)
@@ -7065,15 +7175,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func addWorkspaceBranchFieldChanged(_ sender: NSControl) {
-        for refs in AddWorkspaceFieldCache.shared.cache.values {
-            guard refs.existingBranchField === sender || refs.newBranchField === sender else { continue }
-            handleAddWorkspaceBranchFieldChange(refs: refs)
-            return
-        }
+        guard let refs = addWorkspaceFieldRefs, refs.existingBranchField === sender || refs.newBranchField === sender else { return }
+        handleAddWorkspaceBranchFieldChange(refs: refs)
     }
 
     @objc private func createWorkspace(_ sender: NSButton) {
-        guard let refs = AddWorkspaceFieldCache.shared.cache[sender.tag] else { return }
+        guard let refs = Self.liveFormRefs(addWorkspaceFieldRefs, forSenderTag: sender.tag) else { return }
         do {
             let baseBranch = refs.baseBranchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let branch = currentAddWorkspaceBranchValue(refs).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7136,8 +7243,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             commandPalette.applyCommandPaletteFilter()
             return
         }
-        for refs in AddProjectFieldCache.shared.cache.values {
-            guard refs.repoURLField === changedField else { continue }
+        if let refs = addProjectFieldRefs, refs.repoURLField === changedField {
             updateAddProjectSourceStepUI(refs)
             return
         }
@@ -7146,8 +7252,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             scheduleAddProjectDirectorySuggestions(refs)
             return
         }
-        for refs in AddWorkspaceFieldCache.shared.cache.values {
-            guard refs.existingBranchField === changedField || refs.newBranchField === changedField else { continue }
+        if let refs = addWorkspaceFieldRefs, refs.existingBranchField === changedField || refs.newBranchField === changedField {
             if let existingBranchField = refs.existingBranchField, existingBranchField === changedField {
                 Self.syncExistingWorkspaceBranchSelection(existingBranchField: existingBranchField)
             }
@@ -7158,13 +7263,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     public func comboBoxSelectionDidChange(_ notification: Notification) {
         guard let comboBox = notification.object as? NSComboBox else { return }
-        for refs in AddWorkspaceFieldCache.shared.cache.values {
-            guard refs.existingBranchField === comboBox else { continue }
-            let selectedBranchValue = (comboBox.objectValueOfSelectedItem as? String) ?? comboBox.stringValue
-            comboBox.stringValue = selectedBranchValue
-            handleAddWorkspaceBranchFieldChange(refs: refs, branchValueOverride: selectedBranchValue)
-            return
-        }
+        guard let refs = addWorkspaceFieldRefs, refs.existingBranchField === comboBox else { return }
+        let selectedBranchValue = (comboBox.objectValueOfSelectedItem as? String) ?? comboBox.stringValue
+        comboBox.stringValue = selectedBranchValue
+        handleAddWorkspaceBranchFieldChange(refs: refs, branchValueOverride: selectedBranchValue)
     }
 
     private func handleAddWorkspaceBranchFieldChange(refs: AddWorkspaceFieldRefs, branchValueOverride: String? = nil) {
@@ -7495,9 +7597,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func showWorkspaceOverflowMenu(_ sender: NSButton) {
-        guard let workspaceID = sender.identifier?.rawValue,
-            let workspace = workspacesByProject.values.flatMap({ $0 }).first(where: { $0.id == workspaceID })
-        else { return }
+        guard let workspaceID = sender.identifier?.rawValue, let workspace = workspaceIndex[workspaceID]?.workspace else { return }
         let menu = Self.makeWorkspaceOverflowMenu(
             workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace))
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
@@ -9793,7 +9893,7 @@ extension AppKitController {
                         let window = windows[windowListIndex]
                         let label: String
                         let detail: String?
-                        if window.role == "terminal" {
+                        if window.roleValue == .terminal {
                             let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
                             label = fallback.label
                             detail = fallback.detail

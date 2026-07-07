@@ -277,7 +277,7 @@ PY
 )"
   command_output="$(
     env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 \
-      "$SPACES_CLI" terminal command --backend ghostty-embedded --title "$title"
+      "$SPACES_CLI" terminal command --title "$title"
   )"
   command_wall_ms="$(ms_since "$command_started_at")"
   session_id="$(extract_session_id "$command_output")"

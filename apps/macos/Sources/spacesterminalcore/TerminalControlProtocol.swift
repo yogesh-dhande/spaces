@@ -48,6 +48,34 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.appearance = appearance
     }
 
+    public init(command: TerminalControlCommand, authToken: String? = nil) {
+        switch command {
+        case .attach(let payload):
+            self.init(
+                command: command.name, authToken: authToken, client: payload.client, attachmentMode: payload.attachmentMode,
+                appearance: payload.appearance)
+        case .detach(let payload), .heartbeat(let payload), .takeover(let payload):
+            self.init(command: command.name, authToken: authToken, clientID: payload.clientID)
+        case .send(let payload):
+            self.init(
+                command: command.name, authToken: authToken, text: payload.text, bytes: payload.bytes, clientID: payload.clientID,
+                ownerEpoch: payload.ownerEpoch, appendNewline: payload.appendNewline)
+        case .key(let payload):
+            self.init(command: command.name, authToken: authToken, key: payload.key, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch)
+        case .clearScreen(let payload):
+            self.init(command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch)
+        case .resize(let payload):
+            self.init(
+                command: command.name, authToken: authToken, clientID: payload.clientID, columns: payload.columns, rows: payload.rows,
+                ownerEpoch: payload.ownerEpoch, resizeSerial: payload.resizeSerial)
+        case .scroll(let payload):
+            self.init(
+                command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch,
+                scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods)
+        case .unsupported(let name): self.init(command: name, authToken: authToken)
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case command
         case authToken
@@ -114,6 +142,190 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     }
 }
 
+public struct TerminalControlAttachPayload: Sendable, Equatable {
+    public let client: TerminalClient?
+    public let attachmentMode: TerminalAttachmentMode?
+    public let appearance: ThemeAppearance?
+
+    public init(client: TerminalClient?, attachmentMode: TerminalAttachmentMode?, appearance: ThemeAppearance?) {
+        self.client = client
+        self.attachmentMode = attachmentMode
+        self.appearance = appearance
+    }
+}
+
+public struct TerminalControlClientPayload: Sendable, Equatable {
+    public let clientID: String?
+
+    public init(clientID: String?) { self.clientID = clientID }
+}
+
+public struct TerminalControlSendPayload: Sendable, Equatable {
+    public let text: String?
+    public let bytes: Data?
+    public let clientID: String?
+    public let ownerEpoch: UInt64?
+    public let appendNewline: Bool
+
+    public init(text: String?, bytes: Data?, clientID: String?, ownerEpoch: UInt64?, appendNewline: Bool) {
+        self.text = text
+        self.bytes = bytes
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+        self.appendNewline = appendNewline
+    }
+
+    public var inputPayload: Data? {
+        if let bytes { return bytes }
+        if let text { return Data(text.utf8) }
+        return nil
+    }
+}
+
+public struct TerminalControlKeyPayload: Sendable, Equatable {
+    public let key: String?
+    public let clientID: String?
+    public let ownerEpoch: UInt64?
+
+    public init(key: String?, clientID: String?, ownerEpoch: UInt64?) {
+        self.key = key
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+    }
+}
+
+public struct TerminalControlOwnerPayload: Sendable, Equatable {
+    public let clientID: String?
+    public let ownerEpoch: UInt64?
+
+    public init(clientID: String?, ownerEpoch: UInt64?) {
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+    }
+}
+
+public struct TerminalControlResizePayload: Sendable, Equatable {
+    public let clientID: String?
+    public let columns: Int?
+    public let rows: Int?
+    public let ownerEpoch: UInt64?
+    public let resizeSerial: UInt64?
+
+    public init(clientID: String?, columns: Int?, rows: Int?, ownerEpoch: UInt64?, resizeSerial: UInt64?) {
+        self.clientID = clientID
+        self.columns = columns
+        self.rows = rows
+        self.ownerEpoch = ownerEpoch
+        self.resizeSerial = resizeSerial
+    }
+}
+
+public struct TerminalControlScrollPayload: Sendable, Equatable {
+    public let clientID: String?
+    public let ownerEpoch: UInt64?
+    public let scrollHorizontal: Double?
+    public let scrollVertical: Double?
+    public let scrollMods: Int32?
+
+    public init(clientID: String?, ownerEpoch: UInt64?, scrollHorizontal: Double?, scrollVertical: Double?, scrollMods: Int32?) {
+        self.clientID = clientID
+        self.ownerEpoch = ownerEpoch
+        self.scrollHorizontal = scrollHorizontal
+        self.scrollVertical = scrollVertical
+        self.scrollMods = scrollMods
+    }
+}
+
+public enum TerminalControlCommand: Sendable, Equatable {
+    case attach(TerminalControlAttachPayload)
+    case detach(TerminalControlClientPayload)
+    case heartbeat(TerminalControlClientPayload)
+    case takeover(TerminalControlClientPayload)
+    case send(TerminalControlSendPayload)
+    case key(TerminalControlKeyPayload)
+    case clearScreen(TerminalControlOwnerPayload)
+    case resize(TerminalControlResizePayload)
+    case scroll(TerminalControlScrollPayload)
+    case unsupported(String)
+
+    public init(request: TerminalControlRequest) {
+        switch request.command {
+        case "attach":
+            self = .attach(
+                TerminalControlAttachPayload(client: request.client, attachmentMode: request.attachmentMode, appearance: request.appearance))
+        case "detach": self = .detach(TerminalControlClientPayload(clientID: request.clientID))
+        case "heartbeat": self = .heartbeat(TerminalControlClientPayload(clientID: request.clientID))
+        case "takeover": self = .takeover(TerminalControlClientPayload(clientID: request.clientID))
+        case "send":
+            self = .send(
+                TerminalControlSendPayload(
+                    text: request.text, bytes: request.bytes, clientID: request.clientID, ownerEpoch: request.ownerEpoch,
+                    appendNewline: request.appendNewline))
+        case "key": self = .key(TerminalControlKeyPayload(key: request.key, clientID: request.clientID, ownerEpoch: request.ownerEpoch))
+        case "clearScreen": self = .clearScreen(TerminalControlOwnerPayload(clientID: request.clientID, ownerEpoch: request.ownerEpoch))
+        case "resize":
+            self = .resize(
+                TerminalControlResizePayload(
+                    clientID: request.clientID, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
+                    resizeSerial: request.resizeSerial))
+        case "scroll":
+            self = .scroll(
+                TerminalControlScrollPayload(
+                    clientID: request.clientID, ownerEpoch: request.ownerEpoch, scrollHorizontal: request.scrollHorizontal,
+                    scrollVertical: request.scrollVertical, scrollMods: request.scrollMods))
+        default: self = .unsupported(request.command)
+        }
+    }
+
+    public var name: String {
+        switch self {
+        case .attach: "attach"
+        case .detach: "detach"
+        case .heartbeat: "heartbeat"
+        case .takeover: "takeover"
+        case .send: "send"
+        case .key: "key"
+        case .clearScreen: "clearScreen"
+        case .resize: "resize"
+        case .scroll: "scroll"
+        case .unsupported(let name): name
+        }
+    }
+
+    public var requiresOwnerClientID: Bool {
+        switch self {
+        case .send, .key, .clearScreen, .resize, .scroll: true
+        case .attach, .detach, .heartbeat, .takeover, .unsupported: false
+        }
+    }
+
+    public var includesSessionStateOnSuccess: Bool {
+        switch self {
+        case .takeover: true
+        case .attach, .detach, .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .unsupported: false
+        }
+    }
+
+    public var requiredPayloadFailureMessage: String? {
+        switch self {
+        case .attach(let payload): payload.client == nil ? "Missing client payload." : nil
+        case .detach(let payload), .heartbeat(let payload), .takeover(let payload): payload.clientID == nil ? "Missing client ID." : nil
+        case .send(let payload): payload.inputPayload == nil ? "Missing input payload." : nil
+        case .key(let payload): payload.key == nil ? "Unsupported terminal key." : nil
+        case .resize(let payload):
+            if let columns = payload.columns, let rows = payload.rows, columns > 0, rows > 0 { nil } else { "Missing terminal size." }
+        case .clearScreen, .scroll, .unsupported: nil
+        }
+    }
+
+    public static func isMobileTerminalControlName(_ name: String) -> Bool {
+        switch name {
+        case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll": true
+        default: false
+        }
+    }
+}
+
 public struct TerminalControlResponse: Codable, Sendable, Equatable {
     public let ok: Bool
     public let message: String
@@ -125,6 +337,8 @@ public struct TerminalControlResponse: Codable, Sendable, Equatable {
 }
 
 extension TerminalControlRequest {
+    public var commandValue: TerminalControlCommand { TerminalControlCommand(request: self) }
+
     public var inputPayload: Data? {
         if let bytes { return bytes }
         if let text { return Data(text.utf8) }

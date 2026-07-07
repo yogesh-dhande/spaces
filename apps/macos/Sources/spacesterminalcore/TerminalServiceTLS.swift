@@ -499,28 +499,6 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             }
         }
 
-        private final class StartupSignal: @unchecked Sendable {
-            private let lock = NSLock()
-            private let semaphore = DispatchSemaphore(value: 0)
-            private var result: Result<Void, Error>?
-
-            func signal(_ result: Result<Void, Error>) {
-                lock.lock()
-                let shouldSignal = self.result == nil
-                if shouldSignal { self.result = result }
-                lock.unlock()
-                if shouldSignal { semaphore.signal() }
-            }
-
-            func wait(timeout: TimeInterval) -> Result<Void, Error> {
-                guard semaphore.wait(timeout: .now() + timeout) == .success else { return .failure(TerminalServiceTLSError.requestTimedOut) }
-                lock.lock()
-                let result = self.result ?? .failure(TerminalServiceTLSError.requestTimedOut)
-                lock.unlock()
-                return result
-            }
-        }
-
         private let host: String
         private let port: Int
         private let authToken: String?
@@ -591,9 +569,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             }
             listener = createdListener
             createdListener.start(queue: queue)
-            switch startup.wait(timeout: timeout) {
-            case .success: break
-            case .failure(let error):
+            if case .failure(let error) = startup.wait(timeout: timeout) ?? .failure(TerminalServiceTLSError.requestTimedOut) {
                 createdListener.cancel()
                 throw error
             }

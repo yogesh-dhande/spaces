@@ -101,9 +101,30 @@ import Testing
         #expect(refs.pendingImportUpdateAllWorkspaces)
     }
 
-    @MainActor private func makeProjectFieldRefs() -> ProjectFieldRefs {
+    @MainActor @Test func liveFormRefsHonorsTheSenderMatchingTheLiveForm() {
+        // A control from the live form carries the form's generation tag, so its action resolves to
+        // the live refs and is honored.
+        let refs = makeProjectFieldRefs(formTag: 7)
+        #expect(AppKitController.liveFormRefs(refs, forSenderTag: 7) === refs)
+    }
+
+    @MainActor @Test func liveFormRefsIgnoresSenderFromAReplacedForm() {
+        // Rebuilding a single-instance dialog replaces its refs with a new generation. A queued action
+        // from the previous form still carries the old tag, so it must resolve to nil (be dropped)
+        // rather than mutate the current form's state.
+        let liveRefs = makeProjectFieldRefs(formTag: 2)
+        let staleSenderTag = 1
+        #expect(AppKitController.liveFormRefs(liveRefs, forSenderTag: staleSenderTag) == nil)
+    }
+
+    @MainActor @Test func liveFormRefsIgnoresSenderWhenNoFormIsLive() {
+        // After the dialog closes its refs are nil, so any late action is dropped instead of crashing.
+        #expect(AppKitController.liveFormRefs(nil as ProjectFieldRefs?, forSenderTag: 3) == nil)
+    }
+
+    @MainActor private func makeProjectFieldRefs(formTag: Int = "project".hashValue) -> ProjectFieldRefs {
         ProjectFieldRefs(
-            projectID: "project",
+            formTag: formTag, projectID: "project",
             setupScriptSection: ScriptSection(
                 title: "Setup Script", editAccessibilityIdentifier: "setup-script-edit", formAccessibilityPrefix: "project-setup-script", value: ""),
             stopScriptSection: ScriptSection(

@@ -2,7 +2,8 @@ import AppKit
 
 @MainActor final class AddWorkspaceAutoNameState { var branchOptions: [String] = [] }
 
-struct AddWorkspaceFieldRefs {
+struct AddWorkspaceFieldRefs: FormGenerationTagged {
+    let formTag: Int
     let projectID: String
     let isGitRepo: Bool
     let branchModeSegmented: NSSegmentedControl?

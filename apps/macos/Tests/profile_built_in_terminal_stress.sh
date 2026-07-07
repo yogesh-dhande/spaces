@@ -125,7 +125,7 @@ run_scenario() {
   local cli_metrics_path="$WORK_ROOT/${scenario}-cli.log"
   local command_output session_id session_dir output_log
 
-  command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --backend ghostty-embedded --command "$command" --title "stress-${scenario}")"
+  command_output="$(env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command --command "$command" --title "stress-${scenario}")"
   session_id="$(extract_session_id "$command_output")"
   [[ -n "$session_id" ]] || { echo "Failed to parse session ID for scenario $scenario" >&2; exit 1; }
 

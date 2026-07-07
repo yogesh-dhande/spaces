@@ -1,18 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocsShell } from "../../components/docs-shell";
+import { card, prose, code } from "../../components/guide-styles";
 
 export const metadata: Metadata = {
   title: "Guide: Next.js + Django (Separate Repos)",
   description:
     "Cookbook guide for operating frontend and backend from separate repositories with Spaces.",
 };
-
-const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";
-const prose = "mt-2 text-sm leading-7 text-foreground-soft";
-const list = "mt-3 space-y-2 text-sm leading-7 text-foreground-soft";
-const code =
-  "mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground";
 
 export default function NextjsDjangoSeparateReposGuidePage() {
   return (

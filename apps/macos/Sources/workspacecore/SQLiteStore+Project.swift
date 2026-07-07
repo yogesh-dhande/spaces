@@ -4,12 +4,16 @@ import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
+    /// Canonical column order for a full `projects` row read; reused by every SELECT and by the
+    /// INSERT below since both list the same 7 columns in the same order.
+    private static let projectColumns = "id, name, dir, is_git, default_branch, setup_script, stop_script"
+
     public func upsert(project: ProjectRecord) throws {
         let normalizedServiceDefinitions = try validatedServiceDefinitions(project.ports)
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO projects(id, name, dir, is_git, default_branch, setup_script, stop_script)
+                    INSERT INTO projects(\(Self.projectColumns))
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       name = excluded.name,
@@ -54,7 +58,7 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, name, dir, is_git, default_branch, setup_script, stop_script
+                    SELECT \(Self.projectColumns)
                     FROM projects
                     WHERE id = ?
                     """, bindings: [id])
@@ -66,7 +70,7 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, name, dir, is_git, default_branch, setup_script, stop_script
+                    SELECT \(Self.projectColumns)
                     FROM projects
                     WHERE dir = ?
                     """, bindings: [dir])
@@ -77,7 +81,7 @@ extension SQLiteStore {
     public func projects() throws -> [ProjectRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, name, dir, is_git, default_branch, setup_script, stop_script
+                SELECT \(Self.projectColumns)
                 FROM projects
                 ORDER BY name
                 """)

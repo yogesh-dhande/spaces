@@ -182,16 +182,9 @@ private struct SelectWorkspaceDetailCommand: ParsableCommand {
     /// workspace id, avoiding brittle sidebar accessibility traversal in the
     /// manual desktop harness.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let workspace = try resolveWorkspace(dir: workspaceDir).workspace
         try IPCNotification.post(IPCNotification.selectWorkspaceDetail, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id])
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                notes: workspace.notes))
+        try emitJSON(workspaceSummaryPayload(workspace))
     }
 }
 
@@ -205,16 +198,9 @@ private struct OpenWorkspaceTerminalCommand: ParsableCommand {
     /// manual harness can profile launch responsiveness without scripting
     /// shortcuts or sidebar clicks.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let workspace = try resolveWorkspace(dir: workspaceDir).workspace
         try IPCNotification.post(IPCNotification.openWorkspaceTerminal, userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id])
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                notes: workspace.notes))
+        try emitJSON(workspaceSummaryPayload(workspace))
     }
 }
 
@@ -230,11 +216,7 @@ private struct StartWorkspaceTerminalSessionCommand: ParsableCommand {
     /// daemon, so the helper exercises the same local or paired-device routing
     /// as app and mobile entry points.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: title, command: command)
         try emitJSON(session)
     }
@@ -346,7 +328,7 @@ private struct OpenDevicePairingWindowCommand: ParsableCommand {
             DevicePairingWindowPayload(
                 host: status.host, port: status.port, bonjourServiceName: status.bonjourServiceName, pairingLink: window.linkString,
                 pairingCode: window.code, pairingNonce: window.nonce, certificateFingerprint: link.certificateFingerprint,
-                expiresAt: ISO8601DateFormatter().string(from: window.expiresAt), message: response.message))
+                expiresAt: e2eISO8601Formatter.string(from: window.expiresAt), message: response.message))
     }
 }
 
@@ -694,6 +676,22 @@ private struct RenderUpdateTextLine: Encodable {
     let error: String?
 }
 
+/// Shared resolve + post + emit flow for commands that look up a workspace and tell the
+/// running app to act on one named target inside it (a configured process or coding agent).
+/// The four call sites differ only in which notification to post, the label used in the
+/// "Missing ..." validation error, and the key used for the target name in the emitted JSON.
+private func postWorkspaceTargetIPC(
+    _ notification: Notification.Name, workspaceDir: String, targetName: String, targetLabel: String, targetKey: String
+) throws {
+    let workspace = try resolveWorkspace(dir: workspaceDir).workspace
+    let trimmedTargetName = targetName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedTargetName.isEmpty else { throw ValidationError("Missing \(targetLabel).") }
+    try IPCNotification.post(
+        notification,
+        userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedTargetName])
+    try emitJSON(["workspaceID": workspace.id, targetKey: trimmedTargetName])
+}
+
 private struct RunWorkspaceProcessCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "run-workspace-process")
 
@@ -703,17 +701,9 @@ private struct RunWorkspaceProcessCommand: ParsableCommand {
     /// Tells the running Spaces app to launch one configured process through
     /// the same app-side path used by GUI recovery or focus actions.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
-        try IPCNotification.post(
-            IPCNotification.runWorkspaceProcess,
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName])
-        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+        try postWorkspaceTargetIPC(
+            IPCNotification.runWorkspaceProcess, workspaceDir: workspaceDir, targetName: processName, targetLabel: "process name",
+            targetKey: "processName")
     }
 }
 
@@ -724,17 +714,9 @@ private struct StopWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var processName: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
-        try IPCNotification.post(
-            IPCNotification.stopWorkspaceProcess,
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName])
-        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+        try postWorkspaceTargetIPC(
+            IPCNotification.stopWorkspaceProcess, workspaceDir: workspaceDir, targetName: processName, targetLabel: "process name",
+            targetKey: "processName")
     }
 }
 
@@ -745,17 +727,9 @@ private struct RestartWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var processName: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        let trimmedProcessName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedProcessName.isEmpty else { throw ValidationError("Missing process name.") }
-        try IPCNotification.post(
-            IPCNotification.restartWorkspaceProcess,
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedProcessName])
-        try emitJSON(["workspaceID": workspace.id, "processName": trimmedProcessName])
+        try postWorkspaceTargetIPC(
+            IPCNotification.restartWorkspaceProcess, workspaceDir: workspaceDir, targetName: processName, targetLabel: "process name",
+            targetKey: "processName")
     }
 }
 
@@ -768,17 +742,8 @@ private struct LaunchWorkspaceAgentCommand: ParsableCommand {
     /// Tells the running Spaces app to launch one configured coding agent
     /// through the same app-side path used by the GUI.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { throw ValidationError("Missing coding agent name.") }
-        try IPCNotification.post(
-            IPCNotification.launchWorkspaceAgent,
-            userInfo: [IPCNotification.workspaceIDUserInfoKey: workspace.id, IPCNotification.workspaceTargetNameUserInfoKey: trimmedName])
-        try emitJSON(["workspaceID": workspace.id, "name": trimmedName])
+        try postWorkspaceTargetIPC(
+            IPCNotification.launchWorkspaceAgent, workspaceDir: workspaceDir, targetName: name, targetLabel: "coding agent name", targetKey: "name")
     }
 }
 
@@ -815,19 +780,12 @@ private struct StopWorkspaceCommand: ParsableCommand {
     /// manual harness can close tracked terminals/browser windows between
     /// phases without widening the public CLI.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
         guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
             throw ValidationError("Workspace disappeared: \(workspace.id)")
         }
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                notes: updated.notes))
+        try emitJSON(workspaceSummaryPayload(updated))
     }
 }
 
@@ -862,11 +820,7 @@ private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspace.id)
         try emitJSON(
             WorkspaceRuntimePlanPayload(
@@ -930,11 +884,7 @@ private struct SeedFixtureCommand: ParsableCommand {
         }
 
         let payload = SeedFixturePayload(
-            projectID: project.id,
-            defaultWorkspace: try orchestrator.store.workspace(dir: project.dir).map {
-                WorkspaceSummaryPayload(
-                    id: $0.id, name: $0.displayName, dir: $0.dir, isArchived: $0.isArchived, isRunning: $0.isRunning, notes: $0.notes)
-            })
+            projectID: project.id, defaultWorkspace: try orchestrator.store.workspace(dir: project.dir).map(workspaceSummaryPayload))
         try emitJSON(payload)
     }
 
@@ -1058,10 +1008,7 @@ private struct RegisterProjectCommand: ParsableCommand {
         guard let workspace = try orchestrator.store.workspace(dir: project.dir) else {
             throw ValidationError("Default workspace not found for project: \(project.dir)")
         }
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                notes: workspace.notes))
+        try emitJSON(workspaceSummaryPayload(workspace))
     }
 }
 
@@ -1088,10 +1035,7 @@ private struct CreateWorkspaceCommand: ParsableCommand {
         let workspace = try orchestrator.createWorkspaceOnDevice(
             projectID: project.id, branch: branch, baseBranch: baseBranch, directoryName: directoryName, notes: notes, runSetupScript: false,
             allowRemoteBranchLookup: false, allowExistingBranchReuse: existingBranch)
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                notes: workspace.notes))
+        try emitJSON(workspaceSummaryPayload(workspace))
     }
 }
 
@@ -1104,21 +1048,10 @@ private struct DumpWorkspaceCommand: ParsableCommand {
     /// can assert on the real database contents without reaching into SQLite
     /// directly.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         let payload = WorkspaceDumpPayload(
-            workspace: .init(
-                id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-                notes: workspace.notes),
-            settings: try orchestrator.workspaceSettings(workspaceID: workspace.id).map {
-                WorkspaceSettingsPayload(
-                    stopScript: $0.stopScript, ports: $0.ports.map(\.name), processes: $0.processes.map { .init(name: $0.name, command: $0.command) },
-                    browserSessions: $0.browserSessions.map { .init(name: $0.name, url: $0.url) },
-                    agentLaunchers: $0.agentLaunchers.map { .init(name: $0.name, command: $0.command) })
-            },
+            workspace: workspaceSummaryPayload(workspace),
+            settings: try orchestrator.workspaceSettings(workspaceID: workspace.id).map(workspaceSettingsPayload),
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
@@ -1189,11 +1122,7 @@ private struct CycleWorkspaceWindowCommand: ParsableCommand {
     @Option(name: .long) var direction: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let workspace = try resolveWorkspace(dir: workspaceDir).workspace
         switch direction {
         case "next", "previous":
             let requestID = UUID().uuidString
@@ -1216,11 +1145,7 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
     @Option(name: .long) var processName: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
             throw ValidationError("Running process not found: \(processName)")
         }
@@ -1336,11 +1261,7 @@ private struct SetWorkspaceAgentLaunchersCommand: ParsableCommand {
     /// workspace-settings path so the manual harness can launch a mock agent
     /// without driving the nested settings UI.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         if clear && (name != nil || command != nil) { throw ValidationError("--clear cannot be combined with --name or --command") }
         if !clear
             && (name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
@@ -1352,14 +1273,9 @@ private struct SetWorkspaceAgentLaunchersCommand: ParsableCommand {
             if clear { settings.agentLaunchers = [] } else { settings.agentLaunchers = [AgentLauncher(name: name!, command: command!)] }
         }
         guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
-            throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")
+            throw ValidationError("Workspace settings missing at: \(workspace.dir)")
         }
-        try emitJSON(
-            WorkspaceSettingsPayload(
-                stopScript: updated.stopScript, ports: updated.ports.map(\.name),
-                processes: updated.processes.map { .init(name: $0.name, command: $0.command) },
-                browserSessions: updated.browserSessions.map { .init(name: $0.name, url: $0.url) },
-                agentLaunchers: updated.agentLaunchers.map { .init(name: $0.name, command: $0.command) }))
+        try emitJSON(workspaceSettingsPayload(updated))
     }
 }
 
@@ -1399,19 +1315,12 @@ private struct ArchiveWorkspaceCommand: ParsableCommand {
     /// Archives one workspace through the production lifecycle path so the
     /// manual harness can fall back when the archive confirmation UI is flaky.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         _ = try orchestrator.archiveWorkspace(workspaceID: workspace.id)
         guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
             throw ValidationError("Workspace disappeared: \(workspace.id)")
         }
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                notes: updated.notes))
+        try emitJSON(workspaceSummaryPayload(updated))
     }
 }
 
@@ -1421,19 +1330,12 @@ private struct HideWorkspaceCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         try orchestrator.updateWorkspaceHidden(workspaceID: workspace.id, isHidden: true)
         guard let updated = try orchestrator.store.workspace(id: workspace.id) else {
             throw ValidationError("Workspace disappeared: \(workspace.id)")
         }
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                notes: updated.notes))
+        try emitJSON(workspaceSummaryPayload(updated))
     }
 }
 
@@ -1443,11 +1345,7 @@ private struct ClearWorkspaceAgentWindowsCommand: ParsableCommand {
     @Option(name: .long) var workspaceDir: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         try orchestrator.store.deleteAgentWindows(workspaceID: workspace.id)
         try emitJSON(["workspaceID": workspace.id, "cleared": "true"])
     }
@@ -1463,19 +1361,12 @@ private struct SetWorkspaceStopScriptCommand: ParsableCommand {
     /// path so the shell harness can validate persisted override behavior
     /// without depending on nested text-editor accessibility.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in settings.stopScript = stopScript }
-        guard let updated = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace disappeared at: \(normalizedWorkspaceDir)")
+        guard let updated = try orchestrator.store.workspace(dir: workspace.dir) else {
+            throw ValidationError("Workspace disappeared at: \(workspace.dir)")
         }
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                notes: updated.notes))
+        try emitJSON(workspaceSummaryPayload(updated))
     }
 }
 
@@ -1490,11 +1381,7 @@ private struct SetWorkspaceBrowserSessionURLsCommand: ParsableCommand {
     /// so concurrent fixture workspaces can be distinguished reliably in
     /// Chrome-window focus and cycling assertions.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.browserSessions = settings.browserSessions.map { session in
                 var updated = session
@@ -1506,13 +1393,10 @@ private struct SetWorkspaceBrowserSessionURLsCommand: ParsableCommand {
                 return updated
             }
         }
-        guard let updated = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace disappeared at: \(normalizedWorkspaceDir)")
+        guard let updated = try orchestrator.store.workspace(dir: workspace.dir) else {
+            throw ValidationError("Workspace disappeared at: \(workspace.dir)")
         }
-        try emitJSON(
-            WorkspaceSummaryPayload(
-                id: updated.id, name: updated.displayName, dir: updated.dir, isArchived: updated.isArchived, isRunning: updated.isRunning,
-                notes: updated.notes))
+        try emitJSON(workspaceSummaryPayload(updated))
     }
 }
 
@@ -1527,11 +1411,7 @@ private struct AddWorkspaceProcessCommand: ParsableCommand {
     /// path so the real-system harness can introduce additional runtime load
     /// without scripting the nested settings UI.
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw ValidationError("Missing process name.") }
@@ -1541,14 +1421,9 @@ private struct AddWorkspaceProcessCommand: ParsableCommand {
             settings.processes.append(ProcessTemplate(name: trimmedName, command: trimmedCommand))
         }
         guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
-            throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")
+            throw ValidationError("Workspace settings missing at: \(workspace.dir)")
         }
-        try emitJSON(
-            WorkspaceSettingsPayload(
-                stopScript: updated.stopScript, ports: updated.ports.map(\.name),
-                processes: updated.processes.map { .init(name: $0.name, command: $0.command) },
-                browserSessions: updated.browserSessions.map { .init(name: $0.name, url: $0.url) },
-                agentLaunchers: updated.agentLaunchers.map { .init(name: $0.name, command: $0.command) }))
+        try emitJSON(workspaceSettingsPayload(updated))
     }
 }
 
@@ -1559,25 +1434,16 @@ private struct RemoveWorkspaceProcessCommand: ParsableCommand {
     @Option(name: .long) var name: String
 
     func run() throws {
-        let orchestrator = try makeOrchestrator()
-        let normalizedWorkspaceDir = normalizePath(workspaceDir)
-        guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
-            throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
-        }
+        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { throw ValidationError("Missing process name.") }
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.processes.removeAll { ($0.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == trimmedName }
         }
         guard let updated = try orchestrator.workspaceSettings(workspaceID: workspace.id) else {
-            throw ValidationError("Workspace settings missing at: \(normalizedWorkspaceDir)")
+            throw ValidationError("Workspace settings missing at: \(workspace.dir)")
         }
-        try emitJSON(
-            WorkspaceSettingsPayload(
-                stopScript: updated.stopScript, ports: updated.ports.map(\.name),
-                processes: updated.processes.map { .init(name: $0.name, command: $0.command) },
-                browserSessions: updated.browserSessions.map { .init(name: $0.name, url: $0.url) },
-                agentLaunchers: updated.agentLaunchers.map { .init(name: $0.name, command: $0.command) }))
+        try emitJSON(workspaceSettingsPayload(updated))
     }
 }
 
@@ -1880,15 +1746,27 @@ private func workspaceSummary(orchestrator: WorkspaceOrchestrator, projectDir: S
     let match: WorkspaceSummary?
     if let name { match = workspaces.first(where: { $0.displayName == name }) } else { match = workspaces.first(where: \.isDefault) }
     guard let workspace = match else { return nil }
-    return WorkspaceSummaryPayload(
-        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
-        notes: workspace.notes)
+    return workspaceSummaryPayload(workspace)
 }
 
 private func workspaceSummaryPayload(_ workspace: WorkspaceRecord) -> WorkspaceSummaryPayload {
     WorkspaceSummaryPayload(
         id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
         notes: workspace.notes)
+}
+
+private func workspaceSummaryPayload(_ workspace: WorkspaceSummary) -> WorkspaceSummaryPayload {
+    WorkspaceSummaryPayload(
+        id: workspace.id, name: workspace.displayName, dir: workspace.dir, isArchived: workspace.isArchived, isRunning: workspace.isRunning,
+        notes: workspace.notes)
+}
+
+private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> WorkspaceSettingsPayload {
+    WorkspaceSettingsPayload(
+        stopScript: settings.stopScript, ports: settings.ports.map(\.name),
+        processes: settings.processes.map { .init(name: $0.name, command: $0.command) },
+        browserSessions: settings.browserSessions.map { .init(name: $0.name, url: $0.url) },
+        agentLaunchers: settings.agentLaunchers.map { .init(name: $0.name, command: $0.command) })
 }
 
 private func spacesDevicePayload(_ device: SpacesDeviceRecord) -> SpacesDevicePayload {
@@ -1930,15 +1808,21 @@ private func emitJSON<T: Encodable>(_ value: T) throws {
 // store. Without it the harness would neither persist captured window IDs nor read them back.
 private func makeOrchestrator() throws -> WorkspaceOrchestrator { try WorkspaceOrchestrator(store: .init(path: DatabaseLocator.defaultPath())) }
 
-/// Resolves a workspace directory to its stable id from the store. The harness uses this
-/// only to address IPC focus commands at the running app; the focus itself runs in the app.
-private func workspaceID(forDir dir: String) throws -> String {
+/// Resolves a workspace directory to its orchestrator and stored record. Shared by every
+/// command that looks up one workspace by `--workspace-dir` before acting on it, so the
+/// "Workspace not found at: <normalized dir>" error stays identical across all of them.
+private func resolveWorkspace(dir: String) throws -> (orchestrator: WorkspaceOrchestrator, workspace: WorkspaceRecord) {
+    let orchestrator = try makeOrchestrator()
     let normalizedWorkspaceDir = normalizePath(dir)
-    guard let workspace = try makeOrchestrator().store.workspace(dir: normalizedWorkspaceDir) else {
+    guard let workspace = try orchestrator.store.workspace(dir: normalizedWorkspaceDir) else {
         throw ValidationError("Workspace not found at: \(normalizedWorkspaceDir)")
     }
-    return workspace.id
+    return (orchestrator, workspace)
 }
+
+/// Resolves a workspace directory to its stable id from the store. The harness uses this
+/// only to address IPC focus commands at the running app; the focus itself runs in the app.
+private func workspaceID(forDir dir: String) throws -> String { try resolveWorkspace(dir: dir).workspace.id }
 
 private func sendTerminalServiceRequestForSession(sessionID rawSessionID: String, request: TerminalServiceRequest) throws -> TerminalServiceResponse {
     let sessionID = try required(rawSessionID, label: "session-id")
@@ -1983,10 +1867,7 @@ private func normalizeRemoteRoot(_ path: String) -> String {
     return "/" + trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 }
 
-private func normalizedOptional(_ value: String?) -> String? {
-    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
-    return value
-}
+private func normalizedOptional(_ value: String?) -> String? { normalizedNonEmpty(value) }
 
 private func required(_ value: String, label: String) throws -> String {
     guard let normalized = normalizedOptional(value) else { throw ValidationError("Missing \(label).") }
@@ -2003,7 +1884,11 @@ private func validOptionalPort(_ port: Int?, label: String) throws -> Int? {
     return try validPort(port, label: label)
 }
 
-private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
+// Cached because ISO8601DateFormatter construction is expensive; ISO8601DateFormatter is
+// documented thread-safe so one shared instance is safe to reuse across this module's helpers.
+nonisolated(unsafe) private let e2eISO8601Formatter = ISO8601DateFormatter()
+
+private func nowISO8601() -> String { e2eISO8601Formatter.string(from: Date()) }
 
 private final class MobileServePairingWindowEmitter: @unchecked Sendable {
     weak var server: SpacesDeviceAPIServer?
@@ -2034,7 +1919,7 @@ private final class MobileServePairingWindowEmitter: @unchecked Sendable {
 
         let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
         print(
-            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesDeviceFirstPartyPolicy.allowedBundleID)"
+            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(e2eISO8601Formatter.string(from: window.expiresAt))\tbundle=\(SpacesDeviceFirstPartyPolicy.allowedBundleID)"
         )
         fflush(stdout)
     }

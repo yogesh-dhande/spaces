@@ -1,6 +1,7 @@
 import AppKit
 
-@MainActor final class ProjectFieldRefs {
+@MainActor final class ProjectFieldRefs: FormGenerationTagged {
+    let formTag: Int
     let projectID: String
     let setupScriptSection: ScriptSection
     let stopScriptSection: ScriptSection
@@ -15,10 +16,11 @@ import AppKit
     var pendingImportUpdateAllWorkspaces = false
 
     init(
-        projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
+        formTag: Int, projectID: String, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection, portsSection: PortsSection,
         processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection, agentLaunchersSection: AgentLaunchersSection,
         importButton: NSButton, exportButton: NSButton, discardImportedConfigButton: NSButton
     ) {
+        self.formTag = formTag
         self.projectID = projectID
         self.setupScriptSection = setupScriptSection
         self.stopScriptSection = stopScriptSection

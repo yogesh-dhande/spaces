@@ -347,7 +347,7 @@
             if currentAttachment?.mode != mode {
                 try TerminalSessionPersistence.attachClient(
                     sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
-                    attachedAt: ISO8601DateFormatter().string(from: Date()))
+                    attachedAt: TerminalSessionTimestamp.string(from: Date()))
                 if mode == .owner, previousOwnerClientID != client.id { advanceOwnerEpoch(reason: "attach") }
                 postAttachmentStateDidChange()
             }
@@ -356,10 +356,10 @@
 
         public func detach(clientID: String) throws {
             let detachedClientWasOwner = isOwner(clientID: clientID)
-            try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: ISO8601DateFormatter().string(from: Date()))
+            try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: TerminalSessionTimestamp.string(from: Date()))
             var remainingOwnerClientID = activeOwnerClientID()
             if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: clientID) {
-                let transferredAt = ISO8601DateFormatter().string(from: Date())
+                let transferredAt = TerminalSessionTimestamp.string(from: Date())
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: launchConfiguration.sessionID, newOwnerClientID: localOwnerClientID, paths: paths, transferredAt: transferredAt)
                 remainingOwnerClientID = localOwnerClientID
@@ -401,7 +401,7 @@
         var isStarted: Bool { started }
 
         public func terminate() {
-            let now = ISO8601DateFormatter().string(from: Date())
+            let now = TerminalSessionTimestamp.string(from: Date())
             let childPID = observedChildPID()
             runtimeStateTimer?.invalidate()
             runtimeStateTimer = nil
@@ -479,20 +479,21 @@
         }
 
         public func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let command = request.commandValue
             trace(
-                "control_request command=\(request.command) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
+                "control_request command=\(command.name) client=\(request.clientID ?? request.client?.id ?? "nil") target_session=\(launchConfiguration.sessionID)"
             )
-            return switch request.command {
-            case "attach": controlResponseForAttachRequest(request)
-            case "detach": controlResponseForDetachRequest(request)
-            case "heartbeat": controlResponseForHeartbeatRequest(request)
-            case "send": controlResponseForSendRequest(request)
-            case "key": controlResponseForKeyRequest(request)
-            case "clearScreen": controlResponseForClearScreenRequest(request)
-            case "takeover": controlResponseForTakeoverRequest(request)
-            case "resize": controlResponseForResizeRequest(request)
-            case "scroll": controlResponseForScrollRequest(request)
-            default: TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
+            return switch command {
+            case .attach: controlResponseForAttachRequest(request)
+            case .detach: controlResponseForDetachRequest(request)
+            case .heartbeat: controlResponseForHeartbeatRequest(request)
+            case .send: controlResponseForSendRequest(request)
+            case .key: controlResponseForKeyRequest(request)
+            case .clearScreen: controlResponseForClearScreenRequest(request)
+            case .takeover: controlResponseForTakeoverRequest(request)
+            case .resize: controlResponseForResizeRequest(request)
+            case .scroll: controlResponseForScrollRequest(request)
+            case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
             }
         }
 
@@ -707,7 +708,7 @@
                 let previousOwnerClientID = activeOwnerClientID()
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
-                    transferredAt: ISO8601DateFormatter().string(from: Date()))
+                    transferredAt: TerminalSessionTimestamp.string(from: Date()))
                 if previousOwnerClientID != clientID { advanceOwnerEpoch(reason: "takeover") }
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -791,7 +792,7 @@
             let foregroundAgent = foregroundProcess.flatMap(TerminalForegroundProcessInspector.classify)
             let state = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
-                childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: ISO8601DateFormatter().string(from: now), title: effectiveTitle,
+                childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now), title: effectiveTitle,
                 workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows,
                 foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
@@ -821,7 +822,7 @@
             let detachedClientWasOwner = activeAttachmentsBeforeExpiry.contains {
                 $0.mode == .owner && $0.detachedAt == nil && staleClientIDSet.contains($0.clientID)
             }
-            let detachedAt = ISO8601DateFormatter().string(from: now)
+            let detachedAt = TerminalSessionTimestamp.string(from: now)
             for clientID in staleClientIDs { try? TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt) }
             var remainingOwnerClientID = activeOwnerClientID()
             if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: "") {
@@ -1058,7 +1059,7 @@
             return lastExportedScreenStateRevision < revision
         }
 
-        private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
+        private func nowISO8601() -> String { TerminalSessionTimestamp.string(from: Date()) }
 
         private static func clampedInt(_ value: UInt64) -> Int {
             guard value <= UInt64(Int.max) else { return Int.max }

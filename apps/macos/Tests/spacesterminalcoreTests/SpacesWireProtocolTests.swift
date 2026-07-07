@@ -5,19 +5,19 @@ import XCTest
 
 final class SpacesWireProtocolTests: XCTestCase {
     func testEvaluateCompatibleWhenVersionsMatch() {
-        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 3, localVersion: 3)
+        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 4, localVersion: 4)
         XCTAssertEqual(verdict, .compatible)
         XCTAssertTrue(verdict.isCompatible)
     }
 
     func testEvaluateDaemonTooOldWhenBelowLocal() {
-        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 2, localVersion: 3)
+        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 3, localVersion: 4)
         XCTAssertEqual(verdict, .daemonTooOld)
         XCTAssertFalse(verdict.isCompatible)
     }
 
     func testEvaluateClientTooOldWhenAboveLocal() {
-        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 4, localVersion: 3)
+        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 5, localVersion: 4)
         XCTAssertEqual(verdict, .clientTooOld)
         XCTAssertFalse(verdict.isCompatible)
     }

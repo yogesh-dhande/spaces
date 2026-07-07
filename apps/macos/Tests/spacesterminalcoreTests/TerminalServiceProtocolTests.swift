@@ -25,9 +25,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
             id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "blocked", label: "Mock Agent",
             terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
             createdAt: "2026-06-11T00:00:00Z")
-        let profileCommand = TerminalServiceProfileCommandRequest(
-            operation: .workspaceCreate, projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true,
-            terminalSessionID: "session-1", terminalText: "hello", terminalBytes: Data([0, 10, 255]), appendNewline: true, lineCount: 40)
+        let profileCommand = TerminalServiceProfileCommand.workspaceCreate(
+            .init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true))
         let requests = [
             TerminalServiceRequest(command: .ping),
             TerminalServiceRequest(
@@ -80,6 +79,55 @@ final class TerminalServiceProtocolTests: XCTestCase {
 
         XCTAssertThrowsError(try TerminalServiceCodec.decodeRequest(emptyCommand))
         XCTAssertThrowsError(try TerminalServiceCodec.decodeRequest(multipleCommands))
+    }
+
+    func testProfileCommandRoundTripsEveryOperation() throws {
+        let commands: [TerminalServiceProfileCommand] = [
+            .projectList, .terminalList, .workspaceList(.init(projectID: "project-1", includeArchived: true)), .workspaceList(.init()),
+            .workspaceCreate(.init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true)),
+            .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(workspaceID: "workspace-1"),
+            .workspaceRestart(workspaceID: "workspace-1"),
+            .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
+            .terminalSend(.init(sessionID: "session-1", input: .text("hello"), appendNewline: true)),
+            .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
+            .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),
+            .terminalCommand(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "ls", title: "list")),
+            .terminalCommand(.init(cwd: "/tmp/work")),
+        ]
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        for command in commands {
+            let decoded = try decoder.decode(TerminalServiceProfileCommand.self, from: encoder.encode(command))
+            XCTAssertEqual(decoded, command)
+        }
+    }
+
+    func testProfileCommandDecodeNormalizesRequiredStringsAndRejectsEmpty() throws {
+        let decoder = JSONDecoder()
+
+        // Surrounding whitespace on a required field is trimmed at the wire boundary.
+        let padded = Data(#"{"workspaceStart":"  workspace-1  "}"#.utf8)
+        XCTAssertEqual(try decoder.decode(TerminalServiceProfileCommand.self, from: padded), .workspaceStart(workspaceID: "workspace-1"))
+
+        // An empty-after-trim required field is rejected during decode.
+        let empty = Data(#"{"workspaceStart":"   "}"#.utf8)
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: empty))
+    }
+
+    func testProfileCommandDecodeRejectsAmbiguousPayloads() {
+        let decoder = JSONDecoder()
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data("{}".utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"projectList":{},"terminalList":{}}"#.utf8)))
+    }
+
+    func testTerminalProfileInputRejectsZeroAndTwoKeyPayloads() throws {
+        let decoder = JSONDecoder()
+
+        XCTAssertEqual(try decoder.decode(TerminalProfileInput.self, from: Data(#"{"text":""}"#.utf8)), .text(""))
+        XCTAssertEqual(try decoder.decode(TerminalProfileInput.self, from: Data(#"{"bytes":"AAr/"}"#.utf8)), .bytes(Data([0, 10, 255])))
+
+        XCTAssertThrowsError(try decoder.decode(TerminalProfileInput.self, from: Data("{}".utf8)))
+        XCTAssertThrowsError(try decoder.decode(TerminalProfileInput.self, from: Data(#"{"text":"hi","bytes":"AA=="}"#.utf8)))
     }
 
     func testClientCanSendRequestToServiceSocket() throws {

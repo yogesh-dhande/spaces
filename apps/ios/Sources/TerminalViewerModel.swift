@@ -24,6 +24,18 @@ private enum TerminalViewerRenderMode: String {
     case ended
 }
 
+enum TerminalViewerPhase: Equatable {
+    case unavailable
+    case ended
+    case starting
+    case connecting(owner: Bool)
+    case ownerBusy
+    case ownerSynchronizing
+    case ownerInteractive
+    case takingOver
+    case viewingOtherOwner
+}
+
 private enum TerminalLinkPreviewRequestError: Error {
     case stale
 }
@@ -233,14 +245,36 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     var attachmentSnapshot: TerminalSessionAttachmentSnapshot { latestState?.attachmentSnapshot ?? session.attachmentSnapshot }
     var isOwner: Bool { !isEndedState && activeOwnerClientID == remoteClient.id }
     var isOwnershipSynchronizationPending: Bool { isOwnershipSynchronizationScheduled || isSynchronizingOwnership }
-    var isTakingOver: Bool { !isOwner && (isAwaitingTakeoverConfirmation || isBusy || isOwnershipSynchronizationPending) }
-    var acceptsInput: Bool { !isEndedState && isOwner && !isBusy && !isConnecting && !isOwnershipSynchronizationPending && !isSessionUnavailable }
-    var keepsTerminalInputSurfaceActive: Bool { !isEndedState && isOwner && !isConnecting && !isSessionUnavailable }
-    var showsTakeOverAction: Bool { !isEndedState && !isStartingState && !isSessionUnavailable && !isOwner && !isTakingOver && !isConnecting }
+    var phase: TerminalViewerPhase {
+        if isSessionUnavailable { return .unavailable }
+        if isEndedState { return .ended }
+        if isConnecting { return .connecting(owner: isOwner) }
+        if isOwner {
+            if isBusy { return .ownerBusy }
+            if isOwnershipSynchronizationPending { return .ownerSynchronizing }
+            return .ownerInteractive
+        }
+        if isStartingState { return .starting }
+        if isAwaitingTakeoverConfirmation || isBusy || isOwnershipSynchronizationPending { return .takingOver }
+        return .viewingOtherOwner
+    }
+    var isTakingOver: Bool { phase == .takingOver }
+    var acceptsInput: Bool { phase == .ownerInteractive }
+    var keepsTerminalInputSurfaceActive: Bool {
+        switch phase {
+        case .ownerInteractive, .ownerBusy, .ownerSynchronizing: true
+        case .unavailable, .ended, .starting, .connecting, .takingOver, .viewingOtherOwner: false
+        }
+    }
+    var showsTakeOverAction: Bool { phase == .viewingOtherOwner }
     var isPreparingInput: Bool {
-        guard !isEndedState, isOwner && !isSessionUnavailable else { return false }
-        guard ownerRenderEpochState != nil, isInputSurfaceReady else { return true }
-        return isBusy || isConnecting
+        switch phase {
+        case .connecting(owner: true), .ownerBusy: return true
+        case .ownerInteractive, .ownerSynchronizing:
+            return ownerRenderEpochState == nil || !isInputSurfaceReady
+        case .unavailable, .ended, .starting, .connecting(owner: false), .takingOver, .viewingOtherOwner:
+            return false
+        }
     }
     var viewportColumns: Int? { viewportSize?.columns }
     var viewportRows: Int? { viewportSize?.rows }
@@ -296,6 +330,8 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isInputSurfaceReady = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        streamHandle?.cancel()
+        streamHandle = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
@@ -319,10 +355,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         hasRetriedEndedStateAfterStreamClose = false
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
-        streamHandle?.cancel()
-        streamHandle = nil
         return (commandChannel, shouldDetach)
     }
+
 
     private func detachForStop(using currentChannel: SpacesDeviceAPICommandChannel, shouldDetach: Bool, timeout: Duration) async {
         if shouldDetach {
@@ -1435,15 +1470,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isAwaitingTakeoverConfirmation = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        streamHandle?.cancel()
+        streamHandle = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         inputSendQueue.cancelAll()
+        ownershipSynchronizationTask?.cancel()
+        ownershipSynchronizationTask = nil
         bufferedInputText = ""
         hasAttachedToSession = false
         hasConfirmedOwnerInputReadiness = false
         isInputSurfaceReady = false
-        ownershipSynchronizationTask?.cancel()
-        ownershipSynchronizationTask = nil
         reportedOwnerReadyEpochID = nil
         needsOwnershipSynchronizationAfterCurrentRun = false
         invalidateLinkPreviewRequests()
@@ -1452,8 +1489,6 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         linkPreview = nil
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
-        streamHandle?.cancel()
-        streamHandle = nil
         errorMessage = nil
         onAuthenticationRequired(recoveryMessage)
         return true

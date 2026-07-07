@@ -4,6 +4,31 @@ import spacesterminalcore
 import workspacecore
 
 final class SpacesMCPStdioServer {
+    private struct MCPToolDescriptor {
+        let name: String
+        let description: String
+        let properties: [String: Any]
+        let required: [String]
+        let oneOf: [[String: Any]]
+        let handler: (SpacesMCPStdioServer, [String: Any]) throws -> TerminalServiceProfileCommandResponse
+
+        init(
+            name: String, description: String, properties: [String: Any], required: [String], oneOf: [[String: Any]] = [],
+            handler: @escaping (SpacesMCPStdioServer, [String: Any]) throws -> TerminalServiceProfileCommandResponse
+        ) {
+            self.name = name
+            self.description = description
+            self.properties = properties
+            self.required = required
+            self.oneOf = oneOf
+            self.handler = handler
+        }
+
+        var definition: [String: Any] {
+            SpacesMCPStdioServer.tool(name: name, description: description, properties: properties, required: required, oneOf: oneOf)
+        }
+    }
+
     private let input: FileHandle
     private let output: FileHandle
     private let encoder: JSONEncoder
@@ -18,36 +43,81 @@ final class SpacesMCPStdioServer {
 
     func run() throws { while let data = try readMessage() { try handleMessage(data) } }
 
-    static func toolDefinitions() -> [[String: Any]] {
+    private static func toolDescriptors() -> [MCPToolDescriptor] {
         [
-            tool(name: "spaces_project_list", description: "List Spaces projects.", properties: [:], required: []),
-            tool(
+            MCPToolDescriptor(name: "spaces_project_list", description: "List Spaces projects.", properties: [:], required: []) { _, _ in
+                try TerminalService.sendProfileCommand(.projectList)
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_list", description: "List Spaces workspaces.",
                 properties: ["project": stringSchema("Project ID filter."), "includeArchived": boolSchema("Include archived workspaces.")],
-                required: []),
-            tool(
+                required: []
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .workspaceList(
+                        .init(
+                            projectID: server.optionalString(arguments["project"]),
+                            includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false)))
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_create", description: "Create a workspace on this device.",
                 properties: [
                     "project": stringSchema("Project ID."), "branch": stringSchema("Workspace branch."),
                     "baseBranch": stringSchema("Base branch for new branch creation."),
                     "existingBranch": boolSchema("Use an existing branch instead of creating a new branch."),
-                ], required: ["project", "branch"]),
-            tool(
+                ], required: ["project", "branch"]
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .workspaceCreate(
+                        .init(
+                            projectID: try server.requiredString(arguments["project"], field: "project"),
+                            branch: try server.requiredString(arguments["branch"], field: "branch"),
+                            baseBranch: server.optionalString(arguments["baseBranch"]),
+                            existingBranch: server.optionalBool(arguments["existingBranch"]) ?? false)))
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_start", description: "Ensure a workspace is running.",
-                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]),
-            tool(
+                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .workspaceStart(workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+            },
+            MCPToolDescriptor(
                 name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace.",
-                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]),
-            tool(
+                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(
+                    .workspaceRestart(workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+            },
+            MCPToolDescriptor(
                 name: "spaces_terminal_list", description: "List available Spaces terminal sessions.",
-                properties: ["device": stringSchema("Paired device name or ID. Defaults to this machine.")], required: []),
-            tool(
+                properties: ["device": stringSchema("Paired device name or ID. Defaults to this machine.")], required: []
+            ) { server, arguments in
+                if let device = try server.resolvedDevice(arguments) {
+                    let sessions = try SpacesDeviceClient.terminalSessions(device: device, clientApp: cliDeviceClientApp())
+                    let rows = sessions.map { "\($0.id)\tstate=\($0.state.rawValue)\tcwd=\($0.workingDirectory)" }
+                    return TerminalServiceProfileCommandResponse(
+                        message: rows.isEmpty ? "No terminal sessions on \(device.name)." : rows.joined(separator: "\n"))
+                }
+                return try TerminalService.sendProfileCommand(.terminalList, timeout: 5)
+            },
+            MCPToolDescriptor(
                 name: "spaces_terminal_tail", description: "Read recent output from an explicit Spaces terminal session.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."), "lines": intSchema("Number of output lines to read. Defaults to 20."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
-                ], required: ["session"]),
-            tool(
+                ], required: ["session"]
+            ) { server, arguments in
+                let sessionID = try server.requiredString(arguments["session"], field: "session")
+                if let device = try server.resolvedDevice(arguments) {
+                    let output = try SpacesDeviceClient.tailTerminalOutput(
+                        sessionID: sessionID, lines: server.optionalInt(arguments["lines"]), device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: "Read terminal output.", terminalOutput: output)
+                }
+                return try TerminalService.sendProfileCommand(
+                    .terminalTail(.init(sessionID: sessionID, lineCount: server.optionalInt(arguments["lines"]))), timeout: 5)
+            },
+            MCPToolDescriptor(
                 name: "spaces_terminal_send", description: "Send text or raw bytes to an explicit Spaces terminal session.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
@@ -55,10 +125,40 @@ final class SpacesMCPStdioServer {
                     "bytes": byteArraySchema("Raw byte values to send. Each value must be an integer from 0 through 255."),
                     "appendNewline": boolSchema("Append a newline after the payload."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
-                ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]),
-            tool(name: "spaces_device_list", description: "List paired devices reachable from this machine.", properties: [:], required: []),
+                ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
+            ) { server, arguments in
+                let input = try server.terminalInputPayload(from: arguments)
+                let sessionID = try server.requiredString(arguments["session"], field: "session")
+                let appendNewline = server.optionalBool(arguments["appendNewline"]) ?? false
+                if let device = try server.resolvedDevice(arguments) {
+                    let text: String?
+                    let bytes: Data?
+                    switch input {
+                    case .text(let value):
+                        text = value
+                        bytes = nil
+                    case .bytes(let value):
+                        text = nil
+                        bytes = value
+                    }
+                    let response = try SpacesDeviceClient.sendTerminalInput(
+                        sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline, device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: response.message)
+                }
+                return try TerminalService.sendProfileCommand(
+                    .terminalSend(.init(sessionID: sessionID, input: input, appendNewline: appendNewline)), timeout: 5)
+            },
+            MCPToolDescriptor(
+                name: "spaces_device_list", description: "List paired devices reachable from this machine.", properties: [:], required: []
+            ) { _, _ in
+                let devices = try SpacesClientDatabase.defaultDatabase().pairedDevices()
+                return TerminalServiceProfileCommandResponse(
+                    message: devices.isEmpty ? "No paired devices." : SpacesPairedDeviceSelection.deviceRows(devices))
+            },
         ]
     }
+
+    static func toolDefinitions() -> [[String: Any]] { toolDescriptors().map(\.definition) }
 
     private static func tool(name: String, description: String, properties: [String: Any], required: [String], oneOf: [[String: Any]] = [])
         -> [String: Any]
@@ -115,67 +215,10 @@ final class SpacesMCPStdioServer {
     }
 
     private func callTool(name: String, arguments: [String: Any]) throws -> TerminalServiceProfileCommandResponse {
-        switch name {
-        case "spaces_project_list": return try TerminalService.sendProfileCommand(.init(operation: .projectList))
-        case "spaces_workspace_list":
-            return try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .workspaceList, projectID: optionalString(arguments["project"]),
-                    includeArchived: optionalBool(arguments["includeArchived"]) ?? false))
-        case "spaces_workspace_create":
-            return try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .workspaceCreate, projectID: try requiredString(arguments["project"], field: "project"),
-                    branch: try requiredString(arguments["branch"], field: "branch"), baseBranch: optionalString(arguments["baseBranch"]),
-                    existingBranch: optionalBool(arguments["existingBranch"]) ?? false))
-        case "spaces_workspace_start":
-            return try TerminalService.sendProfileCommand(
-                .init(operation: .workspaceStart, workspaceID: try requiredString(arguments["workspace"], field: "workspace")))
-        case "spaces_workspace_restart":
-            return try TerminalService.sendProfileCommand(
-                .init(operation: .workspaceRestart, workspaceID: try requiredString(arguments["workspace"], field: "workspace")))
-        case "spaces_terminal_list":
-            if let device = try resolvedDevice(arguments) {
-                let sessions = try SpacesDeviceClient.terminalSessions(device: device, clientApp: cliDeviceClientApp())
-                let rows = sessions.map { "\($0.id)\tstate=\($0.state.rawValue)\tcwd=\($0.workingDirectory)" }
-                return TerminalServiceProfileCommandResponse(
-                    message: rows.isEmpty ? "No terminal sessions on \(device.name)." : rows.joined(separator: "\n"))
-            }
-            return try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5)
-        case "spaces_terminal_tail":
-            let sessionID = try requiredString(arguments["session"], field: "session")
-            if let device = try resolvedDevice(arguments) {
-                let output = try SpacesDeviceClient.tailTerminalOutput(
-                    sessionID: sessionID, lines: optionalInt(arguments["lines"]), device: device, clientApp: cliDeviceClientApp())
-                return TerminalServiceProfileCommandResponse(message: "Read terminal output.", terminalOutput: output)
-            }
-            return try TerminalService.sendProfileCommand(
-                .init(operation: .terminalTail, terminalSessionID: sessionID, lineCount: optionalInt(arguments["lines"])), timeout: 5)
-        case "spaces_terminal_send":
-            let payload = try terminalInputPayload(from: arguments)
-            let sessionID = try requiredString(arguments["session"], field: "session")
-            let appendNewline = optionalBool(arguments["appendNewline"]) ?? false
-            if let device = try resolvedDevice(arguments) {
-                let response = try SpacesDeviceClient.sendTerminalInput(
-                    sessionID: sessionID, text: payload.text, bytes: payload.bytes, appendNewline: appendNewline, device: device,
-                    clientApp: cliDeviceClientApp())
-                return TerminalServiceProfileCommandResponse(message: response.message)
-            }
-            return try TerminalService.sendProfileCommand(
-                .init(
-                    operation: .terminalSend, terminalSessionID: sessionID, terminalText: payload.text, terminalBytes: payload.bytes,
-                    appendNewline: appendNewline), timeout: 5)
-        case "spaces_device_list":
-            let devices = try SpacesClientDatabase.defaultDatabase().pairedDevices()
-            return TerminalServiceProfileCommandResponse(
-                message: devices.isEmpty ? "No paired devices." : SpacesPairedDeviceSelection.deviceRows(devices))
-        default: throw MCPError.invalidArguments("Unknown Spaces tool '\(name)'.")
+        guard let descriptor = Self.toolDescriptors().first(where: { $0.name == name }) else {
+            throw MCPError.invalidArguments("Unknown Spaces tool '\(name)'.")
         }
-    }
-
-    private func resolvedDevice(_ arguments: [String: Any]) throws -> SpacesPairedDeviceRecord? {
-        guard let selector = optionalString(arguments["device"]) else { return nil }
-        return try SpacesPairedDeviceSelection.resolve(selector)
+        return try descriptor.handler(self, arguments)
     }
 
     private func encodedText(_ response: TerminalServiceProfileCommandResponse) throws -> String {
@@ -191,6 +234,11 @@ final class SpacesMCPStdioServer {
     private func requiredRawString(_ value: Any?, field: String) throws -> String {
         guard let string = value as? String else { throw MCPError.invalidArguments("\(field) is required.") }
         return string
+    }
+
+    private func resolvedDevice(_ arguments: [String: Any]) throws -> SpacesPairedDeviceRecord? {
+        guard let selector = optionalString(arguments["device"]) else { return nil }
+        return try SpacesPairedDeviceSelection.resolve(selector)
     }
 
     private func optionalString(_ value: Any?) -> String? {
@@ -216,15 +264,19 @@ final class SpacesMCPStdioServer {
         return nil
     }
 
-    private func terminalInputPayload(from arguments: [String: Any]) throws -> (text: String?, bytes: Data?) {
+    /// Maps the JSON `text`/`bytes` arguments into the typed `TerminalProfileInput`. The typed input
+    /// makes text-xor-bytes structural on the wire, but the enforcement still lives here because MCP
+    /// arguments are untyped JSON where both keys can be supplied at once; this is the only layer that
+    /// must reject that. Internal (not private) so the arg-mapping rejection is unit-testable.
+    func terminalInputPayload(from arguments: [String: Any]) throws -> TerminalProfileInput {
         let textValue = arguments["text"]
         let bytesValue = arguments["bytes"]
         let hasText = textValue != nil
         let hasBytes = bytesValue != nil
         guard hasText || hasBytes else { throw MCPError.invalidArguments("text or bytes is required.") }
         guard !(hasText && hasBytes) else { throw MCPError.invalidArguments("Provide text or bytes, not both.") }
-        if hasText { return (try requiredRawString(textValue, field: "text"), nil) }
-        return (nil, try requiredBytes(bytesValue, field: "bytes"))
+        if hasText { return .text(try requiredRawString(textValue, field: "text")) }
+        return .bytes(try requiredBytes(bytesValue, field: "bytes"))
     }
 
     private func requiredBytes(_ value: Any?, field: String) throws -> Data {

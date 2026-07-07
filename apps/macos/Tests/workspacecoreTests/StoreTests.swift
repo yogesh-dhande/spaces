@@ -490,6 +490,73 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(persisted.map(\.command), ["npm run api", "npm run web"])
     }
 
+    // Tests an outer withTransaction wrapping two mutations that each internally open
+    // their own withImmediateTransaction commits once and persists both writes.
+    func testNestedTransactionCommitsBothStoreMutations() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+
+        try store.withTransaction {
+            try store.upsert(workspace: workspaceA)
+            try store.upsert(workspace: workspaceB)
+        }
+
+        XCTAssertNotNil(try store.workspace(id: workspaceA.id))
+        XCTAssertNotNil(try store.workspace(id: workspaceB.id))
+    }
+
+    // Tests an error thrown out of the outer withTransaction rolls back every write
+    // made inside it, including ones already returned by inner transactions.
+    func testOuterTransactionErrorRollsBackAllStoreMutations() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+
+        struct OuterFailure: Error {}
+        XCTAssertThrowsError(
+            try store.withTransaction {
+                try store.upsert(workspace: workspaceA)
+                try store.upsert(workspace: workspaceB)
+                throw OuterFailure()
+            }
+        ) { XCTAssertTrue($0 is OuterFailure) }
+
+        XCTAssertNil(try store.workspace(id: workspaceA.id))
+        XCTAssertNil(try store.workspace(id: workspaceB.id))
+    }
+
+    // Tests savepoint semantics: an inner transaction that throws is rolled back to its
+    // savepoint, and when the body catches the error and continues, the outer commit
+    // still persists the writes made before and after the failed inner step.
+    func testInnerTransactionFailureCaughtLeavesOuterWritesIntact() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+
+        try store.withTransaction {
+            try store.upsert(workspace: workspace)
+            // Duplicate process IDs fail inside setWorkspaceProcesses' own transaction,
+            // which rolls back only to its savepoint and leaves the outer intact.
+            XCTAssertThrowsError(
+                try store.setWorkspaceProcesses(
+                    workspaceID: workspace.id,
+                    processes: [
+                        ProcessTemplate(id: "dup", name: "api", command: "npm run api"),
+                        ProcessTemplate(id: "dup", name: "web", command: "npm run web"),
+                    ]))
+            try store.updateWorkspaceHidden(id: workspace.id, isHidden: true)
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, true)
+        XCTAssertTrue(try store.workspaceProcesses(workspaceID: workspace.id).isEmpty)
+    }
+
     // Tests project records remain daemon-owned data without client sidebar state.
     func testProjectRoundTripDoesNotRequireSidebarState() throws {
         let root = try makeTempDirectory()
@@ -563,6 +630,8 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(storedWindows.count, 3)
         XCTAssertEqual(storedWindows[0].name, "Browser")
         XCTAssertEqual(storedWindows[0].detail, nil)
+        XCTAssertEqual(storedWindows.first(where: { $0.id == firstWindow.id })?.roleValue, .browser)
+        XCTAssertEqual(storedWindows.first(where: { $0.id == secondWindow.id })?.roleValue, .terminal)
         XCTAssertTrue(storedWindows.contains(where: { $0.name == "Terminal" }))
         try store.deleteWindow(id: firstWindow.id)
         XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 2)
@@ -791,6 +860,22 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.setting(key: "key"), "value")
         try store.setSetting(key: "key", value: nil)
         XCTAssertNil(try store.setting(key: "key"))
+    }
+
+    // Tests that a workspace's isHidden flag round-trips through updateWorkspaceHidden in both directions.
+    func testUpdateWorkspaceHiddenRoundTrips() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false)
+
+        try store.updateWorkspaceHidden(id: workspace.id, isHidden: true)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, true)
+
+        try store.updateWorkspaceHidden(id: workspace.id, isHidden: false)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false)
     }
 
     // Tests project and workspace lookup and ordering by arranging representative inputs and asserting the expected result.
@@ -1089,6 +1174,97 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(failed?.finishedAt, "2026-01-01T00:00:05Z")
         XCTAssertEqual(failed?.exitCode, 42)
         XCTAssertEqual(failed?.logPath, "/tmp/setup-failed.log")
+    }
+
+    // Tests that the batched `*ByWorkspace` reads (used to eliminate the N+1 on the device overview
+    // hot path) return exactly the same records, in the same order, as calling the per-workspace API
+    // for each workspace — including empty results for a workspace with no rows.
+    func testBatchByWorkspaceReadsMatchPerWorkspaceReads() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let ws1 = makeWorkspaceRecord(id: "ws1", projectID: project.id, dir: try makeTempDirectory().path, branch: "one")
+        let ws2 = makeWorkspaceRecord(id: "ws2", projectID: project.id, dir: try makeTempDirectory().path, branch: "two")
+        let ws3 = makeWorkspaceRecord(id: "ws3", projectID: project.id, dir: try makeTempDirectory().path, branch: "three")
+        try store.upsert(project: project)
+        for workspace in [ws1, ws2, ws3] { try store.upsert(workspace: workspace) }
+
+        // ws1: two running processes and two agents with distinct order keys, ports, and a setup state.
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "p1b", workspaceID: ws1.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
+                terminalTrackingID: "sess-web", pid: 2, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:02Z",
+                exitedAt: nil))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "p1a", workspaceID: ws1.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
+                terminalTrackingID: "sess-api", pid: 1, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:01Z",
+                exitedAt: nil))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "a1b", workspaceID: ws1.id, provider: .spaces, label: "Second", terminalTrackingID: "agent-2", codexThreadID: nil,
+                status: .idle, createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "a1a", workspaceID: ws1.id, provider: .spaces, label: "First", terminalTrackingID: "agent-1", codexThreadID: nil,
+                status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
+        try store.setWorkspacePorts(workspaceID: ws1.id, ports: [3000, 3001], names: ["api", "web"])
+        try store.setWorkspaceSetupState(
+            workspaceID: ws1.id, status: .failed, errorMessage: "boom", startedAt: "2026-01-01T00:00:00Z", finishedAt: "2026-01-01T00:00:05Z",
+            exitCode: 7, logPath: "/tmp/ws1.log")
+
+        // ws2: a single running process, agent, an extra standalone browser window, and ports — but no
+        // setup-state row, so it must be absent from the batched setup-state map.
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "p2", workspaceID: ws2.id, templateName: "worker", command: "run worker", terminalApp: "Spaces",
+                terminalTrackingID: "sess-worker", pid: 3, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-02T00:00:00Z",
+                exitedAt: "2026-01-02T00:01:00Z"))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "a2", workspaceID: ws2.id, provider: .spaces, label: "Solo", terminalTrackingID: "agent-solo", codexThreadID: nil,
+                status: .idle, createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z"))
+        try store.upsert(
+            window: WindowRecord(
+                id: "w2-browser", workspaceID: ws2.id, app: "Google Chrome", title: "Docs", role: "browser", orderIndex: 500, lastSeenAt: "now"))
+        try store.setWorkspacePorts(workspaceID: ws2.id, ports: [4000], names: ["admin"])
+
+        let runningByWorkspace = try store.runningProcessesByWorkspace()
+        let agentsByWorkspace = try store.agentWindowsByWorkspace()
+        let windowsByWorkspace = try store.windowsByWorkspace()
+        let portsByWorkspace = try store.workspacePortsNamedByWorkspace()
+        let setupByWorkspace = try store.workspaceSetupStateByWorkspace()
+
+        for workspace in [ws1, ws2, ws3] {
+            XCTAssertEqual(
+                (runningByWorkspace[workspace.id] ?? []).map(\.id), try store.runningProcesses(workspaceID: workspace.id).map(\.id),
+                "running processes mismatch for \(workspace.id)")
+            XCTAssertEqual(
+                (agentsByWorkspace[workspace.id] ?? []).map(\.id), try store.agentWindows(workspaceID: workspace.id).map(\.id),
+                "agent windows mismatch for \(workspace.id)")
+            XCTAssertEqual(
+                (windowsByWorkspace[workspace.id] ?? []).map(\.id), try store.windows(workspaceID: workspace.id).map(\.id),
+                "windows mismatch for \(workspace.id)")
+            XCTAssertEqual(
+                (portsByWorkspace[workspace.id] ?? []).map { "\($0.port):\($0.name)" },
+                try store.workspacePortsNamed(workspaceID: workspace.id).map { "\($0.port):\($0.name)" }, "ports mismatch for \(workspace.id)")
+            let batchedSetup = setupByWorkspace[workspace.id]
+            let perWorkspaceSetup = try store.workspaceSetupState(workspaceID: workspace.id)
+            XCTAssertEqual(batchedSetup?.status, perWorkspaceSetup?.status, "setup status mismatch for \(workspace.id)")
+            XCTAssertEqual(batchedSetup?.errorMessage, perWorkspaceSetup?.errorMessage, "setup error mismatch for \(workspace.id)")
+            XCTAssertEqual(batchedSetup?.exitCode, perWorkspaceSetup?.exitCode, "setup exit code mismatch for \(workspace.id)")
+            XCTAssertEqual(batchedSetup?.logPath, perWorkspaceSetup?.logPath, "setup log path mismatch for \(workspace.id)")
+        }
+
+        // ws1 keeps its distinct ordering; ws3 has no rows in any batch and no setup-state entry.
+        XCTAssertEqual(runningByWorkspace[ws1.id]?.map(\.id), ["p1a", "p1b"])
+        XCTAssertEqual(agentsByWorkspace[ws1.id]?.map(\.id), ["a1a", "a1b"])
+        XCTAssertNil(runningByWorkspace[ws3.id])
+        XCTAssertNil(agentsByWorkspace[ws3.id])
+        XCTAssertNil(windowsByWorkspace[ws3.id])
+        XCTAssertNil(portsByWorkspace[ws3.id])
+        XCTAssertNil(setupByWorkspace[ws2.id])
+        XCTAssertNil(setupByWorkspace[ws3.id])
+        XCTAssertEqual(setupByWorkspace[ws1.id]?.status, .failed)
     }
 
     // Tests workspace lookup by directory by arranging representative inputs and asserting the expected result.

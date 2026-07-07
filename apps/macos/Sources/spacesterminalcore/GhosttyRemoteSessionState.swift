@@ -91,16 +91,41 @@ public enum GhosttyRemoteSessionStateCodec {
 }
 
 public enum GhosttyRemoteSessionStateTimestamp {
-    public static func string(from date: Date) -> String {
+    // ISO8601DateFormatter construction is expensive, and `string(from:)`/`date(from:)` run on
+    // hot terminal state broadcast/parse paths across every module that emits or reads
+    // `emittedAt` (spacesterminalghostty, spacesd, spacesui, ...). ISO8601DateFormatter is
+    // documented thread-safe, so one shared instance per format is safe to reuse across
+    // threads/tasks instead of allocating a fresh formatter per call.
+    nonisolated(unsafe) private static let fractionalSecondsFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    // Fallback for legacy/foreign timestamps that lack fractional seconds.
+    nonisolated(unsafe) private static let defaultFormatter = ISO8601DateFormatter()
+
+    public static func string(from date: Date) -> String {
+        fractionalSecondsFormatter.string(from: date)
     }
 
     public static func date(from string: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let parsed = formatter.date(from: string) { return parsed }
-        return ISO8601DateFormatter().date(from: string)
+        if let parsed = fractionalSecondsFormatter.date(from: string) { return parsed }
+        return defaultFormatter.date(from: string)
     }
+}
+
+/// Cached ISO8601 formatter for session runtime/attachment timestamps (`updatedAt`,
+/// `attachedAt`, `detachedAt`, `transferredAt`, process `startedAt`/`createdAt`, terminal
+/// client `connectedAt`) using the framework's default (whole-second) format. Deliberately
+/// separate from `GhosttyRemoteSessionStateTimestamp` above, whose fractional-seconds format
+/// is part of the remote session state wire format (see
+/// `TerminalSessionPersistence.parseISO8601`'s doc comment) — the two must not be merged.
+/// Shared by every module that depends on spacesterminalcore (spacesterminalghostty,
+/// spacesterminalui, workspacecore) since several call sites sit on hot terminal-event paths.
+public enum TerminalSessionTimestamp {
+    nonisolated(unsafe) private static let formatter = ISO8601DateFormatter()
+
+    public static func string(from date: Date) -> String { formatter.string(from: date) }
+    public static func date(from string: String) -> Date? { formatter.date(from: string) }
 }

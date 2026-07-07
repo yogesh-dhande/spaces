@@ -4,11 +4,16 @@ import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
+    /// Canonical column order for a full `workspaces` row read; reused by every SELECT and by the
+    /// INSERT below since both list the same 13 columns in the same order.
+    private static let workspaceColumns =
+        "id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes"
+
     public func upsert(workspace: WorkspaceRecord) throws {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO workspaces(id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
+                    INSERT INTO workspaces(\(Self.workspaceColumns))
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       dir = excluded.dir,
@@ -36,7 +41,7 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT \(Self.workspaceColumns)
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -47,7 +52,7 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT \(Self.workspaceColumns)
                     FROM workspaces
                     WHERE dir = ?
                     ORDER BY is_archived ASC
@@ -60,7 +65,7 @@ extension SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                SELECT \(Self.workspaceColumns)
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, branch
@@ -213,6 +218,29 @@ extension SQLiteStore {
             status: status, errorMessage: errorMessage, startedAt: startedAt, finishedAt: finishedAt, exitCode: exitCode, logPath: logPath)
     }
 
+    /// Batched form of `workspaceSetupState(workspaceID:)`: one full-table SELECT keyed by workspace in
+    /// Swift, eliminating the per-workspace query on the overview hot path. `workspace_id` is the
+    /// primary key of `workspace_settings`, so each workspace maps to at most one row. Workspaces with
+    /// no row are absent from the dictionary (mirroring the `nil` the per-workspace query returns); the
+    /// caller applies the same succeeded default the orchestrator does.
+    public func workspaceSetupStateByWorkspace() throws -> [String: WorkspaceSetupState] {
+        let rows = try queryRows(
+            sql: """
+                SELECT workspace_id, setup_status, setup_error, setup_started_at, setup_finished_at, setup_exit_code, setup_log_path
+                FROM workspace_settings
+                """)
+        var result: [String: WorkspaceSetupState] = [:]
+        for row in rows {
+            guard row.count >= 7 else { continue }
+            let rawStatus = row[1].isEmpty ? WorkspaceSetupStatus.succeeded.rawValue : row[1]
+            let status = WorkspaceSetupStatus(rawValue: rawStatus) ?? .succeeded
+            result[row[0]] = WorkspaceSetupState(
+                status: status, errorMessage: row[2].isEmpty ? nil : row[2], startedAt: row[3].isEmpty ? nil : row[3],
+                finishedAt: row[4].isEmpty ? nil : row[4], exitCode: row[5].isEmpty ? nil : Int(row[5]), logPath: row[6].isEmpty ? nil : row[6])
+        }
+        return result
+    }
+
     public func setWorkspaceSetupState(
         workspaceID: String, status: WorkspaceSetupStatus, errorMessage: String? = nil, startedAt: String? = nil, finishedAt: String? = nil,
         exitCode: Int? = nil, logPath: String? = nil
@@ -268,7 +296,7 @@ extension SQLiteStore {
         return WorkspaceRecord(
             id: row[0], projectID: row[1], dir: row[2], runtimePath: row[3].isEmpty ? row[2] : row[3], dirname: row[4].isEmpty ? nil : row[4],
             branch: row[5].isEmpty ? nil : row[5], baseBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1",
-            isHidden: row[9] != "0", isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11],
+            isHidden: row[9] == "1", isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11],
             notes: row[12].isEmpty ? nil : row[12])
     }
 }

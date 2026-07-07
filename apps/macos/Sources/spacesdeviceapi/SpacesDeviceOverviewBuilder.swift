@@ -348,7 +348,7 @@ struct SpacesDeviceOverviewBuilder {
     ) -> [SpacesDeviceWorkspaceTerminalRow] {
         var rows: [SpacesDeviceWorkspaceTerminalRow] = []
         var includedSessionIDs = Set<String>()
-        for window in descriptor.windows where window.role == "terminal" {
+        for window in descriptor.windows where window.roleValue == .terminal {
             if let key = terminalTrackingKey(window), claimedTerminalKeys.contains(key) { continue }
             let rawSessionID = terminalSessionID(for: window)
             let session = rawSessionID.flatMap { sessionsByID[$0] }

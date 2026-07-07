@@ -4,6 +4,29 @@ import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
+    /// Canonical column order for a full `agent_sessions` row read, joined against `runtime_targets`
+    /// for the terminal target fields; reused by every SELECT below. This is not the same list as the
+    /// `agent_sessions` INSERT columns (which write the base table directly, without the join), so it
+    /// is not shared with the INSERT.
+    private static let agentWindowColumns = """
+        agent_sessions.id,
+        agent_sessions.workspace_id,
+        agent_sessions.provider,
+        agent_sessions.label,
+        COALESCE(agent_sessions.runtime_target_id, ''),
+        COALESCE(runtime_targets.app, ''),
+        COALESCE(runtime_targets.name, ''),
+        COALESCE(runtime_targets.detail, ''),
+        COALESCE(runtime_targets.tracking_id, ''),
+        COALESCE(agent_sessions.terminal_session_id, ''),
+        COALESCE(agent_sessions.session_key, ''),
+        COALESCE(agent_sessions.claimed_launcher_id, ''),
+        COALESCE(agent_sessions.claimed_launcher_name, ''),
+        agent_sessions.status,
+        agent_sessions.created_at,
+        agent_sessions.updated_at
+        """
+
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
         let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         let terminalSessionID = spacesAgentTerminalSessionID(record)
@@ -38,22 +61,7 @@ extension SQLiteStore {
         let rows = try queryRows(
             sql: """
                 SELECT
-                  agent_sessions.id,
-                  agent_sessions.workspace_id,
-                  agent_sessions.provider,
-                  agent_sessions.label,
-                  COALESCE(agent_sessions.runtime_target_id, ''),
-                  COALESCE(runtime_targets.app, ''),
-                  COALESCE(runtime_targets.name, ''),
-                  COALESCE(runtime_targets.detail, ''),
-                  COALESCE(runtime_targets.tracking_id, ''),
-                  COALESCE(agent_sessions.terminal_session_id, ''),
-                  COALESCE(agent_sessions.session_key, ''),
-                  COALESCE(agent_sessions.claimed_launcher_id, ''),
-                  COALESCE(agent_sessions.claimed_launcher_name, ''),
-                  agent_sessions.status,
-                  agent_sessions.created_at,
-                  agent_sessions.updated_at
+                  \(Self.agentWindowColumns)
                 FROM agent_sessions
                 LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                 WHERE agent_sessions.workspace_id = ?
@@ -62,27 +70,28 @@ extension SQLiteStore {
         return rows.compactMap { decodeAgentWindow(row: $0) }
     }
 
+    /// Batched form of `agentWindows(workspaceID:)`: one full-table SELECT grouped by workspace in Swift,
+    /// eliminating the per-workspace query on the overview hot path. Grouping preserves element order,
+    /// and the SELECT orders by `workspace_id` then the same `created_at` key the per-workspace query
+    /// uses, so each group matches `agentWindows(workspaceID:)` exactly.
+    public func agentWindowsByWorkspace() throws -> [String: [AgentWindowRecord]] {
+        let rows = try queryRows(
+            sql: """
+                SELECT
+                  \(Self.agentWindowColumns)
+                FROM agent_sessions
+                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                ORDER BY agent_sessions.workspace_id, agent_sessions.created_at
+                """)
+        return Dictionary(grouping: rows.compactMap { decodeAgentWindow(row: $0) }, by: { $0.workspaceID })
+    }
+
     public func agentWindow(workspaceID: String, terminalTrackingID: String) throws -> AgentWindowRecord? {
         guard
             let row = try queryRow(
                 sql: """
                     SELECT
-                      agent_sessions.id,
-                      agent_sessions.workspace_id,
-                      agent_sessions.provider,
-                      agent_sessions.label,
-                      COALESCE(agent_sessions.runtime_target_id, ''),
-                      COALESCE(runtime_targets.app, ''),
-                      COALESCE(runtime_targets.name, ''),
-                      COALESCE(runtime_targets.detail, ''),
-                      COALESCE(runtime_targets.tracking_id, ''),
-                      COALESCE(agent_sessions.terminal_session_id, ''),
-                      COALESCE(agent_sessions.session_key, ''),
-                      COALESCE(agent_sessions.claimed_launcher_id, ''),
-                      COALESCE(agent_sessions.claimed_launcher_name, ''),
-                      agent_sessions.status,
-                      agent_sessions.created_at,
-                      agent_sessions.updated_at
+                      \(Self.agentWindowColumns)
                     FROM agent_sessions
                     LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                     WHERE agent_sessions.workspace_id = ?
@@ -96,22 +105,7 @@ extension SQLiteStore {
         let rows = try queryRows(
             sql: """
                 SELECT
-                  agent_sessions.id,
-                  agent_sessions.workspace_id,
-                  agent_sessions.provider,
-                  agent_sessions.label,
-                  COALESCE(agent_sessions.runtime_target_id, ''),
-                  COALESCE(runtime_targets.app, ''),
-                  COALESCE(runtime_targets.name, ''),
-                  COALESCE(runtime_targets.detail, ''),
-                  COALESCE(runtime_targets.tracking_id, ''),
-                  COALESCE(agent_sessions.terminal_session_id, ''),
-                  COALESCE(agent_sessions.session_key, ''),
-                  COALESCE(agent_sessions.claimed_launcher_id, ''),
-                  COALESCE(agent_sessions.claimed_launcher_name, ''),
-                  agent_sessions.status,
-                  agent_sessions.created_at,
-                  agent_sessions.updated_at
+                  \(Self.agentWindowColumns)
                 FROM agent_sessions
                 LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                 WHERE agent_sessions.workspace_id = ?
@@ -195,7 +189,7 @@ extension SQLiteStore {
         let targetID = runtimeTargetID ?? terminalTarget.runtimeTargetID ?? record.id
         let existingWindows = try windows(workspaceID: record.workspaceID)
         let existingWindow = existingWindows.first(where: { $0.id == targetID })
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = TerminalSessionTimestamp.string(from: Date())
         let preservesExistingMetadata = try preservesExistingTerminalMetadata(for: record)
         try upsert(
             window: WindowRecord(

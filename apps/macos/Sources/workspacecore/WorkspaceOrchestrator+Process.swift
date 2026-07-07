@@ -79,7 +79,6 @@ extension WorkspaceOrchestrator {
         let workspace = try workspace ?? resolveWorkspace(id: workspaceID).1
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         let now = currentDate()
-        let formatter = ISO8601DateFormatter()
         var didUpdate = false
         for process in processes where process.status == .running {
             if let runtimeState = resolvedBuiltInSessionRuntimeState(for: process), !runtimeState.state.isInteractive {
@@ -93,7 +92,7 @@ extension WorkspaceOrchestrator {
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
                 continue
             }
-            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
+            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = TerminalSessionTimestamp.date(from: startedAtStr),
                 now.timeIntervalSince(startedAt) < 10.0
             {
                 continue
@@ -359,7 +358,7 @@ extension WorkspaceOrchestrator {
             logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
         try store.upsert(runningProcess: updatedProcess)
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
-            $0.role == "terminal" && matchesTrackedTerminalWindow($0, process: process)
+            $0.roleValue == .terminal && matchesTrackedTerminalWindow($0, process: process)
         }) {
             try store.upsert(
                 window: WindowRecord(
@@ -566,7 +565,7 @@ extension WorkspaceOrchestrator {
             terminateProcessGroup(pid: pid)
         }
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
-            if terminalWindow.role == "terminal", isManagedTerminalApp(terminalWindow.app),
+            if terminalWindow.roleValue == .terminal, isManagedTerminalApp(terminalWindow.app),
                 let sessionID = normalizedTerminalSessionID(terminalWindow.terminalNativeID ?? terminalWindow.terminalTrackingID)
             {
                 builtInTerminalWindowCloser(sessionID)

@@ -4,9 +4,25 @@ import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
+    /// Canonical column order for a full window (`runtime_targets`) row read, joined against
+    /// `browser_targets` for the browser URL; reused by the per-workspace and batched SELECTs below so
+    /// both decode through `decodeWindow` with an identical row shape.
+    private static let windowColumns = """
+        rt.id,
+        rt.workspace_id,
+        rt.app,
+        rt.name,
+        rt.detail,
+        COALESCE(bt.target_url, ''),
+        COALESCE(rt.tracking_id, ''),
+        CASE WHEN rt.type = 'browser' THEN 'browser' ELSE 'terminal' END,
+        rt.order_index,
+        rt.updated_at
+        """
+
     public func upsert(window: WindowRecord) throws {
         try withImmediateTransaction {
-            let targetType = window.role == "browser" ? "browser" : "terminal"
+            let targetType = window.roleValue == .browser ? "browser" : "terminal"
             let hasExistingTargetID =
                 (try queryRow(sql: "SELECT id FROM runtime_targets WHERE id = ? AND workspace_id = ?", bindings: [window.id, window.workspaceID]))
                 != nil
@@ -58,22 +74,29 @@ extension SQLiteStore {
         let rows = try queryRows(
             sql: """
                 SELECT
-                  rt.id,
-                  rt.workspace_id,
-                  rt.app,
-                  rt.name,
-                  rt.detail,
-                  COALESCE(bt.target_url, ''),
-                  COALESCE(rt.tracking_id, ''),
-                  CASE WHEN rt.type = 'browser' THEN 'browser' ELSE 'terminal' END,
-                  rt.order_index,
-                  rt.updated_at
+                  \(Self.windowColumns)
                 FROM runtime_targets rt
                 LEFT JOIN browser_targets bt ON bt.runtime_target_id = rt.id
                 WHERE rt.workspace_id = ?
                 ORDER BY rt.order_index
                 """, bindings: [workspaceID])
         return rows.compactMap { decodeWindow(row: $0) }
+    }
+
+    /// Batched form of `windows(workspaceID:)`: one full-table SELECT grouped by workspace in Swift,
+    /// eliminating the per-workspace query on the overview hot path. Grouping preserves element order,
+    /// and the SELECT orders by `workspace_id` then the same `order_index` key the per-workspace query
+    /// uses, so each group matches `windows(workspaceID:)` exactly.
+    public func windowsByWorkspace() throws -> [String: [WindowRecord]] {
+        let rows = try queryRows(
+            sql: """
+                SELECT
+                  \(Self.windowColumns)
+                FROM runtime_targets rt
+                LEFT JOIN browser_targets bt ON bt.runtime_target_id = rt.id
+                ORDER BY rt.workspace_id, rt.order_index
+                """)
+        return Dictionary(grouping: rows.compactMap { decodeWindow(row: $0) }, by: { $0.workspaceID })
     }
 
     public func workspaceIDForTerminalSession(_ sessionID: String) throws -> String? {

@@ -584,7 +584,7 @@ def wait_for_session_id_by_title(title: str, timeout: float = 10) -> str:
 def start_terminal(title: str, command: str, terminal_target: str) -> str:
     try:
         completed = run(
-            [spaces_cli, "terminal", "command", "--backend", "ghostty-embedded", "--command", command, "--title", title],
+            [spaces_cli, "terminal", "command", "--command", command, "--title", title],
             timeout=20,
         )
         return extract_session_id(completed.stdout)

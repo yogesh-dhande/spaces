@@ -7,7 +7,9 @@ enum AddProjectSourceKind {
     case git
 }
 
-@MainActor final class AddProjectFieldRefs {
+@MainActor final class AddProjectFieldRefs: FormGenerationTagged {
+    let formTag: Int
+
     // MARK: Source step
     /// The two clickable source rows; the selected one is highlighted and reveals its input.
     let folderRow: ClickableRowView
@@ -42,11 +44,12 @@ enum AddProjectSourceKind {
     var directoryCompletions: [String] = []
 
     init(
-        folderRow: ClickableRowView, gitRow: ClickableRowView, folderInputRow: NSView, gitInputRow: NSView, dirField: NSTextField,
+        formTag: Int, folderRow: ClickableRowView, gitRow: ClickableRowView, folderInputRow: NSView, gitInputRow: NSView, dirField: NSTextField,
         repoURLField: NSTextField, continueButton: NSButton, setupScriptSection: ScriptSection, stopScriptSection: ScriptSection,
         portsSection: PortsSection, processesSection: ProcessesSection, browserSessionsSection: BrowserSessionsSection,
         agentLaunchersSection: AgentLaunchersSection, createButton: NSButton, spacesYAMLMissingLabel: NSTextField
     ) {
+        self.formTag = formTag
         self.folderRow = folderRow
         self.gitRow = gitRow
         self.folderInputRow = folderInputRow

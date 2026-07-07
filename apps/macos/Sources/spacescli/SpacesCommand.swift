@@ -28,9 +28,7 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
             """, version: AppVersion.current,
-        subcommands: [
-            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MCPCommand.self,
-        ])
+        subcommands: [ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MCPCommand.self])
 
     public init() {}
 }
@@ -45,7 +43,7 @@ struct ProjectListCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        let projects = try TerminalService.sendProfileCommand(.init(operation: .projectList)).projects ?? []
+        let projects = try TerminalService.sendProfileCommand(.projectList).projects ?? []
         context.output.emitLines(projects.map { "\($0.id)\tname=\($0.name)\tdir=\($0.dir)" })
     }
 }
@@ -65,8 +63,7 @@ struct WorkspaceListCommand: ParsableCommand {
     func run() throws {
         let context = CLIContext()
         let workspaces =
-            try TerminalService.sendProfileCommand(.init(operation: .workspaceList, projectID: project, includeArchived: includeArchived)).workspaces
-            ?? []
+            try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: project, includeArchived: includeArchived))).workspaces ?? []
         context.output.emitLines(
             workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\tname=\($0.displayName)" })
     }
@@ -84,7 +81,7 @@ struct WorkspaceCreateCommand: ParsableCommand {
         let context = CLIContext()
         let workspace = try requireProfileWorkspace(
             try TerminalService.sendProfileCommand(
-                .init(operation: .workspaceCreate, projectID: project, branch: branch, baseBranch: baseBranch, existingBranch: existingBranch)))
+                .workspaceCreate(.init(projectID: project, branch: branch, baseBranch: baseBranch, existingBranch: existingBranch))))
         context.output.emit("Created workspace \(workspace.id)\tproject=\(workspace.projectID)\tbranch=\(workspace.branch ?? "-")")
     }
 }
@@ -96,7 +93,7 @@ struct WorkspaceStartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceStart, workspaceID: workspace)))
+        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceStart(workspaceID: workspace)))
         context.output.emit("Workspace is running \(workspace)")
     }
 }
@@ -108,7 +105,7 @@ struct WorkspaceRestartCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.init(operation: .workspaceRestart, workspaceID: workspace)))
+        _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceRestart(workspaceID: workspace)))
         context.output.emit("Workspace restarted \(workspace)")
     }
 }
@@ -129,8 +126,7 @@ struct AgentSignalCommand: ParsableCommand {
 
     func run() throws {
         let context = CLIContext()
-        _ = try TerminalService.sendProfileCommand(
-            .init(operation: .agentSignal, workspaceID: workspace, terminalSessionID: session, agentEvent: type.rawValue))
+        _ = try TerminalService.sendProfileCommand(.agentSignal(.init(workspaceID: workspace, terminalSessionID: session, event: type.rawValue)))
         context.output.emit("Agent \(type.rawValue): workspace=\(workspace)")
     }
 }
@@ -312,7 +308,7 @@ struct TerminalListCommand: ParsableCommand {
             let sessions = try SpacesDeviceClient.terminalSessions(device: record, clientApp: cliDeviceClientApp())
             rows = sessions.map { "\($0.id)\tstate=\($0.state.rawValue)\tcwd=\($0.workingDirectory)" }
         } else {
-            let sessions = try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5).terminalSessions ?? []
+            let sessions = try TerminalService.sendProfileCommand(.terminalList, timeout: 5).terminalSessions ?? []
             rows = terminalSessionRows(sessions)
         }
         if rows.isEmpty {
@@ -363,9 +359,8 @@ struct TerminalCommandCommand: ParsableCommand {
         // path — the default 15s profile-command timeout can trip before a slow launch finishes,
         // even though the daemon keeps creating the session in the background.
         let response = try TerminalService.sendProfileCommand(
-            .init(
-                operation: .terminalCommand, workspaceID: workspace, cwd: context.currentDirectoryPath(), terminalCommand: command,
-                terminalTitle: title), timeout: TerminalService.createSessionRequestTimeout())
+            .terminalCommand(.init(cwd: context.currentDirectoryPath(), workspaceID: workspace, command: command, title: title)),
+            timeout: TerminalService.createSessionRequestTimeout())
         guard let session = response.terminalSession else {
             throw WorkspaceError.invalidArgument(message: "spacesd did not return a terminal session.")
         }
@@ -396,7 +391,8 @@ struct TerminalSendCommand: ParsableCommand {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
         }
         let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "send", text: text, appendNewline: newline), socketPath: paths.controlSocketPath)
+            request: TerminalControlRequest(command: .send(.init(text: text, bytes: nil, clientID: nil, ownerEpoch: nil, appendNewline: newline))),
+            socketPath: paths.controlSocketPath)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         print("Sent input to terminal session \(sessionID)")
     }
@@ -413,7 +409,8 @@ struct TerminalKeyCommand: ParsableCommand {
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
         }
-        let response = try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key), socketPath: paths.controlSocketPath)
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: .key(.init(key: key, clientID: nil, ownerEpoch: nil))), socketPath: paths.controlSocketPath)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         print("Sent key to terminal session \(sessionID)")
     }
@@ -483,7 +480,7 @@ struct TerminalTakeoverCommand: ParsableCommand {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
         }
         let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
+            request: TerminalControlRequest(command: .takeover(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
         guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
         print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
     }
@@ -510,7 +507,7 @@ struct TerminalProxyCommand: ParsableCommand {
             case "tail":
                 if let clientID = request.clientID {
                     _ = try? TerminalControlClient.send(
-                        request: TerminalControlRequest(command: "heartbeat", clientID: clientID), socketPath: paths.controlSocketPath)
+                        request: TerminalControlRequest(command: .heartbeat(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
                 }
                 let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: max(request.lineCount ?? 40, 1))
                 return TerminalControlResponse(ok: true, message: tailed)

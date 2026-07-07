@@ -72,8 +72,7 @@ import systembridge
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor), row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 28),
-            scrollView.heightAnchor.constraint(equalTo: row.heightAnchor, constant: -6),
+            heightAnchor.constraint(equalToConstant: 28), scrollView.heightAnchor.constraint(equalTo: row.heightAnchor, constant: -6),
             tabsStack.heightAnchor.constraint(equalTo: scrollView.heightAnchor),
         ])
     }
@@ -115,8 +114,8 @@ import systembridge
 
     private func actionButton(symbol: String, tooltip: String, identifier: String, action: Selector) -> NSButton {
         let button = NSButton(
-            image: NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
-                .withSymbolConfiguration(.init(pointSize: 10, weight: .medium)) ?? NSImage(), target: self, action: action)
+            image: NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?.withSymbolConfiguration(
+                .init(pointSize: 10, weight: .medium)) ?? NSImage(), target: self, action: action)
         button.bezelStyle = .inline
         button.isBordered = false
         button.toolTip = tooltip
@@ -160,8 +159,7 @@ import systembridge
         for tabID in tabIDs {
             tabsStack.addArrangedSubview(
                 PanelTabItemView(
-                    tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID,
-                    isRenaming: tabID == renamingTabID,
+                    tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID, isRenaming: tabID == renamingTabID,
                     onSelect: { [weak self] id in self?.onSelectTab?(id) }, onClose: { [weak self] id in self?.onCloseTab?(id) },
                     onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
                     onRenameCommit: { [weak self] id, text in self?.endRename(tabID: id, committedTitle: text) },
@@ -196,9 +194,7 @@ import systembridge
     }
 
     private func renameEditorField() -> NSTextField? {
-        for case let item as PanelTabItemView in tabsStack.arrangedSubviews {
-            if let editor = item.renameEditor { return editor }
-        }
+        for case let item as PanelTabItemView in tabsStack.arrangedSubviews { if let editor = item.renameEditor { return editor } }
         return nil
     }
 
@@ -228,9 +224,8 @@ import systembridge
     private var widthConstraint: NSLayoutConstraint?
 
     init(
-        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void,
-        onClose: @escaping (String) -> Void, onRenameRequest: @escaping (String) -> Void,
-        onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
+        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void, onClose: @escaping (String) -> Void,
+        onRenameRequest: @escaping (String) -> Void, onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
     ) {
         self.tabID = tabID
         self.onSelect = onSelect
@@ -266,8 +261,8 @@ import systembridge
         }
 
         let closeButton = NSButton(
-            image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?
-                .withSymbolConfiguration(.init(pointSize: 8, weight: .medium)) ?? NSImage(), target: self, action: #selector(closeClicked))
+            image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?.withSymbolConfiguration(
+                .init(pointSize: 8, weight: .medium)) ?? NSImage(), target: self, action: #selector(closeClicked))
         closeButton.bezelStyle = .inline
         closeButton.isBordered = false
         closeButton.toolTip = "Close tab"
@@ -294,8 +289,8 @@ import systembridge
             stack.topAnchor.constraint(equalTo: topAnchor), stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             underline.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            underline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            underline.bottomAnchor.constraint(equalTo: bottomAnchor), underline.heightAnchor.constraint(equalToConstant: 2),
+            underline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), underline.bottomAnchor.constraint(equalTo: bottomAnchor),
+            underline.heightAnchor.constraint(equalToConstant: 2),
         ])
 
         // Start at the default width; the strip narrows this as tabs accumulate.

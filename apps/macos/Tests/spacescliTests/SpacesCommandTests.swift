@@ -242,8 +242,7 @@ final class SpacesCommandTests: XCTestCase {
 
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(
-            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MCPCommand"])
+        XCTAssertEqual(subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MCPCommand"])
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {
@@ -272,6 +271,23 @@ final class SpacesCommandTests: XCTestCase {
         let sendProperties = try XCTUnwrap(sendSchema["properties"] as? [String: Any])
         XCTAssertNotNil(sendProperties["bytes"])
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
+    }
+
+    func testMCPTerminalInputMapsTextAndBytesToTypedInput() throws {
+        let server = SpacesMCPStdioServer()
+        XCTAssertEqual(try server.terminalInputPayload(from: ["text": ""]), .text(""))
+        XCTAssertEqual(try server.terminalInputPayload(from: ["text": "hello"]), .text("hello"))
+        XCTAssertEqual(try server.terminalInputPayload(from: ["bytes": [0, 10, 255]]), .bytes(Data([0, 10, 255])))
+    }
+
+    func testMCPTerminalInputRejectsMissingAndBothArguments() {
+        let server = SpacesMCPStdioServer()
+        XCTAssertThrowsError(try server.terminalInputPayload(from: [:])) { error in
+            XCTAssertEqual(error.localizedDescription, "text or bytes is required.")
+        }
+        XCTAssertThrowsError(try server.terminalInputPayload(from: ["text": "hi", "bytes": [1]])) { error in
+            XCTAssertEqual(error.localizedDescription, "Provide text or bytes, not both.")
+        }
     }
 
     func testAgentSignalRejectsUnknownEnumValue() {

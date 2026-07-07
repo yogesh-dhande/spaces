@@ -39,6 +39,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
         case viewer
     }
 
+    private struct PendingOwnershipTransition {
+        let startedAt: Date
+        let target: OwnershipTransitionTarget
+        let reason: String
+    }
+
     private enum PendingGhosttyHostAttachment {
         case owner(requestID: String?, reason: String, requestWindowFocus: Bool)
         case finalRender(reason: String)
@@ -152,9 +158,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
     var shouldShowOwnerStateLabel = true
     var inputStatusIsError = false
     private let notificationObservers = NotificationObserverBag()
-    private var pendingOwnershipTransitionStartedAt: Date?
-    private var pendingOwnershipTransitionTarget: OwnershipTransitionTarget?
-    private var pendingOwnershipTransitionReason: String?
+    private var pendingOwnershipTransition: PendingOwnershipTransition?
     /// Set by the host while it defers the pane's initial owner presentation; the
     /// layout collapses to a full-bleed blank surface until presentation completes.
     var isDeferringInitialOwnerPresentation = false
@@ -179,8 +183,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         detachClientSynchronouslyOnClose: Bool = true, defersInitialOwnerClientAttach: Bool = false,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil, ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)? = nil,
         ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)? = nil, onWindowFocus: (@MainActor (String) -> Void)? = nil,
-        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil,
-        onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
+        onWindowClose: (@MainActor (String, String, Bool) -> Void)? = nil, onCloseClientDetached: (@MainActor @Sendable () -> Void)? = nil,
         sessionHostProvider: (@MainActor (TerminalSessionLaunchConfiguration, TerminalSessionPaths) -> any TerminalGhosttySessionHosting)? = nil
     ) {
         self.sessionID = sessionID
@@ -193,7 +196,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .ghosttyEmbedded
         backend = resolvedBackend
         rendererMode = TerminalRendererResolver.resolveGhosttyEmbeddedMode(backend: resolvedBackend)
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = TerminalSessionTimestamp.string(from: Date())
         client = TerminalClient(
             kind: .localWindow,
             identity: TerminalClientIdentity(label: "Spaces window", hostName: Host.current().name, deviceName: Host.current().localizedName),
@@ -201,19 +204,21 @@ private final class NotificationObserverBag: @unchecked Sendable {
         self.sendInputAction =
             sendInputAction ?? { [socketPath = paths.controlSocketPath, client] text, appendNewline in
                 try TerminalControlClient.send(
-                    request: TerminalControlRequest(command: "send", text: text, clientID: client.id, appendNewline: appendNewline),
+                    request: TerminalControlRequest(
+                        command: .send(.init(text: text, bytes: nil, clientID: client.id, ownerEpoch: nil, appendNewline: appendNewline))),
                     socketPath: socketPath)
             }
         self.sendKeyAction =
             sendKeyAction ?? { [socketPath = paths.controlSocketPath, client] key in
-                try TerminalControlClient.send(request: TerminalControlRequest(command: "key", key: key, clientID: client.id), socketPath: socketPath)
+                try TerminalControlClient.send(
+                    request: TerminalControlRequest(command: .key(.init(key: key, clientID: client.id, ownerEpoch: nil))), socketPath: socketPath)
             }
         self.pasteImageAction = pasteImageAction
         self.pasteboardImageReadAction = pasteboardImageReadAction ?? { TerminalPasteboardImageReader.readImage() }
         self.takeoverAction =
             takeoverAction ?? { clientID in
                 try TerminalControlClient.send(
-                    request: TerminalControlRequest(command: "takeover", clientID: clientID), socketPath: paths.controlSocketPath)
+                    request: TerminalControlRequest(command: .takeover(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
             }
         self.attachClientAction = attachClientAction
         self.detachClientAction = detachClientAction
@@ -397,17 +402,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
     }
 
     private func beginOwnershipTransition(_ target: OwnershipTransitionTarget, reason: String) {
-        pendingOwnershipTransitionStartedAt = Date()
-        pendingOwnershipTransitionTarget = target
-        pendingOwnershipTransitionReason = reason
+        pendingOwnershipTransition = PendingOwnershipTransition(startedAt: Date(), target: target, reason: reason)
     }
 
     private func completeOwnershipTransitionIfNeeded(target: OwnershipTransitionTarget, renderer: String) {
-        guard pendingOwnershipTransitionTarget == target, let startedAt = pendingOwnershipTransitionStartedAt else { return }
-        let reason = pendingOwnershipTransitionReason ?? "unknown"
-        pendingOwnershipTransitionStartedAt = nil
-        pendingOwnershipTransitionTarget = nil
-        pendingOwnershipTransitionReason = nil
+        guard let pending = pendingOwnershipTransition, pending.target == target else { return }
+        let startedAt = pending.startedAt
+        let reason = pending.reason
+        pendingOwnershipTransition = nil
         TerminalPerformance.logMetric(
             "terminal_ownership_transition", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             success: true, detail: "target=\(target.rawValue) renderer=\(renderer) reason=\(reason)")

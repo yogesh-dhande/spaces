@@ -1,18 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { DocsShell } from "../../components/docs-shell";
+import { card, prose, code } from "../../components/guide-styles";
 
 export const metadata: Metadata = {
   title: "Guide: Next.js (No Docker)",
   description:
     "Cookbook guide for running a single Next.js app directly on host with Spaces project settings.",
 };
-
-const card = "border-t border-line/70 pt-8 first:border-t-0 first:pt-0";
-const prose = "mt-2 text-sm leading-7 text-foreground-soft";
-const list = "mt-3 space-y-2 text-sm leading-7 text-foreground-soft";
-const code =
-  "mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground";
 
 export default function NextjsHostGuidePage() {
   return (
@@ -59,7 +54,7 @@ cp .env.example .env`}</code>
           <code>{`PORT=$SPACES_FRONTEND_PORT npm run dev`}</code>
         </pre>
         <p className={prose}>
-          This binds Next.js to the service's assigned local port, so browser sessions target the correct workspace instance.
+          This binds Next.js to the service&apos;s assigned local port, so browser sessions target the correct workspace instance.
         </p>
 
         <h3 className="mt-4 text-sm font-semibold text-foreground">Browser Sessions</h3>

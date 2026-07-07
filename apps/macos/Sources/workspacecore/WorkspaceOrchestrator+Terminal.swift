@@ -37,7 +37,7 @@ extension WorkspaceOrchestrator {
         }
         guard let workspaceID else { return false }
         let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
-            $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+            $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
         }.map(\.id)
         guard !matchingWindowIDs.isEmpty else { return false }
         for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
@@ -58,7 +58,7 @@ extension WorkspaceOrchestrator {
             guard terminalSession(sessionID: sessionID, belongsTo: workspace) else { return false }
         }
         let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
-            $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+            $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
         }.map(\.id)
         terminateBuiltInTerminalSession(sessionID)
         for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
@@ -88,7 +88,7 @@ extension WorkspaceOrchestrator {
                 guard terminalSession(sessionID: sessionID, belongsTo: workspace) else { return false }
             }
             let matchingWindows = try store.windows(workspaceID: workspaceID).filter {
-                $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+                $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
             }
             for window in matchingWindows {
                 try store.upsert(
@@ -248,13 +248,13 @@ extension WorkspaceOrchestrator {
     }
 
     func managedTrackedTerminalWindowIsStillLive(window: WindowRecord) -> Bool {
-        guard window.role == "terminal", let host = terminalHost(for: window.app) else { return false }
+        guard window.roleValue == .terminal, let host = terminalHost(for: window.app) else { return false }
         guard host == .spaces else { return false }
         return builtInTrackedWindowIsStillLive(window: window)
     }
 
     func builtInTrackedWindowIsStillLive(window: WindowRecord) -> Bool {
-        guard window.role == "terminal", terminalHost(for: window.app) == .spaces else { return false }
+        guard window.roleValue == .terminal, terminalHost(for: window.app) == .spaces else { return false }
         guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
         if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
             return builtInSessionIsStillLive(sessionID: sessionID) || builtInSessionLaunchIsPending(sessionID: sessionID)
@@ -282,7 +282,7 @@ extension WorkspaceOrchestrator {
             return false
         }
         guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
-            let createdAt = ISO8601DateFormatter().date(from: launchConfiguration.createdAt)
+            let createdAt = TerminalSessionTimestamp.date(from: launchConfiguration.createdAt)
         else { return false }
         let age = now.timeIntervalSince(createdAt)
         return age >= -5 && age < 60
@@ -432,7 +432,7 @@ extension WorkspaceOrchestrator {
             }
             if terminalWindowWorkspaceID == nil,
                 try store.windows(workspaceID: workspace.id).contains(where: {
-                    $0.role == "terminal" && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+                    $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
                 })
             {
                 terminalWindowWorkspaceID = workspace.id
@@ -467,7 +467,7 @@ extension WorkspaceOrchestrator {
     }
 
     func matchesTrackedTerminalWindow(_ window: WindowRecord, process: RunningProcessRecord) -> Bool {
-        guard window.role == "terminal", window.app == process.terminalApp else { return false }
+        guard window.roleValue == .terminal, window.app == process.terminalApp else { return false }
         if window.id == process.id { return true }
         if let terminalID = process.terminalNativeID, !terminalID.isEmpty, window.terminalNativeID == terminalID { return true }
         if let terminalID = process.terminalTrackingID, !terminalID.isEmpty, window.terminalTrackingID == terminalID { return true }
