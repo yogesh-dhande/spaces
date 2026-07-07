@@ -440,6 +440,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Self.applyPersistentTerminationPolicy()
+        // Apply the stored appearance before any window, menu, or terminal is built so they
+        // all render in the chosen light/dark variant from the first frame.
+        applyStoredAppAppearance()
         logStartupProfile(
             "did_finish_launching",
             details:
@@ -3290,7 +3293,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
+        }
 
         let topBarRow = sidebar.makeSidebarTopBarRow()
         topBarRow.translatesAutoresizingMaskIntoConstraints = false
@@ -3390,11 +3395,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
+        }
 
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
+        }
 
         // The right panel's own footer strip: workspace details for the selected
         // workspace (populated by the detail paths), empty otherwise.
@@ -4046,7 +4055,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(divider) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
         return divider
     }
 
@@ -4141,8 +4152,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.wantsLayer = true
         container.layer?.cornerRadius = UIRadius.compact
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
         container.layer?.masksToBounds = true
+        bindAppearanceReactiveLayer(container) { [weak self] view in
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
 
         let captureWidth: CGFloat = 140
         let rowHeight: CGFloat = 28
@@ -4155,7 +4168,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let sep = NSView()
                 sep.translatesAutoresizingMaskIntoConstraints = false
                 sep.wantsLayer = true
-                sep.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.5).cgColor
+                bindAppearanceReactiveLayer(sep) { [weak self] view in
+                    view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.5).cgColor
+                }
                 container.addSubview(sep)
                 NSLayoutConstraint.activate([
                     sep.leadingAnchor.constraint(equalTo: container.leadingAnchor), sep.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -4413,7 +4428,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.55).cgColor
+        bindAppearanceReactiveLayer(divider) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.55).cgColor
+        }
 
         section.addSubview(innerStack)
         section.addSubview(divider)
@@ -4683,7 +4700,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func addProjectSourceRow(icon: String, title: String, subtitle: String, accessibilityID: String) -> ClickableRowView {
         let container = ClickableRowView(isInteractive: true)
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
         container.setAccessibilityLabel(title)
@@ -4766,8 +4785,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func setAddProjectSourceRowSelected(_ row: ClickableRowView, selected: Bool) {
         row.layer?.borderWidth = selected ? 2 : 1
-        row.layer?.borderColor =
-            selected ? sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)).cgColor : sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(row) { [weak self] view in
+            view.layer?.borderColor =
+                selected
+                ? self?.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)).cgColor : self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
     }
 
     /// The default device for new projects: the local Mac.
@@ -4793,7 +4815,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func presentFormWindow(existing: NSWindow?, header: NSView, hosting stack: NSStackView) -> NSWindow {
         let root = NSView()
         root.wantsLayer = true
-        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(root) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
+        }
 
         let headerDivider = settingsHairlineDivider()
         let body = NSView()
@@ -5054,7 +5078,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelTabStripAccessory.isHidden = true
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
+        }
         // Every workspace-detail surface (panel, loading, setup) shares the footer
         // strip with the workspace's identity and actions.
         if let (_, workspace) = findWorkspace(id: workspaceID) {
@@ -6216,8 +6242,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         button.wantsLayer = true
         button.layer?.cornerRadius = UIRadius.compact
         button.layer?.borderWidth = 1
-        button.layer?.backgroundColor = shortcutKeycapBackgroundColor(active: active).cgColor
-        button.layer?.borderColor = shortcutKeycapBorderColor(active: active).cgColor
+        bindAppearanceReactiveLayer(button) { [weak self] view in
+            view.layer?.backgroundColor = self?.shortcutKeycapBackgroundColor(active: active).cgColor
+            view.layer?.borderColor = self?.shortcutKeycapBorderColor(active: active).cgColor
+        }
     }
 
     private func updateShortcutCaptureButtonText(_ button: NSButton, text: String, active: Bool) {
@@ -6416,7 +6444,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         scroll.wantsLayer = true
         scroll.layer?.cornerRadius = UIRadius.compact
         scroll.layer?.borderWidth = 1
-        scroll.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(scroll) { [weak self] view in
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
         textView.drawsBackground = true
         textView.backgroundColor = inputBg
         textView.textColor = .textColor
@@ -6680,7 +6710,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let selectable = Self.addProjectDeviceIsSelectable(loadState: section.loadState)
         let container = ClickableRowView(isInteractive: selectable)
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
         container.alphaValue = selectable ? 1 : 0.55
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
@@ -9643,9 +9675,11 @@ struct CommandPaletteItem: Sendable {
     func update(item: CommandPaletteItem, isSelected: Bool, shortcutText: String?, onClick: (() -> Void)? = nil) {
         if let onClick { clickHandler = onClick }
         isSelectedState = isSelected
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.rowSelectedCard : .clear).cgColor }
         layer?.borderWidth = isSelected ? 1 : 0
-        layer?.borderColor = (isSelected ? Theme.rowSelectedCardBorder : NSColor.clear).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isSelected ? Theme.rowSelectedCard : .clear).cgColor
+            layer?.borderColor = (isSelected ? Theme.rowSelectedCardBorder : NSColor.clear).cgColor
+        }
 
         labelField.stringValue = item.label
         workspaceField.stringValue = item.workspaceTitle
@@ -9720,6 +9754,7 @@ struct CommandPaletteItem: Sendable {
         super.viewDidChangeEffectiveAppearance()
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = isSelectedState ? Theme.rowSelectedCard.cgColor : NSColor.clear.cgColor
+            layer?.borderColor = isSelectedState ? Theme.rowSelectedCardBorder.cgColor : NSColor.clear.cgColor
         }
     }
 }

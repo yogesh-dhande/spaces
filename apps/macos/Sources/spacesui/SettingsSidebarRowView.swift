@@ -21,7 +21,12 @@ final class SettingsSidebarRowView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
-    private func updateBackgroundColor() { layer?.backgroundColor = resolvedBackground().cgColor }
+    // Resolve the dynamic color under this view's effective appearance. In a bare
+    // `viewDidChangeEffectiveAppearance` callback `NSAppearance.current` still reflects the
+    // previous appearance, so an unwrapped `.cgColor` would keep the old variant.
+    private func updateBackgroundColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = resolvedBackground().cgColor }
+    }
 
     private func resolvedBackground() -> NSColor {
         if isSelected { return selectedBackgroundColor }

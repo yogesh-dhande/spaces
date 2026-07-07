@@ -61,7 +61,9 @@ final class TransientOverlaysController: NSObject {
             overlay.wantsLayer = true
             overlay.layer?.cornerRadius = UIRadius.large
             overlay.layer?.borderWidth = 1
-            overlay.layer?.borderColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+            bindAppearanceReactiveLayer(overlay) { [unowned host] view in
+                view.layer?.borderColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+            }
             overlay.translatesAutoresizingMaskIntoConstraints = false
 
             let stack = NSStackView()

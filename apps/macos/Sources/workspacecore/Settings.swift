@@ -40,4 +40,7 @@ public enum SettingsKey {
     /// Client-side theme selection (a `ThemeID` raw value). Internal-only: persisted and
     /// honored at launch, but not exposed through any settings UI or CLI yet.
     public static let appThemeID = "app_theme_id"
+    /// App-wide UI appearance (an `AppAppearanceMode` raw value: `system`/`light`/`dark`).
+    /// An unset value resolves to the dark default.
+    public static let appAppearanceMode = "app_appearance_mode"
 }

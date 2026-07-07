@@ -27,7 +27,11 @@ final class ClickableRowView: NSView {
 
     // MARK: - Background
 
-    private func updateBackgroundColor() { layer?.backgroundColor = resolvedBackground().cgColor }
+    // Resolve under this view's effective appearance so a live light/dark switch re-resolves
+    // correctly; a bare `.cgColor` in `viewDidChangeEffectiveAppearance` keeps the old variant.
+    private func updateBackgroundColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = resolvedBackground().cgColor }
+    }
 
     private func resolvedBackground() -> NSColor {
         guard isInteractive && isHovered else { return .clear }

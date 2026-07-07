@@ -460,7 +460,9 @@ import workspacecore
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = Theme.border.cgColor
+        bindAppearanceReactiveLayer(divider) { view in
+            view.layer?.backgroundColor = Theme.border.cgColor
+        }
         container.addSubview(divider)
         NSLayoutConstraint.activate([
             container.heightAnchor.constraint(equalToConstant: 1),
