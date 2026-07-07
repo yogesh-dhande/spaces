@@ -265,6 +265,24 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertEqual(second.certificateFingerprint, first.certificateFingerprint)
     }
 
+    #if os(macOS)
+        func testTLSIdentityStoreCreatesIdentityWithSystemLibreSSL() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let originalPath = getenv("PATH").map { String(cString: $0) }
+            setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin", 1)
+            defer { if let originalPath { setenv("PATH", originalPath, 1) } else { unsetenv("PATH") } }
+
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+
+            XCTAssertFalse(identity.certificateFingerprint.isEmpty)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.key.der").path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.certificate.der").path))
+        }
+    #endif
+
     func testTLSIdentityStoreRemovesObsoleteIdentityFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

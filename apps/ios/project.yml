@@ -3,11 +3,6 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "17.0"
-settings:
-  base:
-    # GhosttyKit.xcframework lacks an Intel iOS simulator slice.
-    "ARCHS[sdk=iphonesimulator*]": arm64
-    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
 packages:
   SpacesPackage:
     path: ../macos
@@ -29,9 +24,6 @@ targets:
         PRODUCT_NAME: SpacesMobile
         DEVELOPMENT_TEAM: BEMDA62NB6
         SWIFT_VERSION: 6.0
-        # GhosttyKit.xcframework lacks an Intel iOS simulator slice.
-        "ARCHS[sdk=iphonesimulator*]": arm64
-        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Info.plist
@@ -54,9 +46,6 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         DEVELOPMENT_TEAM: BEMDA62NB6
         PRODUCT_BUNDLE_IDENTIFIER: dev.usespaces.spacesmobile.tests
-        # GhosttyKit.xcframework lacks an Intel iOS simulator slice.
-        "ARCHS[sdk=iphonesimulator*]": arm64
-        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
     dependencies:
       - target: SpacesMobile
       - package: SpacesPackage
@@ -74,9 +63,6 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         DEVELOPMENT_TEAM: BEMDA62NB6
         PRODUCT_BUNDLE_IDENTIFIER: dev.usespaces.spacesmobile.uitests
-        # GhosttyKit.xcframework lacks an Intel iOS simulator slice.
-        "ARCHS[sdk=iphonesimulator*]": arm64
-        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         TEST_TARGET_NAME: SpacesMobile
     dependencies:
       - target: SpacesMobile
