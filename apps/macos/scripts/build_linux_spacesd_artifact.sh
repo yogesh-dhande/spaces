@@ -369,6 +369,7 @@ release_dir="$release_parent/$version"
 release_staging_dir="$release_parent/.install-$version-$$"
 previous_release_dir="$release_parent/.previous-$version-$$"
 bin_root="$HOME/.spaces/bin"
+user_bin_root="$HOME/.local/bin"
 service_dir="$HOME/.config/systemd/user"
 service_path="$service_dir/spacesd.service"
 device_api_host="${SPACES_DEVICE_API_HOST:-0.0.0.0}"
@@ -412,7 +413,7 @@ ensure_user_linger() {
     fi
 }
 
-mkdir -p "$release_parent" "$bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
+mkdir -p "$release_parent" "$bin_root" "$user_bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
 rm -rf "$release_staging_dir" "$previous_release_dir"
 mkdir -p "$release_staging_dir"
 cp -a "$artifact_root/." "$release_staging_dir/"
@@ -426,6 +427,7 @@ trap - EXIT
 ln -sfn "$release_dir" "$install_root/current"
 ln -sfn "$release_dir/bin/spacesd" "$bin_root/spacesd"
 ln -sfn "$release_dir/bin/spaces" "$bin_root/spaces"
+ln -sfn "$bin_root/spaces" "$user_bin_root/spaces"
 
 cat > "$service_path" <<SERVICE
 [Unit]
@@ -461,6 +463,7 @@ printf 'release_dir=%s\n' "$release_dir"
 printf 'current=%s\n' "$install_root/current"
 printf 'spacesd=%s\n' "$bin_root/spacesd"
 printf 'spaces=%s\n' "$bin_root/spaces"
+printf 'spaces_path_alias=%s\n' "$user_bin_root/spaces"
 printf 'service=%s\n' "$service_path"
 EOF
     chmod +x "$destination"
@@ -501,6 +504,7 @@ manifest = {
     "install_root": "~/.spaces/daemon/releases/<app_version>/",
     "current_symlink": "~/.spaces/daemon/current",
     "bin_symlinks": ["~/.spaces/bin/spacesd", "~/.spaces/bin/spaces"],
+    "path_aliases": ["~/.local/bin/spaces"],
     "systemd_user_service": "~/.config/systemd/user/spacesd.service",
     "state": {
         "database": "~/.spaces/spaces.db",

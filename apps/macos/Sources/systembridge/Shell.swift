@@ -149,6 +149,13 @@ public enum Shell {
     private static let loginShellPathTimeoutFallbackSeconds: TimeInterval = 2
     private static let loginShellPathFailureCacheFallbackSeconds: TimeInterval = 10
 
+    static func preparedEnvironment(from environment: [String: String]) -> [String: String] {
+        var env = environment
+        let currentPath = env["PATH"] ?? ""
+        env["PATH"] = mergedCommandPath(currentPath: currentPath, environment: env)
+        return env
+    }
+
     /// Returns the current process environment with Homebrew paths appended to PATH.
     /// Reads PATH from the C-level environment so that `setenv()` mutations from tests
     /// (e.g. injected mock command stubs) are reflected in the returned dictionary.
@@ -161,9 +168,7 @@ public enum Shell {
             "PATH", "SHELL", "HOME", "USER", "LOGNAME", "TMPDIR", "ZDOTDIR", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "TERM",
             "SPACES_LOGIN_SHELL_PATH_TIMEOUT_SECONDS", "SPACES_LOGIN_SHELL_PATH_FAILURE_CACHE_SECONDS",
         ] { if let value = currentEnvironmentValue(for: key) { env[key] = value } else { env.removeValue(forKey: key) } }
-        let currentPath = env["PATH"] ?? ""
-        env["PATH"] = mergedCommandPath(currentPath: currentPath, environment: env)
-        return env
+        return preparedEnvironment(from: env)
     }
 
     private static func currentEnvironmentValue(for key: String) -> String? {
@@ -493,10 +498,19 @@ public enum Shell {
     }
 
     @discardableResult public static func run(_ command: [String], cwd: String? = nil) throws -> Int32 {
+        try run(command, cwd: cwd, preparedEnvironment: processEnvironment())
+    }
+
+    @discardableResult static func run(_ command: [String], cwd: String? = nil, environment: [String: String]) throws -> Int32 {
+        try run(command, cwd: cwd, preparedEnvironment: preparedEnvironment(from: environment))
+    }
+
+    @discardableResult private static func run(_ command: [String], cwd: String? = nil, preparedEnvironment environment: [String: String]) throws
+        -> Int32
+    {
         guard let executable = command.first else {
             throw NSError(domain: "spaces.shell", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty command"])
         }
-        let environment = processEnvironment()
         if cwd == nil, let executablePath = resolvedExecutablePath(for: executable, environment: environment) {
             var argv: [UnsafeMutablePointer<CChar>?] = ([executablePath] + Array(command.dropFirst())).map { strdup($0) }
             argv.append(nil)
@@ -533,10 +547,17 @@ public enum Shell {
     }
 
     public static func runAndCapture(_ command: [String], cwd: String? = nil) throws -> String {
+        try runAndCapture(command, cwd: cwd, preparedEnvironment: processEnvironment())
+    }
+
+    static func runAndCapture(_ command: [String], cwd: String? = nil, environment: [String: String]) throws -> String {
+        try runAndCapture(command, cwd: cwd, preparedEnvironment: preparedEnvironment(from: environment))
+    }
+
+    private static func runAndCapture(_ command: [String], cwd: String? = nil, preparedEnvironment environment: [String: String]) throws -> String {
         guard let executable = command.first else {
             throw NSError(domain: "spaces.shell", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty command"])
         }
-        let environment = processEnvironment()
         #if os(Linux)
             let process = Process()
             let out = Pipe()

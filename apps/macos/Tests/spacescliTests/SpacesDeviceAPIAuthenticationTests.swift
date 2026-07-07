@@ -37,6 +37,18 @@ final class SpacesDeviceAPIAuthenticationTests: XCTestCase {
             "This Mac no longer recognizes this device. Open Devices and pair this device again.")
     }
 
+    func testRecoveryMessageMatchesReachablePortSecureTransportFailure() {
+        // The iOS client maps a reachable port whose pinned-TLS handshake times out to this text; it must
+        // still route into the re-pair recovery flow.
+        let error = NSError(
+            domain: "SpacesDeviceAPIClientError", code: 0,
+            userInfo: [NSLocalizedDescriptionKey: "The secure Device API transport could not authenticate."])
+
+        XCTAssertEqual(
+            SpacesDeviceAPIAuthentication.recoveryMessage(for: error),
+            "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+    }
+
     func testRecoveryMessageIgnoresAvailabilityError() {
         let error = NSError(
             domain: "SpacesDeviceAPIServer", code: 404, userInfo: [NSLocalizedDescriptionKey: "Terminal session 'ABC-123' is not available."])

@@ -124,6 +124,9 @@ spaces agent signal --workspace <workspace-id> --session <terminal-session-id> e
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           <Cmd>spaces device pair</Cmd> with no source opens a short-lived pairing window on the same-machine daemon and prints a <code>spaces://pair</code> link for connecting an iOS client from the terminal. Add <Cmd>--json</Cmd> for machine-readable output. Pass <Cmd>--link</Cmd> to redeem a link from another device, or <Cmd>--ssh user@host</Cmd> to pair with a remote daemon over SSH.
         </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          On Ubuntu 24.04 devices, the Linux installer exposes the CLI at <Cmd>~/.local/bin/spaces</Cmd> for terminal use and keeps the managed helper at <Cmd>~/.spaces/bin/spaces</Cmd>.
+        </p>
         <CodeBlock>{`spaces device pair
 spaces device pair --json`}</CodeBlock>
       </article>

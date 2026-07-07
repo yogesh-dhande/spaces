@@ -1,9 +1,9 @@
 import Foundation
 
 /// Computes the daemon process PATH value that includes the `spaces` CLI shipped next to
-/// the running daemon executable. Nothing else places the managed CLI on PATH on Linux:
-/// the installer is user-scoped so it cannot claim /usr/local/bin, and the systemd user
-/// service starts spacesd with the distro default PATH.
+/// the running daemon executable. The Linux installer creates a shell-facing
+/// `~/.local/bin/spaces` alias, but the systemd user service starts spacesd with the
+/// distro default PATH, so daemon-launched processes still prepend the sibling CLI.
 public enum SpacesCLISearchPath {
     public static let cliExecutableName = "spaces"
 
