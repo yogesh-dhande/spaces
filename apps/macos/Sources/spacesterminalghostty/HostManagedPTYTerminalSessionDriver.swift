@@ -38,8 +38,8 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
     private var closed = false
     private static let inheritedEnvironmentKeysRemovedForExec: Set<String> = [
-        "INVOCATION_ID", "JOURNAL_STREAM", "LISTEN_FDS", "LISTEN_PID", "MAINPID", "NOTIFY_SOCKET", "SPACESD_AUTH_TOKEN", "SPACESD_LISTEN_HOST",
-        "SPACESD_LISTEN_PORT", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT", "WATCHDOG_PID", "WATCHDOG_USEC",
+        "INVOCATION_ID", "JOURNAL_STREAM", "LISTEN_FDS", "LISTEN_PID", "MAINPID", "NOTIFY_SOCKET", "SPACES_DEVICE_API_HOST",
+        "SPACES_DEVICE_API_PORT", "WATCHDOG_PID", "WATCHDOG_USEC",
     ]
 
     init(launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default) {
@@ -195,10 +195,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         processGroupID > 0 && processGroupID == childPID && processGroupID != currentProcessGroupID
     }
 
-    static func shouldRemoveInheritedEnvironmentKey(_ key: String) -> Bool {
-        if key == "SPACESD_AUTH_TOKEN" || key.hasPrefix("SPACESD_AUTH_TOKEN_") { return true }
-        return inheritedEnvironmentKeysRemovedForExec.contains(key)
-    }
+    static func shouldRemoveInheritedEnvironmentKey(_ key: String) -> Bool { inheritedEnvironmentKeysRemovedForExec.contains(key) }
 
     private static func liveProcessID(_ pid: Int32?) -> Int32? {
         guard let pid, pid > 0 else { return nil }

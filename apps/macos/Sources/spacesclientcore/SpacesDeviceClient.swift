@@ -40,7 +40,7 @@ public struct SpacesDeviceOverviewResolution: Sendable {
 public enum SpacesDeviceClientError: LocalizedError, Equatable {
     case missingLocalBootstrap
     case missingOverview
-    case missingTransportKey(deviceName: String, isLocal: Bool)
+    case missingCertificateFingerprint(deviceName: String, isLocal: Bool)
     case requestRejected(String)
     case unavailable(String)
 
@@ -48,16 +48,17 @@ public enum SpacesDeviceClientError: LocalizedError, Equatable {
         switch self {
         case .missingLocalBootstrap: "The local daemon did not return Device API credentials."
         case .missingOverview: "The device did not return project and workspace data."
-        // The recovery differs by device: a remote device's transport key is only obtainable by
-        // re-pairing, but the local device re-bootstraps itself on launch, so "remove and reconnect"
-        // is wrong for this Mac (you cannot un-pair your own device). Guide the local case to a
-        // restart, which re-establishes the key. This is only reached when the in-app self-heal
-        // (`ensureLocalDeviceCredentials`) could not re-bootstrap — typically the local daemon being
-        // unreachable — so a relaunch (which relaunches the daemon) is the actionable next step.
-        case .missingTransportKey(let deviceName, let isLocal):
+        // The recovery differs by device: a remote device's pinned certificate fingerprint is only
+        // obtainable by re-pairing, but the local device re-bootstraps itself on launch, so "remove
+        // and re-pair" is wrong for this Mac (you cannot un-pair your own device). Guide the local
+        // case to a restart, which re-establishes the fingerprint. This is only reached when the
+        // in-app self-heal (`ensureLocalDeviceCredentials`) could not re-bootstrap — typically the
+        // local daemon being unreachable — so a relaunch (which relaunches the daemon) is the
+        // actionable next step.
+        case .missingCertificateFingerprint(let deviceName, let isLocal):
             isLocal
-                ? "Missing secure transport key for \(deviceName). Restart Spaces to reconnect this device."
-                : "Missing secure transport key for \(deviceName). Remove and reconnect this device."
+                ? "Missing secure device identity for \(deviceName). Restart Spaces to reconnect this device."
+                : "Missing secure device identity for \(deviceName). Remove this device and pair it again."
         case .requestRejected(let message): message
         case .unavailable(let message): message
         }
@@ -99,24 +100,21 @@ public enum SpacesDeviceClient {
             certificateFingerprint: bootstrap.certificateFingerprint, createdAt: existingCreatedAt, updatedAt: timestamp, lastSelectedAt: timestamp)
         try database.upsert(device: record)
         try SpacesDeviceCredentialStore.saveToken(bootstrap.authToken, deviceID: record.id, profile: profile)
-        try SpacesDeviceCredentialStore.saveTransportKey(bootstrap.transportKey, deviceID: record.id, profile: profile)
         return record
     }
 
-    /// Ensures the local device's Device API credentials (transport key and auth token) are present,
-    /// re-bootstrapping to regenerate them when either is missing. Only the local device can self-heal
-    /// this way: it is bootstrapped, not paired through a one-time window, so a fresh bootstrap
-    /// re-establishes its credentials. A remote device with missing credentials genuinely needs to be
-    /// removed and re-paired, so callers must not route remote devices here. Cheap when the credentials
-    /// already exist (two keychain existence checks, no daemon round-trip).
+    /// Ensures the local device's Device API auth token is present, re-bootstrapping to regenerate it
+    /// when missing. Only the local device can self-heal this way: it is bootstrapped, not paired
+    /// through a one-time window, so a fresh bootstrap re-establishes its credentials. A remote device
+    /// with missing credentials genuinely needs to be removed and re-paired, so callers must not route
+    /// remote devices here. Cheap when the token already exists (one secret-file existence check, no
+    /// daemon round-trip).
     @discardableResult public static func ensureLocalDeviceCredentials(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
     ) throws -> SpacesPairedDeviceRecord? {
         let localDeviceID = SpacesPairedDeviceRecord.localDeviceID
-        let hasCredentials =
-            ((try? SpacesDeviceCredentialStore.hasTransportKey(deviceID: localDeviceID, profile: profile)) ?? false)
-            && ((try? SpacesDeviceCredentialStore.hasToken(deviceID: localDeviceID, profile: profile)) ?? false)
+        let hasCredentials = (try? SpacesDeviceCredentialStore.hasToken(deviceID: localDeviceID, profile: profile)) ?? false
         if hasCredentials { return nil }
         return try bootstrapLocalDevice(database: providedDatabase, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
     }
@@ -194,22 +192,20 @@ public enum SpacesDeviceClient {
         return SpacesDeviceOverview(device: device, overview: overview)
     }
 
-    #if canImport(Network)
-        /// Opens a live device-overview subscription: the paired daemon pushes a
-        /// fresh overview whenever its database changes, so the client stays current
-        /// without polling. The returned client must be retained and `stop()`ped.
-        public static func subscribeOverview(
-            device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
-            onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
-        ) throws -> SpacesDeviceAPIOverviewStreamClient {
-            let (transportKey, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
-            let client = try SpacesDeviceAPIOverviewStreamClient(
-                authToken: authToken, clientApp: clientApp, host: device.host, port: device.port, transportKey: transportKey,
-                onOverview: { onOverview(SpacesDeviceOverview(device: device, overview: $0)) }, onDisconnect: onDisconnect)
-            try client.start()
-            return client
-        }
-    #endif
+    /// Opens a live device-overview subscription: the paired daemon pushes a
+    /// fresh overview whenever its database changes, so the client stays current
+    /// without polling. The returned client must be retained and `stop()`ped.
+    public static func subscribeOverview(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
+        onOverview: @escaping @Sendable (SpacesDeviceOverview) -> Void, onDisconnect: @escaping @Sendable ((any Error)?) -> Void
+    ) throws -> SpacesDeviceAPIOverviewStreamClient {
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let client = try SpacesDeviceAPIOverviewStreamClient(
+            authToken: authToken, clientApp: clientApp, host: device.host, port: device.port, certificateFingerprint: certificateFingerprint,
+            onOverview: { onOverview(SpacesDeviceOverview(device: device, overview: $0)) }, onDisconnect: onDisconnect)
+        try client.start()
+        return client
+    }
 
     /// Frozen-core handshake read: fetches the daemon's wire protocol + restart-impact status so the
     /// caller can classify compatibility against this build.
@@ -512,44 +508,76 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
-    /// Reads a device's Device API credentials (pinned-TLS transport key and auth token), transparently
-    /// re-bootstrapping the local device when *either* secret is missing. Both are checked together so a
-    /// lost token alone still triggers recovery — otherwise the request would be sent unauthenticated and
-    /// rejected with a 401 while the transport key looked healthy. A remote device cannot regenerate its
-    /// own credentials, so a missing remote transport key surfaces as `missingTransportKey` (the client
-    /// must re-pair); a remote token is returned as-is (possibly nil, the pre-existing behavior).
+    /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send --device`).
+    @discardableResult public static func sendTerminalInput(
+        sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .sendTerminalInput(.init(sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline))), device: device,
+            clientApp: clientApp, profile: profile)
+    }
+
+    /// Rendered plain-text tail of a terminal session on a paired device (`spaces terminal tail --device`).
+    public static func tailTerminalOutput(
+        sessionID: String, lines: Int? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> String {
+        let response = try request(
+            .init(command: .tailTerminalOutput(.init(sessionID: sessionID, lines: lines))), device: device, clientApp: clientApp, profile: profile)
+        guard let output = response.terminalOutput else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return output
+    }
+
+    /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
+    public static func terminalSessions(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceTerminalSessionSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.sessions }
+
+    /// Reads a device's Device API credentials (pinned TLS certificate fingerprint and auth token),
+    /// transparently re-bootstrapping the local device when its token is missing; the re-bootstrap also
+    /// refreshes the local record's fingerprint, so a rotated daemon identity is picked up in the same
+    /// recovery. The fingerprint is non-secret paired-device record data, not a stored secret. A remote
+    /// device cannot regenerate its own identity, so a missing remote fingerprint surfaces as
+    /// `missingCertificateFingerprint` (the client must re-pair); a remote token is returned as-is
+    /// (possibly nil, the pre-existing behavior).
     public static func credentialsEnsuringLocalRecovery(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?)
-        throws -> (transportKey: String, authToken: String?)
+        throws -> (certificateFingerprint: String, authToken: String?)
     {
         if device.id == SpacesPairedDeviceRecord.localDeviceID {
-            let hasTransportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) != nil
-            let hasToken = try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile) != nil
-            if !hasTransportKey || !hasToken { try ensureLocalDeviceCredentials(clientApp: clientApp, profile: profile) }
-            guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
-                throw SpacesDeviceClientError.missingTransportKey(deviceName: device.name, isLocal: true)
+            var record = device
+            if try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile) == nil,
+                let refreshed = try ensureLocalDeviceCredentials(clientApp: clientApp, profile: profile)
+            {
+                record = refreshed
             }
-            return (transportKey, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
+            guard let fingerprint = normalizedFingerprint(record.certificateFingerprint) else {
+                throw SpacesDeviceClientError.missingCertificateFingerprint(deviceName: device.name, isLocal: true)
+            }
+            return (fingerprint, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
         }
-        guard let transportKey = try SpacesDeviceCredentialStore.transportKey(deviceID: device.id, profile: profile) else {
-            throw SpacesDeviceClientError.missingTransportKey(deviceName: device.name, isLocal: false)
+        guard let fingerprint = normalizedFingerprint(device.certificateFingerprint) else {
+            throw SpacesDeviceClientError.missingCertificateFingerprint(deviceName: device.name, isLocal: false)
         }
-        return (transportKey, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
+        return (fingerprint, try SpacesDeviceCredentialStore.token(deviceID: device.id, profile: profile))
+    }
+
+    private static func normalizedFingerprint(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     public static func request(
         _ request: SpacesDeviceAPIRequest, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
-        #if canImport(Network)
-            let (transportKey, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
-            let client = try SpacesDeviceAPIRequestClient(
-                host: device.host, port: device.port, transportKey: transportKey, timeoutSeconds: requestTimeoutSeconds(for: request.command))
-            let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
-            guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
-            return response
-        #else
-            throw SpacesDeviceClientError.unavailable("Device API requests require Network.framework.")
-        #endif
+        let (certificateFingerprint, authToken) = try credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+        let client = try SpacesDeviceAPIRequestClient(
+            host: device.host, port: device.port, certificateFingerprint: certificateFingerprint,
+            timeoutSeconds: requestTimeoutSeconds(for: request.command))
+        let response = try client.request(authenticated(request, authToken: authToken, clientApp: clientApp))
+        guard response.ok else { throw SpacesDeviceClientError.requestRejected(response.message) }
+        return response
     }
 
     private static func authenticated(_ request: SpacesDeviceAPIRequest, authToken: String?, clientApp: SpacesDeviceClientApp)
@@ -561,13 +589,22 @@ public enum SpacesDeviceClient {
     { try SpacesDeviceAPIControlClient.bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: clientApp, presentedToken: presentedToken) }
 
     static func isRetryableLocalDeviceAPIConnectionError(_ error: any Error) -> Bool {
-        #if canImport(Network)
-            if let requestError = error as? SpacesDeviceAPIRequestClientError {
-                switch requestError {
-                case .timeout, .emptyResponse, .connectionFailed: return true
-                case .invalidPort: return false
-                }
+        if let requestError = error as? SpacesDeviceAPIRequestClientError {
+            switch requestError {
+            case .timeout, .emptyResponse, .connectionFailed: return true
+            case .invalidPort: return false
             }
+        }
+        // The pinned-TLS transport's reachability failures (timeout/refused/closed). A certificate
+        // pin mismatch is deliberately not retryable: the daemon is reachable but presents the wrong
+        // identity, which must surface as a real error.
+        if let pinnedTLSError = error as? SpacesPinnedTLSConnectionError {
+            switch pinnedTLSError {
+            case .timeout, .connectionFailed, .connectionClosed: return true
+            case .invalidPort, .receiveLoopActive: return false
+            }
+        }
+        #if canImport(Network)
             if let networkError = error as? NWError {
                 switch networkError {
                 case .posix(let code): return isRetryableLocalDeviceAPIPOSIXCode(code)
@@ -597,7 +634,8 @@ public enum SpacesDeviceClient {
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
-            .terminalPasteImage, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe, .subscribeDeviceOverview:
+            .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
+            .subscribeDeviceOverview:
             defaultRequestTimeoutSeconds
         }
     }

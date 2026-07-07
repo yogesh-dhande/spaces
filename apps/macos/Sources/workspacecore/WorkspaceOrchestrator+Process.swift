@@ -196,8 +196,7 @@ extension WorkspaceOrchestrator {
         let existingWindow = existingWindows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
         let restoredWindow = WindowRecord(
             id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: process.templateName,
-            detail: process.command, targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
-            role: "terminal",
+            detail: process.command, targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
             orderIndex: existingWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
             lastSeenAt: now)
         try store.upsert(window: restoredWindow)
@@ -616,8 +615,8 @@ extension WorkspaceOrchestrator {
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: name, detail: template.command,
-                targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
-                orderIndex: nextOrder, lastSeenAt: now))
+                targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal", orderIndex: nextOrder,
+                lastSeenAt: now))
         launchSucceeded = true
         return record
     }

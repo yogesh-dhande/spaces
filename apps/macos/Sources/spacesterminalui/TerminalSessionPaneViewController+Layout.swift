@@ -274,9 +274,7 @@ extension TerminalSessionPaneViewController {
     /// is frontmost, so UI automation and VoiceOver identify the front window's selected-tab
     /// session by this label off the same `terminal-pane-<sessionID>` element that carries the
     /// owner/viewer AXValue. The panel coordinator keeps it current on every render pass.
-    public func setAccessibilityRuntimeTargetName(_ name: String) {
-        view.setAccessibilityLabel(name)
-    }
+    public func setAccessibilityRuntimeTargetName(_ name: String) { view.setAccessibilityLabel(name) }
 
     func updateHeaderLayoutVisibility() {
         // Session metadata remains available through debug accessors, but panes render
@@ -442,9 +440,7 @@ extension TerminalSessionPaneViewController {
         summaryText(workingDirectory: launchConfiguration.workingDirectory, shell: launchConfiguration.shell, command: launchConfiguration.command)
     }
 
-    static func displayLabel(for client: TerminalClient) -> String {
-        client.identity.deviceName ?? client.identity.hostName ?? client.identity.label
-    }
+    static func displayLabel(for client: TerminalClient) -> String { client.identity.deviceName ?? client.identity.hostName ?? client.identity.label }
 
     static func summaryText(workingDirectory: String, shell: String, command: String?) -> String {
         let cwd = abbreviatedPath(workingDirectory)

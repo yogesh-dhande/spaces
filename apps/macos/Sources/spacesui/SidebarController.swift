@@ -358,7 +358,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let freshnessWindow = Duration.seconds(PollingConstants.remoteOverviewFreshnessInterval)
         var updatedReconnectSection = false
         for record in remotes {
-            guard AppKitController.pairedDeviceHasRequiredCredentials(deviceID: record.id) else {
+            guard AppKitController.pairedDeviceHasRequiredCredentials(device: record) else {
                 if let index = host.deviceSections.firstIndex(where: { $0.deviceID == record.id }) {
                     updatedReconnectSection = updatedReconnectSection || host.deviceSections[index].loadState != .offline("Reconnect required")
                     host.deviceSections[index].loadState = .offline("Reconnect required")
@@ -419,7 +419,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// drops gone devices and opens one per newly present device.
     func refreshRemoteOverviewSubscriptions() {
         guard remoteOverviewSubscriptionsEnabled else { return }
-        let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(deviceID: $0.id) }
+        let remotes = host.macPairedDevices().filter { AppKitController.pairedDeviceHasRequiredCredentials(device: $0) }
         let desiredIDs = Set(remotes.map(\.id))
         for (id, client) in remoteOverviewSubscriptions where !desiredIDs.contains(id) {
             // Remove before stopping so the disconnect callback treats it as intentional.

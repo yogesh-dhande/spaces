@@ -113,8 +113,8 @@ public enum DatabaseSchema {
         // terminal_window_frames is from the one-window-per-terminal era (terminals render as
         // panes inside client-owned panel layouts); runtime_target_events was only ever deleted
         // from, never written or read. Nothing reads or writes either table.
-        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "Drop unused window frame and target event tables", requiresBackup: true)
-        { database in
+        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "Drop unused window frame and target event tables", requiresBackup: true) {
+            database in
             try executeBatch(
                 database: database,
                 sql: """

@@ -17,12 +17,8 @@ public struct SpacesDeviceAPILocalClientBootstrap: Codable, Equatable, Sendable 
     public let port: Int
     public let certificateFingerprint: String
     public let authToken: String
-    public let transportKey: String
 
-    public init(
-        deviceID: String, name: String, platform: String, host: String, port: Int, certificateFingerprint: String, authToken: String,
-        transportKey: String
-    ) {
+    public init(deviceID: String, name: String, platform: String, host: String, port: Int, certificateFingerprint: String, authToken: String) {
         self.deviceID = deviceID
         self.name = name
         self.platform = platform
@@ -30,7 +26,6 @@ public struct SpacesDeviceAPILocalClientBootstrap: Codable, Equatable, Sendable 
         self.port = port
         self.certificateFingerprint = certificateFingerprint
         self.authToken = authToken
-        self.transportKey = transportKey
     }
 }
 

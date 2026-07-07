@@ -11,7 +11,7 @@ import workspacecore
 final class SpacesDeviceAPIServerTransportTests: XCTestCase {
     func testReusableRequestSessionConnectsLazily() throws {
         let client = try SpacesDeviceAPIRequestSessionClient(
-            host: "127.0.0.1", port: makeAvailableTCPPort(), transportKey: SpacesDeviceAPISettings.generateTransportKey())
+            host: "127.0.0.1", port: makeAvailableTCPPort(), certificateFingerprint: testTLSIdentity().certificateFingerprint)
 
         XCTAssertEqual(client.openedConnectionCountForTesting, 0)
     }
@@ -22,15 +22,16 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testReusableRequestSessionSendsMultipleRequestsOnOneConnection() throws {
         try withTemporaryProfile { _ in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-SESSION-REUSE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
                 deviceName: "Mac", appVersion: "1.0")
-            let client = try SpacesDeviceAPIRequestSessionClient(host: "127.0.0.1", port: server.listeningPort, transportKey: transportKey)
+            let client = try SpacesDeviceAPIRequestSessionClient(
+                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             let request = SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp)
             let firstResponse = try client.send(request)
@@ -50,9 +51,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testReusableRequestSessionReconnectsBeforeNonReplayableRequestAfterIdleCutoff() throws {
         try withTemporaryProfile { _ in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let uptime = DeviceAPITransportTestUptime()
@@ -60,7 +61,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-SESSION-IDLE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
                 deviceName: "Mac", appVersion: "1.0")
             let client = try SpacesDeviceAPIRequestSessionClient(
-                host: "127.0.0.1", port: server.listeningPort, transportKey: transportKey, idleReconnectInterval: 1, uptime: uptime.value)
+                host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, idleReconnectInterval: 1,
+                uptime: uptime.value)
             defer { client.cancel() }
 
             let pingRequest = SpacesDeviceAPIRequest(command: .ping, authToken: pairingStore.authToken, clientApp: clientApp)
@@ -83,10 +85,10 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
-    func testTLSPskClientCanPairAndPlaintextClientCannotReadResponse() throws {
+    func testPinnedTLSClientCanPairAndPlaintextClientCannotReadResponse() throws {
         try withTemporaryProfile { _ in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
-            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
@@ -95,8 +97,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-TLS", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
                 appVersion: "1.0")
             let response = try sendTLSRequest(
-                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                    clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok)
             XCTAssertNotNil(response.issuedAuthToken)
@@ -104,10 +107,48 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    func testIncompatibleClientProtocolVersionIsRejectedWithoutConsumingWindow() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
+            try server.start()
+            defer { server.stop() }
+
+            let window = server.openPairingWindow(host: "127.0.0.1", name: "Test Mac", code: "12345678", nonce: "NONCE")
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-VERSION", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
+                appVersion: "1.0")
+
+            // A client one wire version ahead is rejected before the code is validated, so the window
+            // survives for a compatible retry with the same code/nonce.
+            let rejected = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .pair(
+                        .init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version + 1)),
+                    clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertFalse(rejected.ok)
+            XCTAssertNil(rejected.issuedAuthToken)
+
+            // A missing clientProtocolVersion reads as an incompatible (too-old) client and is also rejected.
+            let missingVersion = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: nil)), clientApp: clientApp),
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertFalse(missingVersion.ok)
+
+            let accepted = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                    clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            XCTAssertTrue(accepted.ok)
+            XCTAssertNotNil(accepted.issuedAuthToken)
+        }
+    }
+
     func testUnsupportedBundleDoesNotConsumePairingWindow() throws {
         try withTemporaryProfile { _ in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
-            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
@@ -117,8 +158,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 appVersion: "1.0")
 
             let rejectedResponse = try sendTLSRequest(
-                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: unsupportedClientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                    clientApp: unsupportedClientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             XCTAssertFalse(rejectedResponse.ok)
             XCTAssertTrue(rejectedResponse.message.contains("Unsupported Spaces client bundle"))
 
@@ -126,55 +168,51 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 installationID: "INSTALLATION-SUPPORTED", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
                 deviceName: "iPhone", appVersion: "1.0")
             let acceptedResponse = try sendTLSRequest(
-                SpacesDeviceAPIRequest(command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce)), clientApp: supportedClientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                SpacesDeviceAPIRequest(
+                    command: .pair(.init(pairingCode: window.code, pairingNonce: window.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                    clientApp: supportedClientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(acceptedResponse.ok)
             XCTAssertNotNil(acceptedResponse.issuedAuthToken)
         }
     }
 
-    func testMismatchedTransportKeyLeavesReachablePortForRecoveryProbe() throws {
+    func testMismatchedFingerprintLeavesReachablePortForRecoveryProbe() throws {
         try withTemporaryProfile { _ in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
-            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
-            let staleTransportKey = SpacesDeviceAPISettings.generateTransportKey()
-            switch try tlsConnectionOutcome(port: server.listeningPort, transportKey: staleTransportKey) {
-            case .ready: XCTFail("A stale transport key should not complete the TLS handshake.")
+            let staleFingerprint = "SHA256:" + String(repeating: "0", count: 64)
+            switch try tlsConnectionOutcome(port: server.listeningPort, certificateFingerprint: staleFingerprint) {
+            case .ready: XCTFail("A stale certificate fingerprint should not complete the TLS handshake.")
             case .failed(let error):
                 XCTAssertEqual(
                     SpacesDeviceAPIAuthentication.recoveryMessage(for: error),
                     "This Mac no longer recognizes this device. Open Devices and pair this device again.")
-            case .timedOut:
-                XCTAssertFalse(try plaintextReceivesDeviceAPIResponse(port: server.listeningPort))
-                let probeError = NSError(
-                    domain: "SpacesDeviceAPIClient", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "The secure Device API transport could not authenticate."])
-                XCTAssertEqual(
-                    SpacesDeviceAPIAuthentication.recoveryMessage(for: probeError),
-                    "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            case .timedOut: XCTAssertFalse(try plaintextReceivesDeviceAPIResponse(port: server.listeningPort))
             }
         }
     }
 
     func testPartialTLSRequestEOFIsRejected() throws {
         try withTemporaryProfile { _ in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
-            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
 
-            XCTAssertTrue(try partialTLSRequestEOFClosesConnection(port: server.listeningPort, transportKey: transportKey, server: server))
+            XCTAssertTrue(
+                try partialTLSRequestEOFClosesConnection(
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint, server: server))
         }
     }
 
     func testTerminalLinkResolveRequiresAuthentication() throws {
         try withTemporaryProfile { _ in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
-            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey)
+            let identity = try testTLSIdentity()
+            let server = try SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity)
             try server.start()
             defer { server.stop() }
             let clientApp = SpacesDeviceClientApp(
@@ -183,7 +221,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "image.png")), clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertFalse(response.ok)
             XCTAssertTrue(response.message.localizedStandardContains("device auth token"))
@@ -191,11 +229,75 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    func testSendTerminalInputValidatesPayloadAndSessionAvailability() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-AGENT-SEND", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            func send(_ payload: SpacesDeviceTerminalInputRequest) throws -> SpacesDeviceAPIResponse {
+                try sendTLSRequest(
+                    SpacesDeviceAPIRequest(command: .sendTerminalInput(payload), authToken: pairingStore.authToken, clientApp: clientApp),
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            }
+
+            let missingPayload = try send(.init(sessionID: "agent-send-session"))
+            XCTAssertFalse(missingPayload.ok)
+            XCTAssertTrue(missingPayload.message.localizedStandardContains("text or bytes"))
+
+            let bothPayloads = try send(.init(sessionID: "agent-send-session", text: "echo hi", bytes: Data([0x03])))
+            XCTAssertFalse(bothPayloads.ok)
+            XCTAssertTrue(bothPayloads.message.localizedStandardContains("not both"))
+
+            // Well-formed input against a session with no live control socket reports unavailability
+            // instead of hanging or succeeding silently.
+            let unavailableSession = try send(.init(sessionID: "agent-send-session", text: "echo hi", appendNewline: true))
+            XCTAssertFalse(unavailableSession.ok)
+            XCTAssertTrue(unavailableSession.message.localizedStandardContains("not available"))
+        }
+    }
+
+    func testTailTerminalOutputRendersSessionOutputLog() throws {
+        try withTemporaryProfile { _ in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-AGENT-TAIL", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            func tail(_ payload: SpacesDeviceTerminalTailRequest) throws -> SpacesDeviceAPIResponse {
+                try sendTLSRequest(
+                    SpacesDeviceAPIRequest(command: .tailTerminalOutput(payload), authToken: pairingStore.authToken, clientApp: clientApp),
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+            }
+
+            let noOutput = try tail(.init(sessionID: "agent-tail-session"))
+            XCTAssertFalse(noOutput.ok)
+            XCTAssertTrue(noOutput.message.localizedStandardContains("no output"))
+
+            let paths = try TerminalSessionPaths.forSession(id: "agent-tail-session")
+            try FileManager.default.createDirectory(atPath: paths.rootDirectory, withIntermediateDirectories: true)
+            try Data("first line\nsecond line\nhello-agent\n".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let tailed = try tail(.init(sessionID: "agent-tail-session", lines: 2))
+            XCTAssertTrue(tailed.ok, tailed.message)
+            let text = try XCTUnwrap(tailed.terminalOutput)
+            XCTAssertTrue(text.contains("hello-agent"))
+            XCTAssertFalse(text.contains("first line"))
+        }
+    }
+
     func testCreateProjectImportsDaemonLocalDirectory() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let projectDir = root.appendingPathComponent("daemon-project", isDirectory: true)
@@ -207,7 +309,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .createProject(.init(projectDir: projectDir.path, gitURL: nil)), authToken: pairingStore.authToken, clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
             let projectID = try XCTUnwrap(response.projectID)
@@ -219,9 +321,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testProjectConfigAndHiddenWorkspaceMutationsReturnParityOverview() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let projectDir = root.appendingPathComponent("configured-project", isDirectory: true)
@@ -238,7 +340,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let createResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .createProject(.init(projectDir: projectDir.path, gitURL: nil, config: config)), authToken: pairingStore.authToken,
-                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(createResponse.ok, createResponse.message)
             let projectID = try XCTUnwrap(createResponse.projectID)
@@ -254,7 +356,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let hideResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .updateWorkspaceMetadata(.init(workspaceID: workspaceID, isHidden: true, updatesHidden: true)),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(hideResponse.ok, hideResponse.message)
             XCTAssertEqual(hideResponse.overview?.workspaces.first(where: { $0.id == workspaceID })?.isHidden, true)
@@ -263,9 +366,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testCreateProjectOverviewResolvesServiceURLBrowserSessions() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let projectDir = root.appendingPathComponent("service-url-project", isDirectory: true)
@@ -281,7 +384,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .createProject(.init(projectDir: projectDir.path, gitURL: nil, config: config)), authToken: pairingStore.authToken,
-                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
             let workspaceID = try XCTUnwrap(response.workspaceID)
@@ -295,12 +398,12 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testRestartWorkspaceLifecycleUsesDeviceAPIOrchestratorPath() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
             let launches = DeviceAPITerminalLaunchCapture()
             let terminations = DeviceAPITerminalTerminationCapture()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
                 builtInTerminalSessionTerminator: { terminations.append($0) },
                 builtInTerminalSessionLauncher: { configuration in
                     let childPID = launches.append(configuration)
@@ -337,7 +440,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                     targetURL: "http://localhost:9000/docs", role: "browser", orderIndex: 0, lastSeenAt: "2026-06-18T12:00:02Z"))
             try store.upsert(
                 window: WindowRecord(
-                    id: "shell-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: "zsh", terminalTrackingID: "shell-session", terminalNativeID: "shell-session", role: "terminal", orderIndex: 300,
+                    id: "shell-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: "zsh",
+                    terminalTrackingID: "shell-session", terminalNativeID: "shell-session", role: "terminal", orderIndex: 300,
                     lastSeenAt: "2026-06-18T12:00:03Z"))
             try store.upsert(
                 window: WindowRecord(
@@ -357,7 +461,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .restartWorkspace(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
             XCTAssertEqual(response.workspaceID, workspace.id)
@@ -383,9 +487,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testOverviewResponseCarriesDaemonStatusWithRestartImpactCounts() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
 
@@ -425,7 +529,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(command: .overview, authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
-                transportKey: transportKey)
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
             // The overview carries the frozen-core handshake inline so a compatible client reads the
@@ -440,12 +544,11 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testOpenWorkspaceTerminalReturnsReservedStartingSessionBeforeLauncherCompletes() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
             let launcher = BlockingDeviceAPITerminalLauncher()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
-                builtInTerminalSessionLauncher: launcher.launch)
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, builtInTerminalSessionLauncher: launcher.launch)
             try server.start()
             defer {
                 launcher.release()
@@ -470,7 +573,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .openWorkspaceTerminal(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             let elapsed = Date().timeIntervalSince(startedAt)
 
             XCTAssertTrue(response.ok, response.message)
@@ -501,12 +604,11 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testOpenWorkspaceTerminalResponseKeepsReservedSessionWhenBackgroundLaunchFailsImmediately() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
             let launcher = FailingDeviceAPITerminalLauncher()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
-                builtInTerminalSessionLauncher: launcher.launch)
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, builtInTerminalSessionLauncher: launcher.launch)
             try server.start()
             defer { server.stop() }
 
@@ -527,7 +629,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .openWorkspaceTerminal(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
             let sessionID = try XCTUnwrap(response.sessionID)
@@ -551,11 +653,11 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testRunWorkspaceProcessReturnsLaunchedTerminalSessionID() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
             let launches = DeviceAPITerminalLaunchCapture()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
                 builtInTerminalSessionLauncher: { configuration in
                     let childPID = launches.append(configuration)
                     let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
@@ -568,8 +670,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                         TerminalSessionRuntimeState(
                             sessionID: configuration.sessionID, backend: configuration.backend,
                             servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: Int32(childPID), state: .running,
-                            updatedAt: "2026-06-22T12:00:00Z", title: configuration.title,
-                            workingDirectory: configuration.workingDirectory), paths: paths)
+                            updatedAt: "2026-06-22T12:00:00Z", title: configuration.title, workingDirectory: configuration.workingDirectory),
+                        paths: paths)
                     return TerminalServiceSessionSummary(
                         id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
                         backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running,
@@ -598,7 +700,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .runWorkspaceProcess(.init(workspaceID: workspace.id, processKey: "api", processTemplateID: "process-api")),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
             let sessionID = try XCTUnwrap(response.sessionID)
@@ -612,11 +715,11 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testOpenWorkspaceTerminalCleansReservedSessionWhenOverviewRefreshFails() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
             let launches = DeviceAPITerminalLaunchCapture()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
                 builtInTerminalSessionLauncher: { configuration in
                     let childPID = launches.append(configuration)
                     return TerminalServiceSessionSummary(
@@ -650,7 +753,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .openWorkspaceTerminal(.init(workspaceID: workspace.id)), authToken: pairingStore.authToken, clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertFalse(response.ok)
             XCTAssertTrue(response.message.localizedStandardContains("overview refresh failed"), response.message)
@@ -669,9 +772,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testCreateProjectRequiresOneSource() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let projectDir = root.appendingPathComponent("daemon-project", isDirectory: true)
@@ -683,11 +786,12 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let missingResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .createProject(.init(projectDir: nil, gitURL: nil)), authToken: pairingStore.authToken, clientApp: clientApp),
-                port: server.listeningPort, transportKey: transportKey)
+                port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             let bothResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .createProject(.init(projectDir: projectDir.path, gitURL: "https://example.com/repo.git")),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertFalse(missingResponse.ok)
             XCTAssertEqual(missingResponse.message, "Provide exactly one project directory or Git URL.")
@@ -698,9 +802,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testTerminalLinkWorkspaceRootLookupErrorsPropagate() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let clientApp = SpacesDeviceClientApp(
@@ -713,7 +817,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .resolveTerminalLink(.init(sessionID: "session-1", terminalLink: "image.png")), authToken: pairingStore.authToken,
-                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertFalse(response.ok)
             XCTAssertTrue(response.message.localizedStandardContains("Failed opening sqlite db"), response.message)
@@ -724,9 +828,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testTerminalLinkExternalResolveSkipsWorkspaceRootLookupAndSessionState() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let clientApp = SpacesDeviceClientApp(
@@ -739,7 +843,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .resolveTerminalLink(.init(sessionID: "missing-session", terminalLink: "https://example.com/screenshot.png")),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(response.ok, response.message)
             let metadata = try XCTUnwrap(response.terminalLinkMetadata)
@@ -752,9 +857,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testTerminalLinkChunkReadUsesResolvedTransferAuthorizationWhenDatabaseBecomesUnavailable() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let clientApp = SpacesDeviceClientApp(
@@ -769,7 +874,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let resolveResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: "preview.png")), authToken: pairingStore.authToken,
-                    clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    clientApp: clientApp), port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             let metadata = try XCTUnwrap(resolveResponse.terminalLinkMetadata)
             XCTAssertTrue(resolveResponse.ok)
             XCTAssertEqual(metadata.source, .localFile)
@@ -781,7 +886,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let chunkResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .readTerminalLinkChunk(.init(sessionID: sessionID, terminalLinkID: metadata.id, offset: 0, limit: 16)),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(chunkResponse.ok, chunkResponse.message)
             let chunk = try XCTUnwrap(chunkResponse.terminalLinkChunk)
@@ -792,9 +898,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testTerminalLinkChunkReadRefreshesResolvedTransferAuthorization() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let clientApp = SpacesDeviceClientApp(
@@ -808,14 +914,16 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let resolveResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: "preview-refresh.png")),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
             let metadata = try XCTUnwrap(resolveResponse.terminalLinkMetadata)
             let originalExpiration = try XCTUnwrap(server.terminalLinkTransferAuthorizationExpirationForTesting(linkID: metadata.id))
 
             let chunkResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .readTerminalLinkChunk(.init(sessionID: sessionID, terminalLinkID: metadata.id, offset: 0, limit: 4)),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertTrue(chunkResponse.ok, chunkResponse.message)
             let refreshedExpiration = try XCTUnwrap(server.terminalLinkTransferAuthorizationExpirationForTesting(linkID: metadata.id))
@@ -825,9 +933,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
 
     func testTerminalLinkChunkReadRejectsNeverResolvedLocalLinkWithoutWorkspaceRootScan() throws {
         try withTemporaryProfile { root in
-            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let identity = try testTLSIdentity()
             let pairingStore = AlwaysAuthorizedDevicePairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
             try server.start()
             defer { server.stop() }
             let clientApp = SpacesDeviceClientApp(
@@ -844,7 +952,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let response = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .readTerminalLinkChunk(.init(sessionID: "session-forged", terminalLinkID: metadata.id, offset: 0, limit: 4)),
-                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertFalse(response.ok)
             XCTAssertTrue(response.message.localizedStandardContains("terminal link transfer id is invalid"), response.message)
@@ -858,13 +967,13 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         case timedOut
     }
 
-    private func tlsConnectionOutcome(port: Int, transportKey: String) throws -> DeviceAPITransportConnectionOutcome {
+    private func tlsConnectionOutcome(port: Int, certificateFingerprint: String) throws -> DeviceAPITransportConnectionOutcome {
         let finished = DispatchSemaphore(value: 0)
         let queue = DispatchQueue(label: "spaces.device.api.transport.outcome.test")
         let resultBox = DeviceAPITransportTestResultBox()
         let connection = NWConnection(
             host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
-            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
 
         connection.stateUpdateHandler = { state in
             switch state {
@@ -885,7 +994,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         return .ready
     }
 
-    private func sendTLSRequest(_ request: SpacesDeviceAPIRequest, port: Int, transportKey: String) throws -> SpacesDeviceAPIResponse {
+    private func sendTLSRequest(_ request: SpacesDeviceAPIRequest, port: Int, certificateFingerprint: String) throws -> SpacesDeviceAPIResponse {
         let ready = DispatchSemaphore(value: 0)
         let sent = DispatchSemaphore(value: 0)
         let received = DispatchSemaphore(value: 0)
@@ -893,7 +1002,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         let resultBox = DeviceAPITransportTestResultBox()
         let connection = NWConnection(
             host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
-            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
 
         connection.stateUpdateHandler = { state in
             switch state {
@@ -979,14 +1088,14 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         return (try? SpacesDeviceAPICodec.decodeResponse(Data(buffer.prefix(count)))) != nil
     }
 
-    private func partialTLSRequestEOFClosesConnection(port: Int, transportKey: String, server: SpacesDeviceAPIServer) throws -> Bool {
+    private func partialTLSRequestEOFClosesConnection(port: Int, certificateFingerprint: String, server: SpacesDeviceAPIServer) throws -> Bool {
         let ready = DispatchSemaphore(value: 0)
         let sent = DispatchSemaphore(value: 0)
         let queue = DispatchQueue(label: "spaces.device.api.partial-eof.test")
         let resultBox = DeviceAPITransportTestResultBox()
         let connection = NWConnection(
             host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(port))),
-            using: try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client))
+            using: SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint))
 
         connection.stateUpdateHandler = { state in
             switch state {
@@ -1110,6 +1219,15 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                 createdAt: "2026-06-09T12:00:00Z", workspaceID: workspace.id, kind: .shell), paths: paths)
         return workspaceDir
     }
+}
+
+private let deviceAPITransportTestTLSRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+    "spaces-device-api-transport-tests-tls-\(UUID().uuidString)", isDirectory: true)
+
+/// One pinned-TLS identity per test process: generation is expensive and every server/client pair
+/// only needs a stable certificate to pin.
+private func testTLSIdentity() throws -> TerminalServiceTLSIdentity {
+    try TerminalServiceTLSIdentityStore.loadOrCreate(root: deviceAPITransportTestTLSRoot)
 }
 
 private final class AlwaysAuthorizedDevicePairingStore: SpacesDevicePairingStoreProtocol {

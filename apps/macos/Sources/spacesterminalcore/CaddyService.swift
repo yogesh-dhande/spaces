@@ -238,8 +238,7 @@ import Foundation
             case .executableNotFound: "The caddy executable is required to route workspace service URLs."
             case .startupTimedOut(let path): "Timed out waiting for caddy to start from \(path)."
             case .reloadFailed(let path): "Failed to reload caddy with config at \(path)."
-            case .socketRootUntrusted(let path):
-                "The caddy admin socket directory \(path) is not a private directory owned by the current user."
+            case .socketRootUntrusted(let path): "The caddy admin socket directory \(path) is not a private directory owned by the current user."
             }
         }
     }

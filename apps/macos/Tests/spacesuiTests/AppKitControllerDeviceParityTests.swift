@@ -609,9 +609,8 @@ import workspacecore
         let summary = SpacesDeviceTerminalSessionSummary(
             id: "session-cold", title: "shell", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .running, backend: .ghosttyEmbedded,
             lifetimePolicy: .persistent, servicePID: 123, childPID: nil, workspaceID: "workspace-cold", workspaceTitle: nil, projectID: nil,
-            projectName: nil,
-            createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            projectName: nil, createdAt: "2026-06-01T00:00:00Z", updatedAt: "2026-06-01T00:00:01Z", isControlAvailable: true,
+            isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot())
 
         let match = await AppKitController.resolveSessionSummaryMatchOffMain(
             sessionID: "session-cold", device: device, clientApp: clientApp,

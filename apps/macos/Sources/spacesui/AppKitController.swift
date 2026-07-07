@@ -1251,8 +1251,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// after the pane opens. The pane's own attach otherwise stays a viewer when another
     /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
     /// perf metric the E2E harness parses.
-    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool
-    {
+    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
@@ -1385,8 +1384,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
                 })
             return TerminalPaneContentController(
-                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID),
-                workspaceID: request.workspaceID, sessionID: sessionID, pane: pane)
+                descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
+                sessionID: sessionID, pane: pane)
         } catch {
             showError(error)
             return nil
@@ -2147,7 +2146,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // record so "This Mac" still has an identity to render; with no stored record (a first launch
                 // while the daemon is down) there is no device to show, so it stays a genuine snapshot failure.
                 // Only reachability failures degrade to offline: a bootstrap that reaches the daemon but then
-                // fails writing the paired-device record or saving Keychain credentials is a real error, not
+                // fails writing the paired-device record or saving stored credentials is a real error, not
                 // an offline state, so it must surface rather than be hidden behind an empty offline sidebar.
                 let localDevice: SpacesPairedDeviceRecord
                 let bootstrapOfflineMessage: String?
@@ -2950,10 +2949,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let session = overview?.sessions.first { $0.id == sessionID }
         if let session {
             return DeviceTerminalOpenRequest(
-                workspaceID: session.workspaceID, sessionID: session.id, title: session.title,
-                workingDirectory: session.workingDirectory, kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell,
-                command: session.command, initialState: session.state, servicePID: session.servicePID, childPID: session.childPID,
-                createdAt: session.createdAt, updatedAt: session.updatedAt)
+                workspaceID: session.workspaceID, sessionID: session.id, title: session.title, workingDirectory: session.workingDirectory,
+                kind: terminalSessionKind(rowKind: session.rowKind), shell: session.shell, command: session.command, initialState: session.state,
+                servicePID: session.servicePID, childPID: session.childPID, createdAt: session.createdAt, updatedAt: session.updatedAt)
         }
         guard let workspace = overview?.workspaces.first(where: { $0.id == fallbackWorkspaceID }),
             let row = workspace.terminalRows.first(where: { $0.sessionID == sessionID })
@@ -3253,10 +3251,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return container
     }
 
-    nonisolated static func pairedDeviceHasRequiredCredentials(deviceID: String) -> Bool {
-        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: deviceID)) ?? false
-        let hasTransportKey = (try? SpacesDeviceCredentialStore.hasTransportKey(deviceID: deviceID)) ?? false
-        return hasToken && hasTransportKey
+    /// A paired device is usable when its auth token secret is present and its record carries the
+    /// daemon's pinned TLS certificate fingerprint (non-secret record data).
+    nonisolated static func pairedDeviceHasRequiredCredentials(device: SpacesPairedDeviceRecord) -> Bool {
+        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: device.id)) ?? false
+        return hasToken && !device.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @objc func alertsRowClicked() { alerts.showAlertsDetail() }
@@ -3782,9 +3781,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    /// Confirms the restart-impact with the user, then restarts the device's daemon. A remote Linux
-    /// daemon is updated from the signed artifact over SSH (which restarts it); every other device
-    /// restarts through the `requestDaemonRestart` RPC, after which launchd/systemd respawns it.
+    /// Confirms the restart-impact with the user, then restarts the device's daemon through the
+    /// `requestDaemonRestart` RPC, after which launchd/systemd respawns it (applying any update already
+    /// staged on disk). A remote Linux daemon that is too old for this app is not updated over SSH: the
+    /// user re-runs the version-pinned installer on the Linux device — surfaced in the compatibility
+    /// block — which replaces the binary and restarts the service.
     private func confirmDaemonRestart(deviceID: String) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let alert = NSAlert()
@@ -3797,32 +3798,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showDeviceNotLoadedError()
             return
         }
-        // The daemon reports its own OS, so route on that rather than probing SSH: a non-Linux daemon
-        // must not run the Linux SSH preflight, or a stale/unavailable SSH path would block restarting a
-        // remote Mac whose Device API is still reachable.
-        let isLinuxDaemon = status?.isLinuxDaemon ?? false
         Task { @MainActor [weak self] in
             let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
                 do {
-                    if isLinuxDaemon {
-                        // A remote Linux daemon must be reinstalled from the signed artifact to actually
-                        // update (a plain restart respawns the same old binary); the installer restarts it.
-                        // `false` means the SSH path could not confirm a Linux host, so nothing happened —
-                        // surface that instead of reloading as if it succeeded.
-                        let updated = try SpacesDevicePairingClient.updateRemoteLinuxDaemon(
-                            for: device, appVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey)
-                        guard updated else {
-                            throw NSError(
-                                domain: "SpacesCompatibility", code: 1,
-                                userInfo: [
-                                    NSLocalizedDescriptionKey:
-                                        "Couldn't update this device's daemon over SSH. Check the SSH connection to the device and try again."
-                                ])
-                        }
-                    } else {
-                        // Local or remote Mac: restart through the RPC, applying any update already staged on disk.
-                        try SpacesDeviceClient.requestDaemonRestart(device: device)
-                    }
+                    try SpacesDeviceClient.requestDaemonRestart(device: device)
                     return .success(())
                 } catch { return .failure(error) }
             }.value
@@ -7842,12 +7821,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let focusedPaneContent {
                 self.panelCoordinator.noteContentFocused(focusedPaneContent)
                 let disposition = Self.shortcutMonitorDisposition(
-                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true,
-                    shortcutLeaderModifiers: self.shortcutLeaderModifiers)
+                    eventModifiers: event.modifierFlags, firstResponderIsTerminalPane: true, shortcutLeaderModifiers: self.shortcutLeaderModifiers)
                 focusedTerminalDisposition = disposition
-                if disposition == .passEventToTerminal {
-                    return focusedPaneContent.handleKeyEvent(event) ? nil : event
-                }
+                if disposition == .passEventToTerminal { return focusedPaneContent.handleKeyEvent(event) ? nil : event }
             }
             self.recordStartupInteraction(kind: "key_down")
             if self.handleShortcutCaptureEvent(event: event) { return nil }
@@ -7955,8 +7931,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// all shortcuts run as before.
     nonisolated static func shortcutMonitorDisposition(
         eventModifiers: NSEvent.ModifierFlags, firstResponderIsTerminalPane: Bool, shortcutLeaderModifiers: Set<HotkeyModifier> = []
-    ) -> ShortcutMonitorDisposition
-    {
+    ) -> ShortcutMonitorDisposition {
         guard firstResponderIsTerminalPane else { return .runAppShortcuts }
         let modifiers = eventShortcutModifiers(from: eventModifiers)
         if modifiers.contains(.cmd) { return .runAppShortcuts }
@@ -8100,9 +8075,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func shortcutCaptureKey(for keyCode: UInt16) -> String? { AppKitController.shortcutCaptureKeyMap[keyCode] }
 
-    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
-        Self.eventShortcutModifiers(from: flags)
-    }
+    func shortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> { Self.eventShortcutModifiers(from: flags) }
 
     nonisolated static func eventShortcutModifiers(from flags: NSEvent.ModifierFlags) -> Set<HotkeyModifier> {
         let filtered = flags.intersection([.command, .shift, .option, .control])

@@ -783,9 +783,7 @@ private struct E2ERunner {
     private static func slug(_ value: String) -> String {
         let slug = value.lowercased().replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
             in: CharacterSet(charactersIn: "-"))
-        let capped = slug.count > maxSlugLength
-            ? String(slug.prefix(maxSlugLength)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-            : slug
+        let capped = slug.count > maxSlugLength ? String(slug.prefix(maxSlugLength)).trimmingCharacters(in: CharacterSet(charactersIn: "-")) : slug
         return capped.isEmpty ? "step" : capped
     }
 

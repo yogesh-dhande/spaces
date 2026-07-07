@@ -40,7 +40,7 @@ final class SpacesMobileUITests: XCTestCase {
         try runTerminalLinkPreviewScenario()
     }
 
-    func testAttachedAppConfigurationDoesNotRequireTransportKey() throws {
+    func testAttachedAppConfigurationDoesNotRequireCertificateFingerprint() throws {
         let configURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false)
         defer { try? FileManager.default.removeItem(at: configURL) }
         let payload: [String: Any] = [
@@ -48,7 +48,6 @@ final class SpacesMobileUITests: XCTestCase {
             "host": "127.0.0.1",
             "port": 47_847,
             "authToken": "token",
-            "certificateFingerprint": "SHA256:test",
             "installationID": "installation",
             "attachToExistingApp": true,
         ]
@@ -58,7 +57,7 @@ final class SpacesMobileUITests: XCTestCase {
         let configuration = try UITestConfiguration.load(environment: ["SPACES_MOBILE_UI_TEST_CONFIG_PATH": configURL.path])
 
         XCTAssertTrue(configuration.attachToExistingApp)
-        XCTAssertEqual(configuration.transportKey, "")
+        XCTAssertEqual(configuration.certificateFingerprint, "")
     }
 
     private func runTerminalTakeOverScenario() throws {
@@ -327,7 +326,6 @@ final class SpacesMobileUITests: XCTestCase {
         app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
         app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
         app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
-        app.launchEnvironment["SPACES_MOBILE_TEST_TRANSPORT_KEY"] = configuration.transportKey
         app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
         app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
         if let deviceSeedJSON = configuration.deviceSeedJSON {
@@ -1063,7 +1061,6 @@ private struct UITestConfiguration: Decodable {
     let host: String
     let port: Int
     let authToken: String
-    let transportKey: String
     let certificateFingerprint: String
     let installationID: String
     let renderDumpPath: String?
@@ -1109,7 +1106,6 @@ private struct UITestConfiguration: Decodable {
         guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               (1...65_535).contains(port),
               !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !transportKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
 
@@ -1122,7 +1118,6 @@ private struct UITestConfiguration: Decodable {
                     "host": host,
                     "port": port,
                     "authToken": authToken,
-                    "transportKey": transportKey,
                     "certificateFingerprint": certificateFingerprint,
                 ],
             ],
@@ -1141,7 +1136,6 @@ private struct UITestConfiguration: Decodable {
         case host
         case port
         case authToken
-        case transportKey
         case certificateFingerprint
         case installationID
         case renderDumpPath
@@ -1195,10 +1189,8 @@ private struct UITestConfiguration: Decodable {
         port = try container.decode(Int.self, forKey: .port)
         authToken = try container.decode(String.self, forKey: .authToken)
         if attachToExistingApp {
-            transportKey = try container.decodeIfPresent(String.self, forKey: .transportKey) ?? ""
             certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint) ?? ""
         } else {
-            transportKey = try container.decode(String.self, forKey: .transportKey)
             certificateFingerprint = try container.decode(String.self, forKey: .certificateFingerprint)
         }
         installationID = try container.decode(String.self, forKey: .installationID)

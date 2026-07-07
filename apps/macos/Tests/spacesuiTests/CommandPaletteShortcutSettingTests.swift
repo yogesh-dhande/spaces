@@ -36,15 +36,11 @@ import workspacecore
     }
 
     @Test func shortcutLeaderSettingRequiresAtLeastTwoModifiers() throws {
-        let resolver = AppKitController.ShortcutSettingResolver { key in
-            key == SettingsKey.guiLeaderHotkey ? "ctrl" : nil
-        }
+        let resolver = AppKitController.ShortcutSettingResolver { key in key == SettingsKey.guiLeaderHotkey ? "ctrl" : nil }
         do {
             _ = try resolver.normalizedValue(for: .guiLeaderHotkey, rawValue: "ctrl")
             Issue.record("expected single-modifier leader to be rejected")
-        } catch {
-            #expect(error.localizedDescription == "Hotkey leader must contain at least two modifiers")
-        }
+        } catch { #expect(error.localizedDescription == "Hotkey leader must contain at least two modifiers") }
     }
 
     @Test func shortcutLeaderSettingNormalizesModifierOrder() throws {

@@ -22,7 +22,6 @@ private enum SpacesMobileSettingsStore {
     static func save(_ settings: SpacesMobileConnectionSettings) {
         var stored = settings
         stored.authToken = ""
-        stored.transportKey = ""
         guard let data = try? JSONEncoder().encode(stored) else { return }
         UserDefaults.standard.set(data, forKey: settingsKey)
     }
@@ -41,9 +40,6 @@ private enum SpacesMobileSettingsStore {
         }
         if let authToken = trimmed(environment["SPACES_MOBILE_TEST_AUTH_TOKEN"]) {
             resolved.authToken = authToken
-        }
-        if let transportKey = trimmed(environment["SPACES_MOBILE_TEST_TRANSPORT_KEY"]) {
-            resolved.transportKey = transportKey
         }
         if let certificateFingerprint = trimmed(environment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"]) {
             resolved.certificateFingerprint = certificateFingerprint
@@ -882,8 +878,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
             rowKind: .liveSession,
             rowSourceID: row.id,
-            hasFinalRender: false,
-            daemonEndpoint: row.daemonEndpoint
+            hasFinalRender: false
         )
     }
 

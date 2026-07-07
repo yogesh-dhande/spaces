@@ -109,7 +109,8 @@ import XCTest
         }
 
         func testSecureSocketRootIsPrivateToCurrentUser() throws {
-            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+                "caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: base) }
 
@@ -123,7 +124,8 @@ import XCTest
         }
 
         func testSecureSocketRootRejectsWorldAccessibleDirectory() throws {
-            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+                "caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: base) }
             // Another local user could pre-create the predictable path with lax permissions; the
@@ -137,7 +139,8 @@ import XCTest
         }
 
         func testSecureSocketRootRejectsSymlink() throws {
-            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
+                "caddy-root-\(UUID().uuidString.prefix(8))", isDirectory: true)
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: base) }
             // A symlink at the socket root would redirect the admin socket outside our owned tree.

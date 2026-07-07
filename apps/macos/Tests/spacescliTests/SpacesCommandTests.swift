@@ -51,6 +51,41 @@ final class SpacesCommandTests: XCTestCase {
 
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
 
+    func testTerminalCommandsParseDeviceSelector() throws {
+        XCTAssertEqual(try TerminalListCommand.parse(["--device", "linux-box"]).device, "linux-box")
+        let send = try TerminalSendCommand.parse(["session-1", "echo hi", "--newline", "--device", "linux-box"])
+        XCTAssertEqual(send.sessionID, "session-1")
+        XCTAssertEqual(send.text, "echo hi")
+        XCTAssertTrue(send.newline)
+        XCTAssertEqual(send.device, "linux-box")
+        let tail = try TerminalTailCommand.parse(["session-1", "--lines", "40", "--device", "linux-box"])
+        XCTAssertEqual(tail.lines, 40)
+        XCTAssertEqual(tail.device, "linux-box")
+    }
+
+    func testDevicePairSourceRules() throws {
+        // No source opens a pairing window on this device (optionally as JSON).
+        XCTAssertNoThrow(try DevicePairCommand.parse([]))
+        XCTAssertTrue(try DevicePairCommand.parse(["--json"]).json)
+        // A source pairs this client with another device.
+        XCTAssertEqual(try DevicePairCommand.parse(["--link", "spaces://pair"]).link, "spaces://pair")
+        XCTAssertEqual(try DevicePairCommand.parse(["--ssh", "user@host"]).ssh, "user@host")
+        XCTAssertNoThrow(try DevicePairCommand.parse(["--ssh", "user@host", "--ssh-port", "2222"]))
+        // --ssh and --link are mutually exclusive; --ssh-port requires --ssh; --json is window-only.
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--ssh", "user@host", "--link", "spaces://pair"]))
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--link", "spaces://pair", "--ssh-port", "2222"]))
+        XCTAssertThrowsError(try DevicePairCommand.parse(["--json", "--link", "spaces://pair"]))
+    }
+
+    func testDevicePairParsesSSHDestination() {
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("yogesh@build-box").user, "yogesh")
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("yogesh@build-box").host, "build-box")
+        XCTAssertNil(DevicePairCommand.parsedSSHDestination("build-box").user)
+        XCTAssertEqual(DevicePairCommand.parsedSSHDestination("build-box").host, "build-box")
+    }
+
+    func testDeviceRemoveParsesSelector() throws { XCTAssertEqual(try DeviceRemoveCommand.parse(["linux-box"]).device, "linux-box") }
+
     func testTerminalSessionRowsReturnsEmptyListWhenNoSessionsExist() { XCTAssertEqual(terminalSessionRows([]), []) }
 
     func testAvailableTerminalSessionRowsSkipsMetadataOnlySessions() throws {
@@ -167,15 +202,10 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.authToken, "SECRET")
     }
 
-    func testPairCommandParses() throws {
-        XCTAssertNoThrow(try PairCommand.parse([]))
-        XCTAssertTrue(try PairCommand.parse(["--json"]).json)
-    }
-
     func testPairCommandLinesUseSpacesScheme() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, transportKey: "PSK", certificateFingerprint: "SHA256:abc", name: "Studio",
+                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
         let lines = try pairCommandLines {
             SpacesDeviceAPIControlResponse(ok: true, message: "ok", result: .pairingWindow(.init(pairingWindow: window)))
@@ -191,7 +221,7 @@ final class SpacesCommandTests: XCTestCase {
     func testPairCommandJSONPayloadUsesDeviceMetadata() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, transportKey: "PSK", certificateFingerprint: "SHA256:abc", name: "Studio",
+                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
 
         let payload = try pairCommandPayload {
@@ -203,15 +233,17 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(payload.port, 7443)
         XCTAssertEqual(payload.pairingCode, "12345678")
         XCTAssertEqual(payload.pairingNonce, "N")
-        XCTAssertEqual(payload.transportKey, "PSK")
         XCTAssertEqual(payload.certificateFingerprint, "SHA256:abc")
         XCTAssertEqual(payload.pairingLink, window.linkString)
+        // The SSH pairing path reads these from the JSON to run the compatibility gate.
+        XCTAssertEqual(payload.protocolVersion, 5)
+        XCTAssertEqual(payload.appVersion, "0.1.0")
     }
 
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
         XCTAssertEqual(
-            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "PairCommand", "MobileCommand", "MCPCommand"])
+            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MobileCommand", "MCPCommand"])
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {
@@ -222,7 +254,7 @@ final class SpacesCommandTests: XCTestCase {
             names,
             [
                 "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
-                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send",
+                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_device_list",
             ])
         XCTAssertFalse(names.contains("spaces_agent_signal"))
 
