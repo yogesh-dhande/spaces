@@ -158,7 +158,6 @@ while time.time() < deadline:
         time.sleep(0.5)
 raise SystemExit(f"remote spacesd Device API port {port} did not open: {last_error}")
 PY
-  ssh "${ssh_args[@]}" "$ssh_destination" "~/.local/bin/spaces mobile status" >/dev/null
   echo "Remote Linux spacesd is running the current checkout artifact on $ssh_destination."
 )
 

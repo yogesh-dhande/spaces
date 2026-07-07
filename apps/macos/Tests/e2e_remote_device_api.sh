@@ -174,10 +174,6 @@ remote_profile_env_prefix() {
   printf 'SPACES_DB_PATH=%s SPACES_RUNTIME_DIR=%s' "$(shell_quote "$db_path")" "$(shell_quote "$runtime_dir")"
 }
 
-remote_spaces_mobile_status() {
-  remote_ssh "$(remote_profile_env_prefix) ~/.spaces/bin/spaces mobile status"
-}
-
 remote_spaces_pair_json() {
   remote_ssh "$(remote_profile_env_prefix) ~/.spaces/bin/spaces device pair --json"
 }
@@ -202,7 +198,6 @@ while time.time() < deadline:
         time.sleep(0.5)
 raise SystemExit(f"remote daemon port {port} did not open: {last_error}")
 PY
-  remote_spaces_mobile_status >/dev/null
 }
 
 remote_daemon_cache_marker_path() {
@@ -228,7 +223,6 @@ remote_daemon_cache_ready() {
   actual="$(remote_ssh "cat $(shell_quote "$marker_path") 2>/dev/null || true" 2>/dev/null || true)"
   [[ "$actual" == "$expected" ]] || return 1
   remote_daemon_reachable_from_mac || return 1
-  remote_spaces_mobile_status >/dev/null 2>&1 || return 1
 }
 
 write_remote_daemon_cache_marker() {
