@@ -4,8 +4,6 @@ import Carbon
 final class SidebarOutlineView: NSOutlineView {
     /// Return `true` to indicate the row's click was fully handled; super.mouseDown is skipped.
     var onRowMouseDown: ((Int) -> Bool)?
-    /// Return `true` to indicate the arrow key navigation was fully handled.
-    var onArrowNavigation: ((Int) -> Bool)?
     /// Context menu provider for the right-clicked row; nil falls back to the view's menu.
     var onRowMenu: ((Int) -> NSMenu?)?
 
@@ -24,25 +22,13 @@ final class SidebarOutlineView: NSOutlineView {
     }
 
     override func keyDown(with event: NSEvent) {
+        // Sidebar selection moves only via the configurable leader+up/down chords (handled by
+        // the app-wide shortcut monitor), so plain arrows have a single, predictable path. Swallow
+        // unmodified up/down here to suppress the outline view's native row-by-row selection, which
+        // would otherwise step onto device/project header rows that aren't selectable destinations.
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if flags.isEmpty {
-            switch event.keyCode {
-            case UInt16(kVK_UpArrow): if onArrowNavigation?(-1) == true { return }
-            case UInt16(kVK_DownArrow): if onArrowNavigation?(1) == true { return }
-            default: break
-            }
-        }
+        if flags.isEmpty, event.keyCode == UInt16(kVK_UpArrow) || event.keyCode == UInt16(kVK_DownArrow) { return }
         super.keyDown(with: event)
-    }
-
-    override func moveUp(_ sender: Any?) {
-        if onArrowNavigation?(-1) == true { return }
-        super.moveUp(sender)
-    }
-
-    override func moveDown(_ sender: Any?) {
-        if onArrowNavigation?(1) == true { return }
-        super.moveDown(sender)
     }
 
     // Hide the built-in disclosure triangle while keeping the expand/collapse cell alive

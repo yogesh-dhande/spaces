@@ -71,9 +71,9 @@ public enum SpacesPinnedTLSConnector {
     public static func isClosedConnectionError(_ error: any Error) -> Bool {
         if case SpacesPinnedTLSConnectionError.connectionClosed = error { return true }
         let description = String(describing: error)
-        return description.localizedStandardContains("connection was cancelled")
-            || description.localizedStandardContains("connection was aborted") || description.localizedStandardContains("connection reset")
-            || description.localizedStandardContains("posixerrorcode: 54") || description.localizedStandardContains("broken pipe")
+        return description.localizedStandardContains("connection was cancelled") || description.localizedStandardContains("connection was aborted")
+            || description.localizedStandardContains("connection reset") || description.localizedStandardContains("posixerrorcode: 54")
+            || description.localizedStandardContains("broken pipe")
     }
 }
 
@@ -349,9 +349,7 @@ public enum SpacesPinnedTLSConnector {
                 // The pin decides trust: verify the leaf certificate digest before any application
                 // byte is written, mirroring the Darwin verify-block ordering.
                 var digest = [UInt8](repeating: 0, count: 32)
-                guard spaces_SSL_peer_certificate_sha256(created, &digest) == 1 else {
-                    throw TerminalServiceTLSError.peerCertificateUnavailable
-                }
+                guard spaces_SSL_peer_certificate_sha256(created, &digest) == 1 else { throw TerminalServiceTLSError.peerCertificateUnavailable }
                 let actualFingerprint = "SHA256:\(digest.map { String(format: "%02x", $0) }.joined())"
                 guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
                     throw TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint)

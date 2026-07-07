@@ -1,13 +1,13 @@
 import Foundation
 import XCTest
 
+@testable import spacesterminalcore
+
 #if canImport(Darwin)
     import Darwin
 #else
     import Glibc
 #endif
-
-@testable import spacesterminalcore
 
 final class TerminalServicePathsTests: XCTestCase {
     func testSocketPathUsesShortHashedTmpLocationForLongDatabaseRoots() throws {

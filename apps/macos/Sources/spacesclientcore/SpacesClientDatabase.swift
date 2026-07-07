@@ -681,8 +681,7 @@ public final class SpacesClientDatabase {
     public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
         SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
             try executeClientBatch(database: database, sql: clientStateSchemaSQL)
-        },
-        SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Reserve dropped desktop window IDs version") { _ in },
+        }, SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Reserve dropped desktop window IDs version") { _ in },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
             try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
         }, SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Reserve merged client schema version") { _ in },

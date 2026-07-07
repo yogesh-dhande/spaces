@@ -10,9 +10,9 @@ import XCTest
 /// wire format and is exercised by the Linux artifact smoke and the remote-daemon e2e.
 #if canImport(Network) && canImport(Security)
     final class SpacesPinnedTLSConnectionTests: XCTestCase {
-        private func makeServer(
-            identityRoot: URL, handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
-        ) throws -> TerminalServiceTLSServer {
+        private func makeServer(identityRoot: URL, handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse)
+            throws -> TerminalServiceTLSServer
+        {
             let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: identityRoot)
             let server = TerminalServiceTLSServer(
                 host: "127.0.0.1", port: 0, authToken: nil, identity: identity, queue: DispatchQueue(label: "pinned-tls-connection-test-server"),
@@ -54,14 +54,14 @@ import XCTest
 
             let wrongFingerprint = "SHA256:" + String(repeating: "ab", count: 32)
             XCTAssertThrowsError(
-                try SpacesPinnedTLSConnector.connect(
-                    host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: wrongFingerprint)
+                try SpacesPinnedTLSConnector.connect(host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: wrongFingerprint)
             ) { error in
                 guard case TerminalServiceTLSError.certificatePinMismatch(let expected, let actual) = error else {
                     return XCTFail("Expected certificatePinMismatch, got \(error)")
                 }
                 XCTAssertEqual(expected, wrongFingerprint)
-                XCTAssertEqual(TerminalServiceTLSFingerprint.normalized(actual), TerminalServiceTLSFingerprint.normalized(server.certificateFingerprint))
+                XCTAssertEqual(
+                    TerminalServiceTLSFingerprint.normalized(actual), TerminalServiceTLSFingerprint.normalized(server.certificateFingerprint))
             }
         }
 

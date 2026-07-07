@@ -38,20 +38,17 @@ public enum SpacesDeviceCredentialStore {
     }
 
     private static func secretFileURL(deviceID: String, profile: SpacesProfile?) throws -> URL {
-        try secretDirectoryURL(profile: profile)
-            .appendingPathComponent("\(tokenFilePrefix)-\(sanitizeFileComponent(deviceID)).secret", isDirectory: false)
+        try secretDirectoryURL(profile: profile).appendingPathComponent(
+            "\(tokenFilePrefix)-\(sanitizeFileComponent(deviceID)).secret", isDirectory: false)
     }
 
     private static func secretDirectoryURL(profile: SpacesProfile?) throws -> URL {
         if let rawValue = ProcessInfo.processInfo.environment[secretDirectoryEnvironmentVariable] {
             let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
-            }
+            if !trimmed.isEmpty { return URL(fileURLWithPath: (trimmed as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL }
         }
         let resolvedProfile = try profile ?? SpacesProfile.current()
-        return URL(fileURLWithPath: resolvedProfile.rootDirectory, isDirectory: true)
-            .appendingPathComponent(secretDirectoryName, isDirectory: true)
+        return URL(fileURLWithPath: resolvedProfile.rootDirectory, isDirectory: true).appendingPathComponent(secretDirectoryName, isDirectory: true)
     }
 
     private static func fileSecret(at url: URL) throws -> String? {

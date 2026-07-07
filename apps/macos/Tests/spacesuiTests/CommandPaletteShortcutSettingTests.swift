@@ -20,6 +20,14 @@ import workspacecore
         #expect(commandPaletteIndex == hotkeyIndex.map { $0 + 1 })
     }
 
+    @Test func sidebarNavigationShortcutsAreConfigurableInSettingsPanel() {
+        // Sidebar selection moves only via leader+up/down, so those shortcuts must be user-overridable
+        // from the settings panel rather than hidden functional-only bindings.
+        let cases = AppKitController.ShortcutSetting.settingsPanelCases
+        #expect(cases.contains(.guiSidebarNextShortcut))
+        #expect(cases.contains(.guiSidebarPreviousShortcut))
+    }
+
     @Test func commandPaletteDismissShortcutUsesLeaderPlusX() {
         #expect(
             AppKitController.commandPaletteDismissShortcutMatches(

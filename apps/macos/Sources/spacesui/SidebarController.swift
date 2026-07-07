@@ -1,5 +1,4 @@
 import AppKit
-import Carbon
 import CoreImage
 import Foundation
 import spacesclientcore
@@ -68,6 +67,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// and invalidated together with `visibleWorkspacesCache` (every overview change
     /// reassigns the host's `workspacesByProject`, which invalidates both).
     private var runtimeTargetItemsCache: [String: [SidebarRuntimeTargetItem]] = [:]
+    /// Workspaces the user pinned open by an explicit mouse interaction — clicking the
+    /// workspace row or expanding it with its disclosure chevron. A pinned workspace
+    /// stays expanded even after the selection moves away, until the user collapses it
+    /// with the chevron. Workspaces default to collapsed (empty set). Held in memory on
+    /// this long-lived controller so the state survives sidebar refreshes without a
+    /// database round trip (project collapse, by contrast, is a deliberate
+    /// organizational choice persisted to `project_sidebar_state`).
+    private var pinnedWorkspaceIDs: Set<String> = []
+    /// The workspace expanded only because it is the current arrow-key selection, not
+    /// because it was pinned. It collapses as soon as the selection moves off it. This
+    /// makes keyboard navigation a lightweight preview while mouse clicks pin, matching
+    /// "collapse when no longer selected, unless explicitly expanded by a click."
+    private var transientlyExpandedWorkspaceID: String?
     /// The runtime target currently being renamed inline, if any. The row cell swaps
     /// its title for an editor while this matches (same pattern as the device rename).
     private var renamingRuntimeTarget: (workspaceID: String, item: SidebarRuntimeTargetItem)?
@@ -100,6 +112,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     private static let placeholderProject = ProjectSummary(id: "", name: "", dir: "", isGitRepo: false, defaultBranch: nil)
 
+    /// Leading indent applied to a git project's workspace rows (and their runtime-target rows) so
+    /// they read as nested under the project header. A non-git project has no workspace level, so its
+    /// runtime-target rows are not given this extra indent.
+    private static let workspaceIndent: CGFloat = 16
+
     func invalidateVisibleWorkspacesCache() {
         visibleWorkspacesCache.removeAll(keepingCapacity: true)
         runtimeTargetItemsCache.removeAll(keepingCapacity: true)
@@ -111,23 +128,36 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         outlineView.onRowMouseDown = { [weak self] row in
             guard let self, let ref = self.host.outlineView.item(atRow: row) as? OutlineItemRef else { return false }
             if case .project(let project) = ref.item {
-                // Git project rows toggle their workspace list; non-git rows act as a
-                // single selectable workspace, so let normal row selection proceed.
-                guard project.isGitRepo else { return false }
+                if project.isGitRepo {
+                    // Git project rows are not selectable; a click just toggles their workspace list.
+                    self.toggleProjectExpanded(projectID: project.id)
+                    return true
+                }
+                // A non-git project row stands in for its single workspace, so it stays selectable.
+                // Also toggle its runtime-target list on click, matching how git project and workspace
+                // rows respond to a row click; returning false lets normal row selection proceed.
                 self.toggleProjectExpanded(projectID: project.id)
-                return true
+                return false
             }
             if case .runtimeTarget(_, let workspace, let item) = ref.item {
                 // While this row's inline rename editor is up, let clicks reach the editor.
                 if let renaming = self.renamingRuntimeTarget, renaming.workspaceID == workspace.id, renaming.item.key == item.key { return false }
+                // Clicking into a workspace's targets is a mouse interaction with it, so keep it pinned open.
+                self.pinWorkspaceOpen(workspace.id)
                 if self.host.selectedWorkspaceID != workspace.id { self.selectWorkspace(workspace) }
                 self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
                 return true
             }
+            if case .workspace(_, let workspace) = ref.item {
+                // A mouse click on a workspace row is an explicit expand: pin it open so it stays
+                // expanded after the selection moves away. Arrow-key navigation routes through
+                // selectWorkspace without this handler and so expands the workspace only transiently.
+                self.pinWorkspaceOpen(workspace.id)
+                return false
+            }
             return false
         }
         outlineView.onRowMenu = { [weak self] row in self?.menuForRow(row) }
-        outlineView.onArrowNavigation = { [weak self] direction in self?.navigateSidebarSelection(direction: direction) ?? false }
         outlineView.delegate = self
         outlineView.dataSource = self
     }
@@ -697,18 +727,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return true
     }
 
-    func handleSidebarArrowNavigation(event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        guard flags.isEmpty else { return false }
-        let direction: Int
-        switch event.keyCode {
-        case UInt16(kVK_UpArrow): direction = -1
-        case UInt16(kVK_DownArrow): direction = 1
-        default: return false
-        }
-        return navigateSidebarSelection(direction: direction)
-    }
-
     func selectWorkspace(_ workspace: WorkspaceSummary) {
         // A non-git project's single workspace has no dedicated row; its project row
         // stands in for it, so select that row instead of a `.workspace` item.
@@ -847,7 +865,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .workspace(let project, let workspace):
             return workspaceRowCell(project: project, workspace: workspace, isSelected: host.selectedWorkspaceID == workspace.id)
         case .emptyProject(let project): return emptyProjectRowCell(project: project)
-        case .runtimeTarget(_, let workspace, let item): return runtimeTargetRowCell(workspace: workspace, item: item)
+        case .runtimeTarget(let project, let workspace, let item):
+            return runtimeTargetRowCell(workspace: workspace, item: item, nestedUnderWorkspace: project.isGitRepo)
         }
     }
 
@@ -946,30 +965,42 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let leadingStack = NSStackView()
         leadingStack.orientation = .horizontal
         leadingStack.alignment = .centerY
-        leadingStack.spacing = 8
+        leadingStack.spacing = 6
         leadingStack.translatesAutoresizingMaskIntoConstraints = false
         leadingStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
         leadingStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        // Non-git projects are a single workspace, so surface its running indicator
-        // inline the way a workspace row would.
-        if !project.isGitRepo, let workspace = visibleWorkspaces(projectID: project.id).first {
+        // Every project row reserves a leading icon slot so titles align in one column, and the glyph
+        // marks the row as a project (never a workspace, which lead with a status circle). A git project
+        // shows a muted branch glyph; a non-git project is a plain directory, so it shows a folder tinted
+        // by its single workspace's run state — green when running, muted when stopped — which is a
+        // prominent status without mimicking a workspace's leading dot.
+        let leadingIcon = NSImageView()
+        leadingIcon.translatesAutoresizingMaskIntoConstraints = false
+        leadingIcon.widthAnchor.constraint(equalToConstant: 13).isActive = true
+        leadingIcon.heightAnchor.constraint(equalToConstant: 13).isActive = true
+        if project.isGitRepo {
+            // A commit-graph glyph marks a git project without reading as the ubiquitous branch icon.
+            leadingIcon.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: "Git project")
+            leadingIcon.contentTintColor = .tertiaryLabelColor
+            leadingIcon.toolTip = "Git repository"
+        } else {
+            let workspace = visibleWorkspaces(projectID: project.id).first
             let lifecycleRunning =
-                (host.workspaceRuntimeStatusByID[workspace.id]?.lifecycleState ?? WorkspaceLifecycleState(isRunning: workspace.isRunning)) == .running
-            let statusIcon = NSImageView()
-            statusIcon.translatesAutoresizingMaskIntoConstraints = false
-            statusIcon.image = NSImage(systemSymbolName: lifecycleRunning ? "circle.fill" : "circle", accessibilityDescription: "Status")
-            statusIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
-            statusIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
-            statusIcon.widthAnchor.constraint(equalToConstant: 10).isActive = true
-            statusIcon.heightAnchor.constraint(equalToConstant: 10).isActive = true
-            leadingStack.addArrangedSubview(statusIcon)
+                (workspace.flatMap { host.workspaceRuntimeStatusByID[$0.id]?.lifecycleState }
+                    ?? WorkspaceLifecycleState(isRunning: workspace?.isRunning ?? false)) == .running
+            leadingIcon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: lifecycleRunning ? "Running" : "Stopped")
+            leadingIcon.contentTintColor = lifecycleRunning ? sidebarRunningIndicatorColor() : sidebarIdleIndicatorColor()
+            leadingIcon.toolTip = lifecycleRunning ? "Running" : "Stopped"
         }
+        leadingStack.addArrangedSubview(leadingIcon)
         leadingStack.addArrangedSubview(titleLabel)
 
         let accessoryStack = NSStackView()
         accessoryStack.orientation = .horizontal
         accessoryStack.alignment = .centerY
-        accessoryStack.spacing = 4
+        // Match the workspace row's trailing spacing (and inset, below) so the gear and chevron
+        // line up in the same columns across project and workspace rows.
+        accessoryStack.spacing = 6
         accessoryStack.translatesAutoresizingMaskIntoConstraints = false
         accessoryStack.setContentHuggingPriority(.required, for: .horizontal)
         // Both git and non-git project rows open project settings. A non-git project stands in for
@@ -1001,7 +1032,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             rowBackground.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
 
             contentRow.leadingAnchor.constraint(equalTo: rowBackground.leadingAnchor, constant: 10),
-            contentRow.trailingAnchor.constraint(equalTo: rowBackground.trailingAnchor, constant: -10),
+            // -12 matches the workspace card's content trailing inset so the gear/chevron columns align.
+            contentRow.trailingAnchor.constraint(equalTo: rowBackground.trailingAnchor, constant: -12),
             contentRow.topAnchor.constraint(equalTo: rowBackground.topAnchor, constant: 3),
             contentRow.bottomAnchor.constraint(equalTo: rowBackground.bottomAnchor, constant: -3),
         ])
@@ -1011,6 +1043,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
             addButton.setAccessibilityIdentifier("sidebar-project-add-workspace-\(project.id)")
             accessoryStack.addArrangedSubview(addButton)
+        }
+        // A project row carries a right-edge disclosure chevron mirroring its collapse state. A git
+        // project is always collapsible (it can hold workspaces); a non-git project is collapsible
+        // only when its single workspace has runtime targets to hide.
+        if outlineView(host.outlineView, isItemExpandable: OutlineItemRef(.project(project))) {
+            let isExpanded = !project.isCollapsed
+            let chevron = host.sidebarRowChevronButton(
+                expanded: isExpanded, tooltip: isExpanded ? "Collapse \(project.name)" : "Expand \(project.name)",
+                action: #selector(AppKitController.toggleSidebarProjectDisclosure(_:)))
+            chevron.identifier = NSUserInterfaceItemIdentifier(project.id)
+            chevron.setAccessibilityIdentifier("sidebar-project-disclosure-\(project.id)")
+            accessoryStack.addArrangedSubview(chevron)
         }
         return cell
     }
@@ -1027,7 +1071,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         cell.addSubview(hintLabel)
         NSLayoutConstraint.activate([
-            hintLabel.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 22),
+            // Align with the indented workspace rows this placeholder stands in for.
+            hintLabel.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: Self.workspaceIndent + 12),
             hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -10),
             hintLabel.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
@@ -1103,6 +1148,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         settingsButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         settingsButton.setAccessibilityIdentifier("sidebar-workspace-settings-\(workspace.id)")
         titleRow.addArrangedSubview(settingsButton)
+        // A workspace with no runtime targets has nothing to expand, so it carries no chevron.
+        if !runtimeTargetItems(workspaceID: workspace.id).isEmpty {
+            let isExpanded = isWorkspaceExpanded(workspace.id)
+            let chevron = host.sidebarRowChevronButton(
+                expanded: isExpanded, tooltip: isExpanded ? "Collapse \(workspace.displayName)" : "Expand \(workspace.displayName)",
+                action: #selector(AppKitController.toggleSidebarWorkspaceDisclosure(_:)))
+            chevron.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            chevron.setAccessibilityIdentifier("sidebar-workspace-disclosure-\(workspace.id)")
+            titleRow.addArrangedSubview(chevron)
+        }
         contentStack.addArrangedSubview(titleRow)
         titleRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
 
@@ -1110,8 +1165,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         cell.addSubview(cardView)
 
         NSLayoutConstraint.activate([
-            cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor), cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-            cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
+            // Indent the card so the workspace reads as nested under its git project header.
+            cardView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: Self.workspaceIndent),
+            cardView.trailingAnchor.constraint(equalTo: cell.trailingAnchor), cardView.topAnchor.constraint(equalTo: cell.topAnchor, constant: 2),
             cardView.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -2),
 
             contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 12),
@@ -1142,7 +1198,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
-    private func runtimeTargetRowCell(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSTableCellView {
+    private func runtimeTargetRowCell(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem, nestedUnderWorkspace: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-target-\(workspace.id)-\(item.key)")
 
@@ -1224,10 +1280,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         cell.addSubview(row)
         NSLayoutConstraint.activate([
-            // Flush with the workspace card's leading edge: the ⌘-number chip column
-            // aligns under the workspace row instead of adding a second indent level.
-            row.leadingAnchor.constraint(equalTo: cell.leadingAnchor), row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
-            row.topAnchor.constraint(equalTo: cell.topAnchor), row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+            // Indent the target row one level below its owner so it reads as nested: two levels in
+            // under a git workspace (project → workspace → target), one level in under a non-git
+            // project (project → target), whose project row stands in for the missing workspace level.
+            row.leadingAnchor.constraint(
+                equalTo: cell.leadingAnchor, constant: nestedUnderWorkspace ? Self.workspaceIndent * 2 : Self.workspaceIndent),
+            row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10), row.topAnchor.constraint(equalTo: cell.topAnchor),
+            row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
         ])
         return cell
     }
@@ -1244,9 +1303,74 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     func menuForRow(_ row: Int) -> NSMenu? {
-        guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef, case .runtimeTarget(_, let workspace, let item) = ref.item else {
-            return nil
+        guard let ref = host.outlineView.item(atRow: row) as? OutlineItemRef else { return nil }
+        switch ref.item {
+        case .runtimeTarget(_, let workspace, let item): return runtimeTargetMenu(workspace: workspace, item: item)
+        case .workspace(_, let workspace): return workspaceContextMenu(workspace: workspace)
+        // A non-git project's row stands in for its single workspace, so its right-click menu offers
+        // the same workspace actions, resolved to that lone visible workspace.
+        case .project(let project) where !project.isGitRepo:
+            guard let workspace = visibleWorkspaces(projectID: project.id).first else { return nil }
+            return workspaceContextMenu(workspace: workspace)
+        default: return nil
         }
+    }
+
+    /// Right-click menu for a sidebar workspace row (and the standin row of a non-git project):
+    /// lifecycle controls gated on run state, path actions, and Hide. Lifecycle/Hide items carry the
+    /// workspace id and path actions carry the directory in `identifier.rawValue`. Reveal also carries
+    /// the workspace id so it resolves remote/local state against the clicked row, not the selection.
+    private func workspaceContextMenu(workspace: WorkspaceSummary) -> NSMenu {
+        let menu = NSMenu()
+        func addItem(_ title: String, symbol: String, target: AnyObject, action: Selector, identifier: String, representedObject: Any? = nil) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = target
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            item.identifier = NSUserInterfaceItemIdentifier(identifier)
+            item.representedObject = representedObject
+            menu.addItem(item)
+        }
+        if workspace.isRunning {
+            addItem("Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id)
+            addItem("Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id)
+        } else {
+            addItem("Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id)
+        }
+        menu.addItem(.separator())
+        addItem("Copy path", symbol: "doc.on.doc", target: host, action: #selector(AppKitController.copyDirectoryPath(_:)), identifier: workspace.dir)
+        // Reveal in Finder needs a path on this Mac, so it is offered only for local-device workspaces.
+        if host.isLocalWorkspace(workspace) {
+            addItem(
+                "Reveal in Finder", symbol: "folder", target: host, action: #selector(AppKitController.revealDirectoryInFinder(_:)),
+                identifier: workspace.dir,
+                representedObject: AppKitController.WorkspacePathActionContext(workspaceID: workspace.id, path: workspace.dir))
+        }
+        menu.addItem(.separator())
+        addItem("Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id)
+        return menu
+    }
+
+    @objc private func startWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.launchWorkspace(id: id)
+    }
+
+    @objc private func restartWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.restartWorkspace(id: id)
+    }
+
+    @objc private func stopWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.stopWorkspace(id: id)
+    }
+
+    @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.hideWorkspace(id: id)
+    }
+
+    private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {
         let context = RuntimeTargetMenuContext(workspaceID: workspace.id, item: item)
         let menu = NSMenu()
         func addItem(_ title: String, symbol: String, action: Selector?) {
@@ -1439,6 +1563,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedWorkspaceID = nil
             host.showingSettings = false
             if !host.showingAlerts { host.showPlaceholder() }
+            updateWorkspaceExpansionForSelection(newWorkspaceID: nil)
             refreshSidebarSelectionRows(
                 previousProjectID: previousProjectID, currentProjectID: host.selectedProjectID, previousWorkspaceID: previousWorkspaceID,
                 currentWorkspaceID: host.selectedWorkspaceID)
@@ -1473,12 +1598,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.selectedWorkspaceID = workspace.id
             AppKitController.setClientActiveWorkspaceID(workspace.id)
             host.showingSettings = false
+            // A non-git project has no workspace row to expand, but a git workspace that was only
+            // transiently expanded still needs to collapse now that the selection moved to this project.
+            updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
             host.showWorkspaceDetail(project: project, workspace: workspace)
         case .workspace(let project, let workspace):
             host.selectedProjectID = project.id
             host.selectedWorkspaceID = workspace.id
             AppKitController.setClientActiveWorkspaceID(workspace.id)
             host.showingSettings = false
+            updateWorkspaceExpansionForSelection(newWorkspaceID: workspace.id)
             host.showWorkspaceDetail(project: project, workspace: workspace)
         }
         refreshSidebarSelectionRows(
@@ -1547,9 +1676,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.showError(error)
             return
         }
-        if isCollapsed { host.outlineView.collapseItem(item) } else { host.outlineView.expandItem(item, expandChildren: true) }
+        if isCollapsed {
+            host.outlineView.collapseItem(item)
+        } else {
+            // Reveal the project's workspace rows but keep each workspace collapsed until
+            // expanded or selected; a non-git project's children are its runtime targets directly.
+            host.outlineView.expandItem(item)
+            applyWorkspaceExpansionState(inProject: projectID)
+        }
+        // Collapsing a git project hides its selected workspace row, so the selection must clear.
+        // A non-git project's own row stays visible (only its runtime targets hide), so it stays selected.
         if isCollapsed, let selectedWorkspaceID = host.selectedWorkspaceID, let (project, _) = findWorkspace(id: selectedWorkspaceID),
-            project.id == projectID
+            project.id == projectID, project.isGitRepo
         {
             host.selectedWorkspaceID = nil
             host.selectedProjectID = nil
@@ -1571,11 +1709,89 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.outlineView.expandItem(item)
             }
         }
-        // Expanding children keeps every visible workspace's runtime-target list open;
-        // the target rows have no disclosure affordance of their own.
+        // Drop expansion state for workspaces that no longer exist.
+        let visibleWorkspaceIDs = Set(host.projects.flatMap { visibleWorkspaces(projectID: $0.id).map(\.id) })
+        pinnedWorkspaceIDs.formIntersection(visibleWorkspaceIDs)
+        if let transient = transientlyExpandedWorkspaceID, !visibleWorkspaceIDs.contains(transient) { transientlyExpandedWorkspaceID = nil }
         for project in host.projects {
             guard let row = rowIndex(forProjectID: project.id), let item = host.outlineView.item(atRow: row) else { continue }
-            if project.isCollapsed { host.outlineView.collapseItem(item) } else { host.outlineView.expandItem(item, expandChildren: true) }
+            guard !project.isCollapsed else {
+                host.outlineView.collapseItem(item)
+                continue
+            }
+            // Reveal the project's rows but leave each workspace collapsed until expanded or
+            // selected; a non-git project's children are its runtime targets, so this shows them.
+            host.outlineView.expandItem(item)
+            applyWorkspaceExpansionState(inProject: project.id)
+        }
+    }
+
+    /// Whether a workspace's runtime-target list should be shown: pinned open by an explicit
+    /// mouse interaction, or expanded transiently because it is the current arrow-key selection.
+    private func isWorkspaceExpanded(_ workspaceID: String) -> Bool {
+        pinnedWorkspaceIDs.contains(workspaceID) || transientlyExpandedWorkspaceID == workspaceID
+    }
+
+    /// Marks a workspace as explicitly pinned open in response to a mouse interaction (clicking
+    /// its row or one of its target rows), so it stays expanded after the selection moves away.
+    /// A workspace with no runtime targets has nothing to expand and is left unpinned.
+    private func pinWorkspaceOpen(_ workspaceID: String) {
+        guard !runtimeTargetItems(workspaceID: workspaceID).isEmpty else { return }
+        pinnedWorkspaceIDs.insert(workspaceID)
+        if transientlyExpandedWorkspaceID == workspaceID { transientlyExpandedWorkspaceID = nil }
+    }
+
+    /// Applies each workspace row's expanded/collapsed state for a git project. A non-git
+    /// project has no workspace rows (its project row stands in for its single workspace),
+    /// so there is nothing to apply.
+    private func applyWorkspaceExpansionState(inProject projectID: String) {
+        guard host.projects.first(where: { $0.id == projectID })?.isGitRepo == true else { return }
+        for workspace in visibleWorkspaces(projectID: projectID) {
+            guard let row = rowIndex(forWorkspaceID: workspace.id), let item = host.outlineView.item(atRow: row) else { continue }
+            if isWorkspaceExpanded(workspace.id) { host.outlineView.expandItem(item) } else { host.outlineView.collapseItem(item) }
+        }
+    }
+
+    /// Toggles a workspace's runtime-target list from its disclosure chevron. Expanding pins the
+    /// workspace open so it survives losing the selection; collapsing removes both the pin and any
+    /// transient expansion, so even the selected workspace stays collapsed until it is expanded again.
+    func toggleWorkspaceExpanded(workspaceID: String) {
+        guard let row = rowIndex(forWorkspaceID: workspaceID), let item = host.outlineView.item(atRow: row) else { return }
+        if isWorkspaceExpanded(workspaceID) {
+            pinnedWorkspaceIDs.remove(workspaceID)
+            if transientlyExpandedWorkspaceID == workspaceID { transientlyExpandedWorkspaceID = nil }
+            host.outlineView.collapseItem(item)
+        } else {
+            pinnedWorkspaceIDs.insert(workspaceID)
+            host.outlineView.expandItem(item)
+        }
+        host.outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+    }
+
+    /// Reconciles workspace expansion when the selection moves. The newly selected workspace is
+    /// expanded transiently unless it was already pinned open by a mouse click; the workspace that
+    /// was previously expanded only transiently collapses. Pinned workspaces are untouched, so a
+    /// clicked workspace stays open while arrow-key navigation only previews. Collapsing the old
+    /// row first keeps the new workspace's row lookup accurate as rows shift.
+    private func updateWorkspaceExpansionForSelection(newWorkspaceID: String?) {
+        let previousTransient = transientlyExpandedWorkspaceID
+        let newTransient: String? = {
+            guard let newWorkspaceID, !pinnedWorkspaceIDs.contains(newWorkspaceID) else { return nil }
+            return newWorkspaceID
+        }()
+        transientlyExpandedWorkspaceID = newTransient
+
+        if let previousTransient, previousTransient != newTransient, !pinnedWorkspaceIDs.contains(previousTransient),
+            let row = rowIndex(forWorkspaceID: previousTransient), let item = host.outlineView.item(atRow: row)
+        {
+            host.outlineView.collapseItem(item)
+            host.outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+        }
+        if let newWorkspaceID, isWorkspaceExpanded(newWorkspaceID), !runtimeTargetItems(workspaceID: newWorkspaceID).isEmpty,
+            let row = rowIndex(forWorkspaceID: newWorkspaceID), let item = host.outlineView.item(atRow: row)
+        {
+            host.outlineView.expandItem(item)
+            host.outlineView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
         }
     }
 

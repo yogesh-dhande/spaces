@@ -409,6 +409,10 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public let notes: String?
     public let sessionCount: Int
     public let assignedPorts: [SpacesDeviceAssignedPort]
+    /// Environment variables the daemon injects into every process and terminal of this workspace
+    /// (workspace/project identity and per-service port/host/URL vars), computed authoritatively by
+    /// the owning daemon so the settings dialog can display the exact values processes receive.
+    public let environment: [String: String]
     public let setupState: SpacesDeviceWorkspaceSetupState?
     public let config: SpacesDeviceWorkspaceConfig
     public let processRows: [SpacesDeviceWorkspaceProcessRow]
@@ -418,9 +422,9 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
     public init(
         id: String, projectID: String, projectName: String, branch: String?, baseBranch: String?, dir: String, isRunning: Bool, isArchived: Bool,
         isHidden: Bool, isDefault: Bool, notes: String? = nil, sessionCount: Int, assignedPorts: [SpacesDeviceAssignedPort] = [],
-        setupState: SpacesDeviceWorkspaceSetupState? = nil, config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
-        processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
-        terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
+        environment: [String: String] = [:], setupState: SpacesDeviceWorkspaceSetupState? = nil,
+        config: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(), processRows: [SpacesDeviceWorkspaceProcessRow] = [],
+        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
     ) {
         self.id = id
         self.projectID = projectID
@@ -435,6 +439,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         self.notes = notes
         self.sessionCount = sessionCount
         self.assignedPorts = assignedPorts
+        self.environment = environment
         self.setupState = setupState
         self.config = config
         self.processRows = processRows
@@ -456,6 +461,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         case notes
         case sessionCount
         case assignedPorts
+        case environment
         case setupState
         case config
         case processRows
@@ -478,6 +484,7 @@ public struct SpacesDeviceWorkspaceSummary: Codable, Sendable, Equatable, Identi
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         sessionCount = try container.decodeIfPresent(Int.self, forKey: .sessionCount) ?? 0
         assignedPorts = try container.decodeIfPresent([SpacesDeviceAssignedPort].self, forKey: .assignedPorts) ?? []
+        environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
         setupState = try container.decodeIfPresent(SpacesDeviceWorkspaceSetupState.self, forKey: .setupState)
         config = try container.decodeIfPresent(SpacesDeviceWorkspaceConfig.self, forKey: .config) ?? SpacesDeviceWorkspaceConfig()
         processRows = try container.decodeIfPresent([SpacesDeviceWorkspaceProcessRow].self, forKey: .processRows) ?? []

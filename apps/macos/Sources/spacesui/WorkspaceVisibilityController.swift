@@ -197,6 +197,11 @@ import workspacecore
 
     func closeWorkspaceVisibilityWindow() { workspaceVisibilityWindow?.performClose(nil) }
 
+    /// Hides a workspace from the sidebar without the visibility dialog open — used by the sidebar
+    /// workspace row's right-click menu. Reuses `setWorkspaceHidden` (stop-if-running prompt included);
+    /// the sidebar refreshes from the mutation response, so the completion is a no-op.
+    func hideWorkspace(workspaceID: String) { setWorkspaceHidden(workspaceID: workspaceID, isHidden: true) { _ in } }
+
     /// Sets a workspace's sidebar visibility (persisted as `isHidden`), routing to
     /// the device that owns the workspace and stopping it first if it is running.
     private func setWorkspaceHidden(workspaceID: String, isHidden: Bool, completion: @escaping (Bool) -> Void) {

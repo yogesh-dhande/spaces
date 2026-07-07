@@ -81,7 +81,8 @@
             self.clientApp = clientApp
             self.certificateFingerprint = certificateFingerprint
             authToken = resolvedAuthToken
-            requestClient = try SpacesDeviceAPIRequestSessionClient(host: device.host, port: device.port, certificateFingerprint: certificateFingerprint)
+            requestClient = try SpacesDeviceAPIRequestSessionClient(
+                host: device.host, port: device.port, certificateFingerprint: certificateFingerprint)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
             // Seed the owner from the overview so an owner-seeking open sees the existing

@@ -38,8 +38,8 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
     private var closed = false
     private static let inheritedEnvironmentKeysRemovedForExec: Set<String> = [
-        "INVOCATION_ID", "JOURNAL_STREAM", "LISTEN_FDS", "LISTEN_PID", "MAINPID", "NOTIFY_SOCKET", "SPACES_DEVICE_API_HOST",
-        "SPACES_DEVICE_API_PORT", "WATCHDOG_PID", "WATCHDOG_USEC",
+        "INVOCATION_ID", "JOURNAL_STREAM", "LISTEN_FDS", "LISTEN_PID", "MAINPID", "NOTIFY_SOCKET", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT",
+        "WATCHDOG_PID", "WATCHDOG_USEC",
     ]
 
     init(launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default) {

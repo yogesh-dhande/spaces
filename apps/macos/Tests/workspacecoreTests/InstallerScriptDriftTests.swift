@@ -22,8 +22,7 @@ final class InstallerScriptDriftTests: XCTestCase {
     }
 
     private static var installerScriptURL: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // workspacecoreTests
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()  // workspacecoreTests
             .deletingLastPathComponent()  // Tests
             .deletingLastPathComponent()  // macos
             .deletingLastPathComponent()  // apps

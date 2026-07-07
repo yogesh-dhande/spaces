@@ -27,9 +27,7 @@ public enum TerminalOutputTail {
     // boundary would drop all output that scrolled above the current prompt. A genuine clear that
     // pairs cursor-home with erase-below is still caught by the home-cursor path in
     // `latestRenderedTranscriptBoundaryOffset` (`immediateClearBoundaryOffset`).
-    private static let clearScreenBoundaryPatterns: [Data] = [
-        Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A]),
-    ]
+    private static let clearScreenBoundaryPatterns: [Data] = [Data([0x1B, 0x5B, 0x32, 0x4A]), Data([0x1B, 0x5B, 0x33, 0x4A])]
 
     public static func tail(path: String, lineCount: Int) throws -> String {
         let startedAt = Date()

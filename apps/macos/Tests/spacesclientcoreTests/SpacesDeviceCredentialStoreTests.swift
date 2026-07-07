@@ -15,15 +15,14 @@ final class SpacesDeviceCredentialStoreTests: XCTestCase {
         }
         let profile = SpacesProfile(
             source: .explicitDatabasePath, databasePath: root.appendingPathComponent("spaces.db").path, rootDirectory: root.path,
-            runtimeDirectory: root.appendingPathComponent("runtime").path, ipcNotificationObject: "test", developmentContext: nil,
-            branchSlug: nil, worktreeHash: nil)
+            runtimeDirectory: root.appendingPathComponent("runtime").path, ipcNotificationObject: "test", developmentContext: nil, branchSlug: nil,
+            worktreeHash: nil)
 
         try SpacesDeviceCredentialStore.saveToken("TOKEN", deviceID: "device-one", profile: profile)
 
         let secretDirectory = root.appendingPathComponent(SpacesDeviceCredentialStore.secretDirectoryName, isDirectory: true)
         XCTAssertEqual(try SpacesDeviceCredentialStore.token(deviceID: "device-one", profile: profile), "TOKEN")
-        let directoryPermissions = try XCTUnwrap(
-            FileManager.default.attributesOfItem(atPath: secretDirectory.path)[.posixPermissions] as? NSNumber)
+        let directoryPermissions = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: secretDirectory.path)[.posixPermissions] as? NSNumber)
         XCTAssertEqual(directoryPermissions.int16Value, 0o700)
         let secretFile = secretDirectory.appendingPathComponent("device-auth-token-device-one.secret")
         let filePermissions = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: secretFile.path)[.posixPermissions] as? NSNumber)

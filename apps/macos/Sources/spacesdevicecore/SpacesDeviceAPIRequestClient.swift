@@ -73,10 +73,9 @@ public final class SpacesDeviceAPIRequestSessionClient: @unchecked Sendable {
             uptime: { ProcessInfo.processInfo.systemUptime })
     }
 
-    init(
-        host: String, port: Int, certificateFingerprint: String, idleReconnectInterval: TimeInterval,
-        uptime: @escaping @Sendable () -> TimeInterval
-    ) throws {
+    init(host: String, port: Int, certificateFingerprint: String, idleReconnectInterval: TimeInterval, uptime: @escaping @Sendable () -> TimeInterval)
+        throws
+    {
         guard UInt16(exactly: port) != nil, port > 0 else { throw SpacesDeviceAPIRequestClientError.invalidPort }
         self.host = host
         self.port = port
@@ -198,8 +197,7 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
                     onDisconnect(Self.streamDecodeError(for: line, fallback: error))
                     self?.stop()
                 }
-            },
-            onClosed: { error in onDisconnect(error) })
+            }, onClosed: { error in onDisconnect(error) })
     }
 
     public func stop() {
@@ -263,8 +261,7 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
                     }
                     self?.stop()
                 }
-            },
-            onClosed: { error in onDisconnect(error) })
+            }, onClosed: { error in onDisconnect(error) })
     }
 
     public func stop() {

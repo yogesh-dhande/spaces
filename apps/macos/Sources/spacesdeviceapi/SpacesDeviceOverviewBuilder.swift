@@ -9,6 +9,7 @@ struct SpacesDeviceOverviewBuilder {
         let workspace: WorkspaceRecord
         let settings: WorkspaceSettings?
         let assignedPorts: [SpacesDeviceAssignedPort]
+        let environment: [String: String]
         let resolvedBrowserSessions: [BrowserSession]
         let setupState: WorkspaceSetupState?
         let runningProcesses: [RunningProcessRecord]
@@ -18,12 +19,13 @@ struct SpacesDeviceOverviewBuilder {
         init(
             project: ProjectRecord, workspace: WorkspaceRecord, settings: WorkspaceSettings? = nil, runningProcesses: [RunningProcessRecord] = [],
             agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = [], assignedPorts: [SpacesDeviceAssignedPort] = [],
-            resolvedBrowserSessions: [BrowserSession] = [], setupState: WorkspaceSetupState? = nil
+            environment: [String: String] = [:], resolvedBrowserSessions: [BrowserSession] = [], setupState: WorkspaceSetupState? = nil
         ) {
             self.project = project
             self.workspace = workspace
             self.settings = settings
             self.assignedPorts = assignedPorts
+            self.environment = environment
             self.resolvedBrowserSessions = resolvedBrowserSessions
             self.setupState = setupState
             self.runningProcesses = runningProcesses
@@ -76,7 +78,7 @@ struct SpacesDeviceOverviewBuilder {
                 isRunning: descriptor.workspace.isRunning, isArchived: descriptor.workspace.isArchived, isHidden: descriptor.workspace.isHidden,
                 isDefault: descriptor.workspace.isDefault, notes: descriptor.workspace.notes,
                 sessionCount: sessionsByWorkspaceID[descriptor.workspace.id]?.count ?? 0, assignedPorts: descriptor.assignedPorts,
-                setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
+                environment: descriptor.environment, setupState: descriptor.setupState.map(deviceWorkspaceSetupState),
                 config: workspaceConfig(from: descriptor.settings, resolvedBrowserSessions: descriptor.resolvedBrowserSessions),
                 processRows: runtimeRows.processes, codingAgentRows: runtimeRows.agents, terminalRows: runtimeRows.terminals)
         }

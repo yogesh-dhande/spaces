@@ -40,9 +40,9 @@ extension AppKitController {
         }
 
         static let settingsPanelCases: [ShortcutSetting] = [
-            .guiLeaderHotkey, .guiHotkey, .guiCommandPaletteHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiOpenEditorShortcut,
-            .guiAlertsShortcut, .guiAddWorkspaceShortcut, .guiReloadShortcut, .guiOpenTerminalShortcut, .guiOpenFinderShortcut,
-            .guiOpenSettingsShortcut, .guiWindowShortcut,
+            .guiLeaderHotkey, .guiHotkey, .guiCommandPaletteHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiSidebarNextShortcut,
+            .guiSidebarPreviousShortcut, .guiOpenEditorShortcut, .guiAlertsShortcut, .guiAddWorkspaceShortcut, .guiReloadShortcut,
+            .guiOpenTerminalShortcut, .guiOpenFinderShortcut, .guiOpenSettingsShortcut, .guiWindowShortcut,
         ]
 
         var usesLeader: Bool {

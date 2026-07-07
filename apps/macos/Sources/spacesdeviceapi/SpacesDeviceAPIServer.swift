@@ -1337,14 +1337,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 let slug = SpacesProfile.workspaceHostSlug(
                     branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
                 let resolvedBrowserSessions = try orchestrator.resolvedWorkspaceBrowserSessions(workspaceID: workspace.id)
+                let namedPorts = (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id)) ?? []
                 return SpacesDeviceOverviewBuilder.WorkspaceDescriptor(
                     project: project, workspace: workspace, settings: try? orchestrator.workspaceSettings(workspaceID: workspace.id),
                     runningProcesses: try store.runningProcesses(workspaceID: workspace.id),
                     agentWindows: try store.agentWindows(workspaceID: workspace.id), windows: try store.windows(workspaceID: workspace.id),
-                    assignedPorts: (try? orchestrator.workspacePortsNamed(workspaceID: workspace.id).map {
+                    assignedPorts: namedPorts.map {
                         SpacesDeviceAssignedPort(name: $0.name, port: $0.port, url: "http://\($0.name).\(slug).localhost:\(routerPort)")
-                    }) ?? [], resolvedBrowserSessions: resolvedBrowserSessions,
-                    setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id))
+                    },
+                    environment: orchestrator.buildWorkspaceEnv(
+                        project: project, workspace: workspace, namedPorts: namedPorts.map { (port: $0.port, name: $0.name) }),
+                    resolvedBrowserSessions: resolvedBrowserSessions, setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id))
             }
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()

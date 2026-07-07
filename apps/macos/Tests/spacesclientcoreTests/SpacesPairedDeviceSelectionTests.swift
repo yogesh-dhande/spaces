@@ -46,8 +46,8 @@ final class SpacesPairedDeviceSelectionTests: XCTestCase {
 
     private func device(id: String, name: String) -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
-            id: id, name: name, platform: "remote", host: "192.0.2.10", port: 47_847, certificateFingerprint: "SHA256:ab", sshHost: nil,
-            sshUser: nil, sshPort: nil, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+            id: id, name: name, platform: "remote", host: "192.0.2.10", port: 47_847, certificateFingerprint: "SHA256:ab", sshHost: nil, sshUser: nil,
+            sshPort: nil, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
     }
 
     private func makeDatabase(devices: [SpacesPairedDeviceRecord]) throws -> SpacesClientDatabase {

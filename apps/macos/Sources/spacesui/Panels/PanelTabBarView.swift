@@ -22,6 +22,11 @@ import systembridge
 
     private let tabsStack = NSStackView()
     private let scrollView = NSScrollView()
+    /// Tabs are laid out wide by default and only shrink once too many compete for the
+    /// strip's width: each tab takes an equal share of the visible width, clamped to
+    /// this range. Below the floor the strip stops shrinking and overflows into a scroll.
+    private let maxTabWidth: CGFloat = 200
+    private let minTabWidth: CGFloat = 100
     private var titlesByTabID: [String: String] = [:]
     private var selectedTabID: String?
     private var tabIDs: [String] = []
@@ -74,6 +79,27 @@ import systembridge
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
+
+    /// Tab widths depend on the strip's visible width, so recompute them once the
+    /// scroll view has been sized. Constants only change when the target moves, so the
+    /// constraint updates settle after one pass rather than looping.
+    override func layout() {
+        super.layout()
+        applyTabWidths()
+    }
+
+    /// Give every tab an equal share of the visible width, clamped so a few tabs stay
+    /// comfortably wide and a crowd shrinks to the floor before the strip scrolls.
+    private func applyTabWidths() {
+        let items = tabsStack.arrangedSubviews.compactMap { $0 as? PanelTabItemView }
+        guard !items.isEmpty else { return }
+        let available = scrollView.contentView.bounds.width
+        guard available > 0 else { return }
+        let spacingTotal = tabsStack.spacing * CGFloat(items.count - 1)
+        let perTab = (available - spacingTotal) / CGFloat(items.count)
+        let target = max(minTabWidth, min(maxTabWidth, perTab))
+        for item in items { item.setPreferredWidth(target) }
+    }
 
     /// Clicks on the strip's empty areas (not claimed by a tab, editor, or button)
     /// bubble here. In the main window the strip covers the titlebar's row as an
@@ -197,6 +223,9 @@ import systembridge
     /// removal from the hierarchy can end editing a second time.
     private var renameResolved = false
     private(set) weak var renameEditor: NSTextField?
+    /// Width is driven by the strip (equal share of visible width); the parent updates
+    /// this constant as the tab count or strip width changes.
+    private var widthConstraint: NSLayoutConstraint?
 
     init(
         tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void,
@@ -220,8 +249,9 @@ import systembridge
             editor.font = .systemFont(ofSize: 11)
             editor.delegate = self
             editor.setAccessibilityIdentifier("panel-tab-rename-input")
-            editor.widthAnchor.constraint(greaterThanOrEqualToConstant: 90).isActive = true
-            editor.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
+            // The tab's own width bounds the editor; let it fill and compress inside it.
+            editor.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            editor.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             renameEditor = editor
             titleView = editor
         } else {
@@ -229,8 +259,9 @@ import systembridge
             titleLabel.font = .systemFont(ofSize: 11, weight: isSelected ? .semibold : .regular)
             titleLabel.textColor = isSelected ? Theme.text : Theme.muted
             titleLabel.lineBreakMode = .byTruncatingTail
+            // Fill the tab and truncate when it shrinks; the tab width is the only cap.
+            titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
             titleView = titleLabel
         }
 
@@ -247,6 +278,7 @@ import systembridge
         let stack = NSStackView(views: [titleView, closeButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
+        stack.distribution = .fill
         stack.spacing = 4
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 5, right: 5)
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -265,9 +297,20 @@ import systembridge
             underline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             underline.bottomAnchor.constraint(equalTo: bottomAnchor), underline.heightAnchor.constraint(equalToConstant: 2),
         ])
+
+        // Start at the default width; the strip narrows this as tabs accumulate.
+        let width = widthAnchor.constraint(equalToConstant: 160)
+        width.isActive = true
+        widthConstraint = width
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
+
+    /// Set by the strip to give each tab an equal share of the visible width.
+    func setPreferredWidth(_ width: CGFloat) {
+        guard let widthConstraint, widthConstraint.constant != width else { return }
+        widthConstraint.constant = width
+    }
 
     /// The whole tab surface acts as one control: the title label would otherwise
     /// claim (and swallow) mouse events, leaving click-to-select and the context menu

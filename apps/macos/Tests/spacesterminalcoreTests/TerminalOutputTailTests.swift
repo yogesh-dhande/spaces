@@ -122,10 +122,7 @@ final class TerminalOutputTailTests: XCTestCase {
         // to clear below the prompt, then the prompt text — mirroring a real interactive transcript.
         let promptRedraw = "\(esc)[1m\(esc)[7m%\(esc)[27m\(esc)[0m\r \r\r\(esc)[0m\(esc)[24m\(esc)[Juser@host demo % \(esc)[K\(esc)[?2004h"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let text =
-            "\(promptRedraw)\(esc)[?2004le\u{0008}echo scrolled-marker\(esc)[?2004l\r\r\n"
-            + "scrolled-marker\r\n"
-            + promptRedraw
+        let text = "\(promptRedraw)\(esc)[?2004le\u{0008}echo scrolled-marker\(esc)[?2004l\r\r\n" + "scrolled-marker\r\n" + promptRedraw
         try text.data(using: .utf8)?.write(to: url)
 
         let tailed = try TerminalOutputTail.tail(path: url.path, lineCount: 20)

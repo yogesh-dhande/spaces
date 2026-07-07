@@ -2574,6 +2574,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    final class WorkspacePathActionContext {
+        let workspaceID: String
+        let path: String
+
+        init(workspaceID: String, path: String) {
+            self.workspaceID = workspaceID
+            self.path = path
+        }
+    }
+
     nonisolated static func remoteWorkspacePathActionErrorMessage(action: WorkspacePathAction, deviceName: String) -> String {
         "\(action.title) requires a workspace path on this Mac. \(deviceName) workspaces live on the selected daemon; use an SSH-capable workflow for that remote path."
     }
@@ -3326,7 +3336,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func selectWorkspace(_ workspace: WorkspaceSummary) { sidebar.selectWorkspace(workspace) }
     func orderedSidebarWorkspaces() -> [WorkspaceSummary] { sidebar.orderedSidebarWorkspaces() }
     func navigateSidebarSelection(direction: Int) -> Bool { sidebar.navigateSidebarSelection(direction: direction) }
-    func handleSidebarArrowNavigation(event: NSEvent) -> Bool { sidebar.handleSidebarArrowNavigation(event: event) }
     func toggleProjectExpanded(projectID: String) { sidebar.toggleProjectExpanded(projectID: projectID) }
     func canPreserveDetailPaneAfterSidebarReload() -> Bool { sidebar.canPreserveDetailPaneAfterSidebarReload() }
     func rebuildFlatSidebarData() { sidebar.rebuildFlatSidebarData() }
@@ -3501,7 +3510,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deviceSection(id: deviceID).map { !$0.isLocal } ?? (deviceID != SpacesPairedDeviceRecord.localDeviceID)
     }
 
-    private func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
+    func isLocalWorkspace(_ workspace: WorkspaceSummary) -> Bool { workspace.deviceID == SpacesPairedDeviceRecord.localDeviceID }
+
+    /// Hides a workspace from the sidebar (stopping it first if it is running), routed through the
+    /// workspace-visibility controller so the sidebar row's right-click menu and the visibility
+    /// dialog share one hide path. The sidebar refreshes from the mutation response, so no explicit
+    /// reload callback is needed here.
+    func hideWorkspace(id: String) { workspaceVisibility.hideWorkspace(workspaceID: id) }
 
     /// The device that owns the current selection, so mutations route to the
     /// daemon that actually hosts the selected workspace/project rather than
@@ -3769,13 +3784,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let card = CompatibilityBlockView(
-            verdict: verdict, status: status,
+            verdict: verdict, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, status: status,
             onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.confirmDaemonRestart(deviceID: deviceID) })
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 24),
-            card.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor, constant: 24),
+            card.centerXAnchor.constraint(equalTo: detailContainer.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: detailContainer.centerYAnchor),
+            card.leadingAnchor.constraint(greaterThanOrEqualTo: detailContainer.leadingAnchor, constant: 24),
             card.trailingAnchor.constraint(lessThanOrEqualTo: detailContainer.trailingAnchor, constant: -24),
             card.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
         ])
@@ -6160,6 +6176,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return button
     }
 
+    /// The right-edge disclosure chevron for collapsible sidebar rows (projects and
+    /// workspaces). Points down when expanded and right when collapsed. Rendered as a
+    /// button so a click toggles expansion without also triggering the row's own
+    /// mouse-down handling (project row-toggle or workspace selection).
+    func sidebarRowChevronButton(expanded: Bool, tooltip: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.isBordered = false
+        button.imageScaling = .scaleNone
+        button.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: tooltip)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        button.contentTintColor = .tertiaryLabelColor
+        button.toolTip = tooltip
+        button.setAccessibilityLabel(tooltip)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([button.widthAnchor.constraint(equalToConstant: 16), button.heightAnchor.constraint(equalToConstant: 16)])
+        return button
+    }
+
+    @objc func toggleSidebarProjectDisclosure(_ sender: NSButton) {
+        guard let projectID = sender.identifier?.rawValue else { return }
+        sidebar.toggleProjectExpanded(projectID: projectID)
+    }
+
+    @objc func toggleSidebarWorkspaceDisclosure(_ sender: NSButton) {
+        guard let workspaceID = sender.identifier?.rawValue else { return }
+        sidebar.toggleWorkspaceExpanded(workspaceID: workspaceID)
+    }
+
     func iconButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
         let button = NSButton(title: "", target: self, action: action)
         button.bezelStyle = .texturedRounded
@@ -6361,6 +6407,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc func openDevicePairingWindow() { devicePairing.openDevicePairingWindow() }
     @objc func pairIOSWithConnectedDevice(_ sender: NSButton) { devicePairing.pairIOSWithConnectedDevice(sender) }
     @objc func connectRemoteDeviceFromPairingPanel() { devicePairing.connectRemoteDeviceFromPairingPanel() }
+    @objc func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) { devicePairing.toggleRemoteDeviceAdvancedFields(sender) }
     @objc func restartLocalDaemon() { devicePairing.restartLocalDaemon() }
     @objc func removeMacPairedDevice(_ sender: NSButton) { devicePairing.removeMacPairedDevice(sender) }
     @objc func beginClientDeviceRename(_ sender: NSMenuItem) { devicePairing.beginClientDeviceRename(sender) }
@@ -7177,25 +7224,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.launchWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performLaunchWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    /// Sender-free entry point for the sidebar workspace row's right-click menu, which fires from
+    /// an `NSMenuItem` rather than the footer's `NSButton`.
+    func launchWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performLaunchWorkspace(id: id) } }
+
+    private func performLaunchWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.launchWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7203,30 +7257,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.restartWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performRestartWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response):
-                    // Restart goes through the daemon stop path; the daemon does not own the
-                    // client-side dedicated Chrome windows, so close them here too for a clean
-                    // restarted state (a later browser focus then opens a fresh window).
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    func restartWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performRestartWorkspace(id: id) } }
+
+    private func performRestartWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.restartWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response):
+                // Restart goes through the daemon stop path; the daemon does not own the
+                // client-side dedicated Chrome windows, so close them here too for a clean
+                // restarted state (a later browser focus then opens a fresh window).
+                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7234,27 +7293,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let id = sender.identifier?.rawValue else { return }
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
-            guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForWorkspaceMutation(workspaceID: id) {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.stopWorkspace(
-                        workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
-            }
+            await self?.performStopWorkspace(id: id)
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response):
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: id)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+        }
+    }
+
+    func stopWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performStopWorkspace(id: id) } }
+
+    private func performStopWorkspace(id: String) async {
+        let result: Result<SpacesDeviceAPIResponse, Error>?
+        if let device = deviceForWorkspaceMutation(workspaceID: id) {
+            result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.stopWorkspace(
+                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
+        } else {
+            result = nil
+        }
+        if let result {
+            switch result {
+            case .success(let response):
+                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .failure(let error): showError(error)
+            }
+        } else {
+            showDeviceNotLoadedError()
         }
     }
 
@@ -7367,6 +7431,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func revealDirectoryInFinder(_ sender: Any) {
+        if let context = Self.senderWorkspacePathActionContext(sender) {
+            if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: context.workspaceID) { return }
+            NSWorkspace.shared.selectFile(context.path, inFileViewerRootedAtPath: "")
+            return
+        }
         if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
         guard let path = Self.senderIdentifier(sender) else { return }
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
@@ -7381,17 +7450,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
+    /// Accepts the per-row workspace path context from menu items whose action must resolve
+    /// remote/local state against the clicked workspace rather than the current selection.
+    static func senderWorkspacePathActionContext(_ sender: Any) -> WorkspacePathActionContext? {
+        if let menuItem = sender as? NSMenuItem { return menuItem.representedObject as? WorkspacePathActionContext }
+        return nil
+    }
+
     /// Stock `NSMenu` for the workspace detail ⋯ overflow. Items carry the
     /// workspace path (for Copy/Reveal) or workspace ID (for Archive/Hide) in their
-    /// `identifier.rawValue`, letting the underlying action methods stay
-    /// unchanged whether they're triggered by a button or a menu item.
+    /// `identifier.rawValue`. Reveal also carries the workspace id in
+    /// `representedObject` so remote/local gating resolves the action target itself.
     static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool = true) -> NSMenu {
         let menu = NSMenu()
 
-        func addItem(title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String) {
+        func addItem(
+            title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String,
+            representedObject: Any? = nil
+        ) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
             item.keyEquivalentModifierMask = modifiers
             item.identifier = NSUserInterfaceItemIdentifier(identifier)
+            item.representedObject = representedObject
             item.target = target
             if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
             menu.addItem(item)
@@ -7405,7 +7485,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if isLocalDevice {
             addItem(
                 title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
-                modifiers: [.command, .shift], identifier: path)
+                modifiers: [.command, .shift], identifier: path, representedObject: WorkspacePathActionContext(workspaceID: workspaceID, path: path))
         }
         menu.addItem(.separator())
         addItem(
@@ -7839,7 +7919,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if self.handleClosePaneShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
-            if self.handleSidebarArrowNavigation(event: event) { return nil }
             if self.handleSidebarNavigationShortcut(event: event) { return nil }
             if let openTerminalShortcutSpec, matches(event: event, spec: openTerminalShortcutSpec) {
                 // In a global panel window the new tab opens there, targeting the

@@ -35,6 +35,7 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
     public let isDefault: Bool
     public let notes: String?
     public let assignedPorts: [SpacesDeviceAssignedPort]
+    public let environment: [String: String]
     public let setupState: SpacesDeviceWorkspaceSetupState?
     public let config: SpacesDeviceWorkspaceConfig
     public let processRows: [SpacesDeviceWorkspaceProcessRow]
@@ -55,6 +56,7 @@ public struct SpacesDeviceWorkspaceDetailViewModel: Equatable, Sendable {
         isDefault = workspace.isDefault
         notes = workspace.notes
         assignedPorts = workspace.assignedPorts
+        environment = workspace.environment
         setupState = workspace.setupState
         config = workspace.config
         processRows = workspace.processRows

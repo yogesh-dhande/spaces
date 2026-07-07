@@ -13,7 +13,7 @@ import workspacecore
 final class CompatibilityBlockView: NSView {
     private let onRestart: (() -> Void)?
 
-    init(verdict: SpacesWireCompatibility, status: TerminalServiceDaemonStatus?, onRestart: (() -> Void)?) {
+    init(verdict: SpacesWireCompatibility, deviceName: String, status: TerminalServiceDaemonStatus?, onRestart: (() -> Void)?) {
         self.onRestart = onRestart
         // A too-old Linux daemon cannot be fixed by the restart RPC (it just relaunches the same binary);
         // the user reinstalls on the device instead, so we show the installer command rather than a button.
@@ -23,7 +23,7 @@ final class CompatibilityBlockView: NSView {
 
         let stack = NSStackView()
         stack.orientation = .vertical
-        stack.alignment = .leading
+        stack.alignment = .centerX
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -34,7 +34,8 @@ final class CompatibilityBlockView: NSView {
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")
         icon.contentTintColor = .systemOrange
-        let title = NSTextField(labelWithString: showsLinuxInstaller ? "Update this device's Spaces daemon" : Self.title(for: verdict))
+        let titleText = showsLinuxInstaller ? "Update \(deviceName)'s Spaces daemon" : Self.title(for: verdict, deviceName: deviceName)
+        let title = NSTextField(labelWithString: titleText)
         title.font = .systemFont(ofSize: 16, weight: .semibold)
         header.addArrangedSubview(icon)
         header.addArrangedSubview(title)
@@ -42,12 +43,12 @@ final class CompatibilityBlockView: NSView {
 
         let detailText =
             showsLinuxInstaller
-            ? "The daemon on this device is older than this app, and a restart won't update it. Run the command below on the Linux device, "
-                + "then reconnect. Other paired devices remain available."
-            : Self.detail(for: verdict)
+            ? "The daemon on \(deviceName) is older than this app, and a restart won't update it. Run the command below on the Linux device, "
+                + "then reconnect. Other paired devices remain available." : Self.detail(for: verdict, deviceName: deviceName)
         let detail = NSTextField(wrappingLabelWithString: detailText)
         detail.font = .systemFont(ofSize: 13)
         detail.textColor = .secondaryLabelColor
+        detail.alignment = .center
         stack.addArrangedSubview(detail)
 
         if showsLinuxInstaller {
@@ -64,6 +65,7 @@ final class CompatibilityBlockView: NSView {
             let impactLabel = NSTextField(wrappingLabelWithString: impact)
             impactLabel.font = .systemFont(ofSize: 12)
             impactLabel.textColor = .secondaryLabelColor
+            impactLabel.alignment = .center
             stack.addArrangedSubview(impactLabel)
         }
 
@@ -102,19 +104,19 @@ final class CompatibilityBlockView: NSView {
 
     @objc private func restartTapped() { onRestart?() }
 
-    private static func title(for verdict: SpacesWireCompatibility) -> String {
+    private static func title(for verdict: SpacesWireCompatibility, deviceName: String) -> String {
         switch verdict {
-        case .clientTooOld: "Update Spaces to use this device"
-        case .daemonTooOld: "This device needs a daemon restart"
+        case .clientTooOld: "Device version not compatible"
+        case .daemonTooOld: "Device needs a daemon restart"
         case .compatible: "Daemon update pending"
         }
     }
 
-    private static func detail(for verdict: SpacesWireCompatibility) -> String {
+    private static func detail(for verdict: SpacesWireCompatibility, deviceName: String) -> String {
         switch verdict {
-        case .clientTooOld: "This device runs a newer Spaces than this app. Update Spaces to reconnect to this device."
+        case .clientTooOld: "\(deviceName) runs a newer version than this app. Please update this client to reconnect to it."
         case .daemonTooOld:
-            "The daemon on this device is older than this app needs. Restart it to apply the update and reconnect. "
+            "The daemon on \(deviceName) is older than this app needs. Restart it to apply the update and reconnect. "
                 + "Other paired devices remain available."
         case .compatible: "A newer Spaces is installed; the daemon keeps running the older build until it restarts."
         }
