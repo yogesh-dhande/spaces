@@ -25,17 +25,36 @@ kill_process_tree() {
   kill -KILL "$pid" 2>/dev/null || true
 }
 
+ios_simulator_arch() {
+  local host_arch
+  host_arch="$(uname -m)"
+  case "$host_arch" in
+    arm64 | x86_64)
+      printf '%s\n' "$host_arch"
+      ;;
+    *)
+      printf 'Unsupported iOS simulator host architecture: %s\n' "$host_arch" >&2
+      return 1
+      ;;
+  esac
+}
+
 ios_test_destination() {
   if [ -n "${SPACES_IOS_TEST_DESTINATION:-}" ]; then
     printf '%s\n' "$SPACES_IOS_TEST_DESTINATION"
     return
   fi
 
-  xcrun simctl list devices available -j | python3 -c '
+  local simulator_arch
+  simulator_arch="$(ios_simulator_arch)"
+
+  xcrun simctl list devices available -j | IOS_SIMULATOR_ARCH="$simulator_arch" python3 -c '
 import json
+import os
 import sys
 
 data = json.load(sys.stdin)
+arch = os.environ["IOS_SIMULATOR_ARCH"]
 preferred_names = ("iPhone 17 Pro", "iPhone 16 Pro", "iPhone 15 Pro")
 devices = []
 for runtime, runtime_devices in data.get("devices", {}).items():
@@ -54,10 +73,10 @@ for candidates in (
     for preferred_name in preferred_names:
         for device in candidates:
             if device.get("name") == preferred_name:
-                print("platform=iOS Simulator,id={}".format(device.get("udid")))
+                print("platform=iOS Simulator,id={},arch={}".format(device.get("udid"), arch))
                 raise SystemExit(0)
     if candidates:
-        print("platform=iOS Simulator,id={}".format(candidates[0].get("udid")))
+        print("platform=iOS Simulator,id={},arch={}".format(candidates[0].get("udid"), arch))
         raise SystemExit(0)
 
 raise SystemExit("No available iPhone simulator found for iOS tests.")
