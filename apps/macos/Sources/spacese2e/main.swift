@@ -1948,7 +1948,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
         let connection = makeConnection()
         try waitUntilReady(connection)
         try send(requestData: requestData, connection: connection)
-        receiveStream(from: connection, buffered: Data())
+        receiveStream(from: connection, buffered: LineFrameBuffer())
         dispatchMain()
     }
 
@@ -1997,7 +1997,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
     private func receiveSingleResponse(from connection: NWConnection) throws -> Data {
         let semaphore = DispatchSemaphore(value: 0)
         let box = DeviceAPIRequestResultBox()
-        receiveSingleResponse(from: connection, buffered: Data(), box: box, semaphore: semaphore)
+        receiveSingleResponse(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore)
         guard semaphore.wait(timeout: .now() + 10) == .success else {
             throw DeviceAPIRequestError.timeout("Timed out waiting for the Device API response.")
         }
@@ -2006,7 +2006,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
     }
 
     private func receiveSingleResponse(
-        from connection: NWConnection, buffered data: Data, box: DeviceAPIRequestResultBox, semaphore: DispatchSemaphore
+        from connection: NWConnection, buffered buffer: LineFrameBuffer, box: DeviceAPIRequestResultBox, semaphore: DispatchSemaphore
     ) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
             if let error {
@@ -2014,44 +2014,42 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
                 semaphore.signal()
                 return
             }
-            var nextData = data
-            if let content { nextData.append(content) }
-            if let newlineIndex = nextData.firstIndex(of: 0x0A) {
-                box.setResponseData(Data(nextData.prefix(upTo: newlineIndex)))
+            var nextBuffer = buffer
+            if let content { nextBuffer.append(content) }
+            if let line = nextBuffer.popLine() {
+                box.setResponseData(line)
                 semaphore.signal()
                 return
             }
             if isComplete {
-                guard !nextData.isEmpty else {
+                guard !nextBuffer.isEmpty else {
                     box.setError(DeviceAPIRequestError.emptyResponse)
                     semaphore.signal()
                     return
                 }
-                box.setResponseData(nextData)
+                box.setResponseData(nextBuffer.drainRemainder())
                 semaphore.signal()
                 return
             }
-            self.receiveSingleResponse(from: connection, buffered: nextData, box: box, semaphore: semaphore)
+            self.receiveSingleResponse(from: connection, buffered: nextBuffer, box: box, semaphore: semaphore)
         }
     }
 
-    private func receiveStream(from connection: NWConnection, buffered data: Data) {
+    private func receiveStream(from connection: NWConnection, buffered buffer: LineFrameBuffer) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
             if let error {
                 fputs("\(error)\n", stderr)
                 exit(1)
             }
-            var nextData = data
-            if let content { nextData.append(content) }
-            while let newlineIndex = nextData.firstIndex(of: 0x0A) {
-                let line = Data(nextData.prefix(upTo: newlineIndex))
+            var nextBuffer = buffer
+            if let content { nextBuffer.append(content) }
+            while let line = nextBuffer.popLine() {
                 FileHandle.standardOutput.write(line)
                 FileHandle.standardOutput.write(Data([0x0A]))
                 fflush(stdout)
-                nextData.removeSubrange(...newlineIndex)
             }
             if isComplete { exit(0) }
-            self.receiveStream(from: connection, buffered: nextData)
+            self.receiveStream(from: connection, buffered: nextBuffer)
         }
     }
 }
