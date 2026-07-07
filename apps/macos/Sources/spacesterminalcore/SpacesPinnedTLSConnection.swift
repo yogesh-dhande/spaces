@@ -109,13 +109,13 @@ public enum SpacesPinnedTLSConnector {
         private let queue = DispatchQueue(label: "spaces.pinned.tls.connection")
         private let stateLock = NSLock()
         private var connection: NWConnection?
-        private var readBuffer = Data()
+        private var readBuffer = LineFrameBuffer()
         private var streaming = false
 
         init(host: String, port: Int, expectedFingerprint: String, timeout: TimeInterval) throws {
             guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw SpacesPinnedTLSConnectionError.invalidPort(port) }
             let ready = DispatchSemaphore(value: 0)
-            let pinBox = SpacesPinnedTLSErrorBox()
+            let pinBox = TransportResultBox()
             let tlsOptions = NWProtocolTLS.Options()
             let securityOptions = tlsOptions.securityProtocolOptions
             sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
@@ -126,14 +126,14 @@ public enum SpacesPinnedTLSConnector {
                     let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
                     let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
                     guard let certificate = chain?.first else {
-                        pinBox.setError(TerminalServiceTLSError.peerCertificateUnavailable)
+                        pinBox.setErrorIfUnset(TerminalServiceTLSError.peerCertificateUnavailable)
                         ready.signal()
                         complete(false)
                         return
                     }
                     let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
                     guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
-                        pinBox.setError(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
+                        pinBox.setErrorIfUnset(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
                         ready.signal()
                         complete(false)
                         return
@@ -147,7 +147,7 @@ public enum SpacesPinnedTLSConnector {
                 switch state {
                 case .ready: ready.signal()
                 case .failed(let error):
-                    if pinBox.error() == nil { pinBox.setError(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
+                    if pinBox.error() == nil { pinBox.setErrorIfUnset(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
                     ready.signal()
                 default: break
                 }
@@ -186,11 +186,11 @@ public enum SpacesPinnedTLSConnector {
             var payload = line
             payload.append(0x0A)
             let sent = DispatchSemaphore(value: 0)
-            let errorBox = SpacesPinnedTLSErrorBox()
+            let errorBox = TransportResultBox()
             connection.send(
                 content: payload, contentContext: .defaultMessage, isComplete: false,
                 completion: .contentProcessed { error in
-                    if let error { errorBox.setError(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
+                    if let error { errorBox.setErrorIfUnset(SpacesPinnedTLSConnectionError.connectionFailed(String(describing: error))) }
                     sent.signal()
                 })
             guard sent.wait(timeout: .now() + timeout) == .success else { throw SpacesPinnedTLSConnectionError.timeout }
@@ -210,10 +210,7 @@ public enum SpacesPinnedTLSConnector {
         private func popBufferedLine() -> Data? {
             stateLock.lock()
             defer { stateLock.unlock() }
-            guard let newlineIndex = readBuffer.firstIndex(of: 0x0A) else { return nil }
-            let line = Data(readBuffer.prefix(upTo: newlineIndex))
-            readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
-            return line
+            return readBuffer.popLine()
         }
 
         private func receiveLine(on connection: NWConnection, resultBox: SpacesPinnedTLSLineBox, completion: DispatchSemaphore) {
@@ -225,9 +222,7 @@ public enum SpacesPinnedTLSConnector {
                 }
                 stateLock.lock()
                 if let content, !content.isEmpty { readBuffer.append(content) }
-                if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-                    let line = Data(readBuffer.prefix(upTo: newlineIndex))
-                    readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
+                if let line = readBuffer.popLine() {
                     stateLock.unlock()
                     resultBox.set(.success(line))
                     completion.signal()
@@ -240,8 +235,7 @@ public enum SpacesPinnedTLSConnector {
                         completion.signal()
                         return
                     }
-                    let line = readBuffer
-                    readBuffer.removeAll(keepingCapacity: true)
+                    let line = readBuffer.drainRemainder()
                     stateLock.unlock()
                     resultBox.set(.success(line))
                     completion.signal()
@@ -279,9 +273,7 @@ public enum SpacesPinnedTLSConnector {
                 stateLock.lock()
                 if let content, !content.isEmpty { readBuffer.append(content) }
                 var lines: [Data] = []
-                while let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-                    let line = Data(readBuffer.prefix(upTo: newlineIndex))
-                    readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
+                while let line = readBuffer.popLine() {
                     if !line.isEmpty { lines.append(line) }
                 }
                 stateLock.unlock()
@@ -320,7 +312,7 @@ public enum SpacesPinnedTLSConnector {
         private var socketFD: Int32 = -1
         private var ssl: OpaquePointer?
         private var sslContext: OpaquePointer?
-        private var readBuffer = Data()
+        private var readBuffer = LineFrameBuffer()
         private var cancelled = false
         private var streaming = false
 
@@ -434,20 +426,17 @@ public enum SpacesPinnedTLSConnector {
             Self.setSocketTimeout(fd, seconds: timeout)
             var buffer = [UInt8](repeating: 0, count: 65_536)
             while true {
-                if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-                    let line = Data(readBuffer.prefix(upTo: newlineIndex))
-                    readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
+                if let line = readBuffer.popLine() {
                     return line
                 }
                 let count = SSL_read(ssl, &buffer, Int32(buffer.count))
                 if count > 0 {
-                    readBuffer.append(buffer, count: Int(count))
+                    readBuffer.append(Data(buffer[..<Int(count)]))
                     continue
                 }
                 if SSL_get_error(ssl, count) == SSL_ERROR_ZERO_RETURN {
                     guard !readBuffer.isEmpty else { throw SpacesPinnedTLSConnectionError.connectionClosed }
-                    defer { readBuffer.removeAll(keepingCapacity: true) }
-                    return readBuffer
+                    return readBuffer.drainRemainder()
                 }
                 throw try readWriteFailure(ssl: ssl, result: count, operation: "read")
             }
@@ -477,14 +466,12 @@ public enum SpacesPinnedTLSConnector {
             }
             var buffer = [UInt8](repeating: 0, count: 65_536)
             while true {
-                while let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-                    let line = Data(readBuffer.prefix(upTo: newlineIndex))
-                    readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
+                while let line = readBuffer.popLine() {
                     if !line.isEmpty { onLine(line) }
                 }
                 let count = SSL_read(ssl, &buffer, Int32(buffer.count))
                 if count > 0 {
-                    readBuffer.append(buffer, count: Int(count))
+                    readBuffer.append(Data(buffer[..<Int(count)]))
                     continue
                 }
                 stateLock.lock()
@@ -593,20 +580,3 @@ public enum SpacesPinnedTLSConnector {
         }
     }
 #endif
-
-private final class SpacesPinnedTLSErrorBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedError: (any Error)?
-
-    func setError(_ error: any Error) {
-        lock.lock()
-        if storedError == nil { storedError = error }
-        lock.unlock()
-    }
-
-    func error() -> (any Error)? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedError
-    }
-}
