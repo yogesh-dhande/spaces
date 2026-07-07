@@ -490,6 +490,73 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(persisted.map(\.command), ["npm run api", "npm run web"])
     }
 
+    // Tests an outer withTransaction wrapping two mutations that each internally open
+    // their own withImmediateTransaction commits once and persists both writes.
+    func testNestedTransactionCommitsBothStoreMutations() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+
+        try store.withTransaction {
+            try store.upsert(workspace: workspaceA)
+            try store.upsert(workspace: workspaceB)
+        }
+
+        XCTAssertNotNil(try store.workspace(id: workspaceA.id))
+        XCTAssertNotNil(try store.workspace(id: workspaceB.id))
+    }
+
+    // Tests an error thrown out of the outer withTransaction rolls back every write
+    // made inside it, including ones already returned by inner transactions.
+    func testOuterTransactionErrorRollsBackAllStoreMutations() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspaceA = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        let workspaceB = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+
+        struct OuterFailure: Error {}
+        XCTAssertThrowsError(
+            try store.withTransaction {
+                try store.upsert(workspace: workspaceA)
+                try store.upsert(workspace: workspaceB)
+                throw OuterFailure()
+            }
+        ) { XCTAssertTrue($0 is OuterFailure) }
+
+        XCTAssertNil(try store.workspace(id: workspaceA.id))
+        XCTAssertNil(try store.workspace(id: workspaceB.id))
+    }
+
+    // Tests savepoint semantics: an inner transaction that throws is rolled back to its
+    // savepoint, and when the body catches the error and continues, the outer commit
+    // still persists the writes made before and after the failed inner step.
+    func testInnerTransactionFailureCaughtLeavesOuterWritesIntact() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+
+        try store.withTransaction {
+            try store.upsert(workspace: workspace)
+            // Duplicate process IDs fail inside setWorkspaceProcesses' own transaction,
+            // which rolls back only to its savepoint and leaves the outer intact.
+            XCTAssertThrowsError(
+                try store.setWorkspaceProcesses(
+                    workspaceID: workspace.id,
+                    processes: [
+                        ProcessTemplate(id: "dup", name: "api", command: "npm run api"),
+                        ProcessTemplate(id: "dup", name: "web", command: "npm run web"),
+                    ]))
+            try store.updateWorkspaceHidden(id: workspace.id, isHidden: true)
+        }
+
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, true)
+        XCTAssertTrue(try store.workspaceProcesses(workspaceID: workspace.id).isEmpty)
+    }
+
     // Tests project records remain daemon-owned data without client sidebar state.
     func testProjectRoundTripDoesNotRequireSidebarState() throws {
         let root = try makeTempDirectory()

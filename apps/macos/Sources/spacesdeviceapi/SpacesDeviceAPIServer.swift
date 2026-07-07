@@ -1757,13 +1757,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         -> SpacesDeviceAPIResponse
     {
         let orchestrator = try context.orchestrator()
-        if request.updatesBranch {
-            try orchestrator.updateWorkspaceMetadata(workspaceID: request.workspaceID, branch: normalizedString(request.branch) ?? "")
+        // Pure multi-step DB mutation: branch, notes, and hidden updates commit as one
+        // atomic unit so a reader never sees a partially-updated workspace.
+        try context.store().withTransaction {
+            if request.updatesBranch {
+                try orchestrator.updateWorkspaceMetadata(workspaceID: request.workspaceID, branch: normalizedString(request.branch) ?? "")
+            }
+            if request.updatesNotes {
+                try orchestrator.updateWorkspaceNotes(workspaceID: request.workspaceID, notes: normalizedOptionalString(request.notes))
+            }
+            if request.updatesHidden { try orchestrator.updateWorkspaceHidden(workspaceID: request.workspaceID, isHidden: request.isHidden == true) }
         }
-        if request.updatesNotes {
-            try orchestrator.updateWorkspaceNotes(workspaceID: request.workspaceID, notes: normalizedOptionalString(request.notes))
-        }
-        if request.updatesHidden { try orchestrator.updateWorkspaceHidden(workspaceID: request.workspaceID, isHidden: request.isHidden == true) }
         return try refreshedMutationResponse(context: context, message: "Updated workspace metadata.", workspaceID: request.workspaceID)
     }
 

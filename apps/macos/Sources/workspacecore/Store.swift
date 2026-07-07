@@ -42,17 +42,49 @@ public final class SQLiteStore {
 
     deinit { sqlite3_close(db) }
 
+    /// Public entry point for wrapping several store/orchestrator mutations in one
+    /// atomic unit. Nests safely: an outer `withTransaction` and the
+    /// `withImmediateTransaction` calls the wrapped mutations make internally share a
+    /// single physical transaction, with inner levels expressed as savepoints. Only
+    /// the outermost commit is durable and posts the change signal.
+    public func withTransaction<T>(_ body: () throws -> T) throws -> T {
+        try withImmediateTransaction(body)
+    }
+
+    /// Runs `body` inside a write transaction. At depth zero this opens a real
+    /// `BEGIN IMMEDIATE`/`COMMIT` (rolling back on error); nested calls open a
+    /// savepoint instead so the whole tree commits or rolls back as one unit on the
+    /// single connection. The change signal fires only once, after the outermost
+    /// commit, so a reload never observes partial state.
     func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
-        try executeBatch(sql: "BEGIN IMMEDIATE;")
+        let depth = openTransactionCount
+        if depth == 0 {
+            try executeBatch(sql: "BEGIN IMMEDIATE;")
+            openTransactionCount += 1
+            do {
+                let value = try body()
+                try executeBatch(sql: "COMMIT;")
+                openTransactionCount -= 1
+                Self.postDatabaseDidChange()
+                return value
+            } catch {
+                try? executeBatch(sql: "ROLLBACK;")
+                openTransactionCount -= 1
+                throw error
+            }
+        }
+        let savepoint = "sp\(depth)"
+        try executeBatch(sql: "SAVEPOINT \(savepoint);")
         openTransactionCount += 1
         do {
             let value = try body()
-            try executeBatch(sql: "COMMIT;")
+            try executeBatch(sql: "RELEASE SAVEPOINT \(savepoint);")
             openTransactionCount -= 1
-            Self.postDatabaseDidChange()
             return value
         } catch {
-            try? executeBatch(sql: "ROLLBACK;")
+            // Roll the inner work back to the savepoint and release it, leaving the
+            // enclosing transaction open so the caller can catch and continue.
+            try? executeBatch(sql: "ROLLBACK TO SAVEPOINT \(savepoint); RELEASE SAVEPOINT \(savepoint);")
             openTransactionCount -= 1
             throw error
         }
