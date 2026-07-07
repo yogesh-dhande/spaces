@@ -1,37 +1,20 @@
 import Foundation
 
-public enum WindowRole: Sendable, Hashable, Codable {
+/// Typed view over a `runtime_targets.type` string. Persistence tracks exactly two focusable runtime
+/// roles today (browser and every other runtime item, which is a terminal), so any non-`browser` value
+/// reads back as `.terminal` — mirroring the store's own browser-vs-terminal collapse. Add a case here
+/// only alongside the persistence and orchestration that give it real behavior.
+public enum WindowRole: Sendable, Hashable {
     case browser
     case terminal
-    case editor
-    case unknown(String)
 
-    public init(rawValue: String) {
-        switch rawValue {
-        case "browser": self = .browser
-        case "terminal": self = .terminal
-        case "editor": self = .editor
-        default: self = .unknown(rawValue)
-        }
-    }
+    public init(rawValue: String) { self = rawValue == "browser" ? .browser : .terminal }
 
     public var rawValue: String {
         switch self {
         case .browser: "browser"
         case .terminal: "terminal"
-        case .editor: "editor"
-        case .unknown(let value): value
         }
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        self.init(rawValue: try container.decode(String.self))
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
     }
 }
 

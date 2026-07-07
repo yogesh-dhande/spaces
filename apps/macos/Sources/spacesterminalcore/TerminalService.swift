@@ -78,10 +78,15 @@ import Foundation
             return profile
         }
 
-        @discardableResult public static func ensureRunning(timeout: TimeInterval = 5) throws -> Bool {
+        /// - Parameter requireWireCompatibility: When `true` (the default, used by command dispatch),
+        ///   an adopted already-running daemon must speak this build's wire protocol or this throws.
+        ///   `relaunch` passes `false`: it is replacing the daemon, so it must tolerate the outgoing
+        ///   stale daemon still answering ping during its shutdown grace instead of aborting the wait.
+        @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
             let startedAt = Date()
             let socketPath = try TerminalServicePaths.socketPath()
-            if FileManager.default.fileExists(atPath: socketPath), (try? ping(timeout: 1)) != nil {
+            if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
+                if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                 TerminalPerformance.logMetric(
                     "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                     success: true, detail: "launched=0")
@@ -99,7 +104,8 @@ import Foundation
 
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
-                if FileManager.default.fileExists(atPath: socketPath), (try? ping(timeout: 1)) != nil {
+                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
+                    if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     TerminalPerformance.logMetric(
                         "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                         success: true, detail: "launched=1 pid=\(process.processIdentifier)")
@@ -120,7 +126,7 @@ import Foundation
                 stopExistingService(socketPath: socketPath, timeout: min(max(timeout / 2, 0.5), 2))
             }
             try? FileManager.default.removeItem(atPath: socketPath)
-            return try ensureRunning(timeout: timeout)
+            return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
         }
 
         private static func pingResponse(timeout: TimeInterval = 2) throws -> TerminalServiceResponse {
@@ -414,11 +420,18 @@ import Foundation
             return profile
         }
 
-        @discardableResult public static func ensureRunning(timeout: TimeInterval = 5) throws -> Bool {
+        /// - Parameter requireWireCompatibility: When `true` (the default, used by command dispatch),
+        ///   an adopted already-running daemon must speak this build's wire protocol or this throws.
+        ///   `relaunch` passes `false`: it sends a best-effort `.shutdown` and then waits here, so the
+        ///   outgoing stale daemon still answering ping during its shutdown grace must not abort the wait.
+        @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
             let socketPath = try TerminalServicePaths.socketPath()
             let deadline = Date().addingTimeInterval(timeout)
             repeat {
-                if FileManager.default.fileExists(atPath: socketPath), (try? ping(timeout: min(timeout, 1))) != nil { return false }
+                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
+                    if requireWireCompatibility { try assertDaemonWireCompatible(response) }
+                    return false
+                }
                 Thread.sleep(forTimeInterval: 0.05)
             } while Date() < deadline
             throw TerminalServiceError.serviceUnavailable(socketPath)
@@ -430,7 +443,7 @@ import Foundation
                 _ = try? TerminalServiceClient.send(
                     request: TerminalServiceRequest(command: .shutdown), socketPath: socketPath, timeout: min(timeout, 1))
             }
-            return try ensureRunning(timeout: timeout)
+            return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
         }
 
         public static func createSessionRequestTimeout(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
@@ -456,3 +469,43 @@ import Foundation
         }
     }
 #endif
+
+extension TerminalService {
+    /// Guards local dispatch against a daemon whose wire contract differs from this build's.
+    ///
+    /// `ensureRunning` adopts an already-running daemon after a liveness ping, so a stale `spacesd`
+    /// left over from a previous app version would otherwise receive a payload it cannot decode and
+    /// fail with an opaque decoding error. The daemon advertises its `protocolVersion` on the ping
+    /// response, so we compare it here and refuse to dispatch on a mismatch. We do not auto-relaunch:
+    /// restarting the daemon kills the user's running terminals, so that stays the user's decision and
+    /// this returns an actionable message instead. Returns `nil` when the daemon is compatible.
+    ///
+    /// A ping response with no `daemonStatus` comes from a daemon predating wire-version negotiation,
+    /// which counts as too old (never a match) — the same rule `TerminalServiceDaemonStatus` applies to
+    /// a missing `protocolVersion`.
+    static func daemonWireIncompatibility(_ response: TerminalServiceResponse) -> String? {
+        let verdict = response.daemonStatus.map(SpacesWireCompatibility.evaluate(daemonStatus:)) ?? .daemonTooOld
+        guard !verdict.isCompatible else { return nil }
+        switch verdict {
+        case .clientTooOld: return "The running spacesd daemon is newer than this Spaces build. Update Spaces to match the daemon, then retry."
+        case .daemonTooOld, .compatible:
+            // Quitting/relaunching the Spaces app does not help: the daemon is managed by the OS service
+            // manager (launchd `KeepAlive` / systemd `Restart=always`) and outlives the app, and app
+            // launch only adopts it. Restarting the daemon makes it exit and respawn from the updated
+            // binary — the daemon restart control in the Spaces app (shown for this device) does exactly that.
+            var message =
+                "The running spacesd daemon is older than this Spaces build needs. "
+                + "Restart the daemon to load the update — use the daemon restart action in the Spaces app for this device — then retry."
+            if let status = response.daemonStatus,
+                status.activeSessionCount > 0 || status.runningProcesses > 0 || status.activeAgents + status.waitingAgents > 0
+            {
+                message += " Restarting stops the daemon's running terminals, processes, and agents."
+            }
+            return message
+        }
+    }
+
+    static func assertDaemonWireCompatible(_ response: TerminalServiceResponse) throws {
+        if let message = daemonWireIncompatibility(response) { throw TerminalServiceError.requestFailed(message) }
+    }
+}
