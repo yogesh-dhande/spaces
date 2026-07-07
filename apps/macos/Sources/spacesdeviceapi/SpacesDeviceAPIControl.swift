@@ -17,12 +17,8 @@ public struct SpacesDeviceAPILocalClientBootstrap: Codable, Equatable, Sendable 
     public let port: Int
     public let certificateFingerprint: String
     public let authToken: String
-    public let transportKey: String
 
-    public init(
-        deviceID: String, name: String, platform: String, host: String, port: Int, certificateFingerprint: String, authToken: String,
-        transportKey: String
-    ) {
+    public init(deviceID: String, name: String, platform: String, host: String, port: Int, certificateFingerprint: String, authToken: String) {
         self.deviceID = deviceID
         self.name = name
         self.platform = platform
@@ -30,7 +26,6 @@ public struct SpacesDeviceAPILocalClientBootstrap: Codable, Equatable, Sendable 
         self.port = port
         self.certificateFingerprint = certificateFingerprint
         self.authToken = authToken
-        self.transportKey = transportKey
     }
 }
 
@@ -511,8 +506,7 @@ public enum SpacesDeviceAPIControlClient {
 
     static func socketPath(fileManager: FileManager = .default) throws -> String {
         let root = try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager)
-        let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-terminal-sockets", isDirectory: true)
-        try fileManager.createDirectory(at: socketRoot, withIntermediateDirectories: true)
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
         return socketRoot.appendingPathComponent("device-api-control-\(socketPathComponent(for: root.path)).sock", isDirectory: false).path
     }
 

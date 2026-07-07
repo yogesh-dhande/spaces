@@ -1412,10 +1412,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             switch result {
             case .success(let response):
                 self.applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                guard let sessionID = response.sessionID,
-                    let request = Self.deviceTerminalOpenRequest(
-                        workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? self.overview(forWorkspaceID: workspaceID))
-                else {
+                guard let request = self.terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID) else {
                     completion(nil)
                     return
                 }
@@ -1425,6 +1422,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 completion(nil)
             }
         }
+    }
+
+    private func terminalOpenRequest(fromMutationResponse response: SpacesDeviceAPIResponse, workspaceID: String) -> DeviceTerminalOpenRequest? {
+        guard let sessionID = response.sessionID else { return nil }
+        return Self.deviceTerminalOpenRequest(
+            workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? overview(forWorkspaceID: workspaceID))
     }
 
     nonisolated static func deviceTerminalControlRequest(sessionID: String, controlRequest request: TerminalControlRequest) throws
@@ -2143,7 +2146,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // record so "This Mac" still has an identity to render; with no stored record (a first launch
                 // while the daemon is down) there is no device to show, so it stays a genuine snapshot failure.
                 // Only reachability failures degrade to offline: a bootstrap that reaches the daemon but then
-                // fails writing the paired-device record or saving Keychain credentials is a real error, not
+                // fails writing the paired-device record or saving stored credentials is a real error, not
                 // an offline state, so it must surface rather than be hidden behind an empty offline sidebar.
                 let localDevice: SpacesPairedDeviceRecord
                 let bootstrapOfflineMessage: String?
@@ -3248,10 +3251,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return container
     }
 
-    nonisolated static func pairedDeviceHasRequiredCredentials(deviceID: String) -> Bool {
-        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: deviceID)) ?? false
-        let hasTransportKey = (try? SpacesDeviceCredentialStore.hasTransportKey(deviceID: deviceID)) ?? false
-        return hasToken && hasTransportKey
+    /// A paired device is usable when its auth token secret is present and its record carries the
+    /// daemon's pinned TLS certificate fingerprint (non-secret record data).
+    nonisolated static func pairedDeviceHasRequiredCredentials(device: SpacesPairedDeviceRecord) -> Bool {
+        let hasToken = (try? SpacesDeviceCredentialStore.hasToken(deviceID: device.id)) ?? false
+        return hasToken && !device.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @objc func alertsRowClicked() { alerts.showAlertsDetail() }
@@ -3783,9 +3787,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    /// Confirms the restart-impact with the user, then restarts the device's daemon. A remote Linux
-    /// daemon is updated from the signed artifact over SSH (which restarts it); every other device
-    /// restarts through the `requestDaemonRestart` RPC, after which launchd/systemd respawns it.
+    /// Confirms the restart-impact with the user, then restarts the device's daemon through the
+    /// `requestDaemonRestart` RPC, after which launchd/systemd respawns it (applying any update already
+    /// staged on disk). A remote Linux daemon that is too old for this app is not updated over SSH: the
+    /// user re-runs the version-pinned installer on the Linux device — surfaced in the compatibility
+    /// block — which replaces the binary and restarts the service.
     private func confirmDaemonRestart(deviceID: String) {
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let alert = NSAlert()
@@ -3798,32 +3804,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showDeviceNotLoadedError()
             return
         }
-        // The daemon reports its own OS, so route on that rather than probing SSH: a non-Linux daemon
-        // must not run the Linux SSH preflight, or a stale/unavailable SSH path would block restarting a
-        // remote Mac whose Device API is still reachable.
-        let isLinuxDaemon = status?.isLinuxDaemon ?? false
         Task { @MainActor [weak self] in
             let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
                 do {
-                    if isLinuxDaemon {
-                        // A remote Linux daemon must be reinstalled from the signed artifact to actually
-                        // update (a plain restart respawns the same old binary); the installer restarts it.
-                        // `false` means the SSH path could not confirm a Linux host, so nothing happened —
-                        // surface that instead of reloading as if it succeeded.
-                        let updated = try SpacesDevicePairingClient.updateRemoteLinuxDaemon(
-                            for: device, appVersion: AppVersion.short, remoteArtifactPublicKey: AppVersion.remoteArtifactPublicKey)
-                        guard updated else {
-                            throw NSError(
-                                domain: "SpacesCompatibility", code: 1,
-                                userInfo: [
-                                    NSLocalizedDescriptionKey:
-                                        "Couldn't update this device's daemon over SSH. Check the SSH connection to the device and try again."
-                                ])
-                        }
-                    } else {
-                        // Local or remote Mac: restart through the RPC, applying any update already staged on disk.
-                        try SpacesDeviceClient.requestDaemonRestart(device: device)
-                    }
+                    try SpacesDeviceClient.requestDaemonRestart(device: device)
                     return .success(())
                 } catch { return .failure(error) }
             }.value
@@ -8578,76 +8562,76 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
         case .openTerminal(let request):
-            // Window-focus terminal targets are always workspace-backed (they come from a
-            // workspace's run-target list), so a missing device is a not-loaded state.
-            guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
-                showDeviceNotLoadedError()
-                return nil
-            }
-            Self.setClientActiveWorkspaceID(request.workspaceID)
-            // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
-            // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
-            // fires just after we foreground the terminal and re-hides the app, leaving
-            // `NSApp.isActive` false — which breaks window-cycle current-target resolution
-            // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
-            cancelDeferredExternalWindowHide()
-            // A row-built resolution can predate the session's overview entry and lack the
-            // real shell/command; recover them through the cold overview fetch so the pane's
-            // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
-            let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
-            guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return nil }
-            // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
-            // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
-            // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
-            // closed and reopened (or is currently a viewer) reattaches as owner instead of the
-            // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
-            // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
-            panelCoordinator.content(forSessionID: request.sessionID)?.requestOwnershipIfNeeded()
-            if let requestID, !requestID.isEmpty {
-                logPerfMetric(
-                    "terminal_window_focus_ipc", target: "session=\(request.sessionID)", elapsedMS: 0, success: true,
-                    detail: "route=pane request_id=\(requestID)")
-            }
+            guard await openOrFocusTerminalTarget(request, requestID: requestID) else { return nil }
             return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
-            guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-                showDeviceNotLoadedError()
-                return nil
-            }
-            let result = await Self.deviceMutation(device: device) { device in
+            return await runTerminalSessionMutationAndOpenPane(workspaceID: workspaceID) { device in
                 try SpacesDeviceClient.runWorkspaceProcess(
                     workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
-            switch result {
-            case .success(let response):
-                Self.setClientActiveWorkspaceID(workspaceID)
-                applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                return .open(hidesApp: false)
-            case .failure(let error):
-                showError(error)
-                return nil
-            }
         case .runCodingAgent(let workspaceID, let agentName, let agentLauncherID):
-            guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-                showDeviceNotLoadedError()
-                return nil
-            }
-            let result = await Self.deviceMutation(device: device) { device in
+            return await runTerminalSessionMutationAndOpenPane(workspaceID: workspaceID) { device in
                 try SpacesDeviceClient.runCodingAgent(
                     workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
                     clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
-            switch result {
-            case .success(let response):
-                Self.setClientActiveWorkspaceID(workspaceID)
-                applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                return .open(hidesApp: false)
-            case .failure(let error):
-                showError(error)
-                return nil
-            }
         case .noWorkspace, .noMatch: return nil
+        }
+    }
+
+    @discardableResult private func openOrFocusTerminalTarget(_ request: DeviceTerminalOpenRequest, requestID: String? = nil) async -> Bool {
+        // Window-focus terminal targets are always workspace-backed (they come from a
+        // workspace's run-target list), so a missing device is a not-loaded state.
+        guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
+            showDeviceNotLoadedError()
+            return false
+        }
+        Self.setClientActiveWorkspaceID(request.workspaceID)
+        // Focusing a terminal supersedes a still-pending "hide Spaces after a browser focus"
+        // deferred task (a preceding `open <browser>` schedules one). Without this, that hide
+        // fires just after we foreground the terminal and re-hides the app, leaving
+        // `NSApp.isActive` false — which breaks window-cycle current-target resolution
+        // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
+        cancelDeferredExternalWindowHide()
+        // A row-built resolution can predate the session's overview entry and lack the
+        // real shell/command; recover them through the cold overview fetch so the pane's
+        // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
+        let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
+        guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return false }
+        // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
+        // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
+        // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
+        // closed and reopened (or is currently a viewer) reattaches as owner instead of the
+        // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
+        // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
+        panelCoordinator.content(forSessionID: openRequest.sessionID)?.requestOwnershipIfNeeded()
+        if let requestID, !requestID.isEmpty {
+            logPerfMetric(
+                "terminal_window_focus_ipc", target: "session=\(openRequest.sessionID)", elapsedMS: 0, success: true,
+                detail: "route=pane request_id=\(requestID)")
+        }
+        return true
+    }
+
+    private func runTerminalSessionMutationAndOpenPane(
+        workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
+    ) async -> ExternalWindowAction? {
+        guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
+            showDeviceNotLoadedError()
+            return nil
+        }
+        let result = await Self.deviceMutation(device: device, operation: operation)
+        switch result {
+        case .success(let response):
+            applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+            guard let request = terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID),
+                await openOrFocusTerminalTarget(request)
+            else { return nil }
+            return .focus(hidesApp: false)
+        case .failure(let error):
+            showError(error)
+            return nil
         }
     }
 

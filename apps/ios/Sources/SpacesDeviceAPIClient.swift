@@ -1,7 +1,5 @@
-import Darwin
 import Foundation
 import Network
-import Security
 import spacesdevicecore
 import spacesterminalcore
 
@@ -39,47 +37,6 @@ final class SpacesDeviceAPIStreamHandle: @unchecked Sendable {
     func cancel() { cancelHandler() }
 }
 
-enum SpacesMobileDirectCredentialStore {
-    private static let service = "dev.usespaces.spacesmobile.remote-terminal"
-
-    static func endpoint(from endpoint: SpacesDeviceTerminalDaemonEndpoint?) -> SpacesDeviceTerminalDaemonEndpoint? {
-        guard let endpoint else { return nil }
-        if let token = endpoint.authToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
-            save(token: token, endpoint: endpoint)
-            return endpoint
-        }
-        guard let token = token(for: endpoint) else { return nil }
-        return SpacesDeviceTerminalDaemonEndpoint(
-            host: endpoint.host, port: endpoint.port, authToken: token, certificateFingerprint: endpoint.certificateFingerprint)
-    }
-
-    private static func save(token: String, endpoint: SpacesDeviceTerminalDaemonEndpoint) {
-        let query = baseQuery(endpoint: endpoint)
-        SecItemDelete(query as CFDictionary)
-        var attributes = query
-        attributes[kSecValueData as String] = Data(token.utf8)
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(attributes as CFDictionary, nil)
-    }
-
-    private static func token(for endpoint: SpacesDeviceTerminalDaemonEndpoint) -> String? {
-        var query = baseQuery(endpoint: endpoint)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    private static func baseQuery(endpoint: SpacesDeviceTerminalDaemonEndpoint) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: "\(endpoint.host):\(endpoint.port):\(endpoint.certificateFingerprint)",
-        ]
-    }
-}
-
 struct SpacesDeviceAPIClient: Sendable {
     let settings: SpacesMobileConnectionSettings
     private let requestOverride: (@Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)?
@@ -97,8 +54,21 @@ struct SpacesDeviceAPIClient: Sendable {
     }
 
     func pair(pairingLink: SpacesDevicePairingLink, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> String {
+        // Refuse to redeem an incompatible link before the one-time pairing window is consumed.
+        switch SpacesWireCompatibility.evaluate(daemonProtocolVersion: pairingLink.protocolVersion, localVersion: SpacesWireProtocol.version) {
+        case .compatible:
+            break
+        case .daemonTooOld:
+            throw SpacesDeviceAPIClientError.requestFailed(
+                "\(pairingLink.name) is running Spaces \(pairingLink.appVersion), which is older than this app. Update Spaces on \(pairingLink.name), then pair again.")
+        case .clientTooOld:
+            throw SpacesDeviceAPIClientError.requestFailed(
+                "\(pairingLink.name) is running Spaces \(pairingLink.appVersion), which is newer than this app. Update Spaces on this device, then pair again.")
+        }
         let response = try await sendRequest(
-            .init(command: .pair(.init(pairingCode: pairingLink.code, pairingNonce: pairingLink.nonce)), clientApp: clientAppIdentity),
+            .init(
+                command: .pair(.init(pairingCode: pairingLink.code, pairingNonce: pairingLink.nonce, clientProtocolVersion: SpacesWireProtocol.version)),
+                clientApp: clientAppIdentity),
             commandChannel: commandChannel
         )
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
@@ -575,7 +545,7 @@ struct SpacesDeviceAPIClient: Sendable {
         guard let port = NWEndpoint.Port(rawValue: UInt16(settings.port)), !host.isEmpty else {
             throw SpacesDeviceAPIClientError.invalidEndpoint
         }
-        let parameters = try SpacesDeviceAPITransport.parameters(transportKey: settings.transportKey, role: .client)
+        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
         return (NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters), host, port)
     }
 
@@ -591,513 +561,10 @@ struct SpacesDeviceAPIClient: Sendable {
 
 }
 
-struct SpacesDeviceTerminalDaemonClient: Sendable {
-    let endpoint: SpacesDeviceTerminalDaemonEndpoint
-    private let commandChannel: DirectTerminalServiceCommandChannel
-
-    init(endpoint: SpacesDeviceTerminalDaemonEndpoint) {
-        self.endpoint = endpoint
-        commandChannel = DirectTerminalServiceCommandChannel(endpoint: endpoint)
-    }
-
-    func subscribe(
-        sessionID: String,
-        clientID: String,
-        onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle {
-        let connection = try Self.makePinnedTLSConnection(endpoint: endpoint)
-        let request = TerminalServiceRequest(command: .subscribe(.init(sessionID: sessionID))).withAuthToken(endpoint.authToken)
-        let queue = DispatchQueue(label: "spaces.mobile.direct.stream.\(sessionID).\(clientID)")
-        DirectTerminalServiceStreamSubscription(
-            connection: connection, request: request, onEvent: onEvent, onDisconnect: onDisconnect
-        )
-        .start(on: queue)
-        return SpacesDeviceAPIStreamHandle { connection.cancel() }
-    }
-
-    func fetchState(sessionID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload {
-        let response = try await send(.init(command: .state(.init(sessionID: sessionID))), timeout: timeout)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
-        guard let sessionState = response.sessionState else {
-            throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd did not return terminal state.")
-        }
-        return sessionState
-    }
-
-    func attach(sessionID: String, client: TerminalClient, mode: TerminalAttachmentMode, timeout: Duration = .seconds(3)) async throws {
-        try await control(
-            sessionID: sessionID,
-            request: TerminalControlRequest(command: "attach", client: client, attachmentMode: mode),
-            timeout: timeout)
-    }
-
-    func detach(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
-        try await control(sessionID: sessionID, request: TerminalControlRequest(command: "detach", clientID: clientID), timeout: timeout)
-    }
-
-    func heartbeat(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws {
-        try await control(sessionID: sessionID, request: TerminalControlRequest(command: "heartbeat", clientID: clientID), timeout: timeout)
-    }
-
-    func takeOver(sessionID: String, clientID: String, timeout: Duration = .seconds(3)) async throws -> GhosttyRemoteSessionStatePayload? {
-        let response = try await controlResponse(
-            sessionID: sessionID, request: TerminalControlRequest(command: "takeover", clientID: clientID), timeout: timeout)
-        return response.sessionState
-    }
-
-    func sendText(
-        sessionID: String,
-        clientID: String,
-        text: String,
-        ownerEpoch: UInt64?,
-        appendNewline: Bool = false,
-        timeout: Duration = .seconds(3)
-    ) async throws {
-        try await control(
-            sessionID: sessionID,
-            request: TerminalControlRequest(
-                command: "send", text: text, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: appendNewline),
-            timeout: timeout)
-    }
-
-    func sendKey(sessionID: String, clientID: String, key: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3)) async throws {
-        try await control(
-            sessionID: sessionID,
-            request: TerminalControlRequest(command: "key", key: key, clientID: clientID, ownerEpoch: ownerEpoch),
-            timeout: timeout)
-    }
-
-    func clearScreen(sessionID: String, clientID: String, ownerEpoch: UInt64?, timeout: Duration = .seconds(3)) async throws {
-        try await control(
-            sessionID: sessionID,
-            request: TerminalControlRequest(command: "clearScreen", clientID: clientID, ownerEpoch: ownerEpoch),
-            timeout: timeout)
-    }
-
-    func resize(
-        sessionID: String,
-        clientID: String,
-        columns: Int,
-        rows: Int,
-        ownerEpoch: UInt64?,
-        resizeSerial: UInt64?,
-        timeout: Duration = .seconds(3)
-    ) async throws {
-        try await control(
-            sessionID: sessionID,
-            request: TerminalControlRequest(
-                command: "resize", clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: resizeSerial),
-            timeout: timeout)
-    }
-
-    func scroll(
-        sessionID: String,
-        clientID: String,
-        horizontal: Double,
-        vertical: Double,
-        ownerEpoch: UInt64?,
-        scrollMods: Int32? = nil,
-        timeout: Duration = .seconds(3)
-    ) async throws {
-        try await control(
-            sessionID: sessionID,
-            request: TerminalControlRequest(
-                command: "scroll", clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: horizontal, scrollVertical: vertical,
-                scrollMods: scrollMods),
-            timeout: timeout)
-    }
-
-    func resolveTerminalLink(sessionID: String, link: String, timeout: Duration = .seconds(6)) async throws
-        -> SpacesDeviceTerminalLinkMetadata
-    {
-        let response = try await send(
-            .init(command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: link))), timeout: timeout)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
-        guard let metadata = response.terminalLinkMetadata else {
-            throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd did not return terminal link metadata.")
-        }
-        return try Self.mobileLinkMetadata(metadata)
-    }
-
-    func readTerminalLinkChunk(sessionID: String, linkID: String, offset: Int64, limit: Int, timeout: Duration = .seconds(6)) async throws
-        -> SpacesDeviceTerminalLinkChunk
-    {
-        let response = try await send(
-            .init(
-                command: .readTerminalLinkChunk(
-                    .init(sessionID: sessionID, terminalLinkID: linkID, offset: offset, limit: limit))),
-            timeout: timeout)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
-        guard let chunk = response.terminalLinkChunk else {
-            throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd did not return terminal link data.")
-        }
-        return SpacesDeviceTerminalLinkChunk(
-            linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
-    }
-
-    private func control(sessionID: String, request: TerminalControlRequest, timeout: Duration) async throws {
-        _ = try await controlResponse(sessionID: sessionID, request: request, timeout: timeout)
-    }
-
-    private func controlResponse(sessionID: String, request: TerminalControlRequest, timeout: Duration) async throws -> TerminalServiceResponse {
-        let response = try await send(.init(command: .control(.init(sessionID: sessionID, controlRequest: request))), timeout: timeout)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
-        guard let controlResponse = response.controlResponse else {
-            throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd did not return terminal control response.")
-        }
-        guard controlResponse.ok else { throw SpacesDeviceAPIClientError.requestFailed(controlResponse.message) }
-        return response
-    }
-
-    private func send(_ request: TerminalServiceRequest, timeout: Duration) async throws -> TerminalServiceResponse {
-        try await commandChannel.send(request: request, timeout: timeout)
-    }
-
-    private static func mobileLinkMetadata(_ metadata: TerminalServiceTerminalLinkMetadata) throws -> SpacesDeviceTerminalLinkMetadata {
-        guard let source = SpacesDeviceTerminalLinkSource(rawValue: metadata.source) else {
-            throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd returned an unknown terminal link source.")
-        }
-        let mediaKind: SpacesDeviceTerminalLinkMediaKind?
-        if let value = metadata.mediaKind {
-            guard let parsed = SpacesDeviceTerminalLinkMediaKind(rawValue: value) else {
-                throw SpacesDeviceAPIClientError.requestFailed("Remote spacesd returned an unknown terminal link media kind.")
-            }
-            mediaKind = parsed
-        } else {
-            mediaKind = nil
-        }
-        return SpacesDeviceTerminalLinkMetadata(
-            id: metadata.id, source: source, originalLink: metadata.originalLink, displayName: metadata.displayName,
-            contentType: metadata.contentType, mediaKind: mediaKind, byteCount: metadata.byteCount, externalURL: metadata.externalURL)
-    }
-
-    private static func timeInterval(_ duration: Duration) -> TimeInterval {
-        let components = duration.components
-        return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
-    }
-
-    fileprivate static func makePinnedTLSConnection(endpoint: SpacesDeviceTerminalDaemonEndpoint) throws -> NWConnection {
-        let expectedFingerprint = endpoint.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !expectedFingerprint.isEmpty else { throw TerminalServiceTLSError.missingCertificateFingerprint }
-        guard let port = NWEndpoint.Port(rawValue: UInt16(endpoint.port)) else { throw TerminalServiceTLSError.invalidPort(endpoint.port) }
-
-        let tlsOptions = NWProtocolTLS.Options()
-        let securityOptions = tlsOptions.securityProtocolOptions
-        sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-        sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
-        sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-        sec_protocol_options_set_verify_block(
-            securityOptions,
-            { _, trust, complete in
-                let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                guard let certificate = chain?.first else {
-                    complete(false)
-                    return
-                }
-                let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
-                complete(TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint))
-            }, DispatchQueue.global(qos: .userInitiated))
-
-        return NWConnection(host: NWEndpoint.Host(endpoint.host), port: port, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
-    }
-}
-
-private actor DirectTerminalServiceCommandChannel {
-    private let endpoint: SpacesDeviceTerminalDaemonEndpoint
-    private let queue = DispatchQueue(label: "spaces.mobile.direct.command")
-    private var connection: NWConnection?
-    private var readBuffer = Data()
-
-    init(endpoint: SpacesDeviceTerminalDaemonEndpoint) {
-        self.endpoint = endpoint
-    }
-
-    func send(request: TerminalServiceRequest, timeout: Duration) async throws -> TerminalServiceResponse {
-        var request = request
-        if request.authToken == nil {
-            request = request.withAuthToken(endpoint.authToken)
-        }
-        let command = request.commandName
-        let controlCommand = request.command.controlCommandName
-        let sessionID = request.sessionID ?? "-"
-        let connectionWasOpen = connection != nil
-        let startedAt = Date()
-        var didReconnectAfterClosedConnection = false
-        do {
-            let response: TerminalServiceResponse
-            do {
-                response = try await sendOnce(request: request, timeout: timeout, sessionID: sessionID, command: command)
-            } catch {
-                guard connectionWasOpen, Self.isClosedConnectionError(error) else { throw error }
-                close()
-                didReconnectAfterClosedConnection = true
-                response = try await sendOnce(request: request, timeout: timeout, sessionID: sessionID, command: command)
-            }
-            logEvent(
-                sessionID: sessionID,
-                name: "direct_command_request",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                attributes: [
-                    "command": command,
-                    "control_command": controlCommand ?? "",
-                    "connection_reused": connectionWasOpen ? "1" : "0",
-                    "reconnected_after_closed": didReconnectAfterClosedConnection ? "1" : "0",
-                    "ok": response.ok ? "1" : "0",
-                ])
-            if !response.ok, response.message.localizedStandardContains("unauthorized") {
-                close()
-            }
-            return response
-        } catch {
-            close()
-            logEvent(
-                sessionID: sessionID,
-                name: "direct_command_request",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                attributes: [
-                    "command": command,
-                    "control_command": controlCommand ?? "",
-                    "connection_reused": connectionWasOpen ? "1" : "0",
-                    "error": String(describing: error),
-                ])
-            throw error
-        }
-    }
-
-    private func sendOnce(request: TerminalServiceRequest, timeout: Duration, sessionID: String, command: String) async throws
-        -> TerminalServiceResponse
-    {
-        let connection = try await connectIfNeeded(timeout: timeout, sessionID: sessionID, command: command)
-        var data = try JSONEncoder().encode(request)
-        data.append(0x0A)
-        try await Self.send(data: data, on: connection, timeout: timeout)
-        let responseData = try await readLine(from: connection, timeout: timeout)
-        return try JSONDecoder().decode(TerminalServiceResponse.self, from: responseData)
-    }
-
-    private static func isClosedConnectionError(_ error: any Error) -> Bool {
-        if case SpacesDeviceAPIClientError.requestFailed(let message) = error {
-            return message.localizedStandardContains("direct remote connection was cancelled")
-                || message.localizedStandardContains("connection was cancelled")
-        }
-        let description = String(describing: error)
-        return description.localizedStandardContains("posixerrorcode: 54")
-            || description.localizedStandardContains("connection reset")
-            || description.localizedStandardContains("connection was cancelled")
-            || description.localizedStandardContains("connection was aborted")
-    }
-
-    func close() {
-        connection?.cancel()
-        connection = nil
-        readBuffer.removeAll(keepingCapacity: true)
-    }
-
-    private func connectIfNeeded(timeout: Duration, sessionID: String, command: String) async throws -> NWConnection {
-        if let connection { return connection }
-        let startedAt = Date()
-        let createdConnection = try SpacesDeviceTerminalDaemonClient.makePinnedTLSConnection(endpoint: endpoint)
-        do {
-            try await SpacesDeviceAPIConnectionSupport.waitUntilReady(createdConnection, queue: queue, timeout: timeout)
-        } catch {
-            createdConnection.cancel()
-            logEvent(
-                sessionID: sessionID,
-                name: "direct_command_connect",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                attributes: ["command": command, "error": String(describing: error)])
-            throw error
-        }
-        connection = createdConnection
-        logEvent(
-            sessionID: sessionID,
-            name: "direct_command_connect",
-            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-            attributes: ["command": command, "connection_reused": "0"])
-        return createdConnection
-    }
-
-    private static func send(data: Data, on connection: NWConnection, timeout: Duration) async throws {
-        try await SpacesDeviceAPIConnectionSupport.withTimeout(timeout) {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                let resume = OneShotContinuation(continuation)
-                connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { error in
-                    if let error {
-                        resume.resume(throwing: error)
-                    } else {
-                        resume.resume(returning: ())
-                    }
-                })
-            }
-        }
-    }
-
-    private func readLine(from connection: NWConnection, timeout: Duration) async throws -> Data {
-        try await SpacesDeviceAPIConnectionSupport.withTimeout(timeout) {
-            try await self.readLineAccumulating(from: connection)
-        }
-    }
-
-    private func readLineAccumulating(from connection: NWConnection) async throws -> Data {
-        if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-            let line = Data(readBuffer.prefix(upTo: newlineIndex))
-            readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
-            return line
-        }
-        let (content, isComplete) = try await Self.receiveChunk(from: connection)
-        if let content, !content.isEmpty { readBuffer.append(content) }
-        if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-            let line = Data(readBuffer.prefix(upTo: newlineIndex))
-            readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
-            return line
-        }
-        if isComplete {
-            if readBuffer.isEmpty {
-                throw SpacesDeviceAPIClientError.requestFailed("The direct remote connection was cancelled.")
-            }
-            defer { readBuffer.removeAll(keepingCapacity: true) }
-            return readBuffer
-        }
-        return try await readLineAccumulating(from: connection)
-    }
-
-    private static func receiveChunk(from connection: NWConnection) async throws -> (Data?, Bool) {
-        try await withCheckedThrowingContinuation { continuation in
-            let resume = OneShotContinuation(continuation)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
-                if let error {
-                    resume.resume(throwing: error)
-                    return
-                }
-                resume.resume(returning: (content, isComplete))
-            }
-        }
-    }
-
-    private nonisolated func logEvent(sessionID: String, name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String]) {
-        SpacesDeviceTerminalPerformanceLogger.emit(
-            SpacesDeviceTerminalPerformanceEvent(
-                sessionID: sessionID, source: "ios-direct-daemon", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
-    }
-}
-
-private final class DirectTerminalServiceStreamSubscription: @unchecked Sendable {
-    private static let initialEventTimeout: Duration = .seconds(12)
-
-    private let connection: NWConnection
-    private let request: TerminalServiceRequest
-    private let lifecycle: StreamLifecycle
-    private let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
-    private var buffer = Data()
-    private var decodedState = false
-
-    init(
-        connection: NWConnection,
-        request: TerminalServiceRequest,
-        onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) {
-        self.connection = connection
-        self.request = request
-        self.onEvent = onEvent
-        lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
-    }
-
-    func start(on queue: DispatchQueue) {
-        queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
-            guard let self, !decodedState else { return }
-            lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for remote terminal state."))
-            connection.cancel()
-        }
-        connection.stateUpdateHandler = { [self] state in
-            switch state {
-            case .ready:
-                sendInitialRequest()
-            case .failed(let error):
-                lifecycle.finish(error: error)
-            case .cancelled:
-                lifecycle.finish(error: nil)
-            default:
-                break
-            }
-        }
-        connection.start(queue: queue)
-    }
-
-    private func sendInitialRequest() {
-        do {
-            var data = try JSONEncoder().encode(request)
-            data.append(0x0A)
-            connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { [self] error in
-                if let error {
-                    lifecycle.finish(error: error)
-                    connection.cancel()
-                    return
-                }
-                receiveNext()
-            })
-        } catch {
-            lifecycle.finish(error: error)
-            connection.cancel()
-        }
-    }
-
-    private func receiveNext() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
-            if let content, !content.isEmpty {
-                buffer.append(content)
-                while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-                    let line = Data(buffer.prefix(upTo: newlineIndex))
-                    buffer.removeSubrange(...newlineIndex)
-                    guard !line.isEmpty else { continue }
-                    do {
-                        let payload = try GhosttyRemoteSessionStateCodec.decodeLine(line)
-                        decodedState = true
-                        Task { @MainActor in onEvent(payload) }
-                    } catch {
-                        if let response = try? JSONDecoder().decode(TerminalServiceResponse.self, from: line), !response.ok {
-                            lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message))
-                            connection.cancel()
-                            return
-                        }
-                        lifecycle.finish(error: error)
-                        connection.cancel()
-                        return
-                    }
-                }
-            }
-
-            if let error {
-                lifecycle.finish(error: error)
-                connection.cancel()
-                return
-            }
-
-            if isComplete {
-                if !decodedState,
-                    !buffer.isEmpty,
-                    let response = try? JSONDecoder().decode(TerminalServiceResponse.self, from: buffer),
-                    !response.ok
-                {
-                    lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message))
-                } else {
-                    lifecycle.finish(error: nil)
-                }
-                connection.cancel()
-                return
-            }
-
-            receiveNext()
-        }
-    }
-}
-
 actor SpacesDeviceAPICommandChannel {
     private let host: String
     private let port: Int
-    private let transportKey: String
+    private let certificateFingerprint: String
     private let clientApp: SpacesDeviceClientApp
     private let authToken: String?
     private let queue = DispatchQueue(label: "spaces.device.api.command")
@@ -1106,7 +573,7 @@ actor SpacesDeviceAPICommandChannel {
     init(settings: SpacesMobileConnectionSettings, clientApp: SpacesDeviceClientApp) {
         host = settings.trimmedHost
         port = settings.port
-        transportKey = settings.transportKey
+        certificateFingerprint = settings.certificateFingerprint
         authToken = settings.trimmedAuthToken
         self.clientApp = clientApp
     }
@@ -1140,7 +607,7 @@ actor SpacesDeviceAPICommandChannel {
     private func connectIfNeeded(timeout: Duration) async throws -> NWConnection {
         if let connection { return connection }
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw SpacesDeviceAPIClientError.invalidEndpoint }
-        let parameters = try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .client)
+        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint)
         let createdConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         do {
             try await SpacesDeviceAPIConnectionSupport.waitUntilReady(createdConnection, queue: queue, timeout: timeout)
@@ -1537,12 +1004,6 @@ private final class StreamSubscription: @unchecked Sendable {
 private extension Duration {
     var timeInterval: TimeInterval {
         TimeInterval(components.seconds) + (TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000)
-    }
-
-    var timeval: timeval {
-        let wholeSeconds = Int(timeInterval.rounded(.down))
-        let microseconds = Int32((timeInterval - TimeInterval(wholeSeconds)) * 1_000_000)
-        return Darwin.timeval(tv_sec: wholeSeconds, tv_usec: microseconds)
     }
 }
 

@@ -44,14 +44,11 @@ extension OrchestratorTests {
     func testNextWindowOrderIndexUsesRoleOffsetAndMax() {
         let windows = [
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "Chrome", title: "Browser", role: "browser", orderIndex: 0,
-                lastSeenAt: "now"),
+                id: UUID().uuidString, workspaceID: "ws", app: "Chrome", title: "Browser", role: "browser", orderIndex: 0, lastSeenAt: "now"),
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 1", role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"),
+                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 1", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
-                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 2", role: "terminal", orderIndex: 205,
-                lastSeenAt: "now"),
+                id: UUID().uuidString, workspaceID: "ws", app: "Spaces", title: "Term 2", role: "terminal", orderIndex: 205, lastSeenAt: "now"),
         ]
 
         let nextTerminal = WorkspaceOrchestrator.nextWindowOrderIndex(existing: windows, role: "terminal", orderOffset: 200)
@@ -170,8 +167,8 @@ extension OrchestratorTests {
         let sessionID = "session-1"
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell-1", terminalTrackingID: sessionID,
-                role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell-1", terminalTrackingID: sessionID, role: "terminal",
+                orderIndex: 200, lastSeenAt: "now"))
 
         try withSpacesProfileEnvironment(dbPath: dbPath) {
             try writeTerminalSessionFixture(
@@ -291,8 +288,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -301,8 +297,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
                     sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now",
-                    workspaceID: workspace.id, kind: .shell),
-                paths: paths)
+                    workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
@@ -336,8 +331,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -346,8 +340,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
                     sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: "now",
-                    workspaceID: workspace.id, kind: .shell),
-                paths: paths)
+                    workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
@@ -381,8 +374,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200,
-                lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -392,8 +384,7 @@ extension OrchestratorTests {
             try TerminalSessionPersistence.writeLaunchConfiguration(
                 .init(
                     sessionID: sessionID, title: "shell-1", workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil, createdAt: timestamp,
-                    workspaceID: workspace.id, kind: .shell),
-                paths: paths)
+                    workspaceID: workspace.id, kind: .shell), paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: nil,
@@ -441,8 +432,7 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "stale", role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "stale", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
 
         // Why: verify refresh prunes missing/stale tracked windows without implicitly changing lifecycle state.
         // Remaining risk: rapid concurrent open/close events can still race with a single refresh snapshot.
@@ -523,16 +513,16 @@ extension OrchestratorTests {
 
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "Spaces", title: "default-stale", role: "terminal",
-                orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: defaultWorkspace.id, app: "Spaces", title: "default-stale", role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "Spaces", title: "active-stale", role: "terminal",
-                orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: activeWorkspace.id, app: "Spaces", title: "active-stale", role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "Spaces", title: "archived-stale", role: "terminal",
-                orderIndex: 0, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: archivedWorkspace.id, app: "Spaces", title: "archived-stale", role: "terminal", orderIndex: 0,
+                lastSeenAt: "now"))
 
         // Why: confirm bulk refresh reconciles active workspaces only and leaves archived workspace rows unchanged.
         // Remaining risk: archived rows are intentionally left untouched until explicit archive/cleanup paths run.
@@ -845,8 +835,7 @@ extension OrchestratorTests {
         _ = try orchestrator.addProject(dir: projectDir.path)
 
         XCTAssertThrowsError(
-            try orchestrator.resolveWorkspaceIDForTerminalCommand(
-                explicitWorkspaceID: nil, cwd: root.appendingPathComponent("outside").path)
+            try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: nil, cwd: root.appendingPathComponent("outside").path)
         ) { error in XCTAssertTrue(error.localizedDescription.contains("Spaces workspace")) }
     }
 
@@ -989,8 +978,7 @@ extension OrchestratorTests {
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", role: "terminal", orderIndex: 0,
-                lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "shell", role: "terminal", orderIndex: 0, lastSeenAt: "now"))
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
 
         // Why: verify refreshAllWorkspaceWindows iterates workspaces and returns correct counts.

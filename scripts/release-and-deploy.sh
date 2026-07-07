@@ -237,6 +237,7 @@ echo "🚀 Final step: Creating GitHub release..."
 cd "$REPO_ROOT"
 release_assets=(
   "$DMG_PATH"
+  "$SCRIPTS_DIR/spaces-install-linux.sh"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-arm64.tar.gz"

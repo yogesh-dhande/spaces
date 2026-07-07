@@ -1,6 +1,7 @@
 import ArgumentParser
 import Dispatch
 import Foundation
+import spacesclientcore
 import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
@@ -28,7 +29,7 @@ public struct SpacesCommand: ParsableCommand {
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
             """, version: AppVersion.current,
         subcommands: [
-            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, PairCommand.self, MobileCommand.self,
+            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MobileCommand.self,
             MCPCommand.self,
         ])
 
@@ -141,24 +142,17 @@ struct MCPCommand: ParsableCommand {
     func run() throws { try SpacesMCPStdioServer().run() }
 }
 
-struct PairCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "pair", abstract: "Open a pairing window for this device's spacesd daemon.")
-
-    @Flag(name: .long, help: "Print structured pairing metadata for SSH-assisted Mac pairing.") var json = false
-
-    func run() throws { if json { try emitPairCommandJSON() } else { for line in try pairCommandLines() { print(line) } } }
-}
-
 struct PairingWindowPayload: Codable, Sendable, Equatable {
     let name: String
     let host: String
     let port: Int
     let pairingNonce: String
     let pairingCode: String
-    let transportKey: String
     let certificateFingerprint: String
     let expiresAt: String
     let pairingLink: String
+    let protocolVersion: Int
+    let appVersion: String
 }
 
 func pairCommandLines(
@@ -193,9 +187,9 @@ func pairingWindowLines(_ window: SpacesDevicePairingWindowSnapshot) -> [String]
 func pairingWindowPayload(_ window: SpacesDevicePairingWindowSnapshot) throws -> PairingWindowPayload {
     let link = try SpacesDevicePairingLink.parse(window.linkString)
     return PairingWindowPayload(
-        name: link.name, host: link.host, port: link.port, pairingNonce: link.nonce, pairingCode: link.code, transportKey: link.transportKey,
+        name: link.name, host: link.host, port: link.port, pairingNonce: link.nonce, pairingCode: link.code,
         certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
-        pairingLink: window.linkString)
+        pairingLink: window.linkString, protocolVersion: link.protocolVersion, appVersion: link.appVersion)
 }
 
 private func emitPairCommandJSON() throws {
@@ -212,6 +206,92 @@ private func requireProfileWorkspace(_ response: TerminalServiceProfileCommandRe
     return workspace
 }
 
+struct DeviceCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "device", abstract: "Manage paired devices.",
+        subcommands: [DeviceListCommand.self, DevicePairCommand.self, DeviceRemoveCommand.self])
+}
+
+struct DeviceListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List paired devices.")
+
+    func run() throws {
+        let devices = try SpacesClientDatabase.defaultDatabase().pairedDevices()
+        guard !devices.isEmpty else {
+            print("No paired devices.")
+            return
+        }
+        print(SpacesPairedDeviceSelection.deviceRows(devices))
+    }
+}
+
+struct DevicePairCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "pair", abstract: "Open a pairing window for this device, or pair this client with another device.",
+        discussion: """
+            With no source, opens a pairing window on this device's spacesd daemon and prints its
+            spaces://pair link (use --json for machine-readable metadata).
+
+            Provide a source to pair this client with another device:
+              --ssh user@host   SSH sugar: fetches the target's pairing link over SSH, then redeems it.
+              --link <link>     Redeems a spaces://pair link printed by `spaces device pair` on the target device.
+            """)
+
+    @Option(name: .long, help: "SSH destination (user@host or host) of the device to pair.") var ssh: String?
+    @Option(name: .long, help: "SSH port. Defaults to 22.") var sshPort: Int?
+    @Option(name: .long, help: "A spaces://pair link from the target device's pairing window.") var link: String?
+    @Flag(name: .long, help: "When opening a pairing window, print structured metadata for SSH-assisted pairing.") var json = false
+
+    func validate() throws {
+        if ssh != nil, link != nil { throw ValidationError("Provide at most one of --ssh or --link.") }
+        if ssh == nil, sshPort != nil { throw ValidationError("--ssh-port requires --ssh.") }
+        if json, ssh != nil || link != nil { throw ValidationError("--json only applies when opening a pairing window (omit --ssh and --link).") }
+    }
+
+    func run() throws {
+        // No source: open a pairing window on this device's daemon (the target of an SSH or link pair).
+        if ssh == nil, link == nil {
+            if json { try emitPairCommandJSON() } else { for line in try pairCommandLines() { print(line) } }
+            return
+        }
+        let result: SpacesRemoteDevicePairingResult
+        if let ssh {
+            let (sshUser, sshHost) = Self.parsedSSHDestination(ssh)
+            result = try SpacesDevicePairingClient.pairRemoteDevice(
+                SpacesRemoteDevicePairingRequest(
+                    sshHost: sshHost, sshUser: sshUser, sshPort: sshPort,
+                    clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
+                    clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short)
+            )
+        } else {
+            let parsedLink = try SpacesDevicePairingLink.parse(link ?? "")
+            result = try SpacesDevicePairingClient.pairDevice(
+                link: parsedLink, clientInstallationID: SpacesDevicePairingClient.localMacClientInstallationID(),
+                clientBundleID: SpacesDeviceFirstPartyPolicy.macOSBundleID, clientDeviceName: cliDeviceName(), clientAppVersion: AppVersion.short)
+        }
+        print("Paired \(result.name)\tid=\(result.deviceID)\tendpoint=\(result.host):\(result.port)")
+    }
+
+    static func parsedSSHDestination(_ value: String) -> (user: String?, host: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let atIndex = trimmed.firstIndex(of: "@"), atIndex != trimmed.startIndex else { return (nil, trimmed) }
+        return (String(trimmed[trimmed.startIndex..<atIndex]), String(trimmed[trimmed.index(after: atIndex)...]))
+    }
+}
+
+struct DeviceRemoveCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "remove", abstract: "Remove a paired device and its stored credential.")
+
+    @Argument(help: "Paired device name or ID.") var device: String
+
+    func run() throws {
+        let record = try SpacesPairedDeviceSelection.resolve(device)
+        try SpacesClientDatabase.defaultDatabase().deletePairedDevice(id: record.id)
+        try SpacesDeviceCredentialStore.deleteToken(deviceID: record.id)
+        print("Removed paired device \(record.name) (\(record.id))")
+    }
+}
+
 struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal", abstract: "Manage Spaces terminal sessions.",
@@ -224,9 +304,18 @@ struct TerminalCommand: ParsableCommand {
 struct TerminalListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List available Spaces terminal sessions.")
 
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
+
     func run() throws {
-        let sessions = try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5).terminalSessions ?? []
-        let rows = terminalSessionRows(sessions)
+        let rows: [String]
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let sessions = try SpacesDeviceClient.terminalSessions(device: record, clientApp: cliDeviceClientApp())
+            rows = sessions.map { "\($0.id)\tstate=\($0.state.rawValue)\tcwd=\($0.workingDirectory)" }
+        } else {
+            let sessions = try TerminalService.sendProfileCommand(.init(operation: .terminalList), timeout: 5).terminalSessions ?? []
+            rows = terminalSessionRows(sessions)
+        }
         if rows.isEmpty {
             print("No terminal sessions.")
             return
@@ -234,6 +323,18 @@ struct TerminalListCommand: ParsableCommand {
 
         for row in rows { print(row) }
     }
+}
+
+/// The CLI presents the same per-profile client identity as the GUI app, so a device paired from
+/// either surface is usable from both.
+func cliDeviceClientApp() -> SpacesDeviceClientApp { SpacesDeviceClient.macOSClientApp(deviceName: cliDeviceName(), appVersion: AppVersion.short) }
+
+func cliDeviceName() -> String {
+    #if os(macOS)
+        Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+    #else
+        ProcessInfo.processInfo.hostName
+    #endif
 }
 
 func terminalSessionRows(_ sessions: [TerminalServiceSessionSummary]) -> [String] {
@@ -281,8 +382,16 @@ struct TerminalSendCommand: ParsableCommand {
     @Argument(help: "Terminal session ID.") var sessionID: String
     @Argument(help: "Text to send.") var text: String
     @Flag(name: .long, help: "Append a newline after the text.") var newline = false
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
     func run() throws {
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            _ = try SpacesDeviceClient.sendTerminalInput(
+                sessionID: sessionID, text: text, appendNewline: newline, device: record, clientApp: cliDeviceClientApp())
+            print("Sent input to terminal session \(sessionID) on \(record.name)")
+            return
+        }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
             throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
@@ -316,8 +425,14 @@ struct TerminalTailCommand: ParsableCommand {
 
     @Argument(help: "Terminal session ID.") var sessionID: String
     @Option(name: .long, help: "Number of lines to print.") var lines: Int = 20
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
     func run() throws {
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            print(try SpacesDeviceClient.tailTerminalOutput(sessionID: sessionID, lines: lines, device: record, clientApp: cliDeviceClientApp()))
+            return
+        }
         let startedAt = Date()
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         guard FileManager.default.fileExists(atPath: paths.outputPath) else {
@@ -442,7 +557,7 @@ func mobileStatusLines(status: SpacesDeviceAPIStatus) -> [String] {
     } else {
         lines.append("addresses=\(status.networkAddresses.map { "\($0):\(status.port)" }.joined(separator: ","))")
     }
-    lines.append("pair=Run `spaces pair` to show iOS pairing details, or `spaces pair --json` for SSH-assisted Mac pairing.")
+    lines.append("pair=Run `spaces device pair` to open a pairing window, or `spaces device pair --json` for SSH-assisted pairing.")
     return lines
 }
 

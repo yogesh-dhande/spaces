@@ -317,7 +317,8 @@ import workspacecore
         var rows: [NSView] = []
         rows.append(
             devicePairingInstructionLabel(
-                "Enter the SSH details for a Mac or Linux device. Macs need the Spaces app installed first. Linux is set up automatically over SSH."))
+                "Enter the SSH details for a Mac or Linux device. Install Spaces on the device first: the Spaces app on a Mac, or the Spaces installer on Ubuntu 24.04."
+            ))
 
         let sshHostField = NSTextField()
         sshHostField.placeholderString = "SSH host"
@@ -328,8 +329,7 @@ import workspacecore
 
         // Username and port are optional (they default to the SSH login and port 22), so they live
         // behind a collapsed "Advanced" disclosure to keep the common case a single host field.
-        let advancedToggle = NSButton(
-            title: "Advanced", target: host, action: #selector(AppKitController.toggleRemoteDeviceAdvancedFields(_:)))
+        let advancedToggle = NSButton(title: "Advanced", target: host, action: #selector(AppKitController.toggleRemoteDeviceAdvancedFields(_:)))
         advancedToggle.isBordered = false
         advancedToggle.bezelStyle = .inline
         advancedToggle.setButtonType(.momentaryChange)
@@ -512,10 +512,8 @@ import workspacecore
         Task { [weak self] in
             do {
                 let appVersion = AppVersion.short
-                let remoteArtifactPublicKey = AppVersion.remoteArtifactPublicKey
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try SpacesDevicePairingClient.openRemotePairingWindow(
-                        for: device, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey)
+                    try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: appVersion)
                 }.value
                 let expiresAt = result.expiresAt.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date().addingTimeInterval(300)
                 self?.currentDevicePairingWindow = ClientDevicePairingWindow(
@@ -536,7 +534,6 @@ import workspacecore
         let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
         let deviceName = Host.current().localizedName ?? "Mac"
         let appVersion = AppVersion.short
-        let remoteArtifactPublicKey = AppVersion.remoteArtifactPublicKey
         setRemoteDevicePairingStatus("Validating SSH and preparing the remote device...", isError: false)
         Task { [weak self] in
             do {
@@ -547,7 +544,7 @@ import workspacecore
                         SpacesRemoteDevicePairingRequest(
                             sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
                             clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey))
+                            clientAppVersion: appVersion))
                 }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
@@ -627,7 +624,6 @@ import workspacecore
             let database = try host.clientDatabase()
             try database.deletePairedDevice(id: deviceID)
             try SpacesDeviceCredentialStore.deleteToken(deviceID: deviceID)
-            try SpacesDeviceCredentialStore.deleteTransportKey(deviceID: deviceID)
             refreshVisibleDeviceSettingsAfterClientDeviceChange()
             host.requestSidebarReload()
         } catch { host.showError(error) }
@@ -679,7 +675,7 @@ import workspacecore
             id: SpacesPairedDeviceRecord.localDeviceID, name: "This Mac", host: localHost, port: localStatus?.port, sshHost: nil, sshUser: nil,
             sshPort: nil, isLocal: true, isAvailable: !requireLocalStatus || localStatus != nil, requiresReconnect: false)
         let remote = host.macPairedDevices().map {
-            let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(deviceID: $0.id)
+            let hasCredentials = AppKitController.pairedDeviceHasRequiredCredentials(device: $0)
             return ClientConnectedDevice(
                 id: $0.id, name: $0.name, host: $0.host, port: $0.port, sshHost: $0.sshHost, sshUser: $0.sshUser, sshPort: $0.sshPort, isLocal: false,
                 isAvailable: hasCredentials, requiresReconnect: !hasCredentials)

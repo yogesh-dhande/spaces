@@ -94,8 +94,8 @@ extension WorkspaceOrchestrator {
                 try store.upsert(
                     window: WindowRecord(
                         id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
-                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
-                        terminalNativeID: window.terminalNativeID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
+                        role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
             }
             if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -196,8 +196,7 @@ extension WorkspaceOrchestrator {
     func launchSpacesTerminalSession(
         title: String, workingDirectory: String, command: String?, showMode: TerminalAttachmentMode,
         backend: TerminalSessionBackendKind = .ghosttyEmbedded, readinessPolicy: BuiltInTerminalReadinessPolicy = .stableChildPID,
-        sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, workspaceID: String,
-        kind: TerminalSessionKind = .shell
+        sessionID: String? = nil, lifetimePolicy: TerminalSessionLifetimePolicy = .persistent, workspaceID: String, kind: TerminalSessionKind = .shell
     ) throws -> SpacesTerminalSessionHandle {
         let sessionID = sessionID ?? UUID().uuidString
         let launchConfiguration = TerminalSessionLaunchConfiguration(

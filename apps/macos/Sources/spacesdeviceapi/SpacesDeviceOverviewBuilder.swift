@@ -15,13 +15,11 @@ struct SpacesDeviceOverviewBuilder {
         let runningProcesses: [RunningProcessRecord]
         let agentWindows: [AgentWindowRecord]
         let windows: [WindowRecord]
-        let terminalDaemonEndpoint: SpacesDeviceTerminalDaemonEndpoint?
 
         init(
             project: ProjectRecord, workspace: WorkspaceRecord, settings: WorkspaceSettings? = nil, runningProcesses: [RunningProcessRecord] = [],
             agentWindows: [AgentWindowRecord] = [], windows: [WindowRecord] = [], assignedPorts: [SpacesDeviceAssignedPort] = [],
-            environment: [String: String] = [:], resolvedBrowserSessions: [BrowserSession] = [], setupState: WorkspaceSetupState? = nil,
-            terminalDaemonEndpoint: SpacesDeviceTerminalDaemonEndpoint? = nil
+            environment: [String: String] = [:], resolvedBrowserSessions: [BrowserSession] = [], setupState: WorkspaceSetupState? = nil
         ) {
             self.project = project
             self.workspace = workspace
@@ -33,7 +31,6 @@ struct SpacesDeviceOverviewBuilder {
             self.runningProcesses = runningProcesses
             self.agentWindows = agentWindows
             self.windows = windows
-            self.terminalDaemonEndpoint = terminalDaemonEndpoint
         }
     }
 
@@ -134,7 +131,7 @@ struct SpacesDeviceOverviewBuilder {
             projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
             updatedAt: session.runtimeState.updatedAt, isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
-            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender, daemonEndpoint: matchedWorkspace?.terminalDaemonEndpoint)
+            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender)
     }
 
     private static func projectSummaries(from projects: [ProjectRecord]) -> [SpacesDeviceProjectSummary] {
@@ -265,8 +262,7 @@ struct SpacesDeviceOverviewBuilder {
                 SpacesDeviceWorkspaceProcessRow(
                     id: template.id, workspaceID: descriptor.workspace.id, name: template.name ?? "", command: template.command,
                     templateID: template.id, processID: runningProcess?.id, sessionID: availableSessionID, runState: state,
-                    exitedAt: runningProcess?.exitedAt, canRun: !isRunning, canStop: isRunning, canRestart: isRunning,
-                    daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    exitedAt: runningProcess?.exitedAt, canRun: !isRunning, canStop: isRunning, canRestart: isRunning))
         }
 
         for runningProcess in descriptor.runningProcesses where !usedProcessIDs.contains(runningProcess.id) {
@@ -281,7 +277,7 @@ struct SpacesDeviceOverviewBuilder {
                     id: "process-runtime:\(runningProcess.id)", workspaceID: descriptor.workspace.id, name: name.isEmpty ? "Process" : name,
                     command: runningProcess.command, templateID: runningProcess.templateID, processID: runningProcess.id,
                     sessionID: availableSessionID, runState: state, exitedAt: runningProcess.exitedAt, canRun: false, canStop: isRunning,
-                    canRestart: false, daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    canRestart: false))
         }
         return ProcessRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
@@ -315,8 +311,7 @@ struct SpacesDeviceOverviewBuilder {
             rows.append(
                 codingAgentRow(
                     id: "configured-agent:\(descriptor.workspace.id):\(launcher.id)", workspaceID: descriptor.workspace.id, name: launcher.name,
-                    command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID,
-                    daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    command: launcher.command, launcherID: launcher.id, agent: agent, isConfigured: true, sessionsByID: sessionsByID))
         }
 
         for agent in descriptor.agentWindows where !usedAgentIDs.contains(agent.id) {
@@ -325,14 +320,14 @@ struct SpacesDeviceOverviewBuilder {
                 codingAgentRow(
                     id: "agent:\(agent.id)", workspaceID: descriptor.workspace.id, name: agent.label ?? agent.claimedLauncherName ?? "Coding Agent",
                     command: terminalDetail(for: agent, windows: descriptor.windows) ?? "", launcherID: agent.claimedLauncherID, agent: agent,
-                    isConfigured: false, sessionsByID: sessionsByID, daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    isConfigured: false, sessionsByID: sessionsByID))
         }
         return CodingAgentRows(rows: rows, claimedTerminalKeys: claimedTerminalKeys)
     }
 
     private static func codingAgentRow(
         id: String, workspaceID: String, name: String, command: String, launcherID: String?, agent: AgentWindowRecord?, isConfigured: Bool,
-        sessionsByID: [String: TerminalSessionCatalogEntry], daemonEndpoint: SpacesDeviceTerminalDaemonEndpoint?
+        sessionsByID: [String: TerminalSessionCatalogEntry]
     ) -> SpacesDeviceWorkspaceCodingAgentRow {
         let rawSessionID = terminalSessionID(for: agent)
         let session = rawSessionID.flatMap { sessionsByID[$0] }
@@ -345,7 +340,7 @@ struct SpacesDeviceOverviewBuilder {
         return SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agent?.id, sessionID: session?.sessionID,
             isConfigured: isConfigured, runState: runState, activityState: activityState(for: agent), updatedAt: agent?.updatedAt, canRun: canRun,
-            canStop: canStop, canRestart: canRestart, daemonEndpoint: daemonEndpoint)
+            canStop: canStop, canRestart: canRestart)
     }
 
     private static func workspaceTerminalRows(
@@ -364,7 +359,7 @@ struct SpacesDeviceOverviewBuilder {
                     id: "terminal-window:\(window.id)", workspaceID: descriptor.workspace.id,
                     title: window.name ?? session?.effectiveTitle ?? "Workspace Terminal", workingDirectory: descriptor.workspace.dir,
                     sessionID: session?.sessionID, runState: runState, canOpenTerminal: session != nil,
-                    canStop: runState == .running && session?.sessionID != nil, daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    canStop: runState == .running && session?.sessionID != nil))
         }
 
         for (sessionID, session) in sessionsByID where !includedSessionIDs.contains(sessionID) {
@@ -376,7 +371,7 @@ struct SpacesDeviceOverviewBuilder {
                 SpacesDeviceWorkspaceTerminalRow(
                     id: "terminal-session:\(sessionID)", workspaceID: descriptor.workspace.id, title: session.effectiveTitle,
                     workingDirectory: session.effectiveWorkingDirectory, sessionID: sessionID, runState: runState, canOpenTerminal: true,
-                    canStop: runState == .running, daemonEndpoint: descriptor.terminalDaemonEndpoint))
+                    canStop: runState == .running))
         }
 
         return rows.sorted { lhs, rhs in lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending }

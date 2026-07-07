@@ -369,6 +369,7 @@ release_dir="$release_parent/$version"
 release_staging_dir="$release_parent/.install-$version-$$"
 previous_release_dir="$release_parent/.previous-$version-$$"
 bin_root="$HOME/.spaces/bin"
+user_bin_root="$HOME/.local/bin"
 service_dir="$HOME/.config/systemd/user"
 service_path="$service_dir/spacesd.service"
 device_api_host="${SPACES_DEVICE_API_HOST:-0.0.0.0}"
@@ -412,7 +413,7 @@ ensure_user_linger() {
     fi
 }
 
-mkdir -p "$release_parent" "$bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
+mkdir -p "$release_parent" "$bin_root" "$user_bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
 rm -rf "$release_staging_dir" "$previous_release_dir"
 mkdir -p "$release_staging_dir"
 cp -a "$artifact_root/." "$release_staging_dir/"
@@ -426,6 +427,7 @@ trap - EXIT
 ln -sfn "$release_dir" "$install_root/current"
 ln -sfn "$release_dir/bin/spacesd" "$bin_root/spacesd"
 ln -sfn "$release_dir/bin/spaces" "$bin_root/spaces"
+ln -sfn "$bin_root/spaces" "$user_bin_root/spaces"
 
 cat > "$service_path" <<SERVICE
 [Unit]
@@ -461,6 +463,7 @@ printf 'release_dir=%s\n' "$release_dir"
 printf 'current=%s\n' "$install_root/current"
 printf 'spacesd=%s\n' "$bin_root/spacesd"
 printf 'spaces=%s\n' "$bin_root/spaces"
+printf 'spaces_path_alias=%s\n' "$user_bin_root/spaces"
 printf 'service=%s\n' "$service_path"
 EOF
     chmod +x "$destination"
@@ -501,6 +504,7 @@ manifest = {
     "install_root": "~/.spaces/daemon/releases/<app_version>/",
     "current_symlink": "~/.spaces/daemon/current",
     "bin_symlinks": ["~/.spaces/bin/spacesd", "~/.spaces/bin/spaces"],
+    "path_aliases": ["~/.local/bin/spaces"],
     "systemd_user_service": "~/.config/systemd/user/spacesd.service",
     "state": {
         "database": "~/.spaces/spaces.db",
@@ -582,6 +586,7 @@ smoke_artifact() {
         timeout 20s env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 bin/spacesd | grep -q '^SHA256:'
         mkdir -p "$smoke_root/profile/runtime" "$smoke_root/work"
         env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            SPACES_DEVICE_API_HOST=127.0.0.1 SPACES_DEVICE_API_PORT=0 \
             bin/spacesd >"$smoke_root/spacesd.log" 2>&1 </dev/null &
         local daemon_pid=$!
         trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
@@ -603,7 +608,7 @@ def service_socket_path():
     value = 5381
     for byte in terminal_root.encode("utf-8"):
         value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
-    return f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+    return f"/tmp/spaces-sockets-{os.getuid()}/service-{value:016x}.sock"
 
 def request(payload, timeout=10):
     deadline = time.time() + timeout
@@ -686,7 +691,7 @@ terminal_root = os.path.realpath(os.path.join(runtime, "terminal"))
 value = 5381
 for byte in terminal_root.encode("utf-8"):
     value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
-path = f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+path = f"/tmp/spaces-sockets-{os.getuid()}/service-{value:016x}.sock"
 
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(10)
@@ -705,6 +710,106 @@ response = json.loads(data.decode("utf-8"))
 signals = response.get("agentSignals") or []
 if not response.get("ok") or not any(signal.get("type") == "waiting" for signal in signals):
     raise SystemExit(response)
+PY
+        # Pinned-TLS gate: open a pairing window through the shipped CLI, pair a loopback
+        # Device API client against the daemon's pinned certificate fingerprint, and issue one
+        # authed request over that channel. This is the only automated Linux TLS round-trip.
+        env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            SPACES_DEVICE_API_HOST=127.0.0.1 SPACES_DEVICE_API_PORT=0 \
+            bin/spaces device pair --json >"$smoke_root/pairing-window.json"
+        python3 - "$smoke_root/pairing-window.json" <<'PY'
+import hashlib
+import json
+import socket
+import ssl
+import sys
+
+pairing = json.load(open(sys.argv[1]))
+host = pairing["host"]
+port = int(pairing["port"])
+fingerprint = pairing["certificateFingerprint"]
+if not fingerprint.startswith("SHA256:"):
+    raise SystemExit(f"unexpected certificate fingerprint format: {fingerprint!r}")
+expected = fingerprint.split(":", 1)[1].strip().lower()
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+def request(body):
+    with socket.create_connection((host, port), timeout=10) as raw:
+        with context.wrap_socket(raw, server_hostname=host) as tls:
+            # Pin before any application byte: the daemon's leaf certificate must match the
+            # fingerprint delivered in the pairing window.
+            actual = hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+            if actual != expected:
+                raise SystemExit(f"certificate fingerprint mismatch: expected {expected} got {actual}")
+            tls.sendall(json.dumps(body, separators=(",", ":")).encode("utf-8") + b"\n")
+            data = bytearray()
+            while b"\n" not in data:
+                chunk = tls.recv(65536)
+                if not chunk:
+                    break
+                data.extend(chunk)
+    return json.loads(bytes(data).split(b"\n", 1)[0].decode("utf-8"))
+
+client_app = {
+    "installationID": "linux-artifact-smoke",
+    "bundleID": "dev.usespaces.spacesmobile",
+    "platform": "ios",
+    "deviceName": "Linux Artifact Smoke",
+    "appVersion": "1.0",
+}
+paired = request({
+    "clientApp": client_app,
+    "command": {
+        "pair": {
+            "pairingCode": pairing["pairingCode"],
+            "pairingNonce": pairing["pairingNonce"],
+            # Version-gated pairing: echo the daemon's advertised wire-protocol version so the pair
+            # request matches and is not rejected before the code is validated.
+            "clientProtocolVersion": pairing["protocolVersion"],
+        }
+    },
+})
+auth_token = ((paired.get("result") or {}).get("issuedAuthToken") or {}).get("authToken")
+if not paired.get("ok") or not auth_token:
+    raise SystemExit(paired)
+
+overview = request({
+    "authToken": auth_token,
+    "clientApp": client_app,
+    "command": {"overview": {}},
+})
+if not overview.get("ok") or "overview" not in (overview.get("result") or {}):
+    raise SystemExit(overview)
+
+# Agent send/tail round trip against the smoke session: one-shot input needs no
+# attach/owner handshake, and the rendered tail shows both the session's startup
+# echo and the PTY echo of the sent text.
+sent = request({
+    "authToken": auth_token,
+    "clientApp": client_app,
+    "command": {"sendTerminalInput": {"sessionID": "linux-artifact-smoke", "text": "agent-roundtrip-marker", "appendNewline": True}},
+})
+if not sent.get("ok"):
+    raise SystemExit(sent)
+
+import time as _time
+deadline = _time.time() + 15
+while True:
+    tailed = request({
+        "authToken": auth_token,
+        "clientApp": client_app,
+        "command": {"tailTerminalOutput": {"sessionID": "linux-artifact-smoke", "lines": 50}},
+    })
+    text = ((tailed.get("result") or {}).get("terminalOutput") or {}).get("text") or ""
+    if tailed.get("ok") and "artifact-smoke" in text and "agent-roundtrip-marker" in text:
+        break
+    if _time.time() > deadline:
+        raise SystemExit(tailed)
+    _time.sleep(0.5)
 PY
     )
     rm -rf "$smoke_root"

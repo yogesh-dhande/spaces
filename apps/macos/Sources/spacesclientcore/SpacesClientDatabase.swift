@@ -467,6 +467,9 @@ public final class SpacesClientDatabase {
         try executeBatch(sql: "PRAGMA journal_mode=WAL;")
         try executeBatch(sql: "PRAGMA synchronous=NORMAL;")
         try executeBatch(sql: "PRAGMA foreign_keys=ON;")
+        // The GUI app, spaces CLI, and MCP server write this database from separate processes
+        // (pairing records); WAL alone still surfaces SQLITE_BUSY on write contention.
+        try executeBatch(sql: "PRAGMA busy_timeout=5000;")
     }
 
     private func withImmediateTransaction<T>(_ body: () throws -> T) throws -> T {
@@ -678,8 +681,7 @@ public final class SpacesClientDatabase {
     public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
         SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
             try executeClientBatch(database: database, sql: clientStateSchemaSQL)
-        },
-        SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Reserve dropped desktop window IDs version") { _ in },
+        }, SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Reserve dropped desktop window IDs version") { _ in },
         SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
             try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
         }, SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Reserve merged client schema version") { _ in },

@@ -372,7 +372,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private final class LinuxServer: @unchecked Sendable {
             private let host: String
             private let port: Int
-            private let transportKey: String
+            private let identity: TerminalServiceTLSIdentity
             private let server: SpacesDeviceAPIServer
             private let queue: DispatchQueue
             private var listenSocketFD: Int32 = -1
@@ -383,17 +383,17 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
             private(set) var listeningPort: Int = 0
 
-            init(host: String, port: Int, transportKey: String, server: SpacesDeviceAPIServer, queue: DispatchQueue) {
+            init(host: String, port: Int, identity: TerminalServiceTLSIdentity, server: SpacesDeviceAPIServer, queue: DispatchQueue) {
                 self.host = host
                 self.port = port
-                self.transportKey = transportKey
+                self.identity = identity
                 self.server = server
                 self.queue = queue
             }
 
             func start(timeout: TimeInterval = 5) throws {
                 guard (0...Int(UInt16.max)).contains(port) else { throw POSIXError(.EINVAL) }
-                let context = try Self.makeSSLContext(transportKey: transportKey)
+                let context = try Self.makeSSLContext(identity: identity)
                 let socketFD = try Self.makeListenSocket(host: host, port: port)
                 try Self.setCloseOnExec(socketFD)
                 try Self.setNonBlocking(socketFD)
@@ -553,24 +553,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 return attributes
             }
 
-            private static func makeSSLContext(transportKey: String) throws -> OpaquePointer {
+            private static func makeSSLContext(identity: TerminalServiceTLSIdentity) throws -> OpaquePointer {
                 OPENSSL_init_ssl(0, nil)
                 guard let method = TLS_server_method(), let context = SSL_CTX_new(method) else { throw POSIXError(.EIO) }
                 guard spaces_SSL_CTX_set_min_proto_version(context, TLS1_2_VERSION) == 1 else {
                     SSL_CTX_free(context)
                     throw POSIXError(.EIO)
                 }
-                _ = spaces_SSL_CTX_set_max_proto_version(context, TLS1_2_VERSION)
-                let keyData = try SpacesDeviceAPITransport.decodeTransportKey(transportKey)
-                let configured = keyData.withUnsafeBytes { keyBuffer -> Int32 in
-                    guard let keyAddress = keyBuffer.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-                    return SpacesDeviceAPITransport.pskIdentity.withCString { identity in
-                        spaces_SSL_CTX_configure_device_api_psk(context, keyAddress, UInt32(keyBuffer.count), identity)
-                    }
-                }
-                guard configured == 1 else {
+                guard SSL_CTX_use_certificate_file(context, identity.certificatePath, SSL_FILETYPE_PEM) == 1 else {
                     SSL_CTX_free(context)
-                    throw POSIXError(.EACCES)
+                    throw POSIXError(.EIO)
+                }
+                guard SSL_CTX_use_PrivateKey_file(context, identity.privateKeyPath, SSL_FILETYPE_PEM) == 1 else {
+                    SSL_CTX_free(context)
+                    throw POSIXError(.EIO)
+                }
+                guard SSL_CTX_check_private_key(context) == 1 else {
+                    SSL_CTX_free(context)
+                    throw POSIXError(.EIO)
                 }
                 return context
             }
@@ -716,8 +716,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private let host: String
     private let port: Int
-    private let transportKey: String
-    private let certificateFingerprint: String
+    private let identity: TerminalServiceTLSIdentity
     private let pairingCoordinator: SpacesDevicePairingCoordinator
     private let pairingStore: any SpacesDevicePairingStoreProtocol
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
@@ -757,7 +756,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private var acceptingRequests = false
 
     public init(
-        host: String, port: Int, transportKey: String, certificateFingerprint: String = SpacesDeviceAPISettings.generateCertificateFingerprint(),
+        host: String, port: Int, identity: TerminalServiceTLSIdentity,
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(), pairingStore: SpacesDevicePairingStore? = nil,
         onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
@@ -765,8 +764,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     ) throws {
         self.host = host
         self.port = port
-        self.transportKey = transportKey
-        self.certificateFingerprint = certificateFingerprint
+        self.identity = identity
         self.pairingCoordinator = pairingCoordinator
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
@@ -783,7 +781,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     init(
-        host: String, port: Int, transportKey: String, certificateFingerprint: String = SpacesDeviceAPISettings.generateCertificateFingerprint(),
+        host: String, port: Int, identity: TerminalServiceTLSIdentity,
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(),
         pairingStoreProtocol: any SpacesDevicePairingStoreProtocol, onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
@@ -795,8 +793,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     ) {
         self.host = host
         self.port = port
-        self.transportKey = transportKey
-        self.certificateFingerprint = certificateFingerprint
+        self.identity = identity
         self.pairingCoordinator = pairingCoordinator
         self.pairingStore = pairingStoreProtocol
         self.onPairingSucceeded = onPairingSucceeded
@@ -813,6 +810,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     public private(set) var listeningPort: Int = 0
+
+    public var certificateFingerprint: String { identity.certificateFingerprint }
 
     public var isRunning: Bool {
         stateLock.lock()
@@ -838,7 +837,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     public func start(timeout: TimeInterval = 5) throws {
         #if canImport(Network) && canImport(Security)
             let nwPort = try Self.nwPort(port)
-            let parameters = try SpacesDeviceAPITransport.parameters(transportKey: transportKey, role: .server)
+            let tlsOptions = NWProtocolTLS.Options()
+            let securityOptions = tlsOptions.securityProtocolOptions
+            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
+            sec_protocol_options_set_peer_authentication_required(securityOptions, false)
+            guard let secIdentity = sec_identity_create(identity.identity) else { throw TerminalServiceTLSError.identityImportFailed(errSecParam) }
+            sec_protocol_options_set_local_identity(securityOptions, secIdentity)
+            let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
             if !SpacesDeviceAPIDefaults.isWildcardHost(host) {
                 parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: nwPort)
             }
@@ -890,7 +895,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 throw error
             }
         #elseif os(Linux) && canImport(OpenSSL)
-            let createdServer = LinuxServer(host: host, port: port, transportKey: transportKey, server: self, queue: queue)
+            let createdServer = LinuxServer(host: host, port: port, identity: identity, server: self, queue: queue)
             try createdServer.start(timeout: timeout)
             linuxServer = createdServer
             listeningPort = createdServer.listeningPort
@@ -1014,8 +1019,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         -> SpacesDevicePairingWindow
     {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey,
-            certificateFingerprint: certificateFingerprint, name: name, duration: duration)
+            host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
+            protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration)
     }
 
     public func openPairingWindow(
@@ -1023,8 +1028,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         nonce: String? = nil
     ) -> SpacesDevicePairingWindow {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, transportKey: transportKey,
-            certificateFingerprint: certificateFingerprint, name: name, duration: duration, code: code, nonce: nonce)
+            host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
+            protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration, code: code, nonce: nonce)
     }
 
     public func pairingWindowSnapshot() -> SpacesDevicePairingWindowSnapshot? { pairingCoordinator.snapshot() }
@@ -1034,6 +1039,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .pair(let payload):
             guard let clientApp = request.clientApp else {
                 return SpacesDeviceAPIResponse(ok: false, message: SpacesDevicePairingError.missingClientApp.localizedDescription)
+            }
+            // Version-gate before validating the code so an incompatible client never consumes the
+            // one-time pairing window. A missing clientProtocolVersion reads as an incompatible (too
+            // old) client. This runs pre-authentication, so it discloses the daemon's app version.
+            if let incompatibility = Self.pairingVersionRejection(clientProtocolVersion: payload.clientProtocolVersion) {
+                return SpacesDeviceAPIResponse(ok: false, message: incompatibility)
             }
             try pairingStore.validate(clientApp: clientApp)
             try pairingCoordinator.validate(code: payload.pairingCode, nonce: payload.pairingNonce, peerID: peerID)
@@ -1079,6 +1090,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .state(let payload): return try handleStateRequest(payload)
         case .terminalControl(let payload): return try handleTerminalControlRequest(payload)
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
+        case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
+        case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
@@ -1138,6 +1151,42 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             sessionID: sessionID, name: "terminal_control_response_ready", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: responseAttributes)
         return SpacesDeviceAPIResponse(ok: response.ok, message: response.message, result: sessionState.map(SpacesDeviceAPIResult.terminalState))
+    }
+
+    /// Agent-facing one-shot input: token-authorized like every command but deliberately not
+    /// attachment- or owner-epoch-gated, because orchestrator agents write into sessions they never
+    /// attach to or render. Mirrors the local profile `terminalSend` contract.
+    private func handleSendTerminalInputRequest(_ payload: SpacesDeviceTerminalInputRequest) throws -> SpacesDeviceAPIResponse {
+        let sessionID = payload.sessionID
+        let hasText = payload.text != nil
+        let hasBytes = payload.bytes != nil
+        guard hasText || hasBytes else { return SpacesDeviceAPIResponse(ok: false, message: "text or bytes is required.") }
+        guard !(hasText && hasBytes) else { return SpacesDeviceAPIResponse(ok: false, message: "Provide text or bytes, not both.") }
+
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        if let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.")
+        }
+        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.")
+        }
+        let response = try TerminalControlClient.send(
+            request: TerminalControlRequest(command: "send", text: payload.text, bytes: payload.bytes, appendNewline: payload.appendNewline),
+            socketPath: paths.controlSocketPath)
+        return SpacesDeviceAPIResponse(ok: response.ok, message: response.message)
+    }
+
+    /// Agent-facing rendered tail of the session's output log, mirroring the local profile
+    /// `terminalTail` contract (VT replay through `TerminalOutputTail`).
+    private func handleTailTerminalOutputRequest(_ payload: SpacesDeviceTerminalTailRequest) throws -> SpacesDeviceAPIResponse {
+        let sessionID = payload.sessionID
+        let lineCount = max(payload.lines ?? 20, 1)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.outputPath) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no output yet.")
+        }
+        let output = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lineCount)
+        return SpacesDeviceAPIResponse(ok: true, message: "Read terminal output.", result: .terminalOutput(.init(text: output)))
     }
 
     private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {
@@ -1253,6 +1302,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
+    /// Returns a rejection message when a pairing client's wire-protocol version does not match this
+    /// daemon's, or nil when it matches. Keeps the pairing gate symmetric with the client's
+    /// pre-redeem check: whichever side is older is told to update.
+    static func pairingVersionRejection(clientProtocolVersion: Int?) -> String? {
+        let clientProtocolVersion = clientProtocolVersion ?? 0
+        guard clientProtocolVersion != SpacesWireProtocol.version else { return nil }
+        if clientProtocolVersion < SpacesWireProtocol.version {
+            return "This device runs Spaces \(AppVersion.short); update Spaces on the pairing device to match, then pair again."
+        }
+        return "This device runs Spaces \(AppVersion.short), which is older than the pairing device; update Spaces on this device, then pair again."
+    }
+
     private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
             version: AppVersion.current,
@@ -1286,8 +1347,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     },
                     environment: orchestrator.buildWorkspaceEnv(
                         project: project, workspace: workspace, namedPorts: namedPorts.map { (port: $0.port, name: $0.name) }),
-                    resolvedBrowserSessions: resolvedBrowserSessions, setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id),
-                    terminalDaemonEndpoint: nil)
+                    resolvedBrowserSessions: resolvedBrowserSessions, setupState: try? orchestrator.workspaceSetupState(workspaceID: workspace.id))
             }
         }
         let localSessions = try TerminalSessionCatalog.listLiveSessions()
@@ -1765,13 +1825,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let workspaceID = request.workspaceID
         let processKey = request.processKey
         let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-        if let processTemplateID = normalizedString(request.processTemplateID) {
-            try deviceOrchestrator(store: store).runConfiguredProcess(
-                workspaceID: workspaceID, processTemplateID: processTemplateID, processKey: processKey)
-        } else {
-            try deviceOrchestrator(store: store).runConfiguredProcess(workspaceID: workspaceID, processKey: processKey)
-        }
-        return try refreshedMutationResponse(message: "Ran process '\(processKey)'.", workspaceID: workspaceID)
+        let record =
+            if let processTemplateID = normalizedString(request.processTemplateID) {
+                try deviceOrchestrator(store: store).runConfiguredProcess(
+                    workspaceID: workspaceID, processTemplateID: processTemplateID, processKey: processKey)
+            } else { try deviceOrchestrator(store: store).runConfiguredProcess(workspaceID: workspaceID, processKey: processKey) }
+        return try refreshedMutationResponse(
+            message: "Ran process '\(processKey)'.", workspaceID: workspaceID,
+            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
     }
 
     private func handleStopWorkspaceProcessRequest(_ request: SpacesDeviceWorkspaceProcessMutationRequest) throws -> SpacesDeviceAPIResponse {

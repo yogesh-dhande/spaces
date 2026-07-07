@@ -200,20 +200,18 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             let local = SpacesPairedDeviceRecord.localDeviceID
 
             // Missing local credentials self-heal by re-bootstrapping and persisting them.
-            XCTAssertFalse(try SpacesDeviceCredentialStore.hasTransportKey(deviceID: local))
+            XCTAssertFalse(try SpacesDeviceCredentialStore.hasToken(deviceID: local))
             XCTAssertNotNil(try SpacesDeviceClient.ensureLocalDeviceCredentials(database: database, clientApp: clientApp, bootstrap: bootstrap))
             XCTAssertEqual(probe.bootstrapCount, 1)
-            XCTAssertTrue(try SpacesDeviceCredentialStore.hasTransportKey(deviceID: local))
             XCTAssertTrue(try SpacesDeviceCredentialStore.hasToken(deviceID: local))
 
             // Present credentials cost no daemon round-trip.
             XCTAssertNil(try SpacesDeviceClient.ensureLocalDeviceCredentials(database: database, clientApp: clientApp, bootstrap: bootstrap))
             XCTAssertEqual(probe.bootstrapCount, 1)
 
-            // A missing auth token alone (transport key still present) also re-bootstraps, so a local
-            // request is not left sending an unauthenticated (401) call.
+            // A token deleted later also re-bootstraps, so a local request is not left sending an
+            // unauthenticated (401) call.
             try SpacesDeviceCredentialStore.deleteToken(deviceID: local)
-            XCTAssertTrue(try SpacesDeviceCredentialStore.hasTransportKey(deviceID: local))
             XCTAssertFalse(try SpacesDeviceCredentialStore.hasToken(deviceID: local))
             XCTAssertNotNil(try SpacesDeviceClient.ensureLocalDeviceCredentials(database: database, clientApp: clientApp, bootstrap: bootstrap))
             XCTAssertEqual(probe.bootstrapCount, 2)
@@ -246,7 +244,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             result: .localClientBootstrap(
                 SpacesDeviceAPILocalClientBootstrap(
                     deviceID: SpacesPairedDeviceRecord.localDeviceID, name: "Local Mac", platform: "macos", host: "127.0.0.1", port: port,
-                    certificateFingerprint: "local-fingerprint", authToken: "token-\(port)", transportKey: "transport-\(port)")))
+                    certificateFingerprint: "local-fingerprint", authToken: "token-\(port)")))
     }
 
     private static func emptyOverviewResponse() -> SpacesDeviceAPIResponse {

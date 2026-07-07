@@ -79,6 +79,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         return nil
     }
 
+    @MainActor private func waitUntil(file: StaticString = #filePath, line: UInt = #line, _ condition: @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for condition.", file: file, line: line)
+    }
+
     @MainActor func testRemoteMirrorForwardsModifiedBackspaceSpecs() throws {
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_Delete))), "backspace")
         XCTAssertEqual(
@@ -312,16 +321,16 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         field.stringValue = "n"
         field.sendAction(field.action, to: field.target)
-        try await Task.sleep(for: .milliseconds(120))
+        await Task.yield()
         XCTAssertEqual(mirrorView.debugSearchState.query, "n")
         XCTAssertEqual(mirrorView.debugRecordedBindingActions, [])
 
         field.stringValue = "ne"
         field.sendAction(field.action, to: field.target)
-        try await Task.sleep(for: .milliseconds(200))
+        await Task.yield()
         XCTAssertEqual(mirrorView.debugRecordedBindingActions, [])
 
-        try await Task.sleep(for: .milliseconds(150))
+        try await waitUntil { mirrorView.debugRecordedBindingActions == ["search:ne"] }
         XCTAssertEqual(mirrorView.debugRecordedBindingActions, ["search:ne"])
 
         field.stringValue = "nee"
