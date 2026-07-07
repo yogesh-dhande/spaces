@@ -15,7 +15,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
 
     private let socketPath: String
     private let queue: DispatchQueue
-    private let initialStateProvider: @Sendable (_ hasExistingClients: Bool) -> GhosttyRemoteSessionStatePayload?
+    private let initialStateProvider: @Sendable () -> GhosttyRemoteSessionStatePayload?
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private var clientSources: [Int32: DispatchSourceRead] = [:]
@@ -23,16 +23,7 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     init(socketPath: String, queue: DispatchQueue, initialStateProvider: @escaping @Sendable () -> GhosttyRemoteSessionStatePayload?) {
         self.socketPath = socketPath
         self.queue = queue
-        self.initialStateProvider = { _ in initialStateProvider() }
-    }
-
-    init(
-        socketPath: String, queue: DispatchQueue,
-        initialStateProviderWithConnectionState: @escaping @Sendable (_ hasExistingClients: Bool) -> GhosttyRemoteSessionStatePayload?
-    ) {
-        self.socketPath = socketPath
-        self.queue = queue
-        initialStateProvider = initialStateProviderWithConnectionState
+        self.initialStateProvider = initialStateProvider
     }
 
     func start() throws {
@@ -102,13 +93,12 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
                 Self.applySocketBuffers(clientFD)
                 try Self.setNonBlocking(clientFD)
                 Self.applySocketTimeouts(clientFD)
-                let hasExistingClients = !clientSources.isEmpty
                 let source = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: queue)
                 source.setEventHandler { [weak self] in self?.drainClientInput(clientFD) }
                 source.setCancelHandler { close(clientFD) }
                 clientSources[clientFD] = source
                 source.resume()
-                if let payload = initialStateProvider(hasExistingClients), let data = try? GhosttyRemoteSessionStateCodec.encodeLine(payload) {
+                if let payload = initialStateProvider(), let data = try? GhosttyRemoteSessionStateCodec.encodeLine(payload) {
                     if !Self.writeAll(data: data, to: clientFD) { closeClient(clientFD) }
                 }
             } catch { close(clientFD) }
