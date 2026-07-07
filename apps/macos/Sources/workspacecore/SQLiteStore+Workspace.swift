@@ -4,11 +4,16 @@ import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
+    /// Canonical column order for a full `workspaces` row read; reused by every SELECT and by the
+    /// INSERT below since both list the same 13 columns in the same order.
+    private static let workspaceColumns =
+        "id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes"
+
     public func upsert(workspace: WorkspaceRecord) throws {
         try withImmediateTransaction {
             try execute(
                 sql: """
-                    INSERT INTO workspaces(id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes)
+                    INSERT INTO workspaces(\(Self.workspaceColumns))
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       dir = excluded.dir,
@@ -36,7 +41,7 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT \(Self.workspaceColumns)
                     FROM workspaces WHERE id = ?
                     """, bindings: [id])
         else { return nil }
@@ -47,7 +52,7 @@ extension SQLiteStore {
         guard
             let row = try queryRow(
                 sql: """
-                    SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                    SELECT \(Self.workspaceColumns)
                     FROM workspaces
                     WHERE dir = ?
                     ORDER BY is_archived ASC
@@ -60,7 +65,7 @@ extension SQLiteStore {
     public func workspaces(projectID: String, includeArchived: Bool = false) throws -> [WorkspaceRecord] {
         let rows = try queryRows(
             sql: """
-                SELECT id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes
+                SELECT \(Self.workspaceColumns)
                 FROM workspaces
                 WHERE project_id = ? AND (? = '1' OR is_archived = 0)
                 ORDER BY is_default DESC, branch
@@ -268,7 +273,7 @@ extension SQLiteStore {
         return WorkspaceRecord(
             id: row[0], projectID: row[1], dir: row[2], runtimePath: row[3].isEmpty ? row[2] : row[3], dirname: row[4].isEmpty ? nil : row[4],
             branch: row[5].isEmpty ? nil : row[5], baseBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1",
-            isHidden: row[9] != "0", isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11],
+            isHidden: row[9] == "1", isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11],
             notes: row[12].isEmpty ? nil : row[12])
     }
 }

@@ -795,6 +795,22 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(try store.setting(key: "key"))
     }
 
+    // Tests that a workspace's isHidden flag round-trips through updateWorkspaceHidden in both directions.
+    func testUpdateWorkspaceHiddenRoundTrips() throws {
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: try makeTempDirectory().path)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: project.dir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false)
+
+        try store.updateWorkspaceHidden(id: workspace.id, isHidden: true)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, true)
+
+        try store.updateWorkspaceHidden(id: workspace.id, isHidden: false)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isHidden, false)
+    }
+
     // Tests project and workspace lookup and ordering by arranging representative inputs and asserting the expected result.
     func testProjectAndWorkspaceLookupAndOrdering() throws {
         let store = try makeTemporaryStore()

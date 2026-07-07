@@ -4,6 +4,29 @@ import spacesterminalcore
 import systembridge
 
 extension SQLiteStore {
+    /// Canonical column order for a full `agent_sessions` row read, joined against `runtime_targets`
+    /// for the terminal target fields; reused by every SELECT below. This is not the same list as the
+    /// `agent_sessions` INSERT columns (which write the base table directly, without the join), so it
+    /// is not shared with the INSERT.
+    private static let agentWindowColumns = """
+        agent_sessions.id,
+        agent_sessions.workspace_id,
+        agent_sessions.provider,
+        agent_sessions.label,
+        COALESCE(agent_sessions.runtime_target_id, ''),
+        COALESCE(runtime_targets.app, ''),
+        COALESCE(runtime_targets.name, ''),
+        COALESCE(runtime_targets.detail, ''),
+        COALESCE(runtime_targets.tracking_id, ''),
+        COALESCE(agent_sessions.terminal_session_id, ''),
+        COALESCE(agent_sessions.session_key, ''),
+        COALESCE(agent_sessions.claimed_launcher_id, ''),
+        COALESCE(agent_sessions.claimed_launcher_name, ''),
+        agent_sessions.status,
+        agent_sessions.created_at,
+        agent_sessions.updated_at
+        """
+
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
         let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         let terminalSessionID = spacesAgentTerminalSessionID(record)
@@ -38,22 +61,7 @@ extension SQLiteStore {
         let rows = try queryRows(
             sql: """
                 SELECT
-                  agent_sessions.id,
-                  agent_sessions.workspace_id,
-                  agent_sessions.provider,
-                  agent_sessions.label,
-                  COALESCE(agent_sessions.runtime_target_id, ''),
-                  COALESCE(runtime_targets.app, ''),
-                  COALESCE(runtime_targets.name, ''),
-                  COALESCE(runtime_targets.detail, ''),
-                  COALESCE(runtime_targets.tracking_id, ''),
-                  COALESCE(agent_sessions.terminal_session_id, ''),
-                  COALESCE(agent_sessions.session_key, ''),
-                  COALESCE(agent_sessions.claimed_launcher_id, ''),
-                  COALESCE(agent_sessions.claimed_launcher_name, ''),
-                  agent_sessions.status,
-                  agent_sessions.created_at,
-                  agent_sessions.updated_at
+                  \(Self.agentWindowColumns)
                 FROM agent_sessions
                 LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                 WHERE agent_sessions.workspace_id = ?
@@ -67,22 +75,7 @@ extension SQLiteStore {
             let row = try queryRow(
                 sql: """
                     SELECT
-                      agent_sessions.id,
-                      agent_sessions.workspace_id,
-                      agent_sessions.provider,
-                      agent_sessions.label,
-                      COALESCE(agent_sessions.runtime_target_id, ''),
-                      COALESCE(runtime_targets.app, ''),
-                      COALESCE(runtime_targets.name, ''),
-                      COALESCE(runtime_targets.detail, ''),
-                      COALESCE(runtime_targets.tracking_id, ''),
-                      COALESCE(agent_sessions.terminal_session_id, ''),
-                      COALESCE(agent_sessions.session_key, ''),
-                      COALESCE(agent_sessions.claimed_launcher_id, ''),
-                      COALESCE(agent_sessions.claimed_launcher_name, ''),
-                      agent_sessions.status,
-                      agent_sessions.created_at,
-                      agent_sessions.updated_at
+                      \(Self.agentWindowColumns)
                     FROM agent_sessions
                     LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                     WHERE agent_sessions.workspace_id = ?
@@ -96,22 +89,7 @@ extension SQLiteStore {
         let rows = try queryRows(
             sql: """
                 SELECT
-                  agent_sessions.id,
-                  agent_sessions.workspace_id,
-                  agent_sessions.provider,
-                  agent_sessions.label,
-                  COALESCE(agent_sessions.runtime_target_id, ''),
-                  COALESCE(runtime_targets.app, ''),
-                  COALESCE(runtime_targets.name, ''),
-                  COALESCE(runtime_targets.detail, ''),
-                  COALESCE(runtime_targets.tracking_id, ''),
-                  COALESCE(agent_sessions.terminal_session_id, ''),
-                  COALESCE(agent_sessions.session_key, ''),
-                  COALESCE(agent_sessions.claimed_launcher_id, ''),
-                  COALESCE(agent_sessions.claimed_launcher_name, ''),
-                  agent_sessions.status,
-                  agent_sessions.created_at,
-                  agent_sessions.updated_at
+                  \(Self.agentWindowColumns)
                 FROM agent_sessions
                 LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
                 WHERE agent_sessions.workspace_id = ?
