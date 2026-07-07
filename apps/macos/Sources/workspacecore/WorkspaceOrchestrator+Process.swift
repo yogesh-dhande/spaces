@@ -79,7 +79,6 @@ extension WorkspaceOrchestrator {
         let workspace = try workspace ?? resolveWorkspace(id: workspaceID).1
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         let now = currentDate()
-        let formatter = ISO8601DateFormatter()
         var didUpdate = false
         for process in processes where process.status == .running {
             if let runtimeState = resolvedBuiltInSessionRuntimeState(for: process), !runtimeState.state.isInteractive {
@@ -93,7 +92,7 @@ extension WorkspaceOrchestrator {
                 try handleProcessExit(workspaceID: workspace.id, process: updatedProcess, project: project, workspace: workspace)
                 continue
             }
-            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = formatter.date(from: startedAtStr),
+            if !ignoreStartupGracePeriod, let startedAtStr = process.startedAt, let startedAt = TerminalSessionTimestamp.date(from: startedAtStr),
                 now.timeIntervalSince(startedAt) < 10.0
             {
                 continue

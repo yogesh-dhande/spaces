@@ -1296,7 +1296,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
             let device = deviceForMutation(deviceID: resolvedDeviceID)
             let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
-            let createdAt = request.createdAt ?? ISO8601DateFormatter().string(from: Date())
+            let createdAt = request.createdAt ?? iso8601Formatter.string(from: Date())
             // The seed launch configuration wins over the state model's own summary lookup,
             // and the live Device API state payload never resends shell/command, so seed one
             // only when a real shell is known — from the request (resolved from the source
@@ -2065,6 +2065,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func shouldRequestNormalWorkspaceDetailRefresh(setupStatus: WorkspaceSetupStatus) -> Bool { setupStatus == .succeeded }
 
+    // ISO8601DateFormatter construction is expensive and this is shared by the `nonisolated`
+    // overview-mapping helpers below (buildOverviewAlertsGroups, agentWindows,
+    // deviceTerminalWindows), which run off the main actor. ISO8601DateFormatter is documented
+    // thread-safe, so a single nonisolated instance is safe to reuse instead of allocating a
+    // fresh formatter per call. Kept separate from the instance-scoped `iso8601Formatter` lazy
+    // var above, which isn't reachable from these static/nonisolated contexts.
+    nonisolated(unsafe) private static let staticISO8601Formatter = ISO8601DateFormatter()
+
     /// Builds attention alerts for a device from its overview payload — used for both the local and
     /// remote devices so alerts aggregate identically across the sidebar without the client ever
     /// opening `spaces.db`. Window-role styling (browser/editor icons, per-window focus) is
@@ -2072,7 +2080,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// so an exited process shows as a process alert and clicking it focuses the process. Recency
     /// (and dismissal identity) come from the daemon-supplied `exitedAt`/`updatedAt` timestamps.
     nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> [AlertsGroup] {
-        let iso8601Formatter = ISO8601DateFormatter()
+        let iso8601Formatter = staticISO8601Formatter
         var groups: [AlertsGroup] = []
         for workspace in overview.workspaces where !workspace.isArchived {
             var items: [AlertsAttentionEntry] = []
@@ -2393,7 +2401,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     nonisolated private static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = staticISO8601Formatter.string(from: Date())
         return rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
             return AgentWindowRecord(
@@ -2404,7 +2412,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     nonisolated static func deviceTerminalWindows(from rows: [SpacesDeviceWorkspaceTerminalRow]) -> [WindowRecord] {
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = staticISO8601Formatter.string(from: Date())
         return rows.enumerated().map { index, row in
             WindowRecord(
                 id: row.id, workspaceID: row.workspaceID, app: "Spaces", name: row.title, detail: row.workingDirectory,

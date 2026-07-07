@@ -330,7 +330,7 @@ private struct OpenDevicePairingWindowCommand: ParsableCommand {
             DevicePairingWindowPayload(
                 host: status.host, port: status.port, bonjourServiceName: status.bonjourServiceName, pairingLink: window.linkString,
                 pairingCode: window.code, pairingNonce: window.nonce, transportKey: link.transportKey,
-                certificateFingerprint: link.certificateFingerprint, expiresAt: ISO8601DateFormatter().string(from: window.expiresAt),
+                certificateFingerprint: link.certificateFingerprint, expiresAt: e2eISO8601Formatter.string(from: window.expiresAt),
                 message: response.message))
     }
 }
@@ -2116,7 +2116,11 @@ private func validOptionalPort(_ port: Int?, label: String) throws -> Int? {
     return try validPort(port, label: label)
 }
 
-private func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
+// Cached because ISO8601DateFormatter construction is expensive; ISO8601DateFormatter is
+// documented thread-safe so one shared instance is safe to reuse across this module's helpers.
+nonisolated(unsafe) private let e2eISO8601Formatter = ISO8601DateFormatter()
+
+private func nowISO8601() -> String { e2eISO8601Formatter.string(from: Date()) }
 
 
 private final class MobileServePairingWindowEmitter: @unchecked Sendable {
@@ -2148,7 +2152,7 @@ private final class MobileServePairingWindowEmitter: @unchecked Sendable {
 
         let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
         print(
-            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(ISO8601DateFormatter().string(from: window.expiresAt))\tbundle=\(SpacesDeviceFirstPartyPolicy.allowedBundleID)"
+            "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(e2eISO8601Formatter.string(from: window.expiresAt))\tbundle=\(SpacesDeviceFirstPartyPolicy.allowedBundleID)"
         )
         fflush(stdout)
     }

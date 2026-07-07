@@ -39,6 +39,11 @@ import workspacecore
     /// a variable POSIX error description.
     nonisolated static let deviceAPIUnreachableMessage = "The local Spaces daemon isn't reachable. Restart it to reconnect."
 
+    /// Cached because ISO8601DateFormatter construction is expensive; used for parsing/formatting
+    /// device-pairing timestamps (remote pairing window `expiresAt`, paired-device `updatedAt`).
+    /// ISO8601DateFormatter is documented thread-safe.
+    private static let iso8601Formatter = ISO8601DateFormatter()
+
     /// The Restart Local Daemon action is offered only for failures a relaunch can actually resolve: the
     /// daemon answered that its Device API is not running, or its control endpoint was unreachable (the
     /// daemon is down). It is suppressed for the disabled-override case (a relaunch inherits the same
@@ -484,7 +489,7 @@ import workspacecore
                     try SpacesDevicePairingClient.openRemotePairingWindow(
                         for: device, appVersion: appVersion, remoteArtifactPublicKey: remoteArtifactPublicKey)
                 }.value
-                let expiresAt = result.expiresAt.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date().addingTimeInterval(300)
+                let expiresAt = result.expiresAt.flatMap { Self.iso8601Formatter.date(from: $0) } ?? Date().addingTimeInterval(300)
                 self?.currentDevicePairingWindow = ClientDevicePairingWindow(
                     deviceID: device.id, deviceName: result.name, linkString: result.linkString, expiresAt: expiresAt)
                 self?.devicePanelStatusMessage = nil
@@ -621,7 +626,7 @@ import workspacecore
             let database = try host.clientDatabase()
             if !trimmed.isEmpty, var record = try database.pairedDevices().first(where: { $0.id == deviceID }), record.name != trimmed {
                 record.name = trimmed
-                record.updatedAt = ISO8601DateFormatter().string(from: Date())
+                record.updatedAt = Self.iso8601Formatter.string(from: Date())
                 try database.upsert(device: record)
                 host.requestSidebarReload()
             }

@@ -183,7 +183,7 @@ public enum SpacesLeaseCoordinator {
             pid: getpid(),
             executablePath: SpacesProfile.currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath) ?? CommandLine
                 .arguments.first ?? "unknown", profileRoot: profileRoot, token: UUID().uuidString,
-            acquiredAt: ISO8601DateFormatter().string(from: Date()))
+            acquiredAt: TerminalSessionTimestamp.string(from: Date()))
     }
 
     private static func readLiveOwner(fromLeaseDirectoryPath leaseDirectoryPath: String, fileManager: FileManager) throws -> SpacesProcessLeaseOwner?

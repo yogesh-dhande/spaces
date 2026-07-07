@@ -195,7 +195,7 @@ extension SQLiteStore {
         let targetID = runtimeTargetID ?? terminalTarget.runtimeTargetID ?? record.id
         let existingWindows = try windows(workspaceID: record.workspaceID)
         let existingWindow = existingWindows.first(where: { $0.id == targetID })
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = TerminalSessionTimestamp.string(from: Date())
         let preservesExistingMetadata = try preservesExistingTerminalMetadata(for: record)
         try upsert(
             window: WindowRecord(

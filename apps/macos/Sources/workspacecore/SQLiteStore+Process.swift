@@ -98,7 +98,7 @@ extension SQLiteStore {
         let targetID = runtimeTargetID ?? terminalTarget.runtimeTargetID ?? process.id
         let existingWindows = try windows(workspaceID: process.workspaceID)
         let existingWindow = existingWindows.first(where: { $0.id == targetID })
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = TerminalSessionTimestamp.string(from: Date())
         try upsert(
             window: WindowRecord(
                 id: targetID, workspaceID: process.workspaceID, app: process.terminalApp ?? TerminalHost.spaces.appName, name: process.templateName,

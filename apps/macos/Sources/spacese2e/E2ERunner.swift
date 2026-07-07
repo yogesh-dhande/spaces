@@ -860,11 +860,13 @@ private struct E2ERunner {
         return formatter.string(from: Date())
     }
 
-    private static var isoDateFormatter: ISO8601DateFormatter {
+    // Cached because ISO8601DateFormatter construction is expensive; ISO8601DateFormatter is
+    // documented thread-safe so one shared instance is safe to reuse.
+    nonisolated(unsafe) private static let isoDateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
-    }
+    }()
 
     private static func stepPrefix(_ index: Int) -> String { String(format: "%03d", index) }
 

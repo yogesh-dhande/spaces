@@ -269,7 +269,7 @@ import Foundation
                 (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                 ?? TerminalSessionRuntimeState(
                     sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: nil,
-                    state: .running, updatedAt: ISO8601DateFormatter().string(from: Date()), title: launchConfiguration.title,
+                    state: .running, updatedAt: TerminalSessionTimestamp.string(from: Date()), title: launchConfiguration.title,
                     workingDirectory: launchConfiguration.workingDirectory)
             try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             return TerminalServiceSessionSummary(
@@ -282,7 +282,7 @@ import Foundation
         private static func terminateXCTestCompatibilitySession(id sessionID: String) throws {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths) else { return }
-            let now = ISO8601DateFormatter().string(from: Date())
+            let now = TerminalSessionTimestamp.string(from: Date())
             let runtimeState =
                 (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
                 ?? TerminalSessionRuntimeState(

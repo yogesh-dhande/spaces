@@ -1969,7 +1969,7 @@ public final class WorkspaceOrchestrator {
         return pid
     }
 
-    func nowISO8601() -> String { ISO8601DateFormatter().string(from: Date()) }
+    func nowISO8601() -> String { TerminalSessionTimestamp.string(from: Date()) }
 
     func normalizePath(_ path: String) -> String {
         let expanded = expandTilde(path)

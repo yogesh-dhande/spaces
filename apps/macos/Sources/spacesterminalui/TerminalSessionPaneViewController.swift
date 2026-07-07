@@ -192,7 +192,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let resolvedBackend = resolvedLaunchConfiguration?.backend ?? .ghosttyEmbedded
         backend = resolvedBackend
         rendererMode = TerminalRendererResolver.resolveGhosttyEmbeddedMode(backend: resolvedBackend)
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = TerminalSessionTimestamp.string(from: Date())
         client = TerminalClient(
             kind: .localWindow,
             identity: TerminalClientIdentity(label: "Spaces window", hostName: Host.current().name, deviceName: Host.current().localizedName),

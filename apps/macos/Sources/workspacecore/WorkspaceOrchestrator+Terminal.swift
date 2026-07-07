@@ -282,7 +282,7 @@ extension WorkspaceOrchestrator {
             return false
         }
         guard let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths),
-            let createdAt = ISO8601DateFormatter().date(from: launchConfiguration.createdAt)
+            let createdAt = TerminalSessionTimestamp.date(from: launchConfiguration.createdAt)
         else { return false }
         let age = now.timeIntervalSince(createdAt)
         return age >= -5 && age < 60
