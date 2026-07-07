@@ -140,21 +140,3 @@ export const cookbookGuides: CookbookGuideLink[] = [
     stack: ["Next.js", "Django", "Multi-repo"],
   },
 ];
-
-export const docsPublishingOrder = [
-  "Installation & Setup",
-  "Getting Started",
-  "Projects",
-  "Workspaces",
-  "Workspace Lifecycle",
-  "Window Management",
-  "Processes",
-  "Browser Sessions",
-  "Coding Agents",
-  "Keyboard Shortcuts",
-  "Troubleshooting",
-  "Cookbook Guides",
-  "CLI Reference",
-  "Model Context Protocol",
-  "iOS Companion",
-];
