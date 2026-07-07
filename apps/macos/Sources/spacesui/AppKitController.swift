@@ -2574,6 +2574,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    final class WorkspacePathActionContext {
+        let workspaceID: String
+        let path: String
+
+        init(workspaceID: String, path: String) {
+            self.workspaceID = workspaceID
+            self.path = path
+        }
+    }
+
     nonisolated static func remoteWorkspacePathActionErrorMessage(action: WorkspacePathAction, deviceName: String) -> String {
         "\(action.title) requires a workspace path on this Mac. \(deviceName) workspaces live on the selected daemon; use an SSH-capable workflow for that remote path."
     }
@@ -7421,6 +7431,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc func revealDirectoryInFinder(_ sender: Any) {
+        if let context = Self.senderWorkspacePathActionContext(sender) {
+            if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder, workspaceID: context.workspaceID) { return }
+            NSWorkspace.shared.selectFile(context.path, inFileViewerRootedAtPath: "")
+            return
+        }
         if showRemoteWorkspacePathActionErrorIfNeeded(.revealInFinder) { return }
         guard let path = Self.senderIdentifier(sender) else { return }
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
@@ -7435,17 +7450,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
+    /// Accepts the per-row workspace path context from menu items whose action must resolve
+    /// remote/local state against the clicked workspace rather than the current selection.
+    static func senderWorkspacePathActionContext(_ sender: Any) -> WorkspacePathActionContext? {
+        if let menuItem = sender as? NSMenuItem { return menuItem.representedObject as? WorkspacePathActionContext }
+        return nil
+    }
+
     /// Stock `NSMenu` for the workspace detail ⋯ overflow. Items carry the
     /// workspace path (for Copy/Reveal) or workspace ID (for Archive/Hide) in their
-    /// `identifier.rawValue`, letting the underlying action methods stay
-    /// unchanged whether they're triggered by a button or a menu item.
+    /// `identifier.rawValue`. Reveal also carries the workspace id in
+    /// `representedObject` so remote/local gating resolves the action target itself.
     static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool = true) -> NSMenu {
         let menu = NSMenu()
 
-        func addItem(title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String) {
+        func addItem(
+            title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String,
+            representedObject: Any? = nil
+        ) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
             item.keyEquivalentModifierMask = modifiers
             item.identifier = NSUserInterfaceItemIdentifier(identifier)
+            item.representedObject = representedObject
             item.target = target
             if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
             menu.addItem(item)
@@ -7459,7 +7485,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if isLocalDevice {
             addItem(
                 title: "Reveal in Finder", symbol: "folder", action: #selector(AppKitController.revealDirectoryInFinder(_:)), keyEquivalent: "f",
-                modifiers: [.command, .shift], identifier: path)
+                modifiers: [.command, .shift], identifier: path, representedObject: WorkspacePathActionContext(workspaceID: workspaceID, path: path))
         }
         menu.addItem(.separator())
         addItem(

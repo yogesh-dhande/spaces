@@ -29,13 +29,19 @@ import Testing
         #expect(copy.keyEquivalentModifierMask == [])
     }
 
-    @Test func revealItemCarriesPathAndCmdShiftF() {
+    @Test func revealItemCarriesPathWorkspaceContextAndCmdShiftF() {
         let menu = AppKitController.makeWorkspaceOverflowMenu(workspaceID: "ws-1", path: "/tmp/ws-1", target: nil)
         guard let reveal = menu.items.first(where: { $0.title == "Reveal in Finder" }) else {
             Issue.record("Reveal in Finder menu item missing")
             return
         }
         #expect(reveal.identifier?.rawValue == "/tmp/ws-1")
+        guard let context = AppKitController.senderWorkspacePathActionContext(reveal) else {
+            Issue.record("Reveal in Finder menu item missing workspace path context")
+            return
+        }
+        #expect(context.workspaceID == "ws-1")
+        #expect(context.path == "/tmp/ws-1")
         #expect(reveal.keyEquivalent == "f")
         #expect(reveal.keyEquivalentModifierMask == NSEvent.ModifierFlags([.command, .shift]))
     }
@@ -72,5 +78,11 @@ import Testing
     @Test func senderIdentifierReturnsNilWhenIdentifierMissing() {
         let item = NSMenuItem(title: "x", action: nil, keyEquivalent: "")
         #expect(AppKitController.senderIdentifier(item) == nil)
+    }
+
+    @Test func senderWorkspacePathActionContextReturnsNilWithoutRepresentedContext() {
+        let item = NSMenuItem(title: "x", action: nil, keyEquivalent: "")
+        item.identifier = NSUserInterfaceItemIdentifier("/path/from-menu")
+        #expect(AppKitController.senderWorkspacePathActionContext(item) == nil)
     }
 }

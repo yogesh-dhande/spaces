@@ -1318,15 +1318,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     /// Right-click menu for a sidebar workspace row (and the standin row of a non-git project):
     /// lifecycle controls gated on run state, path actions, and Hide. Lifecycle/Hide items carry the
-    /// workspace id and path actions carry the directory in `identifier.rawValue`, matching the
-    /// sender-identifier contract the underlying action methods read.
+    /// workspace id and path actions carry the directory in `identifier.rawValue`. Reveal also carries
+    /// the workspace id so it resolves remote/local state against the clicked row, not the selection.
     private func workspaceContextMenu(workspace: WorkspaceSummary) -> NSMenu {
         let menu = NSMenu()
-        func addItem(_ title: String, symbol: String, target: AnyObject, action: Selector, identifier: String) {
+        func addItem(_ title: String, symbol: String, target: AnyObject, action: Selector, identifier: String, representedObject: Any? = nil) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = target
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             item.identifier = NSUserInterfaceItemIdentifier(identifier)
+            item.representedObject = representedObject
             menu.addItem(item)
         }
         if workspace.isRunning {
@@ -1341,7 +1342,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if host.isLocalWorkspace(workspace) {
             addItem(
                 "Reveal in Finder", symbol: "folder", target: host, action: #selector(AppKitController.revealDirectoryInFinder(_:)),
-                identifier: workspace.dir)
+                identifier: workspace.dir,
+                representedObject: AppKitController.WorkspacePathActionContext(workspaceID: workspace.id, path: workspace.dir))
         }
         menu.addItem(.separator())
         addItem("Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id)
