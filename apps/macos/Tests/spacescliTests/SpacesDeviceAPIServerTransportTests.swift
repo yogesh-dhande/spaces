@@ -549,6 +549,67 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    func testRunWorkspaceProcessReturnsLaunchedTerminalSessionID() throws {
+        try withTemporaryProfile { root in
+            let transportKey = SpacesDeviceAPISettings.generateTransportKey()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let launches = DeviceAPITerminalLaunchCapture()
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, transportKey: transportKey, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionLauncher: { configuration in
+                    let childPID = launches.append(configuration)
+                    let paths = try TerminalSessionPaths.forSession(id: configuration.sessionID)
+                    try paths.ensureDirectories()
+                    try TerminalSessionPersistence.writeLaunchConfiguration(configuration, paths: paths)
+                    _ = FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    _ = FileManager.default.createFile(atPath: paths.subscriptionSocketPath, contents: Data())
+                    _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+                    try TerminalSessionPersistence.writeRuntimeState(
+                        TerminalSessionRuntimeState(
+                            sessionID: configuration.sessionID, backend: configuration.backend,
+                            servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: Int32(childPID), state: .running,
+                            updatedAt: "2026-06-22T12:00:00Z", title: configuration.title,
+                            workingDirectory: configuration.workingDirectory), paths: paths)
+                    return TerminalServiceSessionSummary(
+                        id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                        backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running,
+                        servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: Int32(childPID),
+                        controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath, launchConfiguration: configuration)
+                })
+            try server.start()
+            defer { server.stop() }
+
+            let projectDir = root.appendingPathComponent("process-project", isDirectory: true)
+            try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+            let store = try SQLiteStore(path: root.appendingPathComponent("spaces.db").path)
+            let project = ProjectRecord(id: "project-process", name: "Process Project", dir: projectDir.path, isGitRepo: false, defaultBranch: nil)
+            let workspace = WorkspaceRecord(
+                id: "workspace-process", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+                isRunning: false, lastLaunchedAt: nil)
+            try store.upsert(project: project)
+            try store.upsert(workspace: workspace)
+            try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+            try store.setWorkspaceProcesses(
+                workspaceID: workspace.id, processes: [ProcessTemplate(id: "process-api", name: "api", command: "echo api")])
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-RUN-PROCESS", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .runWorkspaceProcess(.init(workspaceID: workspace.id, processKey: "api", processTemplateID: "process-api")),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort, transportKey: transportKey)
+
+            XCTAssertTrue(response.ok, response.message)
+            let sessionID = try XCTUnwrap(response.sessionID)
+            XCTAssertEqual(launches.configurationsSnapshot().map(\.sessionID), [sessionID])
+            let overviewWorkspace = try XCTUnwrap(response.overview?.workspaces.first { $0.id == workspace.id })
+            let processRow = try XCTUnwrap(overviewWorkspace.processRows.first { $0.name == "api" })
+            XCTAssertEqual(processRow.sessionID, sessionID)
+            XCTAssertEqual(processRow.runState, .running)
+        }
+    }
+
     func testOpenWorkspaceTerminalCleansReservedSessionWhenOverviewRefreshFails() throws {
         try withTemporaryProfile { root in
             let transportKey = SpacesDeviceAPISettings.generateTransportKey()
