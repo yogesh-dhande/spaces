@@ -4,6 +4,8 @@ import XCTest
 @testable import spacesterminalcore
 
 #if os(macOS)
+    import Darwin
+
     final class TerminalServiceTests: XCTestCase {
         // Regression: capturing output used to wait for exit before draining the pipe, which
         // deadlocks as soon as the child writes more than the kernel's 64KB pipe buffer
@@ -89,10 +91,10 @@ import XCTest
         }
 
         func testParseSocketOwnerProcessIDsFiltersToMatchingSocketPath() {
-            let socketPath = "/tmp/spaces-terminal-sockets/service-current.sock"
+            let socketPath = "/tmp/spaces-sockets-\(getuid())/service-current.sock"
             let output = """
                 COMMAND     PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-                launchd       1 yogesh  12u  unix 0xffffffffffffffff      0t0      /tmp/spaces-terminal-sockets/service-other.sock
+                launchd       1 yogesh  12u  unix 0xffffffffffffffff      0t0      /tmp/spaces-sockets-\(getuid())/service-other.sock
                 SpacesTer   222 yogesh  13u  unix 0xffffffffffffffff      0t0      \(socketPath)
                 sleep       333 yogesh  14u  unix 0xffffffffffffffff      0t0      \(socketPath)
                 broken      abc yogesh  15u  unix 0xffffffffffffffff      0t0      \(socketPath)

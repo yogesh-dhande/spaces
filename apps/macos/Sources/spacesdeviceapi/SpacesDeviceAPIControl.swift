@@ -506,8 +506,7 @@ public enum SpacesDeviceAPIControlClient {
 
     static func socketPath(fileManager: FileManager = .default) throws -> String {
         let root = try TerminalServicePaths.terminalRootDirectory(fileManager: fileManager)
-        let socketRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("spaces-terminal-sockets", isDirectory: true)
-        try fileManager.createDirectory(at: socketRoot, withIntermediateDirectories: true)
+        let socketRoot = try SpacesSocketPaths.secureSocketRoot()
         return socketRoot.appendingPathComponent("device-api-control-\(socketPathComponent(for: root.path)).sock", isDirectory: false).path
     }
 

@@ -604,7 +604,7 @@ def service_socket_path():
     value = 5381
     for byte in terminal_root.encode("utf-8"):
         value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
-    return f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+    return f"/tmp/spaces-sockets-{os.getuid()}/service-{value:016x}.sock"
 
 def request(payload, timeout=10):
     deadline = time.time() + timeout
@@ -687,7 +687,7 @@ terminal_root = os.path.realpath(os.path.join(runtime, "terminal"))
 value = 5381
 for byte in terminal_root.encode("utf-8"):
     value = (((value << 5) + value) + byte) & 0xFFFFFFFFFFFFFFFF
-path = f"/tmp/spaces-terminal-sockets/service-{value:016x}.sock"
+path = f"/tmp/spaces-sockets-{os.getuid()}/service-{value:016x}.sock"
 
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(10)

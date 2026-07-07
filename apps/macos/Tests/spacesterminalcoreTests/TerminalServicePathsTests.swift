@@ -1,6 +1,12 @@
 import Foundation
 import XCTest
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 @testable import spacesterminalcore
 
 final class TerminalServicePathsTests: XCTestCase {
@@ -25,9 +31,9 @@ final class TerminalServicePathsTests: XCTestCase {
         let lockPath = try TerminalServicePaths.instanceLockPath()
         let databaseChangeSignalSocketPath = try TerminalServicePaths.databaseChangeSignalSocketPath()
 
-        XCTAssertTrue(socketPath.hasPrefix("/tmp/spaces-terminal-sockets/service-"))
-        XCTAssertTrue(lockPath.hasPrefix("/tmp/spaces-terminal-sockets/daemon-"))
-        XCTAssertTrue(databaseChangeSignalSocketPath.hasPrefix("/tmp/spaces-terminal-sockets/database-change-"))
+        XCTAssertTrue(socketPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/service-"))
+        XCTAssertTrue(lockPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/daemon-"))
+        XCTAssertTrue(databaseChangeSignalSocketPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/database-change-"))
         XCTAssertLessThan(socketPath.utf8.count, 104)
         XCTAssertLessThan(lockPath.utf8.count, 104)
         XCTAssertLessThan(databaseChangeSignalSocketPath.utf8.count, 104)
@@ -109,13 +115,13 @@ final class TerminalServicePathsTests: XCTestCase {
     private func serviceSocketPath(forTerminalRoot terminalRoot: String) -> String {
         var hash: UInt64 = 5381
         for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
-        return String(format: "/tmp/spaces-terminal-sockets/service-%016llx.sock", hash)
+        return String(format: "/tmp/spaces-sockets-\(getuid())/service-%016llx.sock", hash)
     }
 
     private func databaseChangeSignalSocketPath(forTerminalRoot terminalRoot: String) -> String {
         var hash: UInt64 = 5381
         for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
-        return String(format: "/tmp/spaces-terminal-sockets/database-change-%016llx.sock", hash)
+        return String(format: "/tmp/spaces-sockets-\(getuid())/database-change-%016llx.sock", hash)
     }
 
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
