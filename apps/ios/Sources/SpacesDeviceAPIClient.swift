@@ -5,26 +5,35 @@ import spacesterminalcore
 
 enum SpacesDeviceAPIClientError: LocalizedError {
     case invalidEndpoint
-    case requestFailed(String)
+    case requestFailed(String, code: SpacesDeviceErrorCode? = nil)
     case transportAuthenticationFailed
     case missingOverview
-    case streamFailed(String)
+    case streamFailed(String, code: SpacesDeviceErrorCode? = nil)
     case requestTimedOut
 
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint:
             "The Device API host or port is invalid."
-        case .requestFailed(let message):
+        case .requestFailed(let message, _):
             message
         case .transportAuthenticationFailed:
             "The secure Device API transport could not authenticate."
         case .missingOverview:
             "The Device API did not return a workspace or terminal overview."
-        case .streamFailed(let message):
+        case .streamFailed(let message, _):
             message
         case .requestTimedOut:
             "The Device API request timed out."
+        }
+    }
+}
+
+extension SpacesDeviceAPIClientError: SpacesDeviceErrorCodeProviding {
+    var spacesDeviceErrorCode: SpacesDeviceErrorCode? {
+        switch self {
+        case .requestFailed(_, let code), .streamFailed(_, let code): code
+        default: nil
         }
     }
 }
@@ -71,7 +80,7 @@ struct SpacesDeviceAPIClient: Sendable {
                 clientApp: clientAppIdentity),
             commandChannel: commandChannel
         )
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let issuedAuthToken = response.issuedAuthToken else {
             throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return an auth token.")
         }
@@ -84,7 +93,7 @@ struct SpacesDeviceAPIClient: Sendable {
             timeout: .seconds(8),
             commandChannel: commandChannel
         )
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let overview = response.overview else { throw SpacesDeviceAPIClientError.missingOverview }
         return overview
     }
@@ -96,7 +105,7 @@ struct SpacesDeviceAPIClient: Sendable {
             timeout: .seconds(8),
             commandChannel: commandChannel
         )
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let status = response.daemonStatus else {
             throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return daemon status.")
         }
@@ -111,7 +120,7 @@ struct SpacesDeviceAPIClient: Sendable {
             timeout: .seconds(8),
             commandChannel: commandChannel
         )
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func fetchWorkspaceCreateOptions(
@@ -126,7 +135,7 @@ struct SpacesDeviceAPIClient: Sendable {
             ),
             commandChannel: commandChannel
         )
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let options = response.workspaceCreateOptions else {
             throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return workspace create options.")
         }
@@ -284,7 +293,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let sessionState = response.sessionState else {
             throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return terminal state.")
         }
@@ -303,7 +312,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func detach(
@@ -318,7 +327,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func takeOver(
@@ -333,7 +342,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         return response.sessionState
     }
 
@@ -353,7 +362,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func sendKey(
@@ -370,7 +379,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func clearScreen(
@@ -386,7 +395,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func resize(
@@ -414,7 +423,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func scroll(
@@ -442,7 +451,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
     }
 
     func resolveTerminalLink(
@@ -457,7 +466,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let metadata = response.terminalLinkMetadata else {
             throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return terminal link metadata.")
         }
@@ -478,7 +487,7 @@ struct SpacesDeviceAPIClient: Sendable {
             clientApp: clientAppIdentity
         )
         let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         guard let chunk = response.terminalLinkChunk else {
             throw SpacesDeviceAPIClientError.requestFailed("The Device API did not return terminal link data.")
         }
@@ -510,7 +519,7 @@ struct SpacesDeviceAPIClient: Sendable {
         commandChannel: SpacesDeviceAPICommandChannel?
     ) async throws -> SpacesDeviceAPIResponse {
         let response = try await sendRequest(request, timeout: .seconds(30), commandChannel: commandChannel)
-        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message) }
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
         return response
     }
 
@@ -965,7 +974,7 @@ private final class StreamSubscription: @unchecked Sendable {
                         Task { @MainActor in onEvent(payload) }
                     } catch {
                         if let response = try? SpacesDeviceAPICodec.decodeResponse(line), !response.ok {
-                            lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message))
+                            lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message, code: response.errorCode))
                             connection.cancel()
                             return
                         }
@@ -988,7 +997,7 @@ private final class StreamSubscription: @unchecked Sendable {
                     let response = try? SpacesDeviceAPICodec.decodeResponse(buffer),
                     !response.ok
                 {
-                    lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message))
+                    lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed(response.message, code: response.errorCode))
                 } else {
                     lifecycle.finish(error: nil)
                 }

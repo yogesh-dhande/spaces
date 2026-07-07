@@ -436,8 +436,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             private func sendResponseAndClose(_ response: TerminalServiceResponse) { sendResponse(response, closeAfterSend: true) }
 
             private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool {
-                guard !response.ok else { return false }
-                return response.message.localizedStandardContains("unauthorized")
+                response.closesConnectionAfterDelivery
             }
 
             private func startStreamRelay(socketPath: String) {
@@ -586,7 +585,9 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 
         private func validateAndHandle(request: TerminalServiceRequest) throws -> TerminalServiceResponse {
             if let authorizationFailure = authorizeRequest?(request) { return authorizationFailure }
-            if let authToken, authToken != request.authToken { return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.") }
+            if let authToken, authToken != request.authToken {
+                return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.", errorCode: .unauthorized)
+            }
             return try handleRequest(request)
         }
 
@@ -755,7 +756,9 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 
         private func validateAndHandle(request: TerminalServiceRequest) throws -> TerminalServiceResponse {
             if let authorizationFailure = authorizeRequest?(request) { return authorizationFailure }
-            if let authToken, authToken != request.authToken { return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.") }
+            if let authToken, authToken != request.authToken {
+                return TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.", errorCode: .unauthorized)
+            }
             return try handleRequest(request)
         }
 
@@ -923,8 +926,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         }
 
         private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool {
-            guard !response.ok else { return false }
-            return response.message.localizedStandardContains("unauthorized")
+            response.closesConnectionAfterDelivery
         }
 
         private static func writeTLSResponse(_ data: Data, ssl: OpaquePointer) throws {

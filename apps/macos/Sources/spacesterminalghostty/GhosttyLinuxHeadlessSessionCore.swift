@@ -160,7 +160,9 @@
         private func startControlServer() throws {
             let server = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
                 Self.runOnMainActorSynchronously {
-                    guard let self else { return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.") }
+                    guard let self else {
+                        return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
+                    }
                     return self.handleControlRequest(request)
                 }
             }
@@ -206,7 +208,9 @@
         }
 
         private func attach(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            guard let client = request.client else { return TerminalControlResponse(ok: false, message: "Missing client payload.") }
+            guard let client = request.client else {
+                return TerminalControlResponse(ok: false, message: "Missing client payload.", errorCode: .invalidArgument)
+            }
             let mode = request.attachmentMode ?? .viewer
             do {
                 // Adopt the attaching client's light/dark appearance before broadcasting, so the
@@ -223,7 +227,9 @@
         }
 
         private func detach(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+            guard let clientID = request.clientID else {
+                return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
+            }
             do {
                 let detachedOwner = activeOwnerClientID() == clientID
                 try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: nowISO8601())
@@ -235,7 +241,9 @@
         }
 
         private func heartbeat(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+            guard let clientID = request.clientID else {
+                return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
+            }
             do {
                 try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
                 return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
@@ -243,7 +251,9 @@
         }
 
         private func takeover(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.") }
+            guard let clientID = request.clientID else {
+                return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
+            }
             do {
                 try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
                 let previousOwner = activeOwnerClientID()
@@ -257,8 +267,12 @@
         }
 
         private func send(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            guard ownerRequestIsCurrent(request) else { return TerminalControlResponse(ok: false, message: "Only the active owner can send input.") }
-            guard var payload = request.inputPayload else { return TerminalControlResponse(ok: false, message: "Missing input payload.") }
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
+            }
+            guard var payload = request.inputPayload else {
+                return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+            }
             if request.appendNewline { payload.append(0x0A) }
             markLocalOwnerCommandInputOutputResyncPending()
             ptyDriver.sendRawBytes(payload)
@@ -266,9 +280,11 @@
         }
 
         private func key(_ request: TerminalControlRequest) -> TerminalControlResponse {
-            guard ownerRequestIsCurrent(request) else { return TerminalControlResponse(ok: false, message: "Only the active owner can send input.") }
+            guard ownerRequestIsCurrent(request) else {
+                return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
+            }
             guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
-                return TerminalControlResponse(ok: false, message: "Unsupported terminal key.")
+                return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
             if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
             ptyDriver.sendRawBytes(Data(bytes))
@@ -277,7 +293,7 @@
 
         private func clearScreen(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard ownerRequestIsCurrent(request) else {
-                return TerminalControlResponse(ok: false, message: "Only the active owner can clear the terminal.")
+                return TerminalControlResponse(ok: false, message: "Only the active owner can clear the terminal.", errorCode: .ownershipRejected)
             }
             writeVTRenderer(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.clearScreen)
@@ -286,10 +302,10 @@
 
         private func resize(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard ownerRequestIsCurrent(request) else {
-                return TerminalControlResponse(ok: false, message: "Only the active owner can resize the terminal.")
+                return TerminalControlResponse(ok: false, message: "Only the active owner can resize the terminal.", errorCode: .ownershipRejected)
             }
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
-                return TerminalControlResponse(ok: false, message: "Missing terminal size.")
+                return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
             terminalSize = (columns, rows)
             _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
@@ -301,7 +317,7 @@
 
         private func scroll(_ request: TerminalControlRequest) -> TerminalControlResponse {
             guard ownerRequestIsCurrent(request) else {
-                return TerminalControlResponse(ok: false, message: "Only the active owner can scroll the terminal.")
+                return TerminalControlResponse(ok: false, message: "Only the active owner can scroll the terminal.", errorCode: .ownershipRejected)
             }
             guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
             let vertical = request.scrollVertical ?? 0
