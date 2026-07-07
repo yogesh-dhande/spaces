@@ -1948,7 +1948,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
         let connection = makeConnection()
         try waitUntilReady(connection)
         try send(requestData: requestData, connection: connection)
-        receiveStream(from: connection, buffered: Data())
+        receiveStream(from: connection, buffered: LineFrameBuffer())
         dispatchMain()
     }
 
@@ -1962,7 +1962,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
     private func waitUntilReady(_ connection: NWConnection) throws {
         let queue = DispatchQueue(label: "spaces.e2e.mobile.request")
         let semaphore = DispatchSemaphore(value: 0)
-        let box = DeviceAPIRequestResultBox()
+        let box = TransportResultBox()
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready: semaphore.signal()
@@ -1981,7 +1981,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
         var payload = requestData
         payload.append(0x0A)
         let semaphore = DispatchSemaphore(value: 0)
-        let box = DeviceAPIRequestResultBox()
+        let box = TransportResultBox()
         connection.send(
             content: payload,
             completion: .contentProcessed { error in
@@ -1996,8 +1996,8 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
 
     private func receiveSingleResponse(from connection: NWConnection) throws -> Data {
         let semaphore = DispatchSemaphore(value: 0)
-        let box = DeviceAPIRequestResultBox()
-        receiveSingleResponse(from: connection, buffered: Data(), box: box, semaphore: semaphore)
+        let box = TransportResultBox()
+        receiveSingleResponse(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore)
         guard semaphore.wait(timeout: .now() + 10) == .success else {
             throw DeviceAPIRequestError.timeout("Timed out waiting for the Device API response.")
         }
@@ -2006,7 +2006,7 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
     }
 
     private func receiveSingleResponse(
-        from connection: NWConnection, buffered data: Data, box: DeviceAPIRequestResultBox, semaphore: DispatchSemaphore
+        from connection: NWConnection, buffered frames: LineFrameBuffer, box: TransportResultBox, semaphore: DispatchSemaphore
     ) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
             if let error {
@@ -2014,44 +2014,43 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
                 semaphore.signal()
                 return
             }
-            var nextData = data
-            if let content { nextData.append(content) }
-            if let newlineIndex = nextData.firstIndex(of: 0x0A) {
-                box.setResponseData(Data(nextData.prefix(upTo: newlineIndex)))
+            var frames = frames
+            if let content { frames.append(content) }
+            if let line = frames.popLine() {
+                box.setResponseData(line)
                 semaphore.signal()
                 return
             }
             if isComplete {
-                guard !nextData.isEmpty else {
+                let remainder = frames.drainRemainder()
+                guard !remainder.isEmpty else {
                     box.setError(DeviceAPIRequestError.emptyResponse)
                     semaphore.signal()
                     return
                 }
-                box.setResponseData(nextData)
+                box.setResponseData(remainder)
                 semaphore.signal()
                 return
             }
-            self.receiveSingleResponse(from: connection, buffered: nextData, box: box, semaphore: semaphore)
+            self.receiveSingleResponse(from: connection, buffered: frames, box: box, semaphore: semaphore)
         }
     }
 
-    private func receiveStream(from connection: NWConnection, buffered data: Data) {
+    private func receiveStream(from connection: NWConnection, buffered frames: LineFrameBuffer) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
             if let error {
                 fputs("\(error)\n", stderr)
                 exit(1)
             }
-            var nextData = data
-            if let content { nextData.append(content) }
-            while let newlineIndex = nextData.firstIndex(of: 0x0A) {
-                let line = Data(nextData.prefix(upTo: newlineIndex))
+            var frames = frames
+            if let content { frames.append(content) }
+            while let line = frames.popLine() {
                 FileHandle.standardOutput.write(line)
                 FileHandle.standardOutput.write(Data([0x0A]))
                 fflush(stdout)
-                nextData.removeSubrange(...newlineIndex)
             }
             if isComplete { exit(0) }
-            self.receiveStream(from: connection, buffered: nextData)
+            self.receiveStream(from: connection, buffered: frames)
         }
     }
 }
@@ -2065,38 +2064,6 @@ private enum DeviceAPIRequestError: LocalizedError {
         case .emptyResponse: "The Device API connection closed before returning a response."
         case .timeout(let message): message
         }
-    }
-}
-
-private final class DeviceAPIRequestResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedError: Error?
-    private var storedResponseData = Data()
-
-    func setError(_ error: Error) {
-        lock.lock()
-        storedError = error
-        lock.unlock()
-    }
-
-    func error() -> Error? {
-        lock.lock()
-        let error = storedError
-        lock.unlock()
-        return error
-    }
-
-    func setResponseData(_ data: Data) {
-        lock.lock()
-        storedResponseData = data
-        lock.unlock()
-    }
-
-    func responseData() -> Data {
-        lock.lock()
-        let data = storedResponseData
-        lock.unlock()
-        return data
     }
 }
 

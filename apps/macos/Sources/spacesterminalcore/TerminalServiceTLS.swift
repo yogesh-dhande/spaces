@@ -951,6 +951,43 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 #endif
 
 #if canImport(Network) && canImport(Security)
+    public enum TerminalServicePinnedTLS {
+        /// Builds client `NWParameters` for a pinned-certificate TLS connection: TLS 1.2–1.3,
+        /// peer authentication required, and a verify block that pins the peer's leaf certificate
+        /// to `expectedFingerprint`. On a pin failure the verify block reports the reason through
+        /// `pinFailure` and then rejects the handshake; callers use `pinFailure` to record the
+        /// error and unblock their connection semaphore.
+        public static func makePinnedTLSParameters(
+            expectedFingerprint: String, pinFailure: @escaping @Sendable (TerminalServiceTLSError) -> Void
+        ) -> NWParameters {
+            let tlsOptions = NWProtocolTLS.Options()
+            let securityOptions = tlsOptions.securityProtocolOptions
+            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
+            sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
+            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
+            sec_protocol_options_set_verify_block(
+                securityOptions,
+                { _, trust, complete in
+                    terminalServiceTLSTrace("client_verify")
+                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                    let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
+                    guard let certificate = chain?.first else {
+                        pinFailure(.peerCertificateUnavailable)
+                        complete(false)
+                        return
+                    }
+                    let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
+                    guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
+                        pinFailure(.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
+                        complete(false)
+                        return
+                    }
+                    complete(true)
+                }, DispatchQueue.global(qos: .userInitiated))
+            return NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+        }
+    }
+
     public final class TerminalServicePinnedTLSRequestSessionClient: @unchecked Sendable {
         private let host: String
         private let port: Int
@@ -959,7 +996,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         private let queue = DispatchQueue(label: "spaces.terminal.service.tls.session")
         private let requestLock = NSLock()
         private var connection: NWConnection?
-        private var readBuffer = Data()
+        private var readBuffer = LineFrameBuffer()
 
         public init(host: String, port: Int, authToken: String? = nil, certificateFingerprint: String, timeout: TimeInterval = 15) throws {
             self.host = host
@@ -1012,7 +1049,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         private func closeLocked() {
             connection?.cancel()
             connection = nil
-            readBuffer.removeAll(keepingCapacity: true)
+            readBuffer = LineFrameBuffer()
         }
 
         private func makeConnection(timeout: TimeInterval) throws -> NWConnection {
@@ -1020,35 +1057,15 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
 
             let ready = DispatchSemaphore(value: 0)
-            let errorBox = TerminalServiceTLSPinBox()
-            let tlsOptions = NWProtocolTLS.Options()
-            let securityOptions = tlsOptions.securityProtocolOptions
-            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-            sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
-            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-            sec_protocol_options_set_verify_block(
-                securityOptions,
-                { _, trust, complete in
-                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                    let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                    guard let certificate = chain?.first else {
-                        errorBox.setError(TerminalServiceTLSError.peerCertificateUnavailable)
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
-                    guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
-                        errorBox.setError(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    complete(true)
-                }, DispatchQueue.global(qos: .userInitiated))
+            let errorBox = TransportResultBox()
+            let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
+                expectedFingerprint: expectedFingerprint,
+                pinFailure: { error in
+                    errorBox.setError(error)
+                    ready.signal()
+                })
 
-            let createdConnection = NWConnection(
-                host: NWEndpoint.Host(host), port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+            let createdConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
             createdConnection.stateUpdateHandler = { [errorBox] state in
                 switch state {
                 case .ready: ready.signal()
@@ -1072,7 +1089,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 
         private func send(_ data: Data, on connection: NWConnection, timeout: TimeInterval) throws {
             let sent = DispatchSemaphore(value: 0)
-            let errorBox = TerminalServiceTLSPinBox()
+            let errorBox = TransportResultBox()
             connection.send(
                 content: data, contentContext: .defaultMessage, isComplete: false,
                 completion: .contentProcessed { [errorBox] error in
@@ -1084,41 +1101,35 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         }
 
         private func readResponseLine(on connection: NWConnection, timeout: TimeInterval) throws -> Data {
-            if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-                let line = Data(readBuffer.prefix(upTo: newlineIndex))
-                readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
-                return line
-            }
+            if let line = readBuffer.popLine() { return line }
             let received = DispatchSemaphore(value: 0)
-            let resultBox = TerminalServiceTLSLineResultBox()
+            let resultBox = TransportResultBox()
             receiveLine(on: connection, resultBox: resultBox, completion: received)
             guard received.wait(timeout: .now() + timeout) == .success else { throw TerminalServiceTLSError.requestTimedOut }
-            return try resultBox.value()
+            if let error = resultBox.error() { throw error }
+            return resultBox.responseData()
         }
 
-        private func receiveLine(on connection: NWConnection, resultBox: TerminalServiceTLSLineResultBox, completion: DispatchSemaphore) {
+        private func receiveLine(on connection: NWConnection, resultBox: TransportResultBox, completion: DispatchSemaphore) {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] content, _, isComplete, error in
                 if let error {
-                    resultBox.set(.failure(TerminalServiceTLSError.connectionFailed(String(describing: error))))
+                    resultBox.setError(TerminalServiceTLSError.connectionFailed(String(describing: error)))
                     completion.signal()
                     return
                 }
                 if let content, !content.isEmpty { readBuffer.append(content) }
-                if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-                    let line = Data(readBuffer.prefix(upTo: newlineIndex))
-                    readBuffer.removeSubrange(readBuffer.startIndex...newlineIndex)
-                    resultBox.set(.success(line))
+                if let line = readBuffer.popLine() {
+                    resultBox.setResponseData(line)
                     completion.signal()
                     return
                 }
                 if isComplete {
                     guard !readBuffer.isEmpty else {
-                        resultBox.set(.failure(TerminalServiceTLSError.connectionFailed("The remote spacesd TLS connection was cancelled.")))
+                        resultBox.setError(TerminalServiceTLSError.connectionFailed("The remote spacesd TLS connection was cancelled."))
                         completion.signal()
                         return
                     }
-                    resultBox.set(.success(readBuffer))
-                    readBuffer.removeAll(keepingCapacity: true)
+                    resultBox.setResponseData(readBuffer.drainRemainder())
                     completion.signal()
                     return
                 }
@@ -1144,7 +1155,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         private let onDisconnect: @Sendable ((any Error)?) -> Void
         private var connection: NWConnection?
         private let queue = DispatchQueue(label: "spaces.terminal.service.tls.stream")
-        private var buffer = Data()
+        private var buffer = LineFrameBuffer()
 
         public init(
             request: TerminalServiceRequest, host: String, port: Int, authToken: String? = nil, certificateFingerprint: String,
@@ -1165,37 +1176,17 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
 
             let ready = DispatchSemaphore(value: 0)
-            let tlsOptions = NWProtocolTLS.Options()
-            let securityOptions = tlsOptions.securityProtocolOptions
-            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-            sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
-            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-            let pinBox = TerminalServiceTLSPinBox()
-            sec_protocol_options_set_verify_block(
-                securityOptions,
-                { _, trust, complete in
-                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                    let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                    guard let certificate = chain?.first else {
-                        pinBox.setError(TerminalServiceTLSError.peerCertificateUnavailable)
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
-                    guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
-                        pinBox.setError(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    complete(true)
-                }, DispatchQueue.global(qos: .userInitiated))
+            let pinBox = TransportResultBox()
+            let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
+                expectedFingerprint: expectedFingerprint,
+                pinFailure: { error in
+                    pinBox.setError(error)
+                    ready.signal()
+                })
 
-            let connection = NWConnection(
-                host: NWEndpoint.Host(host), port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
             let sent = DispatchSemaphore(value: 0)
-            let sendBox = TerminalServiceTLSClientResultBox()
+            let sendBox = TransportResultBox()
             connection.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready: ready.signal()
@@ -1250,9 +1241,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     return
                 }
                 if let content { self.buffer.append(content) }
-                while let newlineIndex = self.buffer.firstIndex(of: 0x0A) {
-                    let line = Data(self.buffer.prefix(upTo: newlineIndex))
-                    self.buffer.removeSubrange(self.buffer.startIndex...newlineIndex)
+                while let line = self.buffer.popLine() {
                     if !line.isEmpty {
                         do { self.onEvent(try GhosttyRemoteSessionStateCodec.decodeLine(line)) } catch {
                             self.onDisconnect(error)
@@ -1281,40 +1270,19 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw TerminalServiceTLSError.invalidPort(port) }
 
             let ready = DispatchSemaphore(value: 0)
-            let tlsOptions = NWProtocolTLS.Options()
-            let securityOptions = tlsOptions.securityProtocolOptions
-            sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)
-            sec_protocol_options_set_max_tls_protocol_version(securityOptions, .TLSv13)
-            sec_protocol_options_set_peer_authentication_required(securityOptions, true)
-            let pinBox = TerminalServiceTLSPinBox()
-            sec_protocol_options_set_verify_block(
-                securityOptions,
-                { _, trust, complete in
-                    terminalServiceTLSTrace("client_verify")
-                    let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-                    let chain = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate]
-                    guard let certificate = chain?.first else {
-                        pinBox.setError(TerminalServiceTLSError.peerCertificateUnavailable)
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    let actualFingerprint = TerminalServiceTLSFingerprint.fingerprint(certificate: certificate)
-                    guard TerminalServiceTLSFingerprint.matches(expectedFingerprint, actualFingerprint) else {
-                        pinBox.setError(TerminalServiceTLSError.certificatePinMismatch(expected: expectedFingerprint, actual: actualFingerprint))
-                        ready.signal()
-                        complete(false)
-                        return
-                    }
-                    complete(true)
-                }, DispatchQueue.global(qos: .userInitiated))
+            let pinBox = TransportResultBox()
+            let parameters = TerminalServicePinnedTLS.makePinnedTLSParameters(
+                expectedFingerprint: expectedFingerprint,
+                pinFailure: { error in
+                    pinBox.setError(error)
+                    ready.signal()
+                })
 
-            let connection = NWConnection(
-                host: NWEndpoint.Host(host), port: nwPort, using: NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options()))
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
             let queue = DispatchQueue(label: "spaces.terminal.service.tls.client")
             let sent = DispatchSemaphore(value: 0)
             let received = DispatchSemaphore(value: 0)
-            let resultBox = TerminalServiceTLSClientResultBox()
+            let resultBox = TransportResultBox()
 
             connection.stateUpdateHandler = { state in
                 terminalServiceTLSTrace("client_state \(state)")
@@ -1366,7 +1334,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         }
 
         private static func receiveTLSResponse(
-            connection: NWConnection, data: Data = Data(), resultBox: TerminalServiceTLSClientResultBox, completion: DispatchSemaphore
+            connection: NWConnection, frames: LineFrameBuffer = LineFrameBuffer(), resultBox: TransportResultBox, completion: DispatchSemaphore
         ) {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
                 if let error {
@@ -1374,86 +1342,23 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     completion.signal()
                     return
                 }
-                var nextData = data
-                if let content { nextData.append(content) }
-                if let newlineIndex = nextData.firstIndex(of: 0x0A) {
-                    resultBox.setResponseData(Data(nextData.prefix(upTo: newlineIndex)))
+                var frames = frames
+                if let content { frames.append(content) }
+                if let line = frames.popLine() {
+                    resultBox.setResponseData(line)
                     completion.signal()
                     return
                 }
                 if isComplete {
-                    resultBox.setResponseData(nextData)
+                    resultBox.setResponseData(frames.drainRemainder())
                     completion.signal()
                     return
                 }
-                receiveTLSResponse(connection: connection, data: nextData, resultBox: resultBox, completion: completion)
+                receiveTLSResponse(connection: connection, frames: frames, resultBox: resultBox, completion: completion)
             }
         }
     }
 
-    private final class TerminalServiceTLSPinBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storedError: (any Error)?
-
-        func setError(_ error: any Error) {
-            lock.lock()
-            storedError = error
-            lock.unlock()
-        }
-
-        func error() -> (any Error)? {
-            lock.lock()
-            defer { lock.unlock() }
-            return storedError
-        }
-    }
-
-    private final class TerminalServiceTLSClientResultBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storedError: (any Error)?
-        private var storedResponseData = Data()
-
-        func setError(_ error: any Error) {
-            lock.lock()
-            storedError = error
-            lock.unlock()
-        }
-
-        func error() -> (any Error)? {
-            lock.lock()
-            defer { lock.unlock() }
-            return storedError
-        }
-
-        func setResponseData(_ data: Data) {
-            lock.lock()
-            storedResponseData = data
-            lock.unlock()
-        }
-
-        func responseData() -> Data {
-            lock.lock()
-            defer { lock.unlock() }
-            return storedResponseData
-        }
-    }
-
-    private final class TerminalServiceTLSLineResultBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storedResult: Result<Data, any Error>?
-
-        func set(_ result: Result<Data, any Error>) {
-            lock.lock()
-            storedResult = result
-            lock.unlock()
-        }
-
-        func value() throws -> Data {
-            lock.lock()
-            defer { lock.unlock() }
-            return try storedResult?.get() ?? Data()
-        }
-    }
 #endif
 
 private func isWildcardHost(_ host: String) -> Bool {
