@@ -467,11 +467,16 @@
         private func startStateStreamServer() throws {
             let stateStreamServer = GhosttyRemoteSessionStateStreamServer(
                 socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue,
-                initialStateProviderWithConnectionState: { [weak self] hasExistingClients in
+                initialStateProvider: { [weak self] in
                     Self.runOnMainActorSynchronously {
+                        // Arm the forced full frame for EVERY subscriber whose unicast initial
+                        // carries no render update, not just the first connection: one-shot
+                        // `.state` reads share this socket, so "no existing clients" is routinely
+                        // false when the real subscriber connects, and without a full-frame
+                        // baseline its deltas can never apply (the pane never becomes renderable).
                         self?.currentRemoteSessionState(
                             reason: TerminalRemoteSessionStateReason.initial, outputByteCount: nil, exportMode: .selfContained,
-                            markNextBroadcastFullWhenMissingRenderUpdate: !hasExistingClients)
+                            markNextBroadcastFullWhenMissingRenderUpdate: true)
                     }
                 })
             try stateStreamServer.start()

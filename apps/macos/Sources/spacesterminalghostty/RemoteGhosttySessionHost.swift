@@ -24,6 +24,7 @@
         private var directStateStreamClient: (any TerminalRemoteStateStreamClient)?
         private var lastSubscriptionAttemptAt: Date?
         private var directStateFetchInFlight = false
+        private var lastRenderUpdateResyncAt: Date?
         private var attachedClient: TerminalClient?
         private var attachedMode: TerminalAttachmentMode = .viewer
         private var lastRequestedViewportSize: (columns: Int, rows: Int)?
@@ -253,7 +254,17 @@
             requestDirectStateFetch()
         }
 
-        private func requestRenderUpdateStateResync() { requestDirectStateFetch() }
+        /// A resync means a frame-bearing payload failed to apply (missing baseline, revision or
+        /// owner-epoch mismatch). Each direct `.state` fetch opens a transient connection on the
+        /// daemon's subscription socket, so an unthrottled retry loop floods the daemon with
+        /// unicast initial exports without converging; space the retries so the stream's own
+        /// recovery (the forced full-frame broadcast) can land in between.
+        private func requestRenderUpdateStateResync() {
+            let now = Date()
+            if let lastRenderUpdateResyncAt, now.timeIntervalSince(lastRenderUpdateResyncAt) < 1 { return }
+            lastRenderUpdateResyncAt = now
+            requestDirectStateFetch()
+        }
 
         private func requestDirectStateFetch() {
             guard let terminalServiceRequestSender else { return }

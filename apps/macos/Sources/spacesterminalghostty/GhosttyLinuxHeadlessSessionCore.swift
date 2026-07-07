@@ -171,7 +171,7 @@
         private func startStateStreamServer() throws {
             let server = GhosttyRemoteSessionStateStreamServer(
                 socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue,
-                initialStateProviderWithConnectionState: { [weak self] hasExistingClients in
+                initialStateProvider: { [weak self] in
                     Self.runOnMainActorSynchronously {
                         self?.makeStatePayload(
                             reason: TerminalRemoteSessionStateReason.initial, exportMode: .selfContained, markNextBroadcastFull: false)

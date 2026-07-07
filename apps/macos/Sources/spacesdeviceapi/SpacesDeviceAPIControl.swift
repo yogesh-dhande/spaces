@@ -397,7 +397,7 @@ public enum SpacesDeviceAPIControlClient {
     public static func statusEnsuringCurrentTerminalService(timeout: TimeInterval = 5) throws -> SpacesDeviceAPIControlResponse {
         try statusEnsuringCurrentTerminalService(
             timeout: timeout, ensureRunning: { try TerminalService.ensureRunning(timeout: $0) },
-            relaunch: { try TerminalService.relaunch(timeout: $0) }, status: { try status(timeout: $0) })
+            relaunch: { try TerminalService.relaunchIfIdle(timeout: $0) }, status: { try status(timeout: $0) })
     }
 
     public static func status(timeout: TimeInterval = 5) throws -> SpacesDeviceAPIControlResponse {
@@ -456,9 +456,17 @@ public enum SpacesDeviceAPIControlClient {
             retryInterval: retryInterval)
     }
 
+    /// Ensures the reachable daemon's Device API listener is current before returning its response, recovering
+    /// from a transient "Device API is not running" state without killing live terminal sessions.
+    ///
+    /// The default `relaunch` closure is the session-preserving `TerminalService.relaunchIfIdle`: it asks the
+    /// daemon to shut down only if idle, so a daemon that is concurrently hosting a session refuses and returns
+    /// `false` instead of being torn down. On `false` the daemon stays up and we keep polling `send` — its
+    /// listener is expected to come up on its own — rather than treating the busy daemon as a failure. This
+    /// closes the client-side check-then-kill TOCTOU that a plain `relaunch` default would otherwise expose.
     static func responseEnsuringCurrentTerminalService(
         timeout: TimeInterval, ensureRunning: (TimeInterval) throws -> Bool = { try TerminalService.ensureRunning(timeout: $0) },
-        relaunch: (TimeInterval) throws -> Bool = { try TerminalService.relaunch(timeout: $0) },
+        relaunch: (TimeInterval) throws -> Bool = { try TerminalService.relaunchIfIdle(timeout: $0) },
         send: (TimeInterval) throws -> SpacesDeviceAPIControlResponse,
         hasLiveTerminalSessions: () throws -> Bool = { !((try? TerminalService.listSessions()) ?? []).isEmpty }, retryInterval: TimeInterval = 0.05
     ) throws -> SpacesDeviceAPIControlResponse {
@@ -471,6 +479,9 @@ public enum SpacesDeviceAPIControlClient {
                 let response = try send(timeout)
                 guard isDeviceAPINotRunningResponse(response), (try? hasLiveTerminalSessions()) != true else { return response }
                 if !relaunchedAfterNotRunning {
+                    // Attempt the session-preserving restart at most once. A busy daemon refuses (`relaunchIfIdle`
+                    // returns false) and is left running; either way we keep polling `send` until the deadline
+                    // instead of hammering shutdownIfIdle on every retry.
                     _ = try relaunch(timeout)
                     deadline = Date().addingTimeInterval(timeout)
                     relaunchedAfterNotRunning = true
@@ -491,6 +502,8 @@ public enum SpacesDeviceAPIControlClient {
         #if os(Linux)
             if let lastEndpointError { throw lastEndpointError }
         #endif
+        // Final session-preserving attempt: if the daemon is busy, `relaunchIfIdle` leaves it running and the
+        // following `send` returns its truthful not-running response instead of us killing a live session.
         _ = try relaunch(timeout)
         return try send(timeout)
     }

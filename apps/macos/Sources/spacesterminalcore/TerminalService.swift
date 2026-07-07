@@ -93,6 +93,46 @@ import Foundation
                 return false
             }
 
+            // Serialize the spawn across processes and threads. Concurrent callers (app startup
+            // threads, the CLI, harnesses) previously each launched a spacesd; the instance-lock
+            // loser exited, but both raced TerminalServiceTLSIdentityStore generation, which can
+            // leave the surviving listener serving a certificate that no longer matches the
+            // fingerprint pairing advertised — after which every pinned Device API connect hangs
+            // to its timeout. One launcher holds the flock; everyone else waits on it while
+            // pinging, then adopts the daemon the winner started.
+            let launchLockPath = socketPath + ".launch.lock"
+            let lockDescriptor = open(launchLockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+            guard lockDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(lockDescriptor) }
+
+            let deadline = Date().addingTimeInterval(timeout)
+            while flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0 {
+                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
+                    if requireWireCompatibility { try assertDaemonWireCompatible(response) }
+                    TerminalPerformance.logMetric(
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0 adopted=1")
+                    return false
+                }
+                guard Date() < deadline else {
+                    TerminalPerformance.logMetric(
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: false, detail: "launched=0 lock_wait_timeout=1")
+                    throw TerminalServiceError.serviceStartupTimedOut(try resolveExecutableURL().path)
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            defer { flock(lockDescriptor, LOCK_UN) }
+
+            // The lock winner may be adopting a daemon another launcher finished starting first.
+            if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
+                if requireWireCompatibility { try assertDaemonWireCompatible(response) }
+                TerminalPerformance.logMetric(
+                    "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                    success: true, detail: "launched=0 adopted=1")
+                return false
+            }
+
             let executableURL = try resolveExecutableURL()
             let process = Process()
             process.executableURL = executableURL
@@ -102,7 +142,6 @@ import Foundation
             process.standardError = FileHandle.nullDevice
             try process.run()
 
-            let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
                 if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
@@ -125,6 +164,38 @@ import Foundation
             if FileManager.default.fileExists(atPath: socketPath) {
                 stopExistingService(socketPath: socketPath, timeout: min(max(timeout / 2, 0.5), 2))
             }
+            try? FileManager.default.removeItem(atPath: socketPath)
+            return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
+        }
+
+        /// Session-preserving replacement for `relaunch`, used by opportunistic ensure-current recovery.
+        ///
+        /// `relaunch` force-kills the daemon and every terminal session it hosts. This instead delegates the
+        /// busy check to the daemon via `.shutdownIfIdle`, which the daemon evaluates atomically: a daemon with
+        /// live sessions refuses (returns `ok == false`) and is left running untouched, so this returns `false`
+        /// without killing or spawning anything and the caller must treat recovery as not done. An idle daemon
+        /// complies, and it is then replaced exactly like `relaunch`.
+        ///
+        /// - Returns: `true` when a fresh daemon is (re)started or was already running; `false` when the daemon
+        ///   refused because it still has live sessions.
+        @discardableResult public static func relaunchIfIdle(timeout: TimeInterval = 5) throws -> Bool {
+            let socketPath = try TerminalServicePaths.socketPath()
+            guard FileManager.default.fileExists(atPath: socketPath) else {
+                return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
+            }
+            let response: TerminalServiceResponse
+            do {
+                response = try TerminalServiceClient.send(
+                    request: TerminalServiceRequest(command: .shutdownIfIdle), socketPath: socketPath, timeout: min(timeout, 1))
+            } catch {
+                // An unresponsive daemon (dead socket file / hung process) can't vouch for its sessions, so fall
+                // back to the forced relaunch today's recovery relies on for genuinely hung daemons.
+                return try relaunch(timeout: timeout)
+            }
+            guard response.ok else { return false }
+            var candidatePIDs = Set<pid_t>()
+            if let servicePID = response.servicePID { candidatePIDs.insert(pid_t(servicePID)) }
+            _ = waitForServiceExit(socketPath: socketPath, candidatePIDs: candidatePIDs, timeout: timeout)
             try? FileManager.default.removeItem(atPath: socketPath)
             return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
         }
@@ -443,6 +514,33 @@ import Foundation
                 _ = try? TerminalServiceClient.send(
                     request: TerminalServiceRequest(command: .shutdown), socketPath: socketPath, timeout: min(timeout, 1))
             }
+            return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
+        }
+
+        /// Session-preserving replacement for `relaunch`, used by opportunistic ensure-current recovery.
+        ///
+        /// `relaunch` sends a forced `.shutdown` that terminates every terminal session the daemon hosts. This
+        /// instead delegates the busy check to the daemon via `.shutdownIfIdle`: a daemon with live sessions
+        /// refuses (returns `ok == false`) and is left running untouched, so this returns `false` without
+        /// stopping anything and the caller must treat recovery as not done. An idle daemon complies and this
+        /// waits for it to come back exactly like `relaunch`.
+        ///
+        /// - Returns: `true` when the daemon is (re)available; `false` when it refused because of live sessions.
+        @discardableResult public static func relaunchIfIdle(timeout: TimeInterval = 5) throws -> Bool {
+            let socketPath = try TerminalServicePaths.socketPath()
+            guard FileManager.default.fileExists(atPath: socketPath) else {
+                return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
+            }
+            let response: TerminalServiceResponse
+            do {
+                response = try TerminalServiceClient.send(
+                    request: TerminalServiceRequest(command: .shutdownIfIdle), socketPath: socketPath, timeout: min(timeout, 1))
+            } catch {
+                // An unresponsive daemon can't vouch for its sessions, so fall back to the forced relaunch that
+                // today's recovery relies on for genuinely hung daemons.
+                return try relaunch(timeout: timeout)
+            }
+            guard response.ok else { return false }
             return try ensureRunning(timeout: timeout, requireWireCompatibility: false)
         }
 

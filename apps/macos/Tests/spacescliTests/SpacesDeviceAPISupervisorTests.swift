@@ -150,6 +150,48 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
         XCTAssertEqual(relaunchCount, 0)
     }
 
+    func testControlResponseKeepsPollingAfterRelaunchRefusesBusyDaemonUntilDeviceAPIRecovers() throws {
+        var relaunchCount = 0
+        var sendCount = 0
+
+        // relaunch returns false to model `relaunchIfIdle` refusing to kill a daemon that is concurrently
+        // hosting a live session. The helper must not treat that as failure: it keeps polling `send`, and the
+        // daemon's Device API listener recovers on its own.
+        let response = try SpacesDeviceAPIControlClient.responseEnsuringCurrentTerminalService(
+            timeout: 1, ensureRunning: { _ in false },
+            relaunch: { _ in
+                relaunchCount += 1
+                return false
+            },
+            send: { _ in
+                sendCount += 1
+                if sendCount < 3 { return SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") }
+                return SpacesDeviceAPIControlResponse(ok: true, message: "Opened device pairing window.")
+            }, hasLiveTerminalSessions: { false }, retryInterval: 0)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(relaunchCount, 1)
+        XCTAssertEqual(sendCount, 3)
+    }
+
+    func testControlResponseReturnsNotRunningWhenRelaunchRefusesBusyDaemonAndDeviceAPINeverRecovers() throws {
+        var relaunchCount = 0
+
+        // A busy daemon keeps refusing relaunch and its Device API never comes up before the deadline. The helper
+        // must surface the truthful not-running response — without throwing and without repeating the relaunch.
+        let response = try SpacesDeviceAPIControlClient.responseEnsuringCurrentTerminalService(
+            timeout: 0.05, ensureRunning: { _ in false },
+            relaunch: { _ in
+                relaunchCount += 1
+                return false
+            }, send: { _ in SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") },
+            hasLiveTerminalSessions: { false }, retryInterval: 0)
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.message, "Device API is not running.")
+        XCTAssertEqual(relaunchCount, 1)
+    }
+
     func testStatusReportsUnavailableWhenConfiguredPortIsBusy() async throws {
         try await withTemporaryProfile { _ in
             let occupiedSocket = try makeOccupiedPortSocket()
