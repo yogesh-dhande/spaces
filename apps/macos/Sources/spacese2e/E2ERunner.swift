@@ -71,23 +71,103 @@ enum E2ELane: String, ExpressibleByArgument {
 
     var scenarios: [String] {
         switch self {
-        case .app: return ["full", "smoke", "window-cycle"]
-        case .terminal:
-            return [
-                "cli", "daemon-idle-shutdown", "edit-shortcuts", "mac-input-latency", "mac-scrollback-latency", "mac-scrollback-partial-latency",
-                "mac-command-output-catchup", "built-in-terminal-profile", "workspace-terminal-open", "workspace-process-terminal",
-                "spaces-terminal-hotkeys", "spaces-terminal-palette", "stress", "soak", "device-api-profile",
-            ]
-        case .mobile:
-            return [
-                "takeover", "codex", "codex-resume-reopen", "roundtrip", "scrollback", "terminal-link-preview", "two-session", "ctrl-c-final-frame",
-                "ctrl-c-final-frame-codex-survivor", "ownership-guard", "ios-input-latency", "ios-scrollback-latency", "demo",
-            ]
+        case .app: return E2EScenarioDescriptor.app.map(\.name)
+        case .terminal: return E2EScenarioDescriptor.terminal.map(\.name)
+        case .mobile: return E2EScenarioDescriptor.mobile.map(\.name)
         case .deviceAPI: return E2EDeviceAPITarget.allCases.map(\.rawValue)
         case .all, .exhaustive: return []
         case .mobileDemo: return ["demo"]
         }
     }
+}
+
+/// Single source of truth for the app/terminal/mobile lanes' scenario names and how each one turns
+/// into a script invocation. `E2ELane.scenarios`, the per-lane dispatch in `E2ERunner`, and
+/// `runExhaustive()`'s latency/UI partitioning all read from these tables instead of re-listing
+/// scenario names, so the lane/scenario/dispatch relationship can't drift between call sites.
+private struct E2EScenarioDescriptor: Sendable {
+    fileprivate let name: String
+    fileprivate let kind: Kind
+
+    /// How a scenario turns into a `runScript` invocation.
+    fileprivate enum Kind: Sendable {
+        /// Runs its own script invocation as soon as it's selected.
+        case script(scriptName: String, arguments: [String], environment: @Sendable (E2ERunner) -> [String: String])
+        /// Batches with sibling terminal-latency scenarios into one `e2e_terminal_latency.sh` call.
+        case terminalLatency
+        /// Batches with sibling mobile UI scenarios into one `e2e_mobile.sh` call; `needsRemote`
+        /// scenarios force the whole batch to run with the remote daemon enabled.
+        case mobileUI(needsRemote: Bool)
+        /// Batches with sibling mobile-latency scenarios into one `e2e_mobile_latency.sh` call.
+        case mobileLatency
+    }
+
+    fileprivate static let app: [E2EScenarioDescriptor] = [
+        E2EScenarioDescriptor(name: "full", kind: .script(scriptName: "e2e_macos_app.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: true) })),
+        E2EScenarioDescriptor(
+            name: "smoke",
+            kind: .script(
+                scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
+            name: "window-cycle",
+            kind: .script(
+                scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: { $0.remoteEnvironment(enabled: false) })),
+    ]
+
+    fileprivate static let terminal: [E2EScenarioDescriptor] = [
+        E2EScenarioDescriptor(
+            name: "cli",
+            kind: .script(scriptName: "e2e_terminal_cli_commands.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
+            name: "daemon-idle-shutdown",
+            kind: .script(scriptName: "e2e_daemon_idle_shutdown.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
+            name: "edit-shortcuts",
+            kind: .script(scriptName: "e2e_terminal_edit_shortcuts.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(name: "mac-input-latency", kind: .terminalLatency),
+        E2EScenarioDescriptor(name: "mac-scrollback-latency", kind: .terminalLatency),
+        E2EScenarioDescriptor(name: "mac-scrollback-partial-latency", kind: .terminalLatency),
+        E2EScenarioDescriptor(name: "mac-command-output-catchup", kind: .terminalLatency),
+        E2EScenarioDescriptor(
+            name: "built-in-terminal-profile",
+            kind: .script(scriptName: "profile_built_in_terminal.sh", arguments: [], environment: { $0.sampleEnvironment(defaultValue: 3) })),
+        E2EScenarioDescriptor(
+            name: "workspace-terminal-open",
+            kind: .script(scriptName: "profile_workspace_terminal_open.sh", arguments: [], environment: { $0.sampleEnvironment(defaultValue: 3) })),
+        E2EScenarioDescriptor(
+            name: "workspace-process-terminal",
+            kind: .script(scriptName: "profile_workspace_process_terminal.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
+            name: "spaces-terminal-hotkeys",
+            kind: .script(scriptName: "profile_spaces_terminal_hotkeys.sh", arguments: [], environment: { $0.sampleEnvironment(defaultValue: 5) })),
+        E2EScenarioDescriptor(
+            name: "spaces-terminal-palette",
+            kind: .script(scriptName: "profile_spaces_terminal_palette.sh", arguments: [], environment: { $0.sampleEnvironment(defaultValue: 5) })),
+        E2EScenarioDescriptor(
+            name: "stress",
+            kind: .script(scriptName: "profile_built_in_terminal_stress.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(name: "soak", kind: .script(scriptName: "soak_built_in_terminal.sh", arguments: [], environment: { $0.soakEnvironment() })),
+        E2EScenarioDescriptor(
+            name: "device-api-profile",
+            kind: .script(scriptName: "profile_device_api.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+    ]
+
+    fileprivate static let mobile: [E2EScenarioDescriptor] = [
+        E2EScenarioDescriptor(name: "takeover", kind: .mobileUI(needsRemote: true)),
+        E2EScenarioDescriptor(name: "codex", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "codex-resume-reopen", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "roundtrip", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "scrollback", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "terminal-link-preview", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "two-session", kind: .mobileUI(needsRemote: true)),
+        E2EScenarioDescriptor(name: "ctrl-c-final-frame", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "ctrl-c-final-frame-codex-survivor", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "ownership-guard", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "ios-input-latency", kind: .mobileLatency),
+        E2EScenarioDescriptor(name: "ios-scrollback-latency", kind: .mobileLatency),
+        E2EScenarioDescriptor(
+            name: "demo", kind: .script(scriptName: "run_mobile_terminal_demo.sh", arguments: [], environment: { $0.mobileDemoEnvironment() })),
+    ]
 }
 
 enum E2EDeviceAPITarget: String, CaseIterable, ExpressibleByArgument {
@@ -170,16 +250,23 @@ private struct E2ERunner {
         try runProcess(executable: ghosttySetup, arguments: [], environment: [:])
     }
 
+    /// Runs a scenario whose descriptor kind is `.script`; the terminal-latency and mobile
+    /// batching kinds are dispatched by their owning lane function instead.
+    private mutating func runDescriptorScript(_ descriptor: E2EScenarioDescriptor) throws {
+        guard case .script(let scriptName, let arguments, let environment) = descriptor.kind else {
+            throw E2ERunnerError("Scenario \(descriptor.name) does not run as a standalone script")
+        }
+        try runScript(scriptName, arguments: arguments, environment: environment(self))
+    }
+
     private mutating func runApp() throws { try runApp(selected: command.scenario.isEmpty ? ["full"] : command.scenario) }
 
     private mutating func runApp(selected: [String]) throws {
         for scenario in selected {
-            switch scenario {
-            case "full": try runScript("e2e_macos_app.sh", environment: remoteEnvironment(enabled: true))
-            case "smoke", "window-cycle":
-                try runScript("e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: remoteEnvironment(enabled: false))
-            default: throw E2ERunnerError("Unknown app scenario: \(scenario)")
+            guard let descriptor = E2EScenarioDescriptor.app.first(where: { $0.name == scenario }) else {
+                throw E2ERunnerError("Unknown app scenario: \(scenario)")
             }
+            try runDescriptorScript(descriptor)
         }
     }
 
@@ -191,23 +278,12 @@ private struct E2ERunner {
         var latencyScenarios: [String] = []
 
         for scenario in selected {
-            switch scenario {
-            case "cli": try runScript("e2e_terminal_cli_commands.sh", environment: remoteEnvironment(enabled: false))
-            case "daemon-idle-shutdown": try runScript("e2e_daemon_idle_shutdown.sh", environment: remoteEnvironment(enabled: false))
-            case "edit-shortcuts": try runScript("e2e_terminal_edit_shortcuts.sh", environment: remoteEnvironment(enabled: false))
-            case "mac-input-latency", "mac-scrollback-latency", "mac-scrollback-partial-latency", "mac-command-output-catchup":
-                latencyScenarios.append(scenario)
-            case "built-in-terminal-profile": try runScript("profile_built_in_terminal.sh", environment: sampleEnvironment(defaultValue: 3))
-            case "workspace-terminal-open": try runScript("profile_workspace_terminal_open.sh", environment: sampleEnvironment(defaultValue: 3))
-            case "workspace-process-terminal": try runScript("profile_workspace_process_terminal.sh", environment: remoteEnvironment(enabled: false))
-            case "spaces-terminal-hotkeys": try runScript("profile_spaces_terminal_hotkeys.sh", environment: sampleEnvironment(defaultValue: 5))
-            case "spaces-terminal-palette": try runScript("profile_spaces_terminal_palette.sh", environment: sampleEnvironment(defaultValue: 5))
-            case "stress": try runScript("profile_built_in_terminal_stress.sh", environment: remoteEnvironment(enabled: false))
-            case "soak":
-                var environment = remoteEnvironment(enabled: false)
-                if let durationSeconds = command.durationSeconds { environment["DURATION_SECONDS"] = String(durationSeconds) }
-                try runScript("soak_built_in_terminal.sh", environment: environment)
-            case "device-api-profile": try runScript("profile_device_api.sh", environment: remoteEnvironment(enabled: false))
+            guard let descriptor = E2EScenarioDescriptor.terminal.first(where: { $0.name == scenario }) else {
+                throw E2ERunnerError("Unknown terminal scenario: \(scenario)")
+            }
+            switch descriptor.kind {
+            case .terminalLatency: latencyScenarios.append(scenario)
+            case .script: try runDescriptorScript(descriptor)
             default: throw E2ERunnerError("Unknown terminal scenario: \(scenario)")
             }
         }
@@ -229,14 +305,16 @@ private struct E2ERunner {
         var uiNeedsRemote = false
 
         for scenario in selected {
-            switch scenario {
-            case "ios-input-latency", "ios-scrollback-latency": latencyScenarios.append(scenario)
-            case "demo": try runScript("run_mobile_terminal_demo.sh", environment: mobileDemoEnvironment())
-            case "takeover", "codex", "codex-resume-reopen", "roundtrip", "scrollback", "terminal-link-preview", "two-session", "ctrl-c-final-frame",
-                "ctrl-c-final-frame-codex-survivor", "ownership-guard":
+            guard let descriptor = E2EScenarioDescriptor.mobile.first(where: { $0.name == scenario }) else {
+                throw E2ERunnerError("Unknown mobile scenario: \(scenario)")
+            }
+            switch descriptor.kind {
+            case .mobileLatency: latencyScenarios.append(scenario)
+            case .script: try runDescriptorScript(descriptor)
+            case .mobileUI(let needsRemote):
                 uiScenarios.append(scenario)
-                if scenario == "takeover" || scenario == "two-session" { uiNeedsRemote = true }
-            default: throw E2ERunnerError("Unknown mobile scenario: \(scenario)")
+                if needsRemote { uiNeedsRemote = true }
+            case .terminalLatency: throw E2ERunnerError("Unknown mobile scenario: \(scenario)")
             }
         }
 
@@ -272,10 +350,13 @@ private struct E2ERunner {
     }
 
     private mutating func runAll() throws {
-        try runScript("e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: remoteEnvironment(enabled: false))
-        try runScript("e2e_terminal_cli_commands.sh", environment: remoteEnvironment(enabled: false))
-        try runScript("e2e_terminal_edit_shortcuts.sh", environment: remoteEnvironment(enabled: false))
+        try runApp(selected: ["smoke"])
+        try runTerminal(selected: ["cli"])
+        try runTerminal(selected: ["edit-shortcuts"])
 
+        // Unlike runTerminal/runMobile's batched dispatch, the "all" lane's latency and mobile
+        // steps intentionally don't thread --keep-root through to the underlying scripts, so
+        // these two stay hand-written rather than going through the shared batching helpers.
         var terminalLatencyArguments = ["--scenario", "mac-input-latency"]
         if let samples = command.samples { terminalLatencyArguments += ["--samples", String(samples)] }
         try runScript("e2e_terminal_latency.sh", arguments: terminalLatencyArguments, environment: remoteEnvironment(enabled: false))
@@ -286,9 +367,14 @@ private struct E2ERunner {
     private mutating func runExhaustive() throws {
         try runApp(selected: ["full"])
         try runTerminal(selected: E2ELane.terminal.scenarios)
-        let mobileLatencyScenarios = ["ios-input-latency", "ios-scrollback-latency"]
-        let mobileNonLatencyScenarios = E2ELane.mobile.scenarios.filter { scenario in !mobileLatencyScenarios.contains(scenario) && scenario != "demo"
-        }
+        let mobileNonLatencyScenarios = E2EScenarioDescriptor.mobile.filter {
+            if case .mobileUI = $0.kind { return true }
+            return false
+        }.map(\.name)
+        let mobileLatencyScenarios = E2EScenarioDescriptor.mobile.filter {
+            if case .mobileLatency = $0.kind { return true }
+            return false
+        }.map(\.name)
         try runMobile(selected: mobileNonLatencyScenarios, networkProfile: .local)
         try runMobile(selected: mobileLatencyScenarios, networkProfile: .local)
         try runMobile(selected: mobileLatencyScenarios, networkProfile: .iosConstrained)
@@ -296,7 +382,7 @@ private struct E2ERunner {
         try runDeviceAPI(.profile)
     }
 
-    private func sampleEnvironment(defaultValue: Int) -> [String: String] {
+    fileprivate func sampleEnvironment(defaultValue: Int) -> [String: String] {
         var environment = remoteEnvironment(enabled: false)
         environment["ITERATIONS"] = String(command.samples ?? defaultValue)
         return environment
@@ -308,7 +394,7 @@ private struct E2ERunner {
         return environment
     }
 
-    private func mobileDemoEnvironment() -> [String: String] {
+    fileprivate func mobileDemoEnvironment() -> [String: String] {
         var environment = remoteEnvironment(enabled: true)
         environment["SPACES_MOBILE_DEMO_BUILD_MACOS"] = "0"
         let inheritedPort = ProcessInfo.processInfo.environment["SPACES_MOBILE_DEMO_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -316,7 +402,15 @@ private struct E2ERunner {
         return environment
     }
 
-    private func remoteEnvironment(enabled: Bool) -> [String: String] {
+    /// `soak`'s only special case beyond the shared remote-disabled environment: an optional
+    /// operator-provided run length threaded into the script's environment.
+    fileprivate func soakEnvironment() -> [String: String] {
+        var environment = remoteEnvironment(enabled: false)
+        if let durationSeconds = command.durationSeconds { environment["DURATION_SECONDS"] = String(durationSeconds) }
+        return environment
+    }
+
+    fileprivate func remoteEnvironment(enabled: Bool) -> [String: String] {
         var environment = sharedEnvironment
         environment["SPACES_E2E_RUN_REMOTE"] = enabled ? "1" : "0"
         if !enabled { environment["SPACES_MOBILE_LATENCY_TERMINAL_TARGETS"] = "local" }
