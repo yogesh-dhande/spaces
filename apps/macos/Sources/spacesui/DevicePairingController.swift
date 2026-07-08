@@ -460,7 +460,7 @@ import workspacecore
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = Theme.border.cgColor
+        bindAppearanceReactiveLayer(divider) { view in view.layer?.backgroundColor = Theme.border.cgColor }
         container.addSubview(divider)
         NSLayoutConstraint.activate([
             container.heightAnchor.constraint(equalToConstant: 1),
@@ -517,8 +517,9 @@ import workspacecore
         Task { [weak self] in
             do {
                 let appVersion = AppVersion.short
+                let profile = try? SpacesProfile.current()
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: appVersion)
+                    try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: appVersion, profile: profile)
                 }.value
                 let expiresAt = result.expiresAt.flatMap { Self.iso8601Formatter.date(from: $0) } ?? Date().addingTimeInterval(300)
                 self?.currentDevicePairingWindow = ClientDevicePairingWindow(
@@ -543,13 +544,14 @@ import workspacecore
         Task { [weak self] in
             do {
                 let sshPort = try Self.parsedSSHPort(sshPortText)
-                let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID()
+                let profile = try? SpacesProfile.current()
+                let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID(profile: profile)
                 let result = try await Task.detached(priority: .userInitiated) {
                     try SpacesDevicePairingClient.pairRemoteDevice(
                         SpacesRemoteDevicePairingRequest(
                             sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
                             clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion))
+                            clientAppVersion: appVersion, profile: profile))
                 }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()

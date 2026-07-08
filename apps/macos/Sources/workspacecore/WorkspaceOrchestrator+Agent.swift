@@ -81,8 +81,7 @@ extension WorkspaceOrchestrator {
         try store.upsert(
             window: WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: nextDetail, targetURL: window.targetURL,
-                terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID, role: window.role,
-                orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                terminalTrackingID: window.terminalTrackingID, role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
         return true
     }
 
@@ -221,9 +220,7 @@ extension WorkspaceOrchestrator {
         guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return false }
         guard let workspaceID = try remoteAgentSignalWorkspaceID(event) else { return false }
         let terminalTrackingID = sanitizedFocusName(event.terminalTrackingID) ?? sanitizedFocusName(event.sessionID)
-        let terminalNativeID = sanitizedFocusName(event.terminalNativeID) ?? terminalTrackingID
-        let codexThreadID = sanitizedFocusName(event.codexThreadID)
-        let existingAgent = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID)
+        let existingAgent = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID)
         let signalLabel = sanitizedFocusName(event.label) ?? sanitizedFocusName(existingAgent?.label)
         let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && signalLabel != nil)
         guard canRecordSignal else { return true }
@@ -232,18 +229,15 @@ extension WorkspaceOrchestrator {
         case .`init`:
             try registerAgentWindow(
                 workspaceID: workspaceID, provider: provider, label: signalLabel, terminalTrackingID: terminalTrackingID,
-                terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, status: existingAgent?.status ?? .idle, eventType: type.rawValue,
-                eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
+                status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "remote_spaces_signal",
+                environmentKeys: event.environmentKeys)
         case .working, .blocked, .done:
             try updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID,
-                terminalNativeID: terminalNativeID, label: signalLabel, status: type.status, eventType: type.rawValue,
-                eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
+                workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID, label: signalLabel, status: type.status,
+                eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
         case .exit:
             guard let existingAgent else { return true }
-            try handleAgentExit(
-                existingAgent, terminalNativeID: terminalNativeID, eventType: type.rawValue, eventSource: "remote_spaces_signal",
-                environmentKeys: event.environmentKeys)
+            try handleAgentExit(existingAgent, eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
         }
         return true
     }
@@ -253,8 +247,7 @@ extension WorkspaceOrchestrator {
         if let workspacePath = sanitizedFocusName(event.workspacePath), let workspace = try store.workspace(dir: workspacePath) {
             return workspace.id
         }
-        let candidateSessionIDs = Set(
-            [event.terminalNativeID, event.terminalTrackingID, event.sessionID].compactMap { normalizedTerminalSessionID($0) })
+        let candidateSessionIDs = Set([event.terminalTrackingID, event.sessionID].compactMap { normalizedTerminalSessionID($0) })
         guard !candidateSessionIDs.isEmpty else { return nil }
         for project in try store.projects() {
             for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
@@ -269,26 +262,15 @@ extension WorkspaceOrchestrator {
         return nil
     }
 
-    func matchingAgentWindow(workspaceID: String, terminalTrackingID: String?, codexThreadID: String?) throws -> AgentWindowRecord? {
+    func matchingAgentWindow(workspaceID: String, terminalTrackingID: String?, sessionKey: String? = nil) throws -> AgentWindowRecord? {
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         return terminalTrackingID.flatMap { sessionID in allAgentWindows.first(where: { $0.terminalTrackingID == sessionID }) }
-            ?? allAgentWindows.first(where: { $0.codexThreadID == codexThreadID && codexThreadID != nil })
+            ?? allAgentWindows.first(where: { $0.sessionKey == sessionKey && sessionKey != nil })
     }
 
     func agentTerminalTargetID(terminalTrackingID: String?) -> String? {
         if let sessionID = terminalTrackingID, !sessionID.isEmpty { return "terminal:\(sessionID)" }
         return nil
-    }
-
-    func matchedWorkspaceProcessForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?) throws -> RunningProcessRecord? {
-        let processes = try store.runningProcesses(workspaceID: workspaceID)
-        let targetID = agentTerminalTargetID(terminalTrackingID: terminalTrackingID)
-        if let targetID, let matched = processes.first(where: { $0.terminalTrackingKey == targetID }) { return matched }
-        return processes.first(where: { process in
-            guard provider == .spaces, process.terminalApp == TerminalHost.spaces.appName else { return false }
-            if let terminalTrackingID, !terminalTrackingID.isEmpty, process.terminalTrackingID == terminalTrackingID { return true }
-            return false
-        })
     }
 
     func matchedTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?) throws -> WindowRecord? {
@@ -313,28 +295,25 @@ extension WorkspaceOrchestrator {
     /// agent record is upserted (`ensureRuntimeTargetForAgentWindow`). Creating it eagerly here
     /// would make the agent's own not-yet-claimed window collide with its focus label and force a
     /// spurious "-2" suffix, so when no row matches yet this returns nil and lets upsert create it.
-    func ensureTrackedWindowExistsForAgent(
-        workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String?
-    ) throws -> WindowRecord? {
+    func ensureTrackedWindowExistsForAgent(workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?) throws
+        -> WindowRecord?
+    {
         _ = label
         guard
             let trackedWindow = try matchedTrackedWindowForAgent(workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID)
         else { return nil }
         let resolvedSessionID = terminalTrackingID ?? trackedWindow.terminalTrackingID
-        let resolvedNativeID = terminalNativeID ?? trackedWindow.terminalNativeID
-        guard resolvedSessionID != trackedWindow.terminalTrackingID || resolvedNativeID != trackedWindow.terminalNativeID else {
-            return trackedWindow
-        }
+        guard resolvedSessionID != trackedWindow.terminalTrackingID else { return trackedWindow }
         let updated = WindowRecord(
             id: trackedWindow.id, workspaceID: trackedWindow.workspaceID, app: trackedWindow.app, name: trackedWindow.name,
-            detail: trackedWindow.detail, targetURL: trackedWindow.targetURL, terminalTrackingID: resolvedSessionID,
-            terminalNativeID: resolvedNativeID, role: trackedWindow.role, orderIndex: trackedWindow.orderIndex, lastSeenAt: nowISO8601())
+            detail: trackedWindow.detail, targetURL: trackedWindow.targetURL, terminalTrackingID: resolvedSessionID, role: trackedWindow.role,
+            orderIndex: trackedWindow.orderIndex, lastSeenAt: nowISO8601())
         try store.upsert(window: updated)
         return updated
     }
 
     func removeStaleAgentWindow(_ record: AgentWindowRecord) throws {
-        terminateBuiltInTerminalSession(record.terminalNativeID ?? record.terminalTrackingID)
+        terminateBuiltInTerminalSession(record.terminalTrackingID)
         try store.deleteAgentWindow(id: record.id)
         try removeAdHocTrackedWindowForAgent(
             workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
@@ -351,8 +330,7 @@ extension WorkspaceOrchestrator {
     }
 
     func agentSessionEventMessage(
-        provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String?, codexThreadID: String?,
-        environmentKeys: [String]? = nil
+        provider: AgentProvider, label: String?, terminalTrackingID: String?, sessionKey: String?, environmentKeys: [String]? = nil
     ) -> String {
         func normalizedValue(_ value: String?) -> String {
             guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return "<nil>" }
@@ -362,18 +340,15 @@ extension WorkspaceOrchestrator {
         let normalizedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines)
         let labelValue = (normalizedLabel?.isEmpty == false ? normalizedLabel : nil) ?? "<nil>"
         let trackingValue = normalizedValue(terminalTrackingID)
-        let nativeValue = normalizedValue(terminalNativeID)
-        let threadValue = normalizedValue(codexThreadID)
+        let sessionKeyValue = normalizedValue(sessionKey)
         let envKeysValue = environmentKeys.map { $0.isEmpty ? "<none>" : $0.joined(separator: ",") } ?? "<nil>"
         return
-            "provider=\(provider.rawValue) label=\(labelValue) tracking_id=\(trackingValue) native_id=\(nativeValue) codex_thread_id=\(threadValue) env_keys=\(envKeysValue)"
+            "provider=\(provider.rawValue) label=\(labelValue) tracking_id=\(trackingValue) session_key=\(sessionKeyValue) env_keys=\(envKeysValue)"
     }
 
     func appendAgentSessionEvent(agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String) {
-        let runtimeTargetID = try? store.agentSessionRuntimeTargetID(id: agentSessionID)
         try? store.appendAgentSessionEvent(
-            agentSessionID: agentSessionID, eventType: eventType, source: source, message: message, runtimeTargetID: runtimeTargetID,
-            createdAt: createdAt)
+            agentSessionID: agentSessionID, eventType: eventType, source: source, message: message, createdAt: createdAt)
     }
 
     func spacesAgentRecordIsConfiguredLauncher(workspaceID: String, record: AgentWindowRecord) throws -> Bool {
@@ -389,19 +364,15 @@ extension WorkspaceOrchestrator {
     }
 
     @discardableResult public func registerAgentWindow(
-        workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, terminalNativeID: String? = nil,
-        codexThreadID: String? = nil, status: AgentWindowStatus = .idle, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil,
-        eventType: String = "register", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
+        workspaceID: String, provider: AgentProvider, label: String? = nil, terminalTrackingID: String? = nil, sessionKey: String? = nil,
+        status: AgentWindowStatus = .idle, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil, eventType: String = "register",
+        eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let matchedProcess = try matchedWorkspaceProcessForAgent(workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID)
-        let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
-            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID)
-        let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
-        if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID) {
+            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
+        if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(
                 workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
@@ -410,9 +381,8 @@ extension WorkspaceOrchestrator {
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
-                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
-                    trackingID: terminalTrackingID ?? finalTerminalNativeID ?? existing.terminalTrackingID),
-                sessionKey: codexThreadID ?? existing.codexThreadID, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
+                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
+                sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
                 claimedLauncherName: resolvedClaimedLauncherName, status: status, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
@@ -422,17 +392,15 @@ extension WorkspaceOrchestrator {
             appendAgentSessionEvent(
                 agentSessionID: updated.id, eventType: eventType, source: eventSource,
                 message: agentSessionEventMessage(
-                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
-                    terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, environmentKeys: environmentKeys),
-                createdAt: now)
+                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
+                    environmentKeys: environmentKeys), createdAt: now)
             return updated
         }
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspaceID, preferredLabel: label, claimedLauncherName: claimedLauncherName)
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
-            terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID ?? finalTerminalNativeID),
-            sessionKey: codexThreadID, claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: status, createdAt: now,
-            updatedAt: now)
+            terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID), sessionKey: sessionKey,
+            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: status, createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
@@ -440,25 +408,21 @@ extension WorkspaceOrchestrator {
         appendAgentSessionEvent(
             agentSessionID: record.id, eventType: eventType, source: eventSource,
             message: agentSessionEventMessage(
-                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID,
-                terminalNativeID: record.terminalNativeID, codexThreadID: record.codexThreadID, environmentKeys: environmentKeys), createdAt: now)
+                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey,
+                environmentKeys: environmentKeys), createdAt: now)
         return record
     }
 
     @discardableResult public func updateAgentWindowStatus(
-        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, codexThreadID: String? = nil,
-        terminalNativeID: String? = nil, label: String? = nil, status: AgentWindowStatus, claimedLauncherName: String? = nil,
-        eventType: String? = nil, eventSource: String = "orchestrator", environmentKeys: [String]? = nil
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String? = nil, sessionKey: String? = nil, label: String? = nil,
+        status: AgentWindowStatus, claimedLauncherName: String? = nil, eventType: String? = nil, eventSource: String = "orchestrator",
+        environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let matchedProcess = try matchedWorkspaceProcessForAgent(workspaceID: workspaceID, provider: provider, terminalTrackingID: terminalTrackingID)
-        let resolvedTerminalNativeID = matchedProcess?.terminalNativeID ?? terminalNativeID
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
-            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID)
-        let finalTerminalNativeID = trackedWindow?.terminalNativeID ?? resolvedTerminalNativeID
-        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, codexThreadID: codexThreadID)
+            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
+        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey)
         if let existing {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -468,9 +432,8 @@ extension WorkspaceOrchestrator {
                 id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
                 runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
                 terminalTarget: TerminalTargetRecord(
-                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
-                    trackingID: terminalTrackingID ?? finalTerminalNativeID ?? existing.terminalTrackingID),
-                sessionKey: codexThreadID ?? existing.codexThreadID, claimedLauncherID: existing.claimedLauncherID,
+                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
+                sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
                 claimedLauncherName: resolvedClaimedLauncherName, status: status, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
@@ -480,40 +443,35 @@ extension WorkspaceOrchestrator {
             appendAgentSessionEvent(
                 agentSessionID: updated.id, eventType: eventType ?? status.rawValue, source: eventSource,
                 message: agentSessionEventMessage(
-                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
-                    terminalNativeID: updated.terminalNativeID, codexThreadID: updated.codexThreadID, environmentKeys: environmentKeys),
-                createdAt: now)
+                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
+                    environmentKeys: environmentKeys), createdAt: now)
             return updated
         }
         return try registerAgentWindow(
-            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: resolvedTerminalNativeID, codexThreadID: codexThreadID, status: status, claimedLauncherName: claimedLauncherName,
-            eventType: eventType ?? status.rawValue, eventSource: eventSource, environmentKeys: environmentKeys)
+            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey,
+            status: status, claimedLauncherName: claimedLauncherName, eventType: eventType ?? status.rawValue, eventSource: eventSource,
+            environmentKeys: environmentKeys)
     }
 
     @discardableResult public func handleAgentExit(
-        _ existing: AgentWindowRecord, terminalNativeID: String? = nil, eventType: String = "exit", eventSource: String = "orchestrator",
-        environmentKeys: [String]? = nil
+        _ existing: AgentWindowRecord, eventType: String = "exit", eventSource: String = "orchestrator", environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord? {
         if try spacesAgentRecordIsConfiguredLauncher(workspaceID: existing.workspaceID, record: existing) {
             return try recordAgentExitStatus(
-                existing, status: .done, terminalNativeID: terminalNativeID, eventType: eventType, eventSource: eventSource,
-                environmentKeys: environmentKeys)
+                existing, status: .done, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
         }
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
         if existingSessionIsLive {
             return try recordAgentExitStatus(
-                existing, status: .idle, terminalNativeID: terminalNativeID, eventType: eventType, eventSource: eventSource,
-                environmentKeys: environmentKeys)
+                existing, status: .idle, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
         }
         appendAgentSessionEvent(
             agentSessionID: existing.id, eventType: eventType, source: eventSource,
             message: agentSessionEventMessage(
-                provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID,
-                terminalNativeID: terminalNativeID ?? existing.terminalNativeID, codexThreadID: existing.codexThreadID,
+                provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID, sessionKey: existing.sessionKey,
                 environmentKeys: environmentKeys), createdAt: nowISO8601())
-        terminateBuiltInTerminalSession(existing.terminalNativeID ?? existing.terminalTrackingID)
+        terminateBuiltInTerminalSession(existing.terminalTrackingID)
         try store.deleteAgentWindow(id: existing.id)
         try removeAdHocTrackedWindowForAgent(
             workspaceID: existing.workspaceID, provider: existing.provider, terminalTrackingID: existing.terminalTrackingID)
@@ -521,8 +479,7 @@ extension WorkspaceOrchestrator {
     }
 
     func recordAgentExitStatus(
-        _ existing: AgentWindowRecord, status: AgentWindowStatus, terminalNativeID: String?, eventType: String, eventSource: String,
-        environmentKeys: [String]?
+        _ existing: AgentWindowRecord, status: AgentWindowStatus, eventType: String, eventSource: String, environmentKeys: [String]?
     ) throws -> AgentWindowRecord {
         let now = nowISO8601()
         let terminalTarget: TerminalTargetRecord? =
@@ -538,9 +495,8 @@ extension WorkspaceOrchestrator {
         appendAgentSessionEvent(
             agentSessionID: updated.id, eventType: eventType, source: eventSource,
             message: agentSessionEventMessage(
-                provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID,
-                terminalNativeID: terminalNativeID ?? updated.terminalNativeID, codexThreadID: updated.codexThreadID, environmentKeys: environmentKeys
-            ), createdAt: now)
+                provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
+                environmentKeys: environmentKeys), createdAt: now)
         return updated
     }
 
@@ -565,12 +521,12 @@ extension WorkspaceOrchestrator {
     }
 
     func stopCodingAgentRecord(_ record: AgentWindowRecord) throws {
-        if let sessionID = record.terminalNativeID ?? record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
+        if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
         appendAgentSessionEvent(
             agentSessionID: record.id, eventType: "stop", source: "orchestrator",
             message: agentSessionEventMessage(
-                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID,
-                terminalNativeID: record.terminalNativeID, codexThreadID: record.codexThreadID), createdAt: nowISO8601())
+                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey),
+            createdAt: nowISO8601())
         try store.deleteAgentWindow(id: record.id)
         try removeAdHocTrackedWindowForAgent(
             workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
@@ -650,10 +606,10 @@ extension WorkspaceOrchestrator {
         }
 
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        )
         var launchEnv = terminalLaunchEnvironment(base: env, includeInheritedPath: false, includeProfileEnvironment: true)
         _ = background
         let agentSessionID = UUID().uuidString
@@ -666,8 +622,8 @@ extension WorkspaceOrchestrator {
             title: launcher.name, workingDirectory: workspace.dir, command: sessionCommand, showMode: .owner, backend: .ghosttyEmbedded,
             readinessPolicy: .sessionReady, sessionID: agentSessionID, workspaceID: workspace.id, kind: .agent)
         let record = try registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: launcher.name, terminalTrackingID: session.sessionID,
-            terminalNativeID: session.sessionID, status: .idle, claimedLauncherID: launcher.id, claimedLauncherName: launcher.name)
+            workspaceID: workspace.id, provider: .spaces, label: launcher.name, terminalTrackingID: session.sessionID, status: .idle,
+            claimedLauncherID: launcher.id, claimedLauncherName: launcher.name)
         try markWorkspaceRunningIfNeeded(workspace)
         return record
     }

@@ -1,6 +1,7 @@
 import XCTest
 import spacesdeviceapi
 import spacesdevicecore
+import spacesterminalcore
 
 @testable import spacesclientcore
 
@@ -84,7 +85,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
                 SpacesDeviceWorkspaceSummary(
                     id: "workspace-hidden", projectID: "project-1", projectName: "Project", branch: "feature/hidden", baseBranch: "main",
                     dir: "/device/project-hidden", isRunning: false, isArchived: false, isHidden: true, isDefault: false, sessionCount: 0),
-            ], sessions: [])
+            ], sessions: [], daemonStatus: Self.status())
 
         let model = SpacesDeviceOverviewViewModel(overview: overview)
 
@@ -248,7 +249,13 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
     }
 
     private static func emptyOverviewResponse() -> SpacesDeviceAPIResponse {
-        SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [])))
+        SpacesDeviceAPIResponse(
+            ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: status())))
+    }
+
+    private static func status() -> TerminalServiceDaemonStatus {
+        TerminalServiceDaemonStatus(
+            version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
     }
 }
 

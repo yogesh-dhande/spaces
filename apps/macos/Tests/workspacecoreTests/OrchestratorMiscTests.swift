@@ -226,18 +226,6 @@ extension OrchestratorTests {
         XCTAssertEqual(all.filter { !$0.isDefault }.map(\.id), [workspace.id])
     }
 
-    func testAlertsDismissedAttentionItemIDsClearsWhenEmpty() throws {
-        let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
-
-        try orchestrator.setAlertsDismissedAttentionItemIDs(Set(["attention-1"]))
-        XCTAssertEqual(try orchestrator.alertsDismissedAttentionItemIDs(), Set(["attention-1"]))
-
-        try orchestrator.setAlertsDismissedAttentionItemIDs([])
-        XCTAssertTrue(try orchestrator.alertsDismissedAttentionItemIDs().isEmpty)
-        XCTAssertNil(try store.setting(key: SettingsKey.alertsDismissedAttentionItems))
-    }
-
     // Tests workspace metadata update can change title, branch, directory name, and notes by arranging representative inputs and asserting the expected result.
     func testUpdateWorkspaceMetadataUpdatesTitleBranchDirectoryNameAndNotes() throws {
         let repo = try makeTempGitRepo(name: "workspace-update-metadata")
@@ -415,7 +403,6 @@ extension OrchestratorTests {
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
-        XCTAssertEqual(runningProcess.terminalTrackingID, runningProcess.terminalNativeID)
 
         let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(window.app, TerminalHost.spaces.appName)

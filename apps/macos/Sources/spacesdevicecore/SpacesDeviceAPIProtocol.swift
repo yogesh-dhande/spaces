@@ -624,34 +624,17 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     /// Frozen-core handshake (wire protocol version + restart-impact counts) for the daemon that
     /// produced this overview. Carried inline so a compatible client reads the compatibility verdict
     /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
-    /// every refresh. `nil` only when the daemon predates this field; clients fall back to the
-    /// standalone frozen-core `daemonStatus` command (which is also the path used when an
-    /// incompatible daemon's overview cannot decode at all).
-    public let daemonStatus: TerminalServiceDaemonStatus?
+    /// every refresh.
+    public let daemonStatus: TerminalServiceDaemonStatus
 
     public init(
         projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
-        daemonStatus: TerminalServiceDaemonStatus? = nil
+        daemonStatus: TerminalServiceDaemonStatus
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
         self.daemonStatus = daemonStatus
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case projects
-        case workspaces
-        case sessions
-        case daemonStatus
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        projects = try container.decodeIfPresent([SpacesDeviceProjectSummary].self, forKey: .projects) ?? []
-        workspaces = try container.decodeIfPresent([SpacesDeviceWorkspaceSummary].self, forKey: .workspaces) ?? []
-        sessions = try container.decodeIfPresent([SpacesDeviceTerminalSessionSummary].self, forKey: .sessions) ?? []
-        daemonStatus = try container.decodeIfPresent(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
     }
 }
 
@@ -1132,7 +1115,7 @@ public struct SpacesDeviceTerminalSessionRequest: Codable, Sendable, Equatable {
     public init(sessionID: String) { self.sessionID = sessionID }
 }
 
-/// One-shot agent input for a terminal session (`spaces terminal send --device`). Unlike
+/// One-shot agent input for a terminal session (`spaces terminal send text/bytes --device`). Unlike
 /// `terminalControl`, this is not attachment- or owner-epoch-gated: orchestrator agents write into
 /// sessions they never render, so the bearer token is the whole authorization.
 public struct SpacesDeviceTerminalInputRequest: Codable, Sendable, Equatable {
@@ -1176,6 +1159,7 @@ public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equata
     case clearScreen
     case resize
     case scroll
+    case setAppearance
 }
 
 public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {

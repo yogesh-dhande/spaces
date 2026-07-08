@@ -93,7 +93,7 @@ import workspacecore
     private func buildSettingsWindowContent() -> NSView {
         let root = NSView()
         root.wantsLayer = true
-        root.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(root) { [unowned host] view in view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor }
 
         let headerBar = buildSettingsWindowHeader()
         let headerDivider = host.settingsHairlineDivider()
@@ -303,7 +303,35 @@ import workspacecore
         }
         let editorCard = host.formSectionCard(icon: "square.and.pencil", title: "Editor", contentViews: editorContentViews)
 
-        return [editorCard]
+        return [appearanceSettingsCard(), editorCard]
+    }
+
+    private func appearanceSettingsCard() -> NSView {
+        let current = host.storedAppAppearanceMode()
+        let popUp = NSPopUpButton()
+        popUp.translatesAutoresizingMaskIntoConstraints = false
+        popUp.autoenablesItems = false
+        for mode in AppAppearanceMode.allCases {
+            popUp.addItem(withTitle: mode.displayName)
+            popUp.itemArray.last?.representedObject = mode
+        }
+        if let item = popUp.itemArray.first(where: { ($0.representedObject as? AppAppearanceMode) == current }) { popUp.select(item) }
+        popUp.target = self
+        popUp.action = #selector(appearanceModeChanged(_:))
+        popUp.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        popUp.setAccessibilityIdentifier("settings-appearance")
+
+        let field = host.settingsLabeledField(name: "Appearance", hint: "Match the system setting or force a light or dark interface", control: popUp)
+        return host.formSectionCard(icon: "circle.lefthalf.filled", title: "Appearance", contentViews: [field])
+    }
+
+    @objc private func appearanceModeChanged(_ sender: NSPopUpButton) {
+        guard let mode = sender.selectedItem?.representedObject as? AppAppearanceMode else { return }
+        guard mode != host.storedAppAppearanceMode() else { return }
+        do {
+            try host.clientDatabase().setSetting(key: ClientSettingsKey.appAppearanceMode, value: mode.rawValue)
+            host.applyAppAppearance(mode)
+        } catch { host.showError(error) }
     }
 
     private func shortcutsSettingsCards() -> [NSView] {
@@ -358,7 +386,7 @@ import workspacecore
         guard let preference = sender.selectedItem?.representedObject as? EditorPreference else { return }
         if host.configCache?.editor == preference { return }
         do {
-            try host.clientDatabase().setSetting(key: SettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
+            try host.clientDatabase().setSetting(key: ClientSettingsKey.appEditor, value: preference == .none ? nil : preference.rawValue)
             host.configCache = try AppKitController.clientAppConfig()
         } catch { host.showError(error) }
     }

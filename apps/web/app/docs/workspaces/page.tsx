@@ -47,7 +47,7 @@ export default function WorkspacesDocsPage() {
           <li>• Renaming the branch inline renames the underlying git branch.</li>
           <li>• Add, remove, or rename services per workspace.</li>
           <li>• Edit a process command while the workspace is running and Spaces asks to confirm, then restarts just that process.</li>
-          <li>• Add a browser session and it opens in Chrome when you focus it.</li>
+          <li>• Add a browser session and it opens as a Chrome tab when you focus it.</li>
           <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on workspace creation, launch, and agent events.</li>
         </ul>
       </article>
@@ -91,7 +91,7 @@ SPACES_API_PORT=20002`}</code>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <code>cmd+alt+=</code> from anywhere brings Spaces forward; pick the workspace you want.</li>
           <li>• Inside Spaces, <code>cmd+alt+]</code> / <code>cmd+alt+[</code> step between workspaces.</li>
-          <li>• <code>cmd+1</code> through <code>cmd+9</code> focus a specific window of the selected workspace.</li>
+          <li>• <code>cmd+1</code> through <code>cmd+0</code> open or focus a specific target of the selected workspace.</li>
           <li>• Click any workspace in the sidebar or window row in the workspace run tab to jump directly.</li>
         </ul>
       </article>

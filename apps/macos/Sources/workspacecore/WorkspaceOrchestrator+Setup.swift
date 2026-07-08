@@ -62,7 +62,7 @@ extension WorkspaceOrchestrator {
 
     func runWorkspaceSetup(project: ProjectRecord, workspace: WorkspaceRecord) throws {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let setupScript = project.setupScript?.trimmingCharacters(in: .whitespacesAndNewlines)
         let startedAt = nowISO8601()
         let logPath = try prepareWorkspaceSetupLog(workspaceID: workspace.id)
@@ -78,7 +78,7 @@ extension WorkspaceOrchestrator {
         do {
             let env = buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-                runtimeManifest: runtimePlan.manifest)
+                runtimeManifest: runtimeManifest)
             result = try runWorkspaceSetupScript(applyEnvVars(setupScript, env: env), cwd: workspace.dir, logPath: logPath)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

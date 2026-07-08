@@ -393,18 +393,14 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
                     BEGIN
                       SELECT RAISE(ABORT, 'forced notes failure');
                     END
-                    """,
-                bindings: [])
+                    """, bindings: [])
 
             let updateResponse = try sendTLSRequest(
                 SpacesDeviceAPIRequest(
                     command: .updateWorkspaceMetadata(
                         .init(
-                            workspaceID: workspaceID, branch: "feature-api-rename", notes: "this write fails", updatesBranch: true,
-                            updatesNotes: true)),
-                    authToken: pairingStore.authToken,
-                    clientApp: clientApp),
-                port: server.listeningPort,
+                            workspaceID: workspaceID, branch: "feature-api-rename", notes: "this write fails", updatesBranch: true, updatesNotes: true
+                        )), authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
                 certificateFingerprint: identity.certificateFingerprint)
 
             XCTAssertFalse(updateResponse.ok)
@@ -484,8 +480,8 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: "old-process", workspaceID: workspace.id, templateID: "process-api", templateName: "api", command: "echo old",
-                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "old-session", terminalNativeID: "old-session", pid: 777,
-                    status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-18T12:00:01Z", exitedAt: nil))
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "old-session", pid: 777, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: "2026-06-18T12:00:01Z", exitedAt: nil))
             try store.upsert(
                 window: WindowRecord(
                     id: "browser-window", workspaceID: workspace.id, app: "Google Chrome", name: "docs", detail: "http://localhost:9000/docs",
@@ -493,18 +489,15 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsert(
                 window: WindowRecord(
                     id: "shell-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: "zsh",
-                    terminalTrackingID: "shell-session", terminalNativeID: "shell-session", role: "terminal", orderIndex: 300,
-                    lastSeenAt: "2026-06-18T12:00:03Z"))
+                    terminalTrackingID: "shell-session", role: "terminal", orderIndex: 300, lastSeenAt: "2026-06-18T12:00:03Z"))
             try store.upsert(
                 window: WindowRecord(
                     id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Mock Agent", detail: "codex",
-                    terminalTrackingID: "agent-session", terminalNativeID: "agent-session", role: "terminal", orderIndex: 400,
-                    lastSeenAt: "2026-06-18T12:00:04Z"))
+                    terminalTrackingID: "agent-session", role: "terminal", orderIndex: 400, lastSeenAt: "2026-06-18T12:00:04Z"))
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "old-agent", workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "agent-session",
-                    terminalNativeID: "agent-session", codexThreadID: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
-                    updatedAt: "2026-06-18T12:00:04Z"))
+                    sessionKey: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z", updatedAt: "2026-06-18T12:00:04Z"))
 
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-WORKSPACE-RESTART", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
@@ -527,7 +520,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertEqual(relaunchedProcess.templateID, "process-api")
             XCTAssertEqual(relaunchedProcess.templateName, "api")
             XCTAssertEqual(relaunchedProcess.status, .running)
-            XCTAssertNotEqual(relaunchedProcess.terminalNativeID, "old-session")
+            XCTAssertNotEqual(relaunchedProcess.terminalTrackingID, "old-session")
             XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
             XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.name), ["api"])
             let overviewWorkspace = try XCTUnwrap(response.overview?.workspaces.first(where: { $0.id == workspace.id }))
@@ -567,13 +560,11 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "spinning-agent", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "spin-session",
-                    terminalNativeID: "spin-session", codexThreadID: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
-                    updatedAt: "2026-06-18T12:00:04Z"))
+                    sessionKey: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z", updatedAt: "2026-06-18T12:00:04Z"))
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "waiting-agent", workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "wait-session",
-                    terminalNativeID: "wait-session", codexThreadID: nil, status: .waiting, createdAt: "2026-06-18T12:00:05Z",
-                    updatedAt: "2026-06-18T12:00:05Z"))
+                    sessionKey: nil, status: .waiting, createdAt: "2026-06-18T12:00:05Z", updatedAt: "2026-06-18T12:00:05Z"))
 
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-OVERVIEW-IMPACT", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
@@ -1248,8 +1239,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         try runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd: directory).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    @discardableResult
-    private func runGit(_ arguments: [String], cwd: URL) throws -> String {
+    @discardableResult private func runGit(_ arguments: [String], cwd: URL) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git"] + arguments

@@ -51,7 +51,7 @@ export default function WorkspaceLifecycleDocsPage() {
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Add a process &mdash; it appears immediately with a non-running status; launch it when you&apos;re ready.</li>
           <li>• Edit a process command &mdash; Spaces asks you to confirm, then restarts just that process.</li>
-          <li>• Add a browser session &mdash; it appears immediately and opens in Chrome when you focus it.</li>
+          <li>• Add a browser session &mdash; it appears immediately and opens as a Chrome tab when you focus it.</li>
         </ul>
       </article>
 

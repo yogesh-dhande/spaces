@@ -232,14 +232,16 @@ public enum SpacesDeviceClient {
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
     ) throws -> TerminalServiceDaemonStatus {
         let response = try requestProvider(.init(command: .daemonStatus), device, clientApp, profile)
-        guard let status = response.daemonStatus else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let status = response.daemonStatus else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return status
     }
 
     /// Refreshes a device, reading its compatibility verdict from the overview's inline frozen-core
     /// status so the common compatible case costs a single round-trip. The standalone `daemonStatus`
-    /// handshake is issued only when the overview cannot carry the verdict: a daemon that predates the
-    /// inline field, or an incompatible daemon whose overview does not decode at all. This is the
+    /// handshake is issued only as a fallback when the overview itself fails to decode — a
+    /// wire-incompatible daemon (a separate macOS/Linux install pair, not this build). This is the
     /// per-refresh hot path; see `docs/implementation.md` (device compatibility handshake).
     public static func resolveOverview(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -266,17 +268,10 @@ public enum SpacesDeviceClient {
             }
             throw error
         }
-        if let status = payload.daemonStatus {
-            // Steady state: the verdict rode inline on the overview, so no second round-trip is needed.
-            let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
-            let overview = verdict.isCompatible ? SpacesDeviceOverview(device: device, overview: payload) : nil
-            return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
-        }
-        // Older daemon that predates the inline status: keep the overview already fetched and read the
-        // verdict from the standalone frozen-core handshake.
-        let status = try? daemonStatus(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
-        let verdict = status.map(SpacesWireCompatibility.evaluate(daemonStatus:))
-        let overview = (verdict?.isCompatible ?? true) ? SpacesDeviceOverview(device: device, overview: payload) : nil
+        // The verdict rides inline on the overview, so no second round-trip is needed.
+        let status = payload.daemonStatus
+        let verdict = SpacesWireCompatibility.evaluate(daemonStatus: status)
+        let overview = verdict.isCompatible ? SpacesDeviceOverview(device: device, overview: payload) : nil
         return SpacesDeviceOverviewResolution(overview: overview, daemonStatus: status, compatibility: verdict)
     }
 
@@ -302,7 +297,9 @@ public enum SpacesDeviceClient {
         dir: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceProjectPreview {
         let response = try request(.init(command: .previewProject(.init(dir: dir))), device: device, clientApp: clientApp, profile: profile)
-        guard let preview = response.projectPreview else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let preview = response.projectPreview else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return preview
     }
 
@@ -328,7 +325,9 @@ public enum SpacesDeviceClient {
         gitURL: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceGitProjectPreview {
         let response = try request(.init(command: .previewGitProject(.init(gitURL: gitURL))), device: device, clientApp: clientApp, profile: profile)
-        guard let preview = response.gitProjectPreview else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let preview = response.gitProjectPreview else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return preview
     }
 
@@ -517,7 +516,7 @@ public enum SpacesDeviceClient {
             clientApp: clientApp, profile: profile)
     }
 
-    /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send --device`).
+    /// Agent-facing one-shot terminal input on a paired device (`spaces terminal send text/bytes --device`).
     @discardableResult public static func sendTerminalInput(
         sessionID: String, text: String? = nil, bytes: Data? = nil, appendNewline: Bool = false, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -534,7 +533,9 @@ public enum SpacesDeviceClient {
     ) throws -> String {
         let response = try request(
             .init(command: .tailTerminalOutput(.init(sessionID: sessionID, lines: lines))), device: device, clientApp: clientApp, profile: profile)
-        guard let output = response.terminalOutput else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let output = response.terminalOutput else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return output
     }
 

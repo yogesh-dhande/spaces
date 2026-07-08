@@ -35,15 +35,15 @@ extension SQLiteStore {
                     }
                 } else { window.id }
             let baseBindings: [Any] = [
-                runtimeTargetID, window.workspaceID, targetType, window.name ?? "", window.detail ?? "", window.app,
-                window.terminalNativeID ?? window.terminalTrackingID ?? "", String(window.orderIndex), window.lastSeenAt, window.lastSeenAt,
+                runtimeTargetID, window.workspaceID, targetType, window.name ?? "", window.detail ?? "", window.app, window.terminalTrackingID ?? "",
+                String(window.orderIndex), window.lastSeenAt,
             ]
             try execute(
                 sql: """
                     INSERT INTO runtime_targets(
-                      id, workspace_id, type, name, detail, app, tracking_id, order_index, created_at, updated_at
+                      id, workspace_id, type, name, detail, app, tracking_id, order_index, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       workspace_id = excluded.workspace_id,
                       type = excluded.type,
@@ -60,12 +60,11 @@ extension SQLiteStore {
                 try execute(sql: "UPDATE runtime_targets SET tracking_id = '' WHERE id = ?", bindings: [runtimeTargetID])
                 try execute(
                     sql: """
-                        INSERT INTO browser_targets(runtime_target_id, target_url, resolved_url)
-                        VALUES (?, ?, ?)
+                        INSERT INTO browser_targets(runtime_target_id, target_url)
+                        VALUES (?, ?)
                         ON CONFLICT(runtime_target_id) DO UPDATE SET
-                          target_url = excluded.target_url,
-                          resolved_url = excluded.resolved_url
-                        """, bindings: [runtimeTargetID, window.targetURL ?? "", window.detail ?? ""])
+                          target_url = excluded.target_url
+                        """, bindings: [runtimeTargetID, window.targetURL ?? ""])
             }
         }
     }
@@ -149,7 +148,6 @@ extension SQLiteStore {
         let role = row[7]
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], name: row[3].isEmpty ? nil : row[3], detail: row[4].isEmpty ? nil : row[4],
-            targetURL: targetURL, terminalTrackingID: trackingID, terminalNativeID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0,
-            lastSeenAt: row[9])
+            targetURL: targetURL, terminalTrackingID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0, lastSeenAt: row[9])
     }
 }

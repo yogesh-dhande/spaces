@@ -302,6 +302,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
+    private var appEffectiveAppearanceObservation: NSKeyValueObservation?
     private var didStartBackgroundServices = false
     private let browserSSHForwardManager = BrowserSSHForwardManager()
     private var remoteBrowserForwardRevisions: [String: Int] = [:]
@@ -339,6 +340,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let index: Int
         let startedAt: Date
         var routeCompletedAt: Date?
+    }
+
+    private struct BrowserCycleState: Sendable {
+        let openBrowserSessions: [BrowserSession]
+        let frontmostURL: String?
+        let clientDBLookupMS: Int
+        let chromeAppleScriptMS: Int
+        let trackedWindowCount: Int
+        let trackedTabCount: Int
+    }
+
+    private struct BrowserFocusResult: Sendable {
+        let focused: Bool
+        let path: String
+        let clientDBLookupMS: Int
+        let clientDBWriteMS: Int
+        let chromeAppleScriptMS: Int
+    }
+
+    private struct RoutedBrowserFocusTarget: Sendable {
+        let targetURL: URL
+        let siblingTargetURLs: [String]
     }
 
     private struct TerminalSessionWindowStateDump: Codable {
@@ -401,7 +424,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ipcNotificationObject = launchContext.profile.ipcNotificationObject
         // Bind the active theme before any Theme token or embedded terminal is touched;
         // an unset or unknown stored id resolves to the default theme.
-        if let storedThemeID = (try? SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appThemeID)) ?? nil {
+        if let storedThemeID = (try? SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.appThemeID)) ?? nil {
             ActiveTheme.id = ThemeID(rawValue: storedThemeID)
         }
         switch launchContext.desktopControlState {
@@ -440,6 +463,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         Self.applyPersistentTerminationPolicy()
+        // Apply the stored appearance before any window, menu, or terminal is built so they
+        // all render in the chosen light/dark variant from the first frame.
+        applyStoredAppAppearance()
         logStartupProfile(
             "did_finish_launching",
             details:
@@ -464,6 +490,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
         setupTextInputDidEndEditingObserver()
+        setupAppEffectiveAppearanceObserver()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
@@ -502,11 +529,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return .terminateNow
             case .stopAll:
                 keepsTerminalSessionsRunningDuringTermination = false
-                let stoppedCount = Self.stopAllBuiltInTerminalSessions(liveSessions: liveSessions)
-                guard stoppedCount == liveSessions.count else {
-                    showError(WorkspaceError.invalidArgument(message: "Unable to stop all terminal sessions before quitting."))
-                    return .terminateCancel
-                }
+                let cleanupResult = performStopAllQuitCleanup(liveSessions: liveSessions)
+                guard cleanupResult.succeeded else { return handleStopAllQuitCleanupFailure(cleanupResult) }
                 return .terminateNow
             case .cancel: return .terminateCancel
             }
@@ -540,6 +564,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NotificationCenter.default.removeObserver(textInputDidEndEditingObserver)
             self.textInputDidEndEditingObserver = nil
         }
+        appEffectiveAppearanceObservation?.invalidate()
+        appEffectiveAppearanceObservation = nil
         commandPalette.commandPaletteLoadTask?.cancel()
         commandPalette.commandPaletteLoadTask = nil
         commandPalette.commandPalettePanel?.close()
@@ -721,9 +747,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// browser-focus matcher, since a browser session resolves to the same name).
     private func focusWorkspaceWindowByName(workspaceID: String, name: String) async {
         let startedAt = Date()
-        func logResult(_ success: Bool) {
-            logPerfMetric("named_window_focus", target: name, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success)
+        var targetResolutionMS = 0
+        var routeMS = 0
+        func logResult(_ success: Bool, reason: String = "") {
+            let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            logPerfMetric(
+                "named_window_focus", target: name, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(reasonDetail)")
         }
+        let resolutionStartedAt = Date()
         guard let context = focusableWindowContext(workspaceID: workspaceID),
             let target = context.targets.first(where: {
                 Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
@@ -731,14 +763,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 } ?? false
             })
         else {
-            logResult(false)
+            targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
+            logResult(false, reason: "no_match")
             return
         }
+        targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        let routeStartedAt = Date()
         guard let action = await executeWindowFocusResolution(resolution) else {
-            logResult(false)
+            routeMS = windowShortcutElapsedMS(since: routeStartedAt)
+            logResult(false, reason: "focus_failed")
             return
         }
+        routeMS = windowShortcutElapsedMS(since: routeStartedAt)
         logResult(true)
         hideAfterSuccessfulExternalWindowAction(action)
     }
@@ -748,9 +785,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// real-system E2E correlates; also emits `process_focus` for the non-correlated path.
     private func focusWorkspaceProcess(workspaceID: String, processName: String, requestID: String?) async {
         let startedAt = Date()
-        func logResult(_ success: Bool) {
-            logPerfMetric("process_focus", target: processName, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success)
+        var targetResolutionMS = 0
+        var routeMS = 0
+        func logResult(_ success: Bool, reason: String = "") {
+            let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+            let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            logPerfMetric(
+                "process_focus", target: processName, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(requestDetail)\(reasonDetail)")
         }
+        let resolutionStartedAt = Date()
         guard let context = focusableWindowContext(workspaceID: workspaceID),
             let target = context.targets.first(where: { target in
                 guard target.kind == .process, let id = target.processID,
@@ -759,14 +803,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return Self.normalizedRunRowName(rowName) == Self.normalizedRunRowName(processName)
             })
         else {
-            logResult(false)
+            targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
+            logResult(false, reason: "no_match")
             return
         }
+        targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        let routeStartedAt = Date()
         guard let action = await executeWindowFocusResolution(resolution, requestID: requestID) else {
-            logResult(false)
+            routeMS = windowShortcutElapsedMS(since: routeStartedAt)
+            logResult(false, reason: "focus_failed")
             return
         }
+        routeMS = windowShortcutElapsedMS(since: routeStartedAt)
         logResult(true)
         hideAfterSuccessfulExternalWindowAction(action)
     }
@@ -781,62 +830,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// rebuilds the focusable targets from the workspace's overview, resolves the current
     /// target from the focused terminal session / frontmost Chrome tab / remembered
     /// cursor, advances, and focuses through the shared `executeWindowFocusResolution`.
-    private func cycleWorkspaceWindow(workspaceID: String, delta: Int, preferredTerminalSessionID: String?) async {
+    private func cycleWorkspaceWindow(workspaceID: String, delta: Int, preferredTerminalSessionID: String?, requestID: String? = nil) async {
         let cycleStartedAt = Date()
         let direction = delta > 0 ? "next" : "previous"
         // The real-system E2E waits for this `window_cycle` perf line, so emit it on both
         // success and failure (matching the orchestrator's format) — it is a parsed surface.
-        func logCycleMetric(target: String, success: Bool) {
+        func logCycleMetric(target: String, success: Bool, detail extraDetail: String = "") {
+            let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+            let suffix = extraDetail.isEmpty ? "" : " \(extraDetail)"
             TerminalPerformance.logWorkspaceMetric(
                 "window_cycle", workspaceID: workspaceID, target: target, elapsedMS: windowShortcutElapsedMS(since: cycleStartedAt), success: success,
-                detail: "direction=\(direction)")
+                detail: "direction=\(direction)\(requestDetail)\(suffix)")
         }
         guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else {
             logCycleMetric(target: "none", success: false)
             return
         }
-        // A "window" is client state, so a configured browser session is only a cycle target
-        // when it currently has an open Chrome tab. Scan Chrome once (when any browser is
-        // configured) for the open tab URLs and the frontmost tab URL; the latter resolves
-        // the current target when no built-in terminal session is focused.
-        let chromeState: (openTabURLs: [String], frontmostURL: String?) =
-            detail.config.resolvedBrowserSessions.isEmpty
-            ? ([], nil)
-            : await Task.detached(priority: .userInitiated) {
-                let chrome = ChromeAdapter()
-                guard chrome.isAvailable() else { return ([], nil) }
-                return ((try? chrome.allTabs())?.map(\.url) ?? [], try? chrome.frontmostActiveTabURL())
-            }.value
-        let openBrowserSessions = detail.config.resolvedBrowserSessions.filter { session in
-            guard let url = session.url, !url.isEmpty else { return false }
-            return chromeState.openTabURLs.contains { $0.hasPrefix(url) }
-        }.map(Self.localBrowserSession(from:))
+        let cycleSession = validCycleSession(workspaceID: workspaceID)
+        let targetResolutionStartedAt = Date()
+        let browserCycleState = await trackedBrowserCycleState(workspaceID: workspaceID, detail: detail)
+        let openTerminalSessionIDs = Set(panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID))
 
         // Cycle over the same ordered targets the numbered shortcuts use, limited to running
         // windows (open browsers, running processes/terminals, agents) — not launch actions.
-        let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: openBrowserSessions).filter { target in
-            switch target.kind {
-            case .browser, .process, .window, .agent: return true
-            case .missingConfiguredProcess, .agentLauncher: return false
-            }
-        }
+        let targets = Self.cycleWindowTargets(
+            detail: detail, browserSessions: browserCycleState.openBrowserSessions, openTerminalSessionIDs: openTerminalSessionIDs)
+        let targetResolutionMS = windowShortcutElapsedMS(since: targetResolutionStartedAt)
+        let resolutionDetail =
+            "target_resolution_ms=\(targetResolutionMS) client_db_lookup_ms=\(browserCycleState.clientDBLookupMS) chrome_applescript_ms=\(browserCycleState.chromeAppleScriptMS) tracked_browser_windows=\(browserCycleState.trackedWindowCount) tracked_browser_tabs=\(browserCycleState.trackedTabCount) open_terminal_panes=\(openTerminalSessionIDs.count)"
         guard !targets.isEmpty else {
-            logCycleMetric(target: "none", success: false)
+            logCycleMetric(target: "none", success: false, detail: resolutionDetail)
             return
         }
 
         let cursorKeys = targets.map { Self.cycleCursorKey(for: $0, detail: detail) }
         let cursor = windowNavigationCursorByWorkspace[workspaceID]
-        let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : chromeState.frontmostURL
+        let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : browserCycleState.frontmostURL
         let currentIndex = Self.cycleCurrentIndex(
             targets: targets, detail: detail, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: frontmostBrowserURL,
             cursorKeys: cursorKeys, cursor: cursor)
-        let ordering = WorkspaceWindowCycle.cycleOrdering(
-            cursors: cursorKeys, currentIndex: currentIndex, session: validCycleSession(workspaceID: workspaceID))
+        let ordering = WorkspaceWindowCycle.cycleOrdering(cursors: cursorKeys, currentIndex: currentIndex, session: cycleSession)
         let orderedTargets = ordering.indices.map { targets[$0] }
         let orderedCursors = ordering.indices.map { cursorKeys[$0] }
         guard !orderedTargets.isEmpty else {
-            logCycleMetric(target: "none", success: false)
+            logCycleMetric(target: "none", success: false, detail: resolutionDetail)
             return
         }
         let startIndex = WorkspaceWindowCycle.nextIndex(orderedCount: orderedTargets.count, orderedCurrentIndex: ordering.currentIndex, delta: delta)
@@ -847,27 +884,134 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let candidateIndex = (startIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
             let resolution = Self.windowShortcutTargetResolution(
                 orderedTargets[candidateIndex], workspaceID: workspaceID, detail: detail, overview: overview)
-            if let action = await executeWindowFocusResolution(resolution) {
+            if let action = await executeWindowFocusResolution(resolution, requestID: requestID) {
                 focusedAction = action
                 resolvedIndex = candidateIndex
                 break
             }
         }
         guard let action = focusedAction else {
-            logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[startIndex], detail: detail), success: false)
+            logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[startIndex], detail: detail), success: false, detail: resolutionDetail)
             return
         }
 
         windowNavigationCursorByWorkspace[workspaceID] = orderedCursors[resolvedIndex]
         windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceWindowCycle.CycleSession(
             orderedCursors: orderedCursors, currentIndex: resolvedIndex, lastUsedAt: Date())
-        logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true)
+        logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true, detail: resolutionDetail)
 
         let hidesApp: Bool
         switch action {
         case .focus(let value), .open(let value): hidesApp = value
         }
         if hidesApp { hideAfterSuccessfulExternalWindowAction(action) } else { commandPalette.dismissCommandPaletteForBuiltInWindowNavigation() }
+    }
+
+    private func trackedBrowserCycleState(workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel) async -> BrowserCycleState {
+        let resolvedSessions = detail.config.resolvedBrowserSessions
+        guard !resolvedSessions.isEmpty else {
+            return BrowserCycleState(
+                openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: 0, chromeAppleScriptMS: 0, trackedWindowCount: 0, trackedTabCount: 0)
+        }
+        return await Task.detached(priority: .userInitiated) {
+            let dbStartedAt = Date()
+            let trackedWindows = ((try? ClientBrowserWindowIDStore().windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
+            let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbStartedAt)
+            guard !trackedWindows.isEmpty else {
+                return BrowserCycleState(
+                    openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: clientDBLookupMS, chromeAppleScriptMS: 0, trackedWindowCount: 0,
+                    trackedTabCount: 0)
+            }
+
+            let chrome = ChromeAdapter()
+            let chromeStartedAt = Date()
+            let snapshot =
+                (try? chrome.tabSnapshot(inWindowIDs: trackedWindows.map(\.windowID))) ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil)
+            let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
+            let trackedTargetURLs = trackedWindows.map(\.targetURL)
+            let configuredTargetURLs = Self.browserSessionTargetURLs(resolvedSessions: resolvedSessions)
+            let openBrowserSessions = resolvedSessions.compactMap { session -> BrowserSession? in
+                guard let url = session.url, !url.isEmpty, trackedTargetURLs.contains(where: { Self.browserSessionTargetURL($0, matches: url) })
+                else { return nil }
+                let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
+                guard snapshot.tabs.contains(where: { Self.browserTabURL($0.url, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs) })
+                else { return nil }
+                return Self.localBrowserSession(from: session)
+            }
+            return BrowserCycleState(
+                openBrowserSessions: openBrowserSessions, frontmostURL: snapshot.frontmostActiveTabURL, clientDBLookupMS: clientDBLookupMS,
+                chromeAppleScriptMS: chromeAppleScriptMS, trackedWindowCount: trackedWindows.count, trackedTabCount: snapshot.tabs.count)
+        }.value
+    }
+
+    nonisolated static func browserSessionTargetURLs(resolvedSessions: [SpacesDeviceBrowserSession], including targetURL: String? = nil) -> [String] {
+        var values = resolvedSessions.compactMap(\.url)
+        if let targetURL { values.append(targetURL) }
+        return uniqueBrowserSessionTargetURLs(values)
+    }
+
+    nonisolated static func browserSessionTargetURLs(workspaceID: String, targetURL: String, overview: SpacesDeviceOverviewPayload?) -> [String] {
+        browserSessionTargetURLs(
+            resolvedSessions: overview.flatMap { workspaceDetail(workspaceID, in: $0)?.config.resolvedBrowserSessions } ?? [], including: targetURL)
+    }
+
+    nonisolated static func browserSessionTargetURLs(workspaceID: String, overview: SpacesDeviceOverviewPayload?) -> [String] {
+        browserSessionTargetURLs(resolvedSessions: overview.flatMap { workspaceDetail(workspaceID, in: $0)?.config.resolvedBrowserSessions } ?? [])
+    }
+
+    nonisolated static func browserSessionTeardownTargetURLs(configuredTargetURLs: [String], trackedTargetURLs: [String]) -> [String] {
+        uniqueBrowserSessionTargetURLs(configuredTargetURLs + trackedTargetURLs)
+    }
+
+    nonisolated private static func uniqueBrowserSessionTargetURLs(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    nonisolated static func browserSessionSiblingTargetURLs(targetURL: String, targetURLs: [String]) -> [String] {
+        guard !targetURL.isEmpty else { return [] }
+        var seen = Set<String>()
+        return targetURLs.filter { candidate in
+            guard !candidate.isEmpty, !browserSessionTargetURL(candidate, matches: targetURL), candidate.hasPrefix(targetURL),
+                seen.insert(candidate).inserted
+            else { return false }
+            return true
+        }
+    }
+
+    nonisolated static func browserSessionTargetURL(_ candidateURL: String, matches targetURL: String) -> Bool {
+        guard !candidateURL.isEmpty, !targetURL.isEmpty else { return false }
+        return browserTabURLIsExactTarget(candidateURL, targetURL: targetURL)
+    }
+
+    nonisolated static func browserTabURL(_ tabURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String])
+        -> Bool
+    {
+        guard !targetURL.isEmpty else { return false }
+        if browserTabURLIsExactTarget(tabURL, targetURL: targetURL) { return true }
+        guard tabURL.hasPrefix(targetURL) else { return false }
+        return !siblingTargetURLs.contains { siblingTargetURL in !siblingTargetURL.isEmpty && tabURL.hasPrefix(siblingTargetURL) }
+    }
+
+    nonisolated private static func browserTabURLIsExactTarget(_ tabURL: String, targetURL: String) -> Bool {
+        if tabURL == targetURL { return true }
+        guard !targetURL.contains("?"), !targetURL.contains("#") else { return false }
+        if targetURL.hasSuffix("/") { return tabURL == String(targetURL.dropLast()) }
+        return tabURL == targetURL + "/"
+    }
+
+    nonisolated static func cycleWindowTargets(
+        detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession], openTerminalSessionIDs: Set<String>
+    ) -> [WorkspaceRunShortcutTarget] {
+        workspaceShortcutTargets(detail: detail, browserSessions: browserSessions).filter { target in
+            switch target.kind {
+            case .browser: return true
+            case .process, .window, .agent:
+                guard let sessionID = cycleTargetSessionID(for: target, detail: detail), !sessionID.isEmpty else { return false }
+                return openTerminalSessionIDs.contains(sessionID)
+            case .missingConfiguredProcess, .agentLauncher: return false
+            }
+        }
     }
 
     private func validCycleSession(workspaceID: String) -> WorkspaceWindowCycle.CycleSession? {
@@ -1136,6 +1280,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// The light/dark appearance a terminal session should carry, shared thread-safely between the
+    /// pane's attach closure (which reads it when the client attaches, off the main actor) and the
+    /// appearance-broadcast path (which advances it on an app appearance change). One value across both
+    /// means an appearance change that lands before the pane attaches is carried by the pending attach
+    /// rather than lost, and it doubles as the per-session dedupe state for `applyAppearanceToLiveSession`.
+    private final class SessionAppearanceStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var appearance: ThemeAppearance
+
+        init(_ appearance: ThemeAppearance) { self.appearance = appearance }
+
+        func set(_ appearance: ThemeAppearance) {
+            lock.lock()
+            self.appearance = appearance
+            lock.unlock()
+        }
+
+        func current() -> ThemeAppearance {
+            lock.lock()
+            defer { lock.unlock() }
+            return appearance
+        }
+    }
+
     struct TerminalSessionSummaryMatch: Sendable, Equatable {
         let device: SpacesPairedDeviceRecord
         let summary: SpacesDeviceTerminalSessionSummary
@@ -1209,8 +1377,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let overviewStartedAt = Date()
         let match = await Self.resolveSessionSummaryMatchOffMain(sessionID: sessionID, device: device, clientApp: clientApp)
         logPerfMetric(
-            "terminal_session_resolve_overview", target: "session=\(sessionID)",
-            elapsedMS: TerminalPerformance.elapsedMS(since: overviewStartedAt), success: match != nil)
+            "terminal_session_resolve_overview", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: overviewStartedAt),
+            success: match != nil)
         return match
     }
 
@@ -1365,17 +1533,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return self.applyRemoteAgentSignals(events)
             }
             let remoteClientStore = RemoteTerminalWindowClientStore()
-            // Resolved once here (this runs on the main actor); the attach closure is @Sendable and
-            // may run off-main, so it cannot read NSApp. A remote daemon renders its terminal with
-            // this appearance's theme variant; like local terminals, a mid-session OS appearance
-            // change takes effect on the next pane open / relaunch.
+            // Resolved once here (this runs on the main actor); the attach closure is @Sendable and may
+            // run off-main, so it cannot read NSApp. Seeds the shared appearance store, which the attach
+            // reads when it fires and the broadcast path advances on a mid-session appearance change
+            // (settings picker or an OS flip while on `.system`) — so an appearance change that lands
+            // before the pane attaches is carried by the attach, and one after it re-themes the live
+            // session without waiting for a reopen.
             let themeAppearance: ThemeAppearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+            let appearanceStore = SessionAppearanceStore(themeAppearance)
             let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
                 remoteClientStore.set(client.id)
                 let response = try Self.sendDeviceTerminalControl(
                     sessionID: sessionID,
                     request: TerminalControlRequest(
-                        command: .attach(TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: themeAppearance))),
+                        command: .attach(
+                            TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: appearanceStore.current()))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
@@ -1418,6 +1590,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     sessionID: sessionID, request: TerminalControlRequest(command: .takeover(TerminalControlClientPayload(clientID: clientID))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
             }
+            // Re-themes this session to a new app appearance mid-session (see `applyAppearanceToLiveSession`).
+            // Reuses the pane's captured request sender and `remoteClientStore` clientID, mirroring the input
+            // closures above. The dedupe/desired state lives in `appearanceStore`, which the attach also reads,
+            // so a change that arrives before attach is recorded here and carried by the pending attach.
+            let setAppearanceAction: (ThemeAppearance) -> Void = { appearance in
+                appearanceStore.set(
+                    Self.applyAppearanceToLiveSession(
+                        appearance, sessionID: sessionID, clientID: remoteClientStore.current(), lastAppliedAppearance: appearanceStore.current(),
+                        requestSender: requestSender, applyState: applyControlState))
+            }
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
@@ -1430,7 +1612,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 })
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
-                sessionID: sessionID, pane: pane)
+                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction)
         } catch {
             showError(error)
             return nil
@@ -1523,6 +1705,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             applyState(sessionState)
         }
         return response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message)
+    }
+
+    /// Re-themes one live session to `appearance` by sending `setAppearance`, and returns the appearance the
+    /// session's store should now carry. A redundant re-theme (already on `appearance`) sends nothing and keeps
+    /// the value. When no client is attached yet the send is skipped but the value still advances to `appearance`
+    /// so the pending attach carries it — otherwise a change that lands before attach would be lost, and later
+    /// broadcasts of the actual variant would dedupe against a stale value until the next flip. `clientID` is
+    /// trace-only for setAppearance — appearance is deliberately not owner-gated — but the daemon still expects
+    /// one. Best-effort: a failed send returns `lastAppliedAppearance` unchanged so the next flip retries it.
+    nonisolated static func applyAppearanceToLiveSession(
+        _ appearance: ThemeAppearance, sessionID: String, clientID: String?, lastAppliedAppearance: ThemeAppearance,
+        requestSender: RemoteGhosttyTerminalServiceRequestSender, applyState: @Sendable (GhosttyRemoteSessionStatePayload) -> Void
+    ) -> ThemeAppearance {
+        guard appearance != lastAppliedAppearance else { return lastAppliedAppearance }
+        guard let clientID else { return appearance }
+        do {
+            _ = try sendDeviceTerminalControl(
+                sessionID: sessionID,
+                request: TerminalControlRequest(
+                    command: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: appearance))),
+                requestSender: requestSender, applyState: applyState)
+            return appearance
+        } catch { return lastAppliedAppearance }
     }
 
     private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) -> [String] {
@@ -1757,6 +1962,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// the old poll re-check.
     func flushDeferredSidebarReloadsIfNeeded() { sidebar.flushPendingDatabaseReloadIfNeeded() }
 
+    /// Observes the app's effective light/dark appearance so an OS-driven flip — the user changing the
+    /// system theme while the appearance setting follows the system — re-themes the daemon-rendered
+    /// terminals. Those terminals run in `spacesd`, which has no `NSApp`, so per-view
+    /// `viewDidChangeEffectiveAppearance` recolors app chrome but cannot reach them; without this they
+    /// would keep the stale variant until reopened. The handler re-runs the same resolved-value broadcast
+    /// the settings picker uses, and per-pane dedupe (seeded from attach) makes a redundant trigger free.
+    ///
+    /// It cannot fire-loop with `applyAppAppearance`'s `NSApp.appearance` assignment: the broadcast only
+    /// reads `effectiveAppearance` and sends `setAppearance` to open panes — it never assigns
+    /// `NSApp.appearance` — so it provokes no further appearance change here. KVO delivers on the main
+    /// thread that mutated `effectiveAppearance`, so `assumeIsolated` is safe.
+    private func setupAppEffectiveAppearanceObserver() {
+        appEffectiveAppearanceObservation = NSApplication.shared.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.broadcastResolvedAppAppearance() }
+        }
+    }
+
     func canReloadAfterBackgroundWorkspaceRefresh() -> Bool {
         !projectHasUnsavedChanges && activeAddWorkspaceFormTag == nil && activeAddProjectFormTag == nil && !isTextInputFocused()
     }
@@ -1917,19 +2139,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func liveBuiltInTerminalSessions(listSessions: () throws -> [TerminalServiceSessionSummary] = TerminalService.listSessions)
         -> [TerminalServiceSessionSummary]
     { (try? listSessions()) ?? [] }
-
-    @discardableResult nonisolated static func stopAllBuiltInTerminalSessions(
-        liveSessions: [TerminalServiceSessionSummary], terminateSession: (String) throws -> Void = { try TerminalService.terminateSession(id: $0) }
-    ) -> Int {
-        var stoppedCount = 0
-        for session in liveSessions {
-            do {
-                try terminateSession(session.id)
-                stoppedCount += 1
-            } catch { fputs("spaces: failed to stop terminal session \(session.id): \(error)\n", stderr) }
-        }
-        return stoppedCount
-    }
 
     private func presentTerminalQuitDialog(liveSessionCount: Int) -> TerminalQuitDialogChoice {
         let alert = NSAlert()
@@ -2227,7 +2436,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     // render offline directly from the stored device record.
                     localDaemonStatus = nil
                     localCompatibility = nil
-                    localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                    localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
                     localOfflineMessage = bootstrapOfflineMessage
                 } else {
                     do {
@@ -2236,7 +2445,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         localCompatibility = localResolution.compatibility
                         // A blocked (incompatible) device has no decodable overview to show; render the block
                         // from an empty snapshot instead.
-                        localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                        localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload.offlinePlaceholder
                         localOfflineMessage = nil
                     } catch {
                         // Only a reachability failure degrades to offline. An error from a reachable daemon
@@ -2246,7 +2455,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         guard SpacesDeviceClient.isLocalDaemonUnreachableError(error) else { throw error }
                         localDaemonStatus = nil
                         localCompatibility = nil
-                        localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                        localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
                         localOfflineMessage = error.localizedDescription
                     }
                 }
@@ -3290,7 +3499,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         let topBarRow = sidebar.makeSidebarTopBarRow()
         topBarRow.translatesAutoresizingMaskIntoConstraints = false
@@ -3390,11 +3599,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        container.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         // The right panel's own footer strip: workspace details for the selected
         // workspace (populated by the detail paths), empty otherwise.
@@ -4046,7 +4255,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(divider) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
         return divider
     }
 
@@ -4141,8 +4352,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.wantsLayer = true
         container.layer?.cornerRadius = UIRadius.compact
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
         container.layer?.masksToBounds = true
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
 
         let captureWidth: CGFloat = 140
         let rowHeight: CGFloat = 28
@@ -4155,7 +4367,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let sep = NSView()
                 sep.translatesAutoresizingMaskIntoConstraints = false
                 sep.wantsLayer = true
-                sep.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.5).cgColor
+                bindAppearanceReactiveLayer(sep) { [weak self] view in
+                    view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.5).cgColor
+                }
                 container.addSubview(sep)
                 NSLayoutConstraint.activate([
                     sep.leadingAnchor.constraint(equalTo: container.leadingAnchor), sep.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -4413,7 +4627,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.55).cgColor
+        bindAppearanceReactiveLayer(divider) { [weak self] view in
+            view.layer?.backgroundColor = self?.sidebarCardBorderColor(isSelected: false).withAlphaComponent(0.55).cgColor
+        }
 
         section.addSubview(innerStack)
         section.addSubview(divider)
@@ -4683,7 +4899,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func addProjectSourceRow(icon: String, title: String, subtitle: String, accessibilityID: String) -> ClickableRowView {
         let container = ClickableRowView(isInteractive: true)
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
         container.setAccessibilityLabel(title)
@@ -4766,8 +4983,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func setAddProjectSourceRowSelected(_ row: ClickableRowView, selected: Bool) {
         row.layer?.borderWidth = selected ? 2 : 1
-        row.layer?.borderColor =
-            selected ? sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)).cgColor : sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(row) { [weak self] view in
+            view.layer?.borderColor =
+                selected
+                ? self?.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184)).cgColor : self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
     }
 
     /// The default device for new projects: the local Mac.
@@ -4793,7 +5013,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func presentFormWindow(existing: NSWindow?, header: NSView, hosting stack: NSStackView) -> NSWindow {
         let root = NSView()
         root.wantsLayer = true
-        root.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(root) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         let headerDivider = settingsHairlineDivider()
         let body = NSView()
@@ -5054,7 +5274,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelTabStripAccessory.isHidden = true
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
-        detailContainer.layer?.backgroundColor = sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
         // Every workspace-detail surface (panel, loading, setup) shares the footer
         // strip with the workspace's identity and actions.
         if let (_, workspace) = findWorkspace(id: workspaceID) {
@@ -5639,7 +5859,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let window = trackedWindows.first(where: {
                     guard $0.roleValue == .terminal else { return false }
                     if let trackingID = agentWindow.terminalTrackingID, !trackingID.isEmpty, $0.terminalTrackingID == trackingID { return true }
-                    if let nativeID = agentWindow.terminalNativeID, !nativeID.isEmpty, $0.terminalNativeID == nativeID { return true }
                     return false
                 })
             else { return }
@@ -6088,7 +6307,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func shortcutDisplayText(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcutText(modifiers: shortcutLeaderModifiers) }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
-        if setting.usesDigitRangeCapture { return displayShortcutText(spec, keyText: "1-9") }
+        if setting.usesDigitRangeCapture { return displayShortcutText(spec, keyText: "1-0") }
         return spec.normalized
     }
 
@@ -6099,14 +6318,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func shortcutHint(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers) }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
-        if setting.usesDigitRangeCapture { return displayShortcut(spec, keyText: "1-9") }
+        if setting.usesDigitRangeCapture { return displayShortcut(spec, keyText: "1-0") }
         return displayShortcut(spec)
     }
 
     func footerShortcutHint(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers, separator: " ") }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
-        if setting.usesDigitRangeCapture { return displayShortcut(spec, separator: " ", keyText: "1-9") }
+        if setting.usesDigitRangeCapture { return displayShortcut(spec, separator: " ", keyText: "1-0") }
         return displayShortcut(spec, separator: " ")
     }
 
@@ -6216,8 +6435,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         button.wantsLayer = true
         button.layer?.cornerRadius = UIRadius.compact
         button.layer?.borderWidth = 1
-        button.layer?.backgroundColor = shortcutKeycapBackgroundColor(active: active).cgColor
-        button.layer?.borderColor = shortcutKeycapBorderColor(active: active).cgColor
+        bindAppearanceReactiveLayer(button) { [weak self] view in
+            view.layer?.backgroundColor = self?.shortcutKeycapBackgroundColor(active: active).cgColor
+            view.layer?.borderColor = self?.shortcutKeycapBorderColor(active: active).cgColor
+        }
     }
 
     private func updateShortcutCaptureButtonText(_ button: NSButton, text: String, active: Bool) {
@@ -6416,7 +6637,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         scroll.wantsLayer = true
         scroll.layer?.cornerRadius = UIRadius.compact
         scroll.layer?.borderWidth = 1
-        scroll.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(scroll) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor }
         textView.drawsBackground = true
         textView.backgroundColor = inputBg
         textView.textColor = .textColor
@@ -6553,7 +6774,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Attention-item dismissals are per-client desktop state, so they live in the client
     /// database rather than the daemon's settings.
     func loadDismissedAlertsAttentionItemIDs() -> Set<String> {
-        guard let raw = (try? clientDatabase().setting(key: SettingsKey.alertsDismissedAttentionItems)) ?? nil, !raw.isEmpty,
+        guard let raw = (try? clientDatabase().setting(key: ClientSettingsKey.alertsDismissedAttentionItems)) ?? nil, !raw.isEmpty,
             let data = raw.data(using: .utf8), let decoded = try? JSONDecoder().decode([String].self, from: data)
         else { return [] }
         return Set(decoded)
@@ -6561,11 +6782,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func storeDismissedAlertsAttentionItemIDs(_ ids: Set<String>) throws {
         guard !ids.isEmpty else {
-            try clientDatabase().setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: nil)
+            try clientDatabase().setSetting(key: ClientSettingsKey.alertsDismissedAttentionItems, value: nil)
             return
         }
         let encoded = try JSONEncoder().encode(ids.sorted())
-        try clientDatabase().setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
+        try clientDatabase().setSetting(key: ClientSettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
     }
 
     func macPairedDevices() -> [SpacesPairedDeviceRecord] {
@@ -6680,7 +6901,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let selectable = Self.addProjectDeviceIsSelectable(loadState: section.loadState)
         let container = ClickableRowView(isInteractive: selectable)
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        }
         container.alphaValue = selectable ? 1 : 0.55
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
@@ -7380,6 +7602,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func restartWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performRestartWorkspace(id: id) } }
 
     private func performRestartWorkspace(id: String) async {
+        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         let result: Result<SpacesDeviceAPIResponse, Error>?
         if let device = deviceForWorkspaceMutation(workspaceID: id) {
             result = await Self.deviceMutation(device: device) { device in
@@ -7393,9 +7616,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             switch result {
             case .success(let response):
                 // Restart goes through the daemon stop path; the daemon does not own the
-                // client-side dedicated Chrome windows, so close them here too for a clean
-                // restarted state (a later browser focus then opens a fresh window).
-                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                // client-side Chrome browser-session tabs, so close them here too for a clean
+                // restarted state (a later browser focus then opens fresh tabs).
+                self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
@@ -7416,6 +7639,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func stopWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performStopWorkspace(id: id) } }
 
     private func performStopWorkspace(id: String) async {
+        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         let result: Result<SpacesDeviceAPIResponse, Error>?
         if let device = deviceForWorkspaceMutation(workspaceID: id) {
             result = await Self.deviceMutation(device: device) { device in
@@ -7428,7 +7652,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let result {
             switch result {
             case .success(let response):
-                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
@@ -7437,33 +7661,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Closes the workspace browser-session tabs the app opened (in their dedicated Chrome windows)
-    /// and clears their tracking rows. Browser-session windows are client/desktop-local, so the
+    /// Closes the workspace browser-session tabs the app opened or adopted and clears their
+    /// tracking rows. Browser-session tab locations are client/desktop-local, so the
     /// daemon cannot close them when a workspace stops — the GUI tears them down here. A no-op when
-    /// the workspace has no tracked browser windows (e.g. a remote workspace, whose browser sessions
-    /// open a URL without a dedicated tracked window).
+    /// the workspace has no tracked browser-session tabs.
     ///
     /// Called from two disjoint triggers: the GUI's own stop/restart/archive handlers (eager, and
     /// the only reliable signal for a restart's transient stop), and the sidebar's daemon-observed
     /// transition diff (the net for stop/archive initiated outside this GUI — CLI, MCP, the Device
     /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
     /// re-observes the same stopped workspace finds nothing to close.
-    func closeLocalBrowserSessionWindows(workspaceID: String) {
+    func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
         Task.detached(priority: .utility) {
-            let store = ClientBrowserWindowIDStore()
-            guard let tracked = try? store.windowIDs(workspaceID: workspaceID), !tracked.isEmpty else { return }
-            let chrome = ChromeAdapter()
-            // Gate on `isRunning()` (a no-Apple-Events check) so stopping a workspace never launches
-            // Chrome: if the user already quit Chrome, the tracked tabs are gone — scripting Chrome
-            // would only relaunch it. Just clear the tracking rows below.
-            if chrome.isRunning() {
-                // Close only the session's matching tab, never the whole window: the window may hold
-                // other tabs the user opened, and a tracked id can be stale (Chrome reuses window
-                // ids after a restart) so the URL must still match.
-                for entry in tracked { _ = try? chrome.closeMatchingTabsInWindow(windowID: entry.windowID, urlPrefix: entry.targetURL) }
-            }
-            try? store.clearAll(workspaceID: workspaceID)
+            Self.closeLocalBrowserSessionWindowsSynchronously(
+                workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
         }
+    }
+
+    private func configuredBrowserSessionTargetURLsForTeardown(workspaceID: String) -> [String] {
+        Self.browserSessionTargetURLs(workspaceID: workspaceID, overview: overview(forWorkspaceID: workspaceID))
     }
 
     @objc private func archiveWorkspace(_ sender: Any) {
@@ -7504,6 +7720,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deleteLocalBranch = project.isGitRepo && deleteLocalBranchCheckbox.state == .on
         let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
+        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         // Resolve the owning device before the optimistic removal below; once the row
         // is gone from workspacesByProject, deviceForWorkspaceMutation can no longer
         // find it and would fall back to the local device, misrouting remote archives.
@@ -7524,7 +7741,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch result {
                 case .success(let response):
                     button?.isEnabled = true
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
+                    self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     applyDeviceMutationResponse(response, selectedProjectID: project.id)
                 case .failure(let error):
                     requestSidebarReload()
@@ -8415,26 +8632,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// database). The port range is daemon-owned and never read by the GUI, so it carries a
     /// placeholder rather than a daemon-DB read — keeping config sourcing off the orchestrator.
     nonisolated static func clientAppConfig() throws -> AppConfig {
-        let editor = try SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
+        let editor = try SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
         return AppConfig(editor: editor, portRange: .default)
     }
 
     private func clientAppConfig() throws -> AppConfig {
-        let editor = try clientDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
+        let editor = try clientDatabase().setting(key: ClientSettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
         return AppConfig(editor: editor, portRange: .default)
     }
 
-    private func clientActiveWorkspaceID() -> String? { try? clientDatabase().setting(key: SettingsKey.activeWorkspaceID) }
+    private func clientActiveWorkspaceID() -> String? { try? clientDatabase().setting(key: ClientSettingsKey.activeWorkspaceID) }
 
     nonisolated static func setClientActiveWorkspaceID(_ workspaceID: String?) {
-        try? SpacesClientDatabase.setDefaultSetting(key: SettingsKey.activeWorkspaceID, value: workspaceID)
+        try? SpacesClientDatabase.setDefaultSetting(key: ClientSettingsKey.activeWorkspaceID, value: workspaceID)
     }
 
     func loadShortcutSpecs() {
         if let modifiers = try? shortcutSettingResolver().leaderModifiers() {
             shortcutLeaderModifiers = modifiers
         } else {
-            shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
+            shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(ClientSettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
         }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
         commandPaletteShortcutSpec = loadShortcutSpec(setting: .guiCommandPaletteHotkey)
@@ -8522,7 +8739,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
         logWindowShortcutProfile("stage=received index=\(index) alerts=\(showingAlerts ? 1 : 0)")
-        await dispatchWindowShortcut(windowShortcutResolution(index: index), index: index, startedAt: startedAt)
+        let shortcutDispatchMS = windowShortcutElapsedMS(since: startedAt)
+        let resolutionStartedAt = Date()
+        let resolution = windowShortcutResolution(index: index)
+        let targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
+        await dispatchWindowShortcut(
+            resolution, index: index, startedAt: startedAt, shortcutDispatchMS: shortcutDispatchMS, targetResolutionMS: targetResolutionMS)
     }
 
     /// Resolves a window-shortcut press to a device-agnostic focus target. Alerts focus
@@ -8544,35 +8766,86 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deviceSection(id: deviceID(forWorkspaceID: workspaceID))?.overview ?? localDeviceOverview
     }
 
-    /// Focuses the local Chrome window for a workspace browser session. A browser session is a
-    /// distinct client "window", so the app opens a dedicated Chrome window for it once and
-    /// tracks that window's id in client state (`ClientBrowserWindowIDStore`, keyed by the
-    /// resolved URL) — replacing the daemon's former `extracted_window_id`. Re-focus returns to
-    /// that specific window by id; only when it is gone does the app open a fresh dedicated
-    /// window. Scoping to the tracked window id means focus never lands on an unrelated window
-    /// that merely has the same URL open. `NSWorkspace.open` is a last resort when Chrome
-    /// cannot be scripted. Remote service sessions use this after their URL has been routed through
-    /// the Mac Caddy router.
-    private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
+    /// Focuses the local Chrome tab for a workspace browser session. Browser-session window ids are
+    /// client state keyed by resolved URL; multiple browser sessions in the same workspace may point
+    /// at the same Chrome window so they stay grouped as tabs. Re-focus first uses the tracked window
+    /// id for the fast path, then scans all Chrome windows for a matching URL so a tab the user moved
+    /// by hand is adopted into tracking instead of duplicated. `NSWorkspace.open` is a last resort
+    /// when Chrome cannot be scripted. Remote service sessions use this after their URL has been
+    /// routed through the Mac Caddy router.
+    private func focusLocalChromeTab(workspaceID: String, targetURL: String, siblingTargetURLs: [String], fallbackURL: URL) async {
         let startedAt = Date()
-        let result: (focused: Bool, path: String, focusMS: Int) = await Task.detached(priority: .userInitiated) {
+        let result: BrowserFocusResult = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
-            let focusStartedAt = Date()
             let store = ClientBrowserWindowIDStore()
-            if let trackedID = try? store.windowID(workspaceID: workspaceID, targetURL: targetURL),
-                (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
-            {
-                return (true, "focused_tracked", TerminalPerformance.elapsedMS(since: focusStartedAt))
+            let dbLookupStartedAt = Date()
+            let trackedEntries = ((try? store.windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
+            let trackedID = trackedEntries.first(where: { AppKitController.browserSessionTargetURL($0.targetURL, matches: targetURL) })?.windowID
+            let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbLookupStartedAt)
+            var chromeAppleScriptMS = 0
+            var clientDBWriteMS = 0
+            if let trackedID {
+                let chromeStartedAt = Date()
+                let didFocus =
+                    (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs))
+                    ?? false
+                chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
+                if didFocus {
+                    return BrowserFocusResult(
+                        focused: true, path: "focused_tracked", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                        chromeAppleScriptMS: chromeAppleScriptMS)
+                }
             }
+
+            let allWindowFocusStartedAt = Date()
+            let relocatedMatch = try? chrome.focusFirstMatchingTabMatch(urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs)
+            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: allWindowFocusStartedAt)
+            if let relocatedMatch {
+                let dbWriteStartedAt = Date()
+                try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: relocatedMatch.windowID)
+                clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
+                return BrowserFocusResult(
+                    focused: true, path: "focused_all_windows", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                    chromeAppleScriptMS: chromeAppleScriptMS)
+            }
+
+            let candidateWindowIDs = trackedEntries.map(\.windowID)
+            let candidateURLPrefixes = trackedEntries.map(\.targetURL)
+            let groupedTabStartedAt = Date()
+            let groupedWindowID = try? chrome.openTabInFirstAvailableWindow(
+                windowIDs: candidateWindowIDs, containingAnyURLPrefix: candidateURLPrefixes, url: targetURL, background: false)
+            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: groupedTabStartedAt)
+            if let groupedWindowID {
+                let dbWriteStartedAt = Date()
+                try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: groupedWindowID)
+                clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
+                return BrowserFocusResult(
+                    focused: true, path: "opened_grouped_tab", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                    chromeAppleScriptMS: chromeAppleScriptMS)
+            }
+
+            let chromeStartedAt = Date()
             let newWindowID = (try? chrome.openWindow(url: targetURL, background: false)) ?? -1
-            guard newWindowID > 0 else { return (false, "fallback", TerminalPerformance.elapsedMS(since: focusStartedAt)) }
+            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
+            guard newWindowID > 0 else {
+                return BrowserFocusResult(
+                    focused: false, path: "fallback", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                    chromeAppleScriptMS: chromeAppleScriptMS)
+            }
+            let dbWriteStartedAt = Date()
             try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: newWindowID)
-            return (true, "opened_window", TerminalPerformance.elapsedMS(since: focusStartedAt))
+            clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
+            return BrowserFocusResult(
+                focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                chromeAppleScriptMS: chromeAppleScriptMS)
         }.value
         if !result.focused { NSWorkspace.shared.open(fallbackURL) }
         logPerfMetric(
             "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-            success: result.focused, detail: "path=\(result.path) focus_ms=\(result.focusMS)")
+            success: result.focused,
+            detail:
+                "path=\(result.path) client_db_lookup_ms=\(result.clientDBLookupMS) client_db_write_ms=\(result.clientDBWriteMS) chrome_applescript_ms=\(result.chromeAppleScriptMS)"
+        )
     }
 
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
@@ -8638,17 +8911,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// target, then applies the window-shortcut profiling and app-hide handling. The
     /// focus work itself lives in `executeWindowFocusResolution` so the cycle and
     /// command-palette paths reuse it.
-    private func dispatchWindowShortcut(_ resolution: DeviceWindowShortcutResolution, index: Int, startedAt: Date) async {
+    private func dispatchWindowShortcut(
+        _ resolution: DeviceWindowShortcutResolution, index: Int, startedAt: Date, shortcutDispatchMS: Int, targetResolutionMS: Int
+    ) async {
         let routeStartedAt = Date()
         let kind = Self.windowShortcutKind(for: resolution)
         guard let action = await executeWindowFocusResolution(resolution) else {
             logWindowShortcutProfile("stage=aborted index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            logPerfMetric(
+                "window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail:
+                    "kind=\(kind) shortcut_dispatch_ms=\(shortcutDispatchMS) target_resolution_ms=\(targetResolutionMS) route_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
+            )
             activeWindowShortcutProfile = nil
             return
         }
-        logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-        logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+        let routeMS = windowShortcutElapsedMS(since: routeStartedAt)
+        logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(routeMS)")
+        logPerfMetric(
+            "window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "kind=\(kind) shortcut_dispatch_ms=\(shortcutDispatchMS) target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)")
         hideAfterSuccessfulExternalWindowAction(action)
         activeWindowShortcutProfile = nil
     }
@@ -8668,6 +8950,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 showError(WorkspaceError.invalidArgument(message: "Browser session URL is invalid."))
                 return nil
             }
+            let browserSessionTargetURLs = Self.browserSessionTargetURLs(
+                workspaceID: workspaceID, targetURL: targetURL, overview: overview(forWorkspaceID: workspaceID))
+            let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserSessionTargetURLs)
             if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
                 guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                     showDeviceNotLoadedError()
@@ -8682,21 +8967,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // actor to keep the focus keypress from freezing the UI. The manager is `Sendable` and
                 // serializes its own state, so the detached task can safely own the reconciliation.
                 let manager = browserSSHForwardManager
-                let routeResult: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try manager.routedURL(targetURL: targetURL, workspace: workspace, device: device)) } catch {
-                        return .failure(error)
-                    }
+                let routeResult: Result<RoutedBrowserFocusTarget, Error> = await Task.detached(priority: .userInitiated) {
+                    do {
+                        let routedURL = try manager.routedURL(targetURL: targetURL, workspace: workspace, device: device)
+                        let routedSiblingTargetURLs = try siblingTargetURLs.map {
+                            try manager.routedURL(targetURL: $0, workspace: workspace, device: device).absoluteString
+                        }
+                        return .success(RoutedBrowserFocusTarget(targetURL: routedURL, siblingTargetURLs: routedSiblingTargetURLs))
+                    } catch { return .failure(error) }
                 }.value
                 switch routeResult {
-                case .success(let routedURL):
+                case .success(let routedTarget):
                     refreshVisibleServicePortDisplays(deviceID: device.id)
-                    await focusLocalChromeTab(workspaceID: workspaceID, targetURL: routedURL.absoluteString, fallbackURL: routedURL)
+                    await focusLocalChromeTab(
+                        workspaceID: workspaceID, targetURL: routedTarget.targetURL.absoluteString, siblingTargetURLs: routedTarget.siblingTargetURLs,
+                        fallbackURL: routedTarget.targetURL)
                 case .failure(let error):
                     showError(error)
                     return nil
                 }
             } else {
-                await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, fallbackURL: url)
+                await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, fallbackURL: url)
             }
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
@@ -8720,10 +9011,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @discardableResult private func openOrFocusTerminalTarget(_ request: DeviceTerminalOpenRequest, requestID: String? = nil) async -> Bool {
+        let startedAt = Date()
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        var requestResolveMS = 0
+        var existingPaneFocusMS = 0
+        var paneOpenMS = 0
+        var ownershipRequestMS = 0
+        var focusObservationMS = 0
+        var focusObserved = false
+        func logTerminalPaneFocus(success: Bool, reason: String = "") {
+            let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            logPerfMetric(
+                "terminal_pane_focus", target: "session=\(request.sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
+                detail:
+                    "request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0)\(requestDetail)\(reasonDetail)"
+            )
+        }
         // Window-focus terminal targets are always workspace-backed (they come from a
         // workspace's run-target list), so a missing device is a not-loaded state.
         guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
             showDeviceNotLoadedError()
+            logTerminalPaneFocus(success: false, reason: "device_not_loaded")
             return false
         }
         Self.setClientActiveWorkspaceID(request.workspaceID)
@@ -8736,19 +9044,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // A row-built resolution can predate the session's overview entry and lack the
         // real shell/command; recover them through the cold overview fetch so the pane's
         // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
+        let requestResolveStartedAt = Date()
         let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
-        guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return false }
+        requestResolveMS = windowShortcutElapsedMS(since: requestResolveStartedAt)
+        let reusedExistingPane = panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil
+        let paneFocusStartedAt = Date()
+        guard panelCoordinator.openOrFocusTerminalPane(openRequest) else {
+            if reusedExistingPane {
+                existingPaneFocusMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+            } else {
+                paneOpenMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+            }
+            logTerminalPaneFocus(success: false, reason: "pane_open_failed")
+            return false
+        }
+        if reusedExistingPane {
+            existingPaneFocusMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+        } else {
+            paneOpenMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+        }
         // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
         // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
         // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
         // closed and reopened (or is currently a viewer) reattaches as owner instead of the
         // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
         // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
+        let ownershipStartedAt = Date()
         panelCoordinator.content(forSessionID: openRequest.sessionID)?.requestOwnershipIfNeeded()
+        ownershipRequestMS = windowShortcutElapsedMS(since: ownershipStartedAt)
+        let focusObservationStartedAt = Date()
+        await Task.yield()
+        focusObserved = panelCoordinator.focusedSessionID() == openRequest.sessionID
+        focusObservationMS = windowShortcutElapsedMS(since: focusObservationStartedAt)
+        logTerminalPaneFocus(success: true)
         if let requestID, !requestID.isEmpty {
             logPerfMetric(
-                "terminal_window_focus_ipc", target: "session=\(openRequest.sessionID)", elapsedMS: 0, success: true,
-                detail: "route=pane request_id=\(requestID)")
+                "terminal_window_focus_ipc", target: "session=\(openRequest.sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                success: true,
+                detail:
+                    "route=pane request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0) request_id=\(requestID)"
+            )
+            if focusObserved {
+                logPerfMetric(
+                    "terminal_window_focus_observed", target: "session=\(openRequest.sessionID)",
+                    elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "route=pane request_id=\(requestID)")
+            }
         }
         return true
     }
@@ -8902,7 +9242,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.cycleWorkspaceWindow(
-                workspaceID: workspaceID, delta: direction > 0 ? 1 : -1, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
+                workspaceID: workspaceID, delta: direction > 0 ? 1 : -1, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID,
+                requestID: requestID)
             self.logPerfMetric(
                 "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: self.windowShortcutElapsedMS(since: startedAt),
                 success: true, detail: "direction=\(direction > 0 ? "next" : "previous") request_id=\(requestID)")
@@ -9643,9 +9984,11 @@ struct CommandPaletteItem: Sendable {
     func update(item: CommandPaletteItem, isSelected: Bool, shortcutText: String?, onClick: (() -> Void)? = nil) {
         if let onClick { clickHandler = onClick }
         isSelectedState = isSelected
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (isSelected ? Theme.rowSelectedCard : .clear).cgColor }
         layer?.borderWidth = isSelected ? 1 : 0
-        layer?.borderColor = (isSelected ? Theme.rowSelectedCardBorder : NSColor.clear).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isSelected ? Theme.rowSelectedCard : .clear).cgColor
+            layer?.borderColor = (isSelected ? Theme.rowSelectedCardBorder : NSColor.clear).cgColor
+        }
 
         labelField.stringValue = item.label
         workspaceField.stringValue = item.workspaceTitle
@@ -9720,6 +10063,7 @@ struct CommandPaletteItem: Sendable {
         super.viewDidChangeEffectiveAppearance()
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = isSelectedState ? Theme.rowSelectedCard.cgColor : NSColor.clear.cgColor
+            layer?.borderColor = isSelectedState ? Theme.rowSelectedCardBorder.cgColor : NSColor.clear.cgColor
         }
     }
 }
@@ -9983,4 +10327,15 @@ extension String {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+}
+
+extension SpacesDeviceOverviewPayload {
+    /// Empty stand-in rendered for an offline or wire-incompatible device, which has no decodable
+    /// overview. Its inline daemon status is never consulted — sidebar sections track live status
+    /// separately — so it advertises the unknown protocol version rather than a fabricated match.
+    fileprivate static let offlinePlaceholder = SpacesDeviceOverviewPayload(
+        workspaces: [], sessions: [],
+        daemonStatus: TerminalServiceDaemonStatus(
+            version: "", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+            protocolVersion: TerminalServiceDaemonStatus.unknownProtocolVersion))
 }

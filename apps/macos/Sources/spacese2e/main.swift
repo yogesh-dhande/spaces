@@ -29,12 +29,11 @@ struct SpacesE2ECommand: ParsableCommand {
             CycleWorkspaceWindowCommand.self, FocusWorkspaceProcessCommand.self, CloseWorkspaceProcessWindowCommand.self, SurfaceSnapshotCommand.self,
             CloseTerminalSessionWindowCommand.self, FocusTerminalSessionWindowCommand.self, DumpTerminalSessionWindowStateCommand.self,
             TerminalSessionWindowShortcutCommand.self, StartWorkspaceTerminalSessionCommand.self, TerminateTerminalSessionCommand.self,
-            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, PlanWorkspaceRuntimeCommand.self,
-            OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self, OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self,
-            ProfileShowCommand.self, ProfileAppOwnerCommand.self, MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self,
-            ProfileDesktopControlOwnerCommand.self, ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self,
-            MobileRequestCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
-            DragApplicationWindowCommand.self,
+            TerminalServiceStateCommand.self, TerminalServiceControlCommand.self, OpenDevicePairingWindowCommand.self, PairRemoteDeviceCommand.self,
+            OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
+            MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
+            ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
+            RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -814,22 +813,6 @@ private struct StopFixturesCommand: ParsableCommand {
     }
 }
 
-private struct PlanWorkspaceRuntimeCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "plan-workspace-runtime")
-
-    @Option(name: .long) var workspaceDir: String
-
-    func run() throws {
-        let (orchestrator, workspace) = try resolveWorkspace(dir: workspaceDir)
-        let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspace.id)
-        try emitJSON(
-            WorkspaceRuntimePlanPayload(
-                projectID: plan.project.id, workspace: workspaceSummaryPayload(plan.workspace),
-                selection: spacesDeviceSelectionPayload(plan.selection), daemonTarget: daemonTargetPayload(plan.daemonTarget),
-                manifest: plan.manifest, remoteSSHURI: plan.remoteSSHURI))
-    }
-}
-
 private struct SeedFixtureCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "seed-fixture")
 
@@ -1055,17 +1038,15 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID)
+                    terminalTrackingID: $0.terminalTrackingID)
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
-                    name: $0.name, app: $0.app, role: $0.role, detail: $0.detail, targetURL: $0.targetURL, terminalTrackingID: $0.terminalTrackingID,
-                    terminalNativeID: $0.terminalNativeID)
+                    name: $0.name, app: $0.app, role: $0.role, detail: $0.detail, targetURL: $0.targetURL, terminalTrackingID: $0.terminalTrackingID)
             },
             agentWindows: try orchestrator.agentWindows(workspaceID: workspace.id).map {
                 AgentWindowPayload(
-                    id: $0.id, label: $0.label, provider: $0.provider.rawValue, status: $0.status.rawValue, terminalTrackingID: $0.terminalTrackingID,
-                    terminalNativeID: $0.terminalNativeID)
+                    id: $0.id, label: $0.label, provider: $0.provider.rawValue, status: $0.status.rawValue, terminalTrackingID: $0.terminalTrackingID)
             })
         try emitJSON(payload)
     }
@@ -1073,7 +1054,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
     private func resolvedPID(for process: RunningProcessRecord) throws -> Int? {
         if let pid = process.pid { return pid }
         guard process.terminalApp == TerminalHost.spaces.appName else { return nil }
-        guard let sessionID = process.terminalTrackingID ?? process.terminalNativeID, !sessionID.isEmpty else { return nil }
+        guard let sessionID = process.terminalTrackingID, !sessionID.isEmpty else { return nil }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         return try TerminalSessionPersistence.readRuntimeState(paths: paths).childPID.map(Int.init)
     }
@@ -1149,7 +1130,7 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
         guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
             throw ValidationError("Running process not found: \(processName)")
         }
-        guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else {
+        guard let sessionID = process.terminalTrackingID, !sessionID.isEmpty else {
             throw ValidationError("Running process has no built-in terminal session: \(processName)")
         }
         try IPCNotification.post(IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID])
@@ -1493,51 +1474,6 @@ private struct RemoteDevicePairingWindowPayload: Codable {
     let expiresAt: String?
 }
 
-private struct SpacesDevicePayload: Codable {
-    let id: String
-    let name: String
-    let kind: String
-    let sshHost: String
-    let sshUser: String?
-    let sshPort: Int?
-    let workspaceRoot: String
-    let daemonHost: String
-    let daemonPort: Int
-    let certificateFingerprint: String
-    let createdAt: String
-    let updatedAt: String
-}
-
-private struct WorkspaceRuntimePlanPayload: Codable {
-    let projectID: String
-    let workspace: WorkspaceSummaryPayload
-    let selection: SpacesDeviceSelectionPayload
-    let daemonTarget: SpacesDaemonConnectionTargetPayload
-    let manifest: WorkspaceRuntimeManifest
-    let remoteSSHURI: String?
-}
-
-private struct SpacesDeviceSelectionPayload: Codable {
-    let location: String
-    let deviceID: String?
-    let displayName: String
-    let device: SpacesDevicePayload?
-}
-
-private struct SpacesDaemonConnectionTargetPayload: Codable {
-    let transport: String
-    let deviceID: String?
-    let displayName: String
-    let socketPath: String?
-    let endpoint: SpacesDaemonEndpointPayload?
-}
-
-private struct SpacesDaemonEndpointPayload: Codable {
-    let host: String
-    let port: Int
-    let certificateFingerprint: String
-}
-
 private struct WorkspaceSummaryPayload: Codable {
     let id: String
     let name: String
@@ -1572,7 +1508,6 @@ private struct RunningProcessPayload: Codable {
     let status: String
     let terminalApp: String?
     let terminalTrackingID: String?
-    let terminalNativeID: String?
 }
 
 private struct WindowPayload: Codable {
@@ -1582,7 +1517,6 @@ private struct WindowPayload: Codable {
     let detail: String?
     let targetURL: String?
     let terminalTrackingID: String?
-    let terminalNativeID: String?
 }
 
 private struct AgentWindowPayload: Codable {
@@ -1591,7 +1525,6 @@ private struct AgentWindowPayload: Codable {
     let provider: String
     let status: String
     let terminalTrackingID: String?
-    let terminalNativeID: String?
 }
 
 private struct SurfaceSnapshotPayload: Codable {
@@ -1769,30 +1702,6 @@ private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> Workspac
         agentLaunchers: settings.agentLaunchers.map { .init(name: $0.name, command: $0.command) })
 }
 
-private func spacesDevicePayload(_ device: SpacesDeviceRecord) -> SpacesDevicePayload {
-    SpacesDevicePayload(
-        id: device.id, name: device.name, kind: device.kind.rawValue, sshHost: device.sshHost, sshUser: device.sshUser, sshPort: device.sshPort,
-        workspaceRoot: device.workspaceRoot, daemonHost: device.daemonEndpoint.host, daemonPort: device.daemonEndpoint.port,
-        certificateFingerprint: device.daemonEndpoint.certificateFingerprint, createdAt: device.createdAt, updatedAt: device.updatedAt)
-}
-
-private func spacesDeviceSelectionPayload(_ selection: SpacesDeviceSelection) -> SpacesDeviceSelectionPayload {
-    switch selection {
-    case .local(let device):
-        return SpacesDeviceSelectionPayload(location: "local", deviceID: device.id, displayName: selection.displayName, device: nil)
-    case .remote(let device):
-        return SpacesDeviceSelectionPayload(
-            location: "remote", deviceID: device.id, displayName: selection.displayName, device: spacesDevicePayload(device))
-    }
-}
-
-private func daemonTargetPayload(_ target: SpacesDaemonConnectionTarget) -> SpacesDaemonConnectionTargetPayload {
-    SpacesDaemonConnectionTargetPayload(
-        transport: target.transport.rawValue, deviceID: target.deviceID, displayName: target.displayName, socketPath: target.socketPath,
-        endpoint: target.endpoint.map { SpacesDaemonEndpointPayload(host: $0.host, port: $0.port, certificateFingerprint: $0.certificateFingerprint) }
-    )
-}
-
 /// Shared JSON encoder for the shell harness.
 private func emitJSON<T: Encodable>(_ value: T) throws {
     let encoder = JSONEncoder()
@@ -1827,14 +1736,7 @@ private func workspaceID(forDir dir: String) throws -> String { try resolveWorks
 private func sendTerminalServiceRequestForSession(sessionID rawSessionID: String, request: TerminalServiceRequest) throws -> TerminalServiceResponse {
     let sessionID = try required(rawSessionID, label: "session-id")
     let request = request.withSessionID(sessionID)
-    let orchestrator = try makeOrchestrator()
-    if let workspaceID = try orchestrator.workspaceIDForTerminalSession(sessionID) {
-        let plan = try orchestrator.workspaceRuntimePlan(workspaceID: workspaceID)
-        return try WorkspaceOrchestrator.sendTerminalServiceRequest(to: plan.daemonTarget, request: request)
-    }
-    let target = SpacesDaemonConnectionTarget(
-        transport: .localUnixSocket, deviceID: nil, displayName: "local Mac", socketPath: try TerminalServicePaths.socketPath())
-    return try WorkspaceOrchestrator.sendTerminalServiceRequest(to: target, request: request)
+    return try TerminalServiceClient.send(request: request, socketPath: try TerminalServicePaths.socketPath(), timeout: 15)
 }
 
 extension TerminalServiceRequest {

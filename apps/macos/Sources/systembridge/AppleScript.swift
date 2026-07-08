@@ -20,11 +20,11 @@ public enum AppleScript {
                             "Unmocked AppleScript call during tests. Install an `osascript` mock before invoking AppleScript.run."
                     ])
             }
-            let usesProcessTimeout = (timeoutSeconds ?? 0) > 0
-            let script = usesProcessTimeout ? timeoutWrappedScript(script, timeoutSeconds: timeoutSeconds ?? 0) : script
+            let usesTimeout = (timeoutSeconds ?? 0) > 0
+            let script = usesTimeout ? timeoutWrappedScript(script, timeoutSeconds: timeoutSeconds ?? 0) : script
             do {
-                if usesProcessTimeout, let timeoutSeconds { return try runWithProcessTimeout(script, timeoutSeconds: timeoutSeconds) }
                 if isRunningTests {
+                    if usesTimeout, let timeoutSeconds { return try runWithProcessTimeout(script, timeoutSeconds: timeoutSeconds) }
                     let output = try Shell.runAndCapture(["osascript", "-e", script])
                     return output.trimmingCharacters(in: .whitespacesAndNewlines)
                 }

@@ -43,13 +43,9 @@ struct SpacesDeviceOverviewBuilder {
         let hasFinalRender: Bool
     }
 
-    static func build(projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], sessions: [TerminalSessionCatalogEntry])
-        -> SpacesDeviceOverviewPayload
-    { build(projects: projects, workspaces: workspaces, workspaceRows: [], liveSessions: sessions) }
-
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus? = nil
+        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -402,17 +398,17 @@ struct SpacesDeviceOverviewBuilder {
     }
 
     private static func terminalSessionID(for process: RunningProcessRecord?) -> String? {
-        guard let sessionID = process?.terminalNativeID ?? process?.terminalTrackingID, !sessionID.isEmpty else { return nil }
+        guard let sessionID = process?.terminalTrackingID, !sessionID.isEmpty else { return nil }
         return sessionID
     }
 
     private static func terminalSessionID(for agent: AgentWindowRecord?) -> String? {
-        guard let sessionID = agent?.terminalNativeID ?? agent?.terminalTrackingID, !sessionID.isEmpty else { return nil }
+        guard let sessionID = agent?.terminalTrackingID, !sessionID.isEmpty else { return nil }
         return sessionID
     }
 
     private static func terminalSessionID(for window: WindowRecord) -> String? {
-        guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return nil }
+        guard let sessionID = window.terminalTrackingID, !sessionID.isEmpty else { return nil }
         return sessionID
     }
 

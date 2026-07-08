@@ -274,7 +274,6 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let id: String
     public let projectID: String
     public let dir: String
-    public let runtimePath: String
     public let dirname: String?
     public let branch: String?
     public let baseBranch: String?
@@ -286,13 +285,12 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let notes: String?
 
     public init(
-        id: String, projectID: String, dir: String, runtimePath: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool,
-        isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool, isArchived: Bool,
+        isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
         self.projectID = projectID
         self.dir = dir
-        self.runtimePath = runtimePath
         self.dirname = dirname
         self.branch = branch
         self.baseBranch = baseBranch
@@ -431,15 +429,12 @@ public struct TerminalServiceAgentSignalEvent: Codable, Sendable, Equatable, Ide
     public let provider: String
     public let label: String?
     public let terminalTrackingID: String?
-    public let terminalNativeID: String?
-    public let codexThreadID: String?
     public let environmentKeys: [String]
     public let createdAt: String
 
     public init(
         id: String, sessionID: String, workspaceID: String?, workspacePath: String?, type: String, provider: String = "spaces", label: String? = nil,
-        terminalTrackingID: String? = nil, terminalNativeID: String? = nil, codexThreadID: String? = nil, environmentKeys: [String] = [],
-        createdAt: String
+        terminalTrackingID: String? = nil, environmentKeys: [String] = [], createdAt: String
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -449,8 +444,6 @@ public struct TerminalServiceAgentSignalEvent: Codable, Sendable, Equatable, Ide
         self.provider = provider
         self.label = label
         self.terminalTrackingID = terminalTrackingID
-        self.terminalNativeID = terminalNativeID
-        self.codexThreadID = codexThreadID
         self.environmentKeys = environmentKeys
         self.createdAt = createdAt
     }

@@ -99,7 +99,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.serviceLogPath)).count, 0)
         let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == reservation.windowRecordID })
         XCTAssertEqual(terminalWindow.role, "terminal")
-        XCTAssertEqual(terminalWindow.terminalNativeID, reservation.sessionID)
         XCTAssertEqual(terminalWindow.terminalTrackingID, reservation.sessionID)
         XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
@@ -210,7 +209,89 @@ extension OrchestratorTests {
 
         let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
-        XCTAssertEqual(terminalWindow.terminalTrackingID, terminalWindow.terminalNativeID)
+    }
+
+    func testCreateWorkspaceTerminalSessionCreatesAdHocWorkspaceTerminalRowAndStopsWithWorkspace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
+            builtInTerminalSessionLauncher: { configuration in
+                launchCapture.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                    launchConfiguration: configuration)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: "echo hello")
+
+        let launchConfiguration = try XCTUnwrap(launchCapture.snapshot().first)
+        XCTAssertEqual(launchConfiguration.sessionID, session.id)
+        XCTAssertEqual(launchConfiguration.workspaceID, workspace.id)
+        XCTAssertEqual(launchConfiguration.kind, .shell)
+        XCTAssertEqual(launchConfiguration.title, "shell-1")
+        XCTAssertTrue(launchConfiguration.command?.contains("echo hello") == true)
+        let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
+        XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
+        XCTAssertEqual(terminalWindow.name, "shell-1")
+        XCTAssertEqual(terminalWindow.role, "terminal")
+        XCTAssertEqual(terminalWindow.terminalTrackingID, session.id)
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+
+        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertEqual(terminateCapture.sessionIDs, [session.id])
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+    }
+
+    func testStopWorkspaceTerminatesLaunchOwnedAdHocTerminalSessionWithoutWindowRow() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store,
+            builtInTerminalSessionTerminator: { sessionID in
+                terminateCapture.sessionIDs.append(sessionID)
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+                    let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+                else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    TerminalSessionRuntimeState(
+                        sessionID: sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID, childPID: runtimeState.childPID,
+                        state: .exited, updatedAt: "2026-06-06T00:00:01Z", exitedAt: "2026-06-06T00:00:01Z", title: runtimeState.title,
+                        workingDirectory: runtimeState.workingDirectory, columns: runtimeState.columns, rows: runtimeState.rows,
+                        foregroundPID: runtimeState.foregroundPID, foregroundExecutablePath: runtimeState.foregroundExecutablePath,
+                        foregroundExecutableName: runtimeState.foregroundExecutableName, foregroundArgv: runtimeState.foregroundArgv,
+                        foregroundDetectedAgentKind: runtimeState.foregroundDetectedAgentKind,
+                        foregroundDisplayLabel: runtimeState.foregroundDisplayLabel, foregroundDisplayCommand: runtimeState.foregroundDisplayCommand),
+                    paths: paths)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "launch-owned-shell"
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-06-06T00:00:00Z")
+        try writeTerminalSessionFixture(
+            sessionID: sessionID, workspace: workspace, kind: .shell,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 456,
+                state: .running, updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+
+        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
     }
 
     func testWorkspaceIDForTerminalSessionUsesTrackedBuiltInSessionID() throws {
@@ -225,8 +306,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                terminalTrackingID: "session-123", terminalNativeID: "session-123", role: "terminal", orderIndex: 200,
-                lastSeenAt: "2026-05-10T18:00:00Z"))
+                terminalTrackingID: "session-123", role: "terminal", orderIndex: 200, lastSeenAt: "2026-05-10T18:00:00Z"))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-123"), workspace.id)
     }
@@ -288,7 +368,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -331,7 +411,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -374,7 +454,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -854,7 +934,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1172,8 +1252,8 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, dir: "/projects/app", runtimePath: "/projects/app", dirname: nil, branch: "main",
-            baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
+            id: "workspace-a", projectID: project.id, dir: "/projects/app", dirname: nil, branch: "main", baseBranch: "main", isDefault: false,
+            isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)
         try store.setWorkspacePorts(workspaceID: workspace.id, ports: [3000], names: ["port"])

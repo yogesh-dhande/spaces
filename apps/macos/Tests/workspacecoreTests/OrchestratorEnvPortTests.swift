@@ -489,7 +489,7 @@ extension OrchestratorTests {
         XCTAssertEqual(env["SPACES_ADMIN_UI_URL"], "http://admin-ui.\(slug).localhost:\(AppConfig.defaultRouterPort)")
     }
 
-    func testBuildWorkspaceEnvKeepsBrowserFacingServiceURLForRemoteManifest() throws {
+    func testBuildWorkspaceEnvKeepsBrowserFacingServiceURLForRuntimeManifest() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/local/project")
@@ -497,31 +497,27 @@ extension OrchestratorTests {
         let slug = SpacesProfile.workspaceHostSlug(
             branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         let manifest = WorkspaceRuntimeManifest(
-            workspaceID: workspace.id, projectID: project.id, deviceID: "linux-device", location: .remote, localPath: workspace.runtimePath,
-            remotePath: "/srv/project/ws", branch: workspace.branch, baseBranch: workspace.baseBranch,
+            workspaceID: workspace.id, projectID: project.id, localPath: workspace.dir, branch: workspace.branch, baseBranch: workspace.baseBranch,
             namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)],
             processEnvironment: [
                 "SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug, "SPACES_WEB_PORT": "3000",
                 "SPACES_WEB_HOST": "web.\(slug).localhost",
-            ], allowedFileRoots: ["/srv/project/ws"])
+            ], allowedFileRoots: [workspace.dir])
 
         let env = orchestrator.buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: [(port: 3000, name: "web")], runtimeManifest: manifest)
 
-        XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], "/srv/project/ws")
-        XCTAssertEqual(env["SPACES_PROJECT_DIR"], "/srv/project/ws")
+        XCTAssertEqual(env["SPACES_WORKSPACE_DIR"], workspace.dir)
+        XCTAssertEqual(env["SPACES_PROJECT_DIR"], project.dir)
         XCTAssertEqual(env["SPACES_WEB_PORT"], "3000")
         XCTAssertEqual(env["SPACES_WEB_URL"], "http://web.\(slug).localhost:\(AppConfig.defaultRouterPort)")
         XCTAssertEqual(env["SPACES_WEB_HOST"], "web.\(slug).localhost")
     }
 
-    // The browser-facing service URL's port is whatever the store reports for the router port:
-    // the seeded value when present (macOS, which runs Caddy), and the canonical
-    // `AppConfig.defaultRouterPort` fallback when unset (headless remote daemons, which never seed
-    // one — see `seedProfileRouterPortIfNeeded`). This test locks the seeded branch; the unseeded
-    // branch is covered by `testBuildWorkspaceEnvKeepsBrowserFacingServiceURLForRemoteManifest`.
-    // Together they guarantee a non-seeding remote daemon advertises the canonical port, never a
-    // fabricated per-profile derived one.
+    // The browser-facing service URL's port is whatever the store reports for the router port: the
+    // seeded value when present, and the canonical `AppConfig.defaultRouterPort` fallback when unset.
+    // This test locks the seeded branch; the unseeded branch is covered by
+    // `testBuildWorkspaceEnvKeepsBrowserFacingServiceURLForRuntimeManifest`.
     func testBuildWorkspaceEnvUsesSeededRouterPortForServiceURL() throws {
         let store = try makeTemporaryStore()
         var config = try store.appConfig()

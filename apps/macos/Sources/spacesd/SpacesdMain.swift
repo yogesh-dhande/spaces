@@ -235,7 +235,9 @@ import workspacecore
             } catch { return Self.failureResponse(error) }
         case .runWorkspaceCommand(let payload): return runWorkspaceCommand(payload)
         case .terminate(let payload):
-            guard !payload.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
+            guard !payload.sessionID.isEmpty else {
+                return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
+            }
             return terminateSession(id: payload.sessionID)
         case .list: return listSessions()
         case .state(let payload): return loadTerminalState(sessionID: payload.sessionID)
@@ -446,7 +448,9 @@ import workspacecore
     }
 
     private func acknowledgeAgentSignals(_ request: TerminalServiceAgentSignalAcknowledgementRequest) -> TerminalServiceResponse {
-        guard !request.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
+        guard !request.sessionID.isEmpty else {
+            return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
+        }
         do {
             try TerminalSessionPersistence.acknowledgeAgentSignals(
                 ids: request.eventIDs, sessionID: request.sessionID, paths: try TerminalSessionPaths.forSession(id: request.sessionID),
@@ -621,9 +625,9 @@ import workspacecore
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, dir: value.dir, runtimePath: value.runtimePath, dirname: value.dirname, branch: value.branch,
-            baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
-            isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
+            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch, baseBranch: value.baseBranch,
+            isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden, isRunning: value.isRunning,
+            lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
 
     private func requiredProfileWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
@@ -682,30 +686,24 @@ import workspacecore
         switch type {
         case .`init`:
             try orchestrator.registerAgentWindow(
-                workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID,
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
         case .working, .blocked, .done:
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, codexThreadID: nil, terminalNativeID: sessionID,
-                label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal",
-                environmentKeys: environmentKeys)
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
+                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
             try orchestrator.handleAgentExit(
-                existingAgent, terminalNativeID: sessionID, eventType: type.rawValue, eventSource: "spaces_agent_signal",
-                environmentKeys: environmentKeys)
+                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
         }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
 
     private func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> AgentWindowRecord?
-    {
-        try orchestrator.agentWindows(workspaceID: workspaceID).first {
-            $0.provider == .spaces && ($0.terminalTrackingID == sessionID || $0.terminalNativeID == sessionID)
-        }
-    }
+    { try orchestrator.agentWindows(workspaceID: workspaceID).first { $0.provider == .spaces && $0.terminalTrackingID == sessionID } }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
@@ -742,7 +740,8 @@ import workspacecore
                 return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.", errorCode: .sessionNotRunning)
             }
             guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-                return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.", errorCode: .sessionNotAvailable)
+                return TerminalServiceResponse(
+                    ok: false, message: "Terminal session '\(sessionID)' is not available.", errorCode: .sessionNotAvailable)
             }
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
             return terminalControlResponse(

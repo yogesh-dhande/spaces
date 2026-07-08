@@ -278,7 +278,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
         host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID)
+            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID,
+            previousOverview: previousLocalSection?.overview)
         rebuildFlatSidebarData()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
@@ -315,16 +316,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// longer running, comparing the previous local-section runtime state against the just-fetched
     /// snapshot. This reload is the only channel through which the GUI learns about stop/archive
     /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
-    /// diff those externally-stopped workspaces would leave their dedicated Chrome tabs and the
+    /// diff those externally-stopped workspaces would leave their tracked Chrome tabs and the
     /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/archive handlers
     /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
     /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
     private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus]
+        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus], previousOverview: SpacesDeviceOverviewPayload?
     ) {
         guard let previous else { return }
         for workspaceID in Self.workspaceIDsTransitionedToNotRunning(previous: previous, current: current) {
-            host.closeLocalBrowserSessionWindows(workspaceID: workspaceID)
+            host.closeLocalBrowserSessionWindows(
+                workspaceID: workspaceID,
+                configuredBrowserSessionTargetURLs: AppKitController.browserSessionTargetURLs(workspaceID: workspaceID, overview: previousOverview))
         }
     }
 
@@ -448,10 +451,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // connect task below captures only Sendable values (not `self`).
         let onOverview: @Sendable (SpacesDeviceOverview) -> Void = { [weak self] overview in
             // A pushed overview comes from a reachable, decodable daemon; read its inline
-            // frozen-core status (if present) so the compatibility verdict rides along, the
-            // same way the polling `resolveOverview` path derives it.
+            // frozen-core status so the compatibility verdict rides along, the same way the
+            // polling `resolveOverview` path derives it.
             let daemonStatus = overview.overview.daemonStatus
-            let compatibility = daemonStatus.map { SpacesWireCompatibility.evaluate(daemonStatus: $0) }
+            let compatibility = SpacesWireCompatibility.evaluate(daemonStatus: daemonStatus)
             Task { @MainActor in
                 self?.applyRemoteDeviceSection(
                     deviceID: deviceID,
@@ -930,8 +933,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         rowBackground.wantsLayer = true
         rowBackground.layer?.cornerRadius = UIRadius.regular
         rowBackground.layer?.borderWidth = isSelected ? 1 : 0
-        rowBackground.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
-        rowBackground.layer?.backgroundColor = isSelected ? sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+        bindAppearanceReactiveLayer(rowBackground) { [weak self] view in
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
+            view.layer?.backgroundColor = isSelected ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+        }
 
         let titleLabel = NSTextField(labelWithString: project.name)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -1066,8 +1071,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         cardView.wantsLayer = true
         cardView.layer?.cornerRadius = UIRadius.regular
         cardView.layer?.borderWidth = isSelected ? 1 : 0
-        cardView.layer?.borderColor = sidebarCardBorderColor(isSelected: true).cgColor
-        cardView.layer?.backgroundColor = isSelected ? sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+        bindAppearanceReactiveLayer(cardView) { [weak self] view in
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
+            view.layer?.backgroundColor = isSelected ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+        }
 
         let contentStack = NSStackView()
         contentStack.orientation = .vertical
@@ -1876,7 +1883,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         badge.textColor = .white
         badge.alignment = .center
         badge.wantsLayer = true
-        badge.layer?.backgroundColor = sidebarFailedIndicatorColor().cgColor
+        bindAppearanceReactiveLayer(badge) { [weak self] view in view.layer?.backgroundColor = self?.sidebarFailedIndicatorColor().cgColor }
         badge.layer?.cornerRadius = UIRadius.pill(forHeight: 14)
         badge.isBordered = false
         badge.isEditable = false
@@ -1917,10 +1924,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func updateAlertsRowAppearance() {
         guard let stack = alertsRowStack else { return }
-        if host.showingAlerts {
-            stack.layer?.backgroundColor = sidebarSelectedCardBackgroundColor().cgColor
-        } else {
-            stack.layer?.backgroundColor = NSColor.clear.cgColor
+        let isShowingAlerts = host.showingAlerts
+        bindAppearanceReactiveLayer(stack) { [weak self] view in
+            view.layer?.backgroundColor = isShowingAlerts ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
         }
     }
 }

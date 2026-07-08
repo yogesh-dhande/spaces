@@ -60,6 +60,29 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.resizeSerial, 8)
     }
 
+    func testSetAppearanceRequestRoundTripsThroughCodec() throws {
+        let request = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "viewer-1", appearance: .dark)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "setAppearance")
+        XCTAssertEqual(decoded.commandValue.name, "setAppearance")
+        // Appearance is a per-client view preference, so it must not be owner-gated on the wire.
+        XCTAssertEqual(decoded.commandValue.requiresOwnerClientID, false)
+        XCTAssertEqual(decoded.clientID, "viewer-1")
+        XCTAssertEqual(decoded.appearance, .dark)
+        guard case .setAppearance(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a setAppearance command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "viewer-1")
+        XCTAssertEqual(payload.appearance, .dark)
+    }
+
+    func testSetAppearanceWithoutAppearanceReportsMissingPayload() throws {
+        let request = try TerminalControlCodec.decodeRequest(#"{"command":"setAppearance","clientID":"viewer-1"}"#.data(using: .utf8)!)
+        XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing appearance.")
+    }
+
     func testTypedCommandWrapperReportsMissingPayloadFields() throws {
         let send = try TerminalControlCodec.decodeRequest(#"{"command":"send","clientID":"client-1"}"#.data(using: .utf8)!)
         let attach = try TerminalControlCodec.decodeRequest(#"{"command":"attach","clientID":"legacy-extra"}"#.data(using: .utf8)!)
@@ -95,38 +118,4 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "ack"))
     }
 
-    func testClientCanSendRequestToTCPServerWithAuthToken() throws {
-        let queue = DispatchQueue(label: "terminal-control-protocol-test.tcp")
-        let received = expectation(description: "received tcp request")
-
-        let server = TerminalControlTCPServer(host: "127.0.0.1", port: 0, authToken: "SECRET", queue: queue) { request in
-            XCTAssertEqual(request, TerminalControlRequest(command: "tail", authToken: "SECRET", lineCount: 10))
-            received.fulfill()
-            return TerminalControlResponse(ok: true, message: "ack")
-        }
-        try server.start()
-        defer { server.stop() }
-
-        let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "tail", authToken: "SECRET", lineCount: 10), host: "127.0.0.1", port: server.listeningPort)
-
-        wait(for: [received], timeout: 2)
-        XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "ack"))
-    }
-
-    func testTCPServerRejectsUnauthorizedClients() throws {
-        let queue = DispatchQueue(label: "terminal-control-protocol-test.tcp.auth")
-        let server = TerminalControlTCPServer(host: "127.0.0.1", port: 0, authToken: "SECRET", queue: queue) { _ in
-            XCTFail("handler should not run for unauthorized client")
-            return TerminalControlResponse(ok: true, message: "unexpected")
-        }
-        try server.start()
-        defer { server.stop() }
-
-        let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: "tail", authToken: "WRONG", lineCount: 5), host: "127.0.0.1", port: server.listeningPort)
-
-        XCTAssertEqual(response.ok, false)
-        XCTAssertEqual(response.message, "Unauthorized terminal client.")
-    }
 }

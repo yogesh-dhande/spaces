@@ -9,8 +9,8 @@ export const metadata: Metadata = {
 const shortcutRows = [
   { shortcut: "cmd+alt+=", action: "Show or hide Spaces", scope: "Global" },
   { shortcut: "cmd+alt+-", action: "Open the command palette", scope: "Global" },
-  { shortcut: "cmd+alt+]", action: "Next window in the current workspace (cycles workspaces when Spaces is frontmost)", scope: "Global + App" },
-  { shortcut: "cmd+alt+[", action: "Previous window in the current workspace (cycles workspaces when Spaces is frontmost)", scope: "Global + App" },
+  { shortcut: "cmd+alt+]", action: "Next already-open window in the current workspace", scope: "Global + App" },
+  { shortcut: "cmd+alt+[", action: "Previous already-open window in the current workspace", scope: "Global + App" },
   { shortcut: "cmd+alt+down", action: "Select the next workspace in the sidebar (Alerts and workspaces)", scope: "App" },
   { shortcut: "cmd+alt+up", action: "Select the previous workspace in the sidebar (Alerts and workspaces)", scope: "App" },
   { shortcut: "cmd+alt+a", action: "Open Alerts", scope: "App" },
@@ -18,7 +18,7 @@ const shortcutRows = [
   { shortcut: "cmd+alt+e", action: "Open the selected workspace in your configured editor", scope: "Global + App" },
   { shortcut: "cmd+alt+t", action: "Open a terminal for the selected workspace", scope: "App" },
   { shortcut: "cmd+alt+f", action: "Reveal the selected workspace in Finder", scope: "App" },
-  { shortcut: "cmd+1 … cmd+9", action: "Focus workspace window by number", scope: "App" },
+  { shortcut: "cmd+1 … cmd+0", action: "Open or focus workspace target by number", scope: "App" },
 ];
 
 export default function ShortcutsDocsPage() {
@@ -50,6 +50,13 @@ export default function ShortcutsDocsPage() {
             </tbody>
           </table>
         </div>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Focus vs Cycle</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Numbered shortcuts open or focus the selected workspace&apos;s ordered targets, including configured browser sessions, stopped process rows, and agent launchers. Next/previous window shortcuts cycle only through targets that already have an open tracked Chrome tab or Spaces terminal pane.
+        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

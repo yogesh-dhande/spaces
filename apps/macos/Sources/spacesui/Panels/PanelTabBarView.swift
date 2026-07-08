@@ -282,7 +282,7 @@ import systembridge
         let underline = NSView()
         underline.translatesAutoresizingMaskIntoConstraints = false
         underline.wantsLayer = true
-        underline.layer?.backgroundColor = isSelected ? Theme.accent.cgColor : NSColor.clear.cgColor
+        bindAppearanceReactiveLayer(underline) { view in view.layer?.backgroundColor = isSelected ? Theme.accent.cgColor : NSColor.clear.cgColor }
         addSubview(underline)
 
         NSLayoutConstraint.activate([

@@ -323,35 +323,12 @@
             XCTAssertNil(model.overview)
         }
 
-        func testRefreshFallsBackToHandshakeWhenOverviewLacksStatus() async {
-            let overview = makeOverview(daemonStatus: nil)
-            let recorder = SpacesMobileRequestRecorder()
-            let settings = SpacesMobileConnectionSettings()
-            let status = daemonStatus(protocolVersion: SpacesWireProtocol.version)
-            let client = SpacesDeviceAPIClient(settings: settings) { request in
-                await recorder.append(request)
-                if request.commandName == "daemonStatus" {
-                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(status))
-                }
-                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
-            }
-            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
-
-            await model.refresh()
-
-            // An older daemon without the inline field falls back to the standalone handshake but keeps
-            // the overview that was already fetched.
-            let commandNames = await recorder.snapshot().map(\.commandName)
-            XCTAssertEqual(commandNames, ["overview", "daemonStatus"])
-            XCTAssertEqual(model.compatibility, .compatible)
-            XCTAssertEqual(model.overview, overview)
-        }
-
         private func makeOverview(
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
             featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil,
-            daemonStatus: TerminalServiceDaemonStatus? = nil
+            daemonStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
+                version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
         ) -> SpacesDeviceOverviewPayload {
             let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
             let processRows =

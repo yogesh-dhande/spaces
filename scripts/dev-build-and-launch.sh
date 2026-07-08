@@ -53,6 +53,20 @@ print(shlex.quote(sys.argv[1]))
 PY
 }
 
+remote_expand_path() {
+  local raw_path="$1"
+  local quoted_path
+  quoted_path="$(remote_shell_quote "$raw_path")"
+  ssh "${ssh_args[@]}" "$ssh_destination" "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted_path"
+}
+
+configured_remote_device_root_override() (
+  set -euo pipefail
+  source "$repo_root/scripts/spaces-e2e-env.sh"
+  spaces_e2e_load_env "$repo_root"
+  printf '%s\n' "${SPACES_E2E_REMOTE_DEVICE_ROOT:-}"
+)
+
 print_failure_diagnostics() {
   echo "Spaces exited; last log lines:"
   tail -n 80 "$LOG_FILE" || true
@@ -126,6 +140,7 @@ deploy_remote_linux_spacesd_if_configured() (
 
   echo "Preparing remote Linux spacesd from current checkout at $ssh_destination..."
   local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
+  local remote_profile_name remote_profile_root remote_db_path remote_runtime_dir quoted_remote_db_path quoted_remote_runtime_dir
   artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
@@ -138,8 +153,14 @@ deploy_remote_linux_spacesd_if_configured() (
   install_root="$(dirname "$archive_path")/dev-launch-install"
   quoted_archive="$(remote_shell_quote "$archive_path")"
   quoted_install="$(remote_shell_quote "$install_root")"
+  remote_profile_name="$(basename "$(dirname "${SPACES_DB_PATH:?}")")"
+  remote_profile_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces-dev/profiles/spaces/$remote_profile_name}"
+  remote_db_path="$(remote_expand_path "$remote_profile_root/spaces.db")"
+  remote_runtime_dir="$(remote_expand_path "$remote_profile_root/runtime")"
+  quoted_remote_db_path="$(remote_shell_quote "$remote_db_path")"
+  quoted_remote_runtime_dir="$(remote_shell_quote "$remote_runtime_dir")"
   ssh "${ssh_args[@]}" "$ssh_destination" \
-    "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_daemon_port $quoted_install/install.sh" >/dev/null
+    "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DB_PATH=$quoted_remote_db_path SPACES_RUNTIME_DIR=$quoted_remote_runtime_dir SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_daemon_port $quoted_install/install.sh" >/dev/null
 
   ssh "${ssh_args[@]}" "$ssh_destination" "python3 - $(remote_shell_quote "$remote_daemon_port")" <<'PY'
 import socket
@@ -159,21 +180,28 @@ while time.time() < deadline:
 raise SystemExit(f"remote spacesd Device API port {port} did not open: {last_error}")
 PY
   echo "Remote Linux spacesd is running the current checkout artifact on $ssh_destination."
+  echo "Using remote profile database: $remote_db_path"
+  echo "Using remote runtime root: $remote_runtime_dir"
 )
 
 configure_ghostty_cache
 "$repo_root/apps/macos/scripts/setup_ghostty.sh"
 "$repo_root/scripts/swiftpm.sh" build
-if [[ "$LOCAL_ONLY" == "0" ]]; then
-  deploy_remote_linux_spacesd_if_configured
-fi
-
 spaces_profile_eval_shell_env "$CLI"
 if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   export SPACES_DB_PATH="$SPACES_DEV_DB_PATH"
   if [[ -z "${SPACES_RUNTIME_DIR:-}" ]]; then
     export SPACES_RUNTIME_DIR="$(dirname "$SPACES_DB_PATH")/runtime"
   fi
+fi
+if [[ "$LOCAL_ONLY" == "0" && -z "${SPACES_E2E_REMOTE_DEVICE_ROOT:-}" ]]; then
+  remote_device_root_override="$(configured_remote_device_root_override)"
+  if [[ -n "$remote_device_root_override" ]]; then
+    export SPACES_E2E_REMOTE_DEVICE_ROOT="$remote_device_root_override"
+  fi
+fi
+if [[ "$LOCAL_ONLY" == "0" ]]; then
+  deploy_remote_linux_spacesd_if_configured
 fi
 spaces_profile_stop_running_app "$CLI"
 spaces_profile_stop_terminal_service_if_idle "$CLI"

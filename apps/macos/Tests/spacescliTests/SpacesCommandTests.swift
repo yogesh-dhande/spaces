@@ -53,11 +53,15 @@ final class SpacesCommandTests: XCTestCase {
 
     func testTerminalCommandsParseDeviceSelector() throws {
         XCTAssertEqual(try TerminalListCommand.parse(["--device", "linux-box"]).device, "linux-box")
-        let send = try TerminalSendCommand.parse(["session-1", "echo hi", "--newline", "--device", "linux-box"])
+        let send = try TerminalSendTextCommand.parse(["session-1", "echo hi", "--newline", "--device", "linux-box"])
         XCTAssertEqual(send.sessionID, "session-1")
         XCTAssertEqual(send.text, "echo hi")
         XCTAssertTrue(send.newline)
         XCTAssertEqual(send.device, "linux-box")
+        let bytes = try TerminalSendBytesCommand.parse(["session-1", "3", "13", "--device", "linux-box"])
+        XCTAssertEqual(bytes.sessionID, "session-1")
+        XCTAssertEqual(bytes.bytes.map(\.value), [3, 13])
+        XCTAssertEqual(bytes.device, "linux-box")
         let tail = try TerminalTailCommand.parse(["session-1", "--lines", "40", "--device", "linux-box"])
         XCTAssertEqual(tail.lines, 40)
         XCTAssertEqual(tail.device, "linux-box")
@@ -158,19 +162,27 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertNil(command.workspace)
     }
 
-    func testTerminalSendParsesSessionAndText() throws {
-        let command = try TerminalSendCommand.parse(["session-1", "hello", "--newline"])
+    func testTerminalSendTextParsesSessionAndText() throws {
+        let command = try TerminalSendTextCommand.parse(["session-1", "hello", "--newline"])
 
         XCTAssertEqual(command.sessionID, "session-1")
         XCTAssertEqual(command.text, "hello")
         XCTAssertTrue(command.newline)
     }
 
-    func testTerminalKeyParsesSessionAndKeySpec() throws {
-        let command = try TerminalKeyCommand.parse(["session-1", "ctrl+c"])
+    func testTerminalSendBytesParsesDecimalBytes() throws {
+        let command = try TerminalSendBytesCommand.parse(["session-1", "3", "27", "91", "65", "255"])
 
         XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertEqual(command.key, "ctrl+c")
+        XCTAssertEqual(command.bytes.map(\.value), [3, 27, 91, 65, 255])
+    }
+
+    func testTerminalSendBytesRejectsMissingAndInvalidPayloads() {
+        XCTAssertThrowsError(try TerminalSendBytesCommand.parse(["session-1"]))
+        XCTAssertThrowsError(try TerminalSendBytesCommand.parse(["session-1", "256"]))
+        XCTAssertThrowsError(try TerminalSendBytesCommand.parse(["session-1", "-1"]))
+        XCTAssertThrowsError(try TerminalSendBytesCommand.parse(["session-1", "0x03"]))
+        XCTAssertThrowsError(try TerminalSendBytesCommand.parse(["session-1", "abc"]))
     }
 
     func testTerminalTailParsesDefaults() throws {
@@ -186,20 +198,17 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.sessionID, "session-1")
     }
 
-    func testTerminalTakeoverParsesSessionAndClient() throws {
-        let command = try TerminalTakeoverCommand.parse(["session-1", "client-1"])
-
-        XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertEqual(command.clientID, "client-1")
+    func testTerminalCommandPublicSubcommands() {
+        let subcommands = TerminalCommand.configuration.subcommands.map { String(describing: $0) }
+        XCTAssertEqual(
+            subcommands, ["TerminalListCommand", "TerminalCommandCommand", "TerminalSendCommand", "TerminalTailCommand", "TerminalShowCommand"])
     }
 
-    func testTerminalProxyParsesSessionHostPortAndAuthToken() throws {
-        let command = try TerminalProxyCommand.parse(["session-1", "--host", "127.0.0.1", "--port", "9123", "--auth-token", "SECRET"])
-
-        XCTAssertEqual(command.sessionID, "session-1")
-        XCTAssertEqual(command.host, "127.0.0.1")
-        XCTAssertEqual(command.port, 9123)
-        XCTAssertEqual(command.authToken, "SECRET")
+    func testRemovedTerminalCommandsAndFormsAreUnavailable() {
+        XCTAssertThrowsError(try TerminalCommand.parse(["key", "session-1", "ctrl+c"]))
+        XCTAssertThrowsError(try TerminalCommand.parse(["takeover", "session-1", "client-1"]))
+        XCTAssertThrowsError(try TerminalCommand.parse(["proxy", "session-1", "--auth-token", "SECRET"]))
+        XCTAssertThrowsError(try TerminalCommand.parse(["send", "session-1", "hello"]))
     }
 
     func testPairCommandLinesUseSpacesScheme() throws {

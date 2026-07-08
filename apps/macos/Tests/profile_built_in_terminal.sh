@@ -200,6 +200,33 @@ if not response.get("ok"):
 PY
 }
 
+takeover_terminal_client() {
+  local session_id="$1"
+  local client_id="$2"
+  local socket_path
+  socket_path="$(spaces_profile_terminal_session_control_socket_path "$SPACES_CLI" "$session_id")"
+  wait_for_socket_path "$socket_path" 10
+  python3 - "$socket_path" "$client_id" <<'PY'
+import json
+import socket
+import sys
+
+socket_path = sys.argv[1]
+client_id = sys.argv[2]
+request = {"command": "takeover", "clientID": client_id}
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(5)
+client.connect(socket_path)
+client.sendall(json.dumps(request).encode("utf-8"))
+client.shutdown(socket.SHUT_WR)
+response = json.loads(client.recv(65536).decode("utf-8"))
+client.close()
+if not response.get("ok"):
+    raise SystemExit(response.get("message") or response)
+PY
+}
+
 wait_for_socket_path() {
   local socket_path="$1"
   local timeout="${2:-10}"
@@ -322,7 +349,7 @@ PY
       "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${viewer_client_id} success=1" \
       "$PERF_LOG" || true
   )"
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal takeover "$session_id" "$viewer_client_id" >/dev/null
+  takeover_terminal_client "$session_id" "$viewer_client_id"
   wait_for_log_pattern_count_greater_than \
     "$PERF_LOG" \
     "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${viewer_client_id} success=1" \
@@ -334,7 +361,7 @@ PY
       "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${owner_client_id} success=1" \
       "$PERF_LOG" || true
   )"
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal takeover "$session_id" "$owner_client_id" >/dev/null
+  takeover_terminal_client "$session_id" "$owner_client_id"
   wait_for_log_pattern_count_greater_than \
     "$PERF_LOG" \
     "spaces: perf metric=terminal_control_takeover target=session=${session_id} client=${owner_client_id} success=1" \

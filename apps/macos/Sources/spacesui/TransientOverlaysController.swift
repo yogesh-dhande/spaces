@@ -16,8 +16,7 @@ import workspacecore
 /// blocking modal. `AppKitController` holds a single instance and delegates these
 /// overlays to it. The controller reaches back into the host for the window,
 /// selection state, and shared services via `host`.
-@MainActor
-final class TransientOverlaysController: NSObject {
+@MainActor final class TransientOverlaysController: NSObject {
     unowned let host: AppKitController
 
     init(host: AppKitController) {
@@ -61,7 +60,9 @@ final class TransientOverlaysController: NSObject {
             overlay.wantsLayer = true
             overlay.layer?.cornerRadius = UIRadius.large
             overlay.layer?.borderWidth = 1
-            overlay.layer?.borderColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+            bindAppearanceReactiveLayer(overlay) { [unowned host] view in
+                view.layer?.borderColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+            }
             overlay.translatesAutoresizingMaskIntoConstraints = false
 
             let stack = NSStackView()

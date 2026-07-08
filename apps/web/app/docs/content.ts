@@ -38,7 +38,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Spaces automatically tracks the windows a workspace opens and lets you jump to any one of them with a keyboard shortcut or the command palette.",
+      "Spaces tracks workspace Chrome tabs and terminal panes so direct shortcuts can open or focus targets and cycling stays inside already-open windows.",
   },
   {
     href: "/docs/processes",
@@ -50,7 +50,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Attach Chrome URLs to a workspace so the pages you need are one keyboard shortcut away while it runs.",
+      "Attach Chrome URLs to a workspace so the pages you need are one direct shortcut away while unopened sessions stay out of window cycling.",
   },
   {
     href: "/docs/coding-agents",
@@ -80,7 +80,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/cli",
     title: "CLI Reference",
     summary:
-      "Use the spaces CLI for same-machine workspace actions, pairing links, Spaces terminal session commands, owner-seeking terminal windows, and ownership takeover.",
+      "Use the spaces CLI for same-machine workspace actions, pairing links, Spaces terminal sessions, text and byte terminal input, and owner-seeking terminal windows.",
   },
   {
     href: "/docs/mcp",

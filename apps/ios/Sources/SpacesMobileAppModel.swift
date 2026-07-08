@@ -517,14 +517,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         defer { isLoading = false }
         do {
             // Read compatibility from the overview's inline frozen-core status so the compatible steady
-            // state costs a single round-trip. Only an older daemon (no inline status) or a refresh that
-            // fails entirely falls back to the standalone frozen-core handshake below.
+            // state costs a single round-trip. Only a refresh that fails entirely falls back to the
+            // standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            if let status = overview.daemonStatus {
-                applyCompatibility(status)
-            } else {
-                await refreshCompatibility()
-            }
+            applyCompatibility(overview.daemonStatus)
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             self.overview = isActiveDeviceBlocked ? nil : overview

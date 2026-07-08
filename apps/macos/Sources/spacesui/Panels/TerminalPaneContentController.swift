@@ -12,16 +12,28 @@ import spacesterminalui
     let workspaceID: String
     let sessionID: String
     private let pane: TerminalSessionPaneViewController
+    /// Re-themes this session's live daemon rendering to `appearance` (see
+    /// `AppKitController.applyAppearanceToLiveSession`). Dedupe and pending-attach state live in the
+    /// session's shared appearance store, captured by the closure, so this controller holds no copy.
+    private let setAppearanceAction: (ThemeAppearance) -> Void
 
     var onTitleChanged: ((String) -> Void)?
 
-    init(descriptor: PaneContentDescriptor, workspaceID: String, sessionID: String, pane: TerminalSessionPaneViewController) {
+    init(
+        descriptor: PaneContentDescriptor, workspaceID: String, sessionID: String, pane: TerminalSessionPaneViewController,
+        setAppearanceAction: @escaping (ThemeAppearance) -> Void
+    ) {
         self.descriptor = descriptor
         self.workspaceID = workspaceID
         self.sessionID = sessionID
         self.pane = pane
+        self.setAppearanceAction = setAppearanceAction
         pane.onDisplayTitleChanged = { [weak self] title, _ in self?.onTitleChanged?(title) }
     }
+
+    /// Re-themes this session's live daemon rendering to the app's current light/dark appearance. Called by
+    /// `PanelCoordinator.broadcastAppearance` for every open pane when the app appearance changes.
+    func applyAppearance(_ appearance: ThemeAppearance) { setAppearanceAction(appearance) }
 
     var contentView: NSView { pane.view }
     var displayTitle: String { pane.displayTitle }

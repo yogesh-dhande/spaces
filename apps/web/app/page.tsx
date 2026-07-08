@@ -183,8 +183,8 @@ type Shortcut = {
 // Accurate shortcuts mirror /docs/shortcuts. Leader (⌘⌥) is configurable.
 const navigateShortcuts: Shortcut[] = [
   { keys: "⌘⌥-", label: "Open the command palette" },
-  { keys: "⌘1–9", label: "Focus a workspace window by number" },
-  { keys: "⌘⌥]", label: "Next window — cycles workspaces when Spaces is frontmost" },
+  { keys: "⌘1–0", label: "Open or focus a workspace target by number" },
+  { keys: "⌘⌥]", label: "Next already-open workspace window" },
   { keys: "⌘⌥[", label: "Previous window" },
   { keys: "⌘⌥=", label: "Show or hide Spaces" },
 ];
@@ -257,21 +257,46 @@ const faqItems: FaqItem[] = [
   {
     question: "I only work on one project at a time. Will Spaces help me?",
     answer: (
-      <ul className="ml-4 list-disc space-y-1">
-        <li>
-          Yes. A workspace starts every process and exposes each named service
-          at a stable per-workspace URL in one action, so spinning a project up
-          or down takes no manual server juggling or <code>.env</code> edits.
-        </li>
-        <li>
-          Tear a workspace down when you&apos;re done and reopen it later exactly
-          as you left it — windows, processes, and all.
-        </li>
-        <li>
-          When you do branch off for a fix or experiment, it gets its own
-          isolated workspace without disturbing your main work.
-        </li>
-      </ul>
+      <>
+        You will still benefit from the the ability to manage agents, processes, and windows, and to control
+        them from your Mac or iPhone.
+      </>
+    ),
+  },
+  {
+    question: "Who is Spaces not for?",
+    answer: (
+      <>
+        <p className="mb-3">
+          Spaces makes opinionated tradeoffs to prioritize speed and
+          flexibility. They may not suit everyone.
+        </p>
+        <ul className="ml-4 list-disc space-y-2">
+          <li>
+            <span className="font-semibold text-foreground">
+              If you keep your window count low.
+            </span>{" "}
+            Spaces gives each browser session, terminal, and editor instance
+            a tracked focus target so you can lay them out across your screens
+            and recall them on demand. The upside is speed and flexibility —
+            focusing a window takes 20–30 ms, versus 200 ms to a full second
+            to reconcile and focus a specific tab in Chrome as you add or
+            move them. It also lets you view any two windows side by side
+            (even from different workspaces) with your favorite tiling window
+            manager. If a sparse desktop matters more to you than instant
+            recall, Spaces will feel like clutter.
+          </li>
+          <li>
+            <span className="font-semibold text-foreground">
+              If you must use macOS full-screen mode.
+            </span>{" "}
+            macOS puts each full-screen window in its own desktop space, so
+            focusing another window forces the OS to transition between
+            desktops. Spaces still works, but it shines when you stay in
+            windowed mode.
+          </li>
+        </ul>
+      </>
     ),
   },
   {
@@ -544,7 +569,10 @@ export default function HomePage() {
             <div className="max-w-xl">
               <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
                 <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-                iOS companion
+                <span>iOS companion</span>
+                <span className="rounded-full border border-accent-2/50 px-2 py-0.5 text-[0.62rem] text-accent-2">
+                  Coming soon
+                </span>
               </p>
               <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
                 Remote control <span className="text-accent whitespace-nowrap">from your iPhone</span>
@@ -617,7 +645,7 @@ export default function HomePage() {
               global command palette to pull any window across any workspace.
             </p>
             <p className="mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
-              <Key>⌘1–9</Key>
+              <Key>⌘1–0</Key>
               <span>focus</span>
               <Key>⌘⌥]</Key>
               <span>cycle</span>

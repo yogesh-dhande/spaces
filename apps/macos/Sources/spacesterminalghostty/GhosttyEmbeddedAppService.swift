@@ -12,6 +12,16 @@ import Foundation
         private var config: ghostty_config_t?
         private var initialized = false
         private var surfaceActionHandlers: [UInt: @MainActor (GhosttyActionEvent) -> Void] = [:]
+        private var liveSurfaces: [UInt: ghostty_surface_t] = [:]
+
+        /// The light/dark scheme currently pushed into the app and every live surface.
+        ///
+        /// Seeded from the same NSApp-less computation `startIfNeeded` uses, so it matches the scheme
+        /// new surfaces inherit at creation (light in the daemon, where there is no NSApp). Callers read
+        /// it to avoid redundant re-themes and to know whether an `applyColorScheme(_:)` actually changed
+        /// anything.
+        public private(set) var currentAppearance: ThemeAppearance =
+            GhosttyEmbeddedAppService.currentColorScheme() == GHOSTTY_COLOR_SCHEME_DARK ? .dark : .light
 
         private init() {}
 
@@ -37,13 +47,7 @@ import Foundation
                 initialized = true
             }
 
-            guard let config = ghostty_config_new() else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed") }
-            // Embedded terminals load ONLY the Spaces-generated config — never the user's
-            // ~/.config/ghostty files — so the look is owned by the active Spaces theme.
-            try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor).withCString { path in
-                ghostty_config_load_file(config, path)
-            }
-            ghostty_config_finalize(config)
+            let config = try Self.makeThemeConfiguration()
 
             var runtimeConfig = ghostty_runtime_config_s()
             runtimeConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
@@ -73,12 +77,41 @@ import Foundation
             }
 
             // The generated config carries light: and dark: theme variants; the scheme pushed
-            // here selects the variant for this process's lifetime. Terminal cell colors are
-            // rendered by the long-lived service, so an OS appearance change mid-session fully
-            // applies after relaunch rather than live.
+            // here selects the variant new surfaces inherit at creation. A later OS appearance
+            // change re-themes existing surfaces live via applyColorScheme(_:).
             ghostty_app_set_color_scheme(app, Self.currentColorScheme())
             self.config = config
             self.app = app
+        }
+
+        /// Generates the Spaces theme config files for the active profile and loads them into a fresh
+        /// finalized Ghostty config handle. Embedded terminals load ONLY this generated config — never
+        /// the user's `~/.config/ghostty` files — so the look is owned by the active Spaces theme.
+        private static func makeThemeConfiguration() throws -> ghostty_config_t {
+            guard let config = ghostty_config_new() else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed") }
+            try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor).withCString { path in
+                ghostty_config_load_file(config, path)
+            }
+            ghostty_config_finalize(config)
+            return config
+        }
+
+        /// Regenerates the Spaces theme config for the active profile and re-points the running app at
+        /// it, replacing the previously loaded config handle.
+        ///
+        /// The generated root config references the light/dark theme files by absolute path, so
+        /// `applyColorScheme(_:)`'s `ghostty_app_update_config` re-reads them from disk. Tests run each
+        /// case under a throwaway profile root that is deleted on teardown, so the config handle a
+        /// process-wide app service loaded during an earlier test can reference since-deleted files.
+        /// Calling this re-anchors the config to the current test's live files. Not used in the
+        /// single-profile daemon, where the profile root persists for the app service's lifetime.
+        func reloadThemeConfigurationForTesting() throws {
+            guard let app else { return }
+            let newConfig = try Self.makeThemeConfiguration()
+            ghostty_app_update_config(app, newConfig)
+            if let previousConfig = config { ghostty_config_free(previousConfig) }
+            config = newConfig
+            ghostty_app_tick(app)
         }
 
         public func tick() {
@@ -87,12 +120,40 @@ import Foundation
         }
 
         public func registerActionHandler(for surface: ghostty_surface_t, handler: @escaping @MainActor (GhosttyActionEvent) -> Void) {
-            surfaceActionHandlers[surfaceKey(surface)] = handler
+            let key = surfaceKey(surface)
+            surfaceActionHandlers[key] = handler
+            liveSurfaces[key] = surface
         }
 
         public func unregisterActionHandler(for surface: ghostty_surface_t?) {
             guard let surface else { return }
-            surfaceActionHandlers.removeValue(forKey: surfaceKey(surface))
+            let key = surfaceKey(surface)
+            surfaceActionHandlers.removeValue(forKey: key)
+            liveSurfaces.removeValue(forKey: key)
+        }
+
+        /// Re-themes every live surface to the given appearance and makes later surfaces inherit it.
+        ///
+        /// Each surface keeps its own light/dark conditional state, so flipping the app scheme alone
+        /// does not re-theme open terminals. The recipe: push the scheme into every live surface and
+        /// the app, then replay the SAME stored config so each surface re-derives its colors from its
+        /// now-updated conditional state. The config file contents are unchanged (the variant is
+        /// conditional-state-driven), and the host retains ownership of the config handle, so it is
+        /// reused and never freed here. The io thread applies the colors asynchronously on the tick.
+        ///
+        /// A no-op when the requested appearance already matches `currentAppearance`, so repeated
+        /// attaches on the same scheme do not churn the surfaces. Returns whether a re-theme was
+        /// applied; callers use this to decide whether to force a full render rebroadcast.
+        @discardableResult public func applyColorScheme(_ appearance: ThemeAppearance) -> Bool {
+            guard appearance != currentAppearance else { return false }
+            guard let app, let config else { return false }
+            let scheme: ghostty_color_scheme_e = appearance == .dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
+            for surface in liveSurfaces.values { ghostty_surface_set_color_scheme(surface, scheme) }
+            ghostty_app_set_color_scheme(app, scheme)
+            ghostty_app_update_config(app, config)
+            ghostty_app_tick(app)
+            currentAppearance = appearance
+            return true
         }
 
         private func handleAction(_ event: GhosttyActionEvent, surfaceKey: UInt) {

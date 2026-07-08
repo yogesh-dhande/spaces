@@ -51,7 +51,7 @@ apps/macos/.build/debug/spaces workspace create --project <project-id> --branch 
 apps/macos/.build/debug/spaces workspace restart --workspace <workspace-id>
 ```
 
-Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script prepares Ghostty artifacts before invoking SwiftPM; in Git worktrees it derives the primary checkout from `.git` metadata when `SPACES_GHOSTTY_CACHE_DIR` is unset, so branch worktrees restore prebuilt artifacts from the shared cache. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only that profile's running app instance before it relaunches; the profile's spacesd is stopped only when it owns no sessions, so live terminal sessions and workspace processes survive the relaunch and the app reattaches to them. When sessions are preserved, the running daemon may be an older build; replace it through the app's daemon-restart prompt, which warns about the sessions it would stop. When the repo `.env` configures `SPACES_E2E_REMOTE_SSH_HOST`, the script builds or reuses the current-checkout Ubuntu artifact, uploads it, installs it into the remote account's `~/.spaces` daemon, waits for the configured Device API port, and then relaunches the local app; pass `--local` to skip the remote deploy and only build and relaunch locally.
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script prepares Ghostty artifacts before invoking SwiftPM; in Git worktrees it derives the primary checkout from `.git` metadata when `SPACES_GHOSTTY_CACHE_DIR` is unset, so branch worktrees restore prebuilt artifacts from the shared cache. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only that profile's running app instance before it relaunches; the profile's spacesd is stopped only when it owns no sessions, so live terminal sessions and workspace processes survive the relaunch and the app reattaches to them. When sessions are preserved, the running daemon may be an older build; replace it through the app's daemon-restart prompt, which warns about the sessions it would stop. When the repo `.env` configures `SPACES_E2E_REMOTE_SSH_HOST`, the script builds or reuses the current-checkout Ubuntu artifact, uploads it, installs it into the remote account's `~/.spaces` daemon, points that service at a remote database/runtime under `~/.spaces-dev/profiles/spaces/<local-profile-name>/` unless `SPACES_E2E_REMOTE_DEVICE_ROOT` is set, waits for the configured Device API port, and then relaunches the local app. Remote pairing from that repo-local app or CLI uses the matching remote profile environment when it runs `~/.spaces/bin/spaces device pair --json` over SSH. Pass `--local` to skip the remote deploy and only build and relaunch locally.
 
 For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
@@ -148,15 +148,15 @@ spaces_cli="$(cd apps/macos/.build/debug && pwd)/spaces"
   terminal command --command cat --title verify-ghostty)
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces terminal list
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  terminal send <session-id> "hello from ghostty" --newline
+  terminal send text <session-id> "hello from ghostty" --newline
+env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
+  terminal send bytes <session-id> 13
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal tail <session-id> --lines 5
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spacese2e \
   mobile-status
 env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
   terminal show <session-id>
-env SPACES_DB_PATH="$SPACES_DB_PATH" SPACES_RUNTIME_DIR="$SPACES_RUNTIME_DIR" apps/macos/.build/debug/spaces \
-  terminal takeover <session-id> <other-client-id>
 ```
 
 For built-in terminal verification, keep exactly one `SpacesApp` process running for the chosen profile root. The current `ghostty-embedded` slice keeps live Ghostty rendering owner-only on both macOS and iOS. Opening a terminal window or mobile detail view auto-attempts takeover, live non-owner states show takeover or status UI only, and ended sessions may still show the final Ghostty render when it was persisted.
@@ -187,7 +187,7 @@ Mobile terminal latency sweeps target the local paired daemon over the Device AP
 
 The daemon-hosted Device API is a paired Spaces-only transport rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone Device API process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same pinned-TLS transport as the iOS app.
 
-`apps/macos/Tests/e2e_remote_terminal_send.sh` verifies the orchestrator agent path end to end against the configured remote host: it pairs the CLI over SSH with `spaces device pair`, creates a remote terminal session, and drives it from the Mac with `spaces terminal list/send/tail --device`, using an isolated client database and secret directory. The remote daemon must be on the same wire-protocol version as the local build (redeploy with `apps/macos/scripts/deploy_linux_spacesd_e2e.sh` first).
+`apps/macos/Tests/e2e_remote_terminal_send.sh` verifies the orchestrator agent path end to end against the configured remote host: it pairs the CLI over SSH with `spaces device pair`, creates a remote terminal session, and drives it from the Mac with `spaces terminal list --device`, `spaces terminal send text --device`, and `spaces terminal tail --device`, using an isolated client database and secret directory. The remote daemon must be on the same wire-protocol version as the local build (redeploy with `apps/macos/scripts/deploy_linux_spacesd_e2e.sh` first).
 
 Focused paired-device parity checks use one shared Device API flow for local and remote daemons:
 
@@ -211,12 +211,19 @@ Remote Device API runs cache the Linux daemon archive under `apps/macos/.build/l
 The lower-level Linux artifact build command is:
 
 ```bash
-docker run --rm --platform linux/amd64 \
+docker run --rm --init --platform linux/amd64 \
   -v "$PWD":/workspace \
+  -v spaces-linux-zig:/root/spaces-zig-cache \
+  -v spaces-linux-swift:/root/spaces-swift-cache \
   -w /workspace \
+  -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
+  -e SPACES_LINUX_SWIFT_BUILD_PATH=/root/spaces-swift-cache/build -e SPACES_LINUX_SWIFT_CACHE_PATH=/root/spaces-swift-cache/cache \
+  -e SPACES_LINUX_SWIFT_CONFIG_PATH=/root/spaces-swift-cache/config -e SPACES_LINUX_SWIFT_SECURITY_PATH=/root/spaces-swift-cache/security \
   swift:6.2-noble \
   bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch x86_64'
 ```
+
+The zig and SwiftPM cache/build paths must live in named Docker volumes, not on the bind-mounted workspace: lock acquisition over Docker Desktop's macOS file sharing can deadlock the ghostty-vt `zig build` (workers park in `futex_wait` with finished compile children unreaped and container CPU pinned at 0%). Named volumes live on the Docker Desktop Linux VM's own filesystem where POSIX locking works, and they persist across runs so caches survive between builds. Sources are read from the mount and the artifact is written back to `dist/linux/` on the mount; only lock-holding state stays in the volumes.
 
 Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, points `~/.local/bin/spaces` to the managed CLI helper, creates `~/.spaces/runtime`, `~/spaces/workspaces`, and `~/spaces/repos`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, enables the user service, and restarts it. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry.
 
@@ -565,7 +572,11 @@ Primary coverage:
 - multi-workspace focus and cycling isolation
 - remote browser-session routing through SSH local forwarding and the Mac Caddy router
 
-The suite emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows covered by the standalone focus-profiling workflow. The final summary prints both the pass/fail case list and the collected timing samples, so this suite is the primary path for focus profiling during development. The `app window-cycle` scenario runs the existing window-cycle profile path; set `REAL_SYSTEM_PROFILE_WARMUPS=5 REAL_SYSTEM_PROFILE_REPETITIONS=30` to collect steady-state cycle samples after warmup without changing the normal full-suite pass.
+The suite emits performance metrics in milliseconds for the main window-focus and cycle paths, using the app's debug timing logs for the same shortcut and cycling flows covered by the standalone focus-profiling workflow. The final summary prints both the pass/fail case list and the collected timing samples with count, p50, p95, max, and raw samples, so this suite is the primary path for focus profiling during development. The `app window-cycle` scenario runs the window-cycle profile path; set `REAL_SYSTEM_PROFILE_WARMUPS=5 REAL_SYSTEM_PROFILE_REPETITIONS=30` to collect steady-state samples after warmup without changing the normal full-suite pass. For faster app-side cycle latency iteration, `app window-cycle-small` runs only the primary workspace setup and repeated cycle loop; use `--samples N` for the repetition count, or set `REAL_SYSTEM_PROFILE_WARMUPS=0` with a small sample count for a quick local probe.
+
+Latency work uses a measured baseline before implementation changes. Run the same app E2E/profile scenario with the same warmup and repetition counts before and after a candidate optimization, then compare the generated artifacts. Optimize only phases whose p95 is at least `15 ms` or at least `20%` of the total p95 for that flow. The profile output should cover browser-session focus, existing terminal-pane focus, terminal pane open-from-focus, browser-to-pane cycling, pane-to-browser cycling, and pane-to-pane cycling.
+
+`DEBUG=1` app perf lines split focus work into named phases: shortcut dispatch, target resolution, client database lookup/write, Chrome AppleScript, existing-pane focus, pane open, ownership request, focus observation, route time, and total elapsed time. Use those phase fields to identify the bottleneck before changing the implementation.
 
 Repeated real-system profiling also covers:
 - main window visibility toggles from inactive and active app states
@@ -573,7 +584,7 @@ Repeated real-system profiling also covers:
 - built-in `Spaces terminal -> main window -> tracked process terminal` focus loops
 - built-in `Spaces terminal -> command palette -> tracked process terminal` focus loops
 
-When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric rows include average, p50, p95, min, max, and raw samples. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch. The E2E artifact report also preserves the app profile `perf.log` with raw `spaces: perf metric=...` lines and request IDs for stage-level joins.
+When the suite finishes with recorded metrics, it appends aggregated metric history to `apps/macos/.artifacts/real-system-profiles/metrics-history.csv` and regenerates `apps/macos/.artifacts/real-system-profiles/report.html` with `best`, `previous`, and `latest` comparisons for each tracked metric. Metric rows include average, p50, p95, min, max, raw samples, and latest-vs-previous p50/p95/max deltas in milliseconds and percent. Metric names use `start.action.end`, such as `browser_untracked_tab.cli_window_focus.browser_tracked_tab`, and the start and end tokens refer to concrete visible surfaces rather than app-level state. Scenario context like workspace scope is stored alongside each row. Dirty worktrees are recorded alongside clean runs by pairing the base `HEAD` commit with a worktree fingerprint, so the report can distinguish two different uncommitted snapshots on the same branch. The E2E artifact report preserves the profile CSV, HTML report, app profile `perf.log`, and raw `spaces: perf metric=...` lines with request IDs for stage-level joins.
 
 The manual suite depends on a small set of debug-log lines from the app and CLI helpers. Treat these as test contracts when changing debug logging:
 - `spaces: perf metric=...`

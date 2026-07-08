@@ -26,14 +26,13 @@ public struct WindowRecord: Sendable {
     public let detail: String?
     public let targetURL: String?
     public let terminalTrackingID: String?
-    public let terminalNativeID: String?
     public let role: String
     public let orderIndex: Int
     public let lastSeenAt: String
 
     public init(
         id: String, workspaceID: String, app: String, name: String?, detail: String? = nil, targetURL: String? = nil,
-        terminalTrackingID: String? = nil, terminalNativeID: String? = nil, role: String, orderIndex: Int, lastSeenAt: String
+        terminalTrackingID: String? = nil, role: String, orderIndex: Int, lastSeenAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -42,7 +41,6 @@ public struct WindowRecord: Sendable {
         self.detail = detail
         self.targetURL = targetURL
         self.terminalTrackingID = terminalTrackingID
-        self.terminalNativeID = terminalNativeID
         self.role = role
         self.orderIndex = orderIndex
         self.lastSeenAt = lastSeenAt
@@ -50,11 +48,11 @@ public struct WindowRecord: Sendable {
 
     public init(
         id: String, workspaceID: String, app: String, name: String?, detail: String? = nil, targetURL: String? = nil,
-        terminalTrackingID: String? = nil, terminalNativeID: String? = nil, role: WindowRole, orderIndex: Int, lastSeenAt: String
+        terminalTrackingID: String? = nil, role: WindowRole, orderIndex: Int, lastSeenAt: String
     ) {
         self.init(
             id: id, workspaceID: workspaceID, app: app, name: name, detail: detail, targetURL: targetURL, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: terminalNativeID, role: role.rawValue, orderIndex: orderIndex, lastSeenAt: lastSeenAt)
+            role: role.rawValue, orderIndex: orderIndex, lastSeenAt: lastSeenAt)
     }
 
     public var roleValue: WindowRole { WindowRole(rawValue: role) }

@@ -493,6 +493,69 @@ import workspacecore
         #expect(request.appearance == .light)
     }
 
+    @Test func deviceTerminalControlRequestMapsSetAppearanceToTheDaemon() throws {
+        // A live theme switch flows through the same device-API conversion as attach; the action and
+        // the requested appearance must both survive so the remote daemon re-themes its live session.
+        let control = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "mac-client", appearance: .dark)))
+
+        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .setAppearance)
+        #expect(request.appearance == .dark)
+        #expect(request.clientID == "mac-client")
+    }
+
+    @Test func appearanceChangeFansOutSetAppearanceToEachLiveSessionOnceWithResolvedValue() {
+        // An app appearance change re-themes every open session once, carrying the resolved light/dark value,
+        // and dedupes: a session already on that appearance (or a repeat broadcast of the same value) sends
+        // nothing more.
+        let recorder = AppearanceControlRecorder()
+        let noopApply: @Sendable (GhosttyRemoteSessionStatePayload) -> Void = { _ in }
+
+        var appearanceA: ThemeAppearance = .light
+        var appearanceB: ThemeAppearance = .light
+        appearanceA = AppKitController.applyAppearanceToLiveSession(
+            .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: appearanceA, requestSender: recorder.send,
+            applyState: noopApply)
+        appearanceB = AppKitController.applyAppearanceToLiveSession(
+            .dark, sessionID: "session-b", clientID: "client-b", lastAppliedAppearance: appearanceB, requestSender: recorder.send,
+            applyState: noopApply)
+
+        #expect(appearanceA == .dark)
+        #expect(appearanceB == .dark)
+        #expect(recorder.sends.count == 2)
+        #expect(recorder.sends.contains { $0.sessionID == "session-a" && $0.appearance == .dark })
+        #expect(recorder.sends.contains { $0.sessionID == "session-b" && $0.appearance == .dark })
+
+        // A redundant broadcast of the same appearance to an already-dark session sends nothing.
+        appearanceA = AppKitController.applyAppearanceToLiveSession(
+            .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: appearanceA, requestSender: recorder.send,
+            applyState: noopApply)
+        #expect(appearanceA == .dark)
+        #expect(recorder.sends.count == 2)
+    }
+
+    @Test func appearanceChangeBeforeAttachIsRecordedForThePendingAttachToCarry() {
+        // A pane whose client has not attached yet has no clientID to send `setAppearance` with, so the
+        // broadcast sends nothing — but it still advances the stored appearance so the pending attach
+        // carries the current variant. Without that, a change landing before attach would be lost and the
+        // session would attach with the stale variant until the next flip.
+        let recorder = AppearanceControlRecorder()
+
+        // Appearance flips to dark while unattached: nothing sent, but the stored value advances to dark.
+        let recorded = AppKitController.applyAppearanceToLiveSession(
+            .dark, sessionID: "session-a", clientID: nil, lastAppliedAppearance: .light, requestSender: recorder.send, applyState: { _ in })
+        #expect(recorded == .dark)
+        #expect(recorder.sends.isEmpty)
+
+        // The attach then carries dark and the client is present; a follow-up broadcast of dark dedupes
+        // against the recorded value, so it does not double-send what the attach already applied.
+        let afterAttach = AppKitController.applyAppearanceToLiveSession(
+            .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: recorded, requestSender: recorder.send, applyState: { _ in })
+        #expect(afterAttach == .dark)
+        #expect(recorder.sends.isEmpty)
+    }
+
     @Test func remoteBrowserRoutePlanMapsLoopbackServicePortToCaddyURL() throws {
         let plan = try #require(
             BrowserSSHForwardManager.routePlan(
@@ -719,5 +782,35 @@ import workspacecore
     private final class AppliedStateBox: @unchecked Sendable {
         private(set) var payload: GhosttyRemoteSessionStatePayload?
         func store(_ payload: GhosttyRemoteSessionStatePayload) { self.payload = payload }
+    }
+
+    /// Records the `setAppearance` control requests a fan-out issues, so a test can assert which sessions
+    /// were re-themed and with what appearance. Replies ok to every request.
+    private final class AppearanceControlRecorder: @unchecked Sendable {
+        struct RecordedSend: Sendable {
+            let sessionID: String
+            let appearance: ThemeAppearance?
+        }
+
+        private let lock = NSLock()
+        private var recorded: [RecordedSend] = []
+
+        var sends: [RecordedSend] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recorded
+        }
+
+        var send: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse {
+            { [self] request in
+                if case .control(let payload) = request.command, payload.controlRequest.command == "setAppearance" {
+                    lock.lock()
+                    recorded.append(RecordedSend(sessionID: payload.sessionID, appearance: payload.controlRequest.appearance))
+                    lock.unlock()
+                }
+                return TerminalServiceResponse(
+                    ok: true, message: "", sessionState: nil, controlResponse: TerminalControlResponse(ok: true, message: ""))
+            }
+        }
     }
 }
