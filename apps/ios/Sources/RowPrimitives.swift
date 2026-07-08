@@ -74,6 +74,47 @@ struct TypeIconTile: View {
     }
 }
 
+// MARK: - Project glyph
+
+/// The marketing site's project glyph: two nodes on the left merging into one on
+/// the right (the `apps/web` `ProjectIcon`, and the AppKit `RowPrimitives.projectGlyphImage`).
+/// Paths are laid out in a 20×20 space and scaled to `size`, so the 1.4pt stroke scales
+/// with it.
+struct ProjectIcon: View {
+    var size: CGFloat = 13
+    var color: Color = Theme.mutedSecondary
+
+    var body: some View {
+        ProjectIconShape()
+            .stroke(color, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+            .frame(width: 20, height: 20)
+            .scaleEffect(size / 20)
+            .frame(width: size, height: size)
+    }
+}
+
+private struct ProjectIconShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let radius: CGFloat = 1.8
+        for center in [CGPoint(x: 5, y: 5), CGPoint(x: 5, y: 15), CGPoint(x: 15, y: 10)] {
+            path.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+        }
+        // Top-left node elbows down into the right node; cubic control points
+        // approximate the SVG's radius-2 quarter-circle corner.
+        path.move(to: CGPoint(x: 6.8, y: 5))
+        path.addLine(to: CGPoint(x: 11, y: 5))
+        path.addCurve(to: CGPoint(x: 13, y: 7), control1: CGPoint(x: 12.105, y: 5), control2: CGPoint(x: 13, y: 5.895))
+        path.addLine(to: CGPoint(x: 13, y: 8))
+        // Bottom-left node elbows up into the right node.
+        path.move(to: CGPoint(x: 6.8, y: 15))
+        path.addLine(to: CGPoint(x: 11, y: 15))
+        path.addCurve(to: CGPoint(x: 13, y: 13), control1: CGPoint(x: 12.105, y: 15), control2: CGPoint(x: 13, y: 14.105))
+        path.addLine(to: CGPoint(x: 13, y: 12))
+        return path
+    }
+}
+
 // MARK: - Metadata chip
 
 /// Small low-contrast chip for short metadata (state, ports, shortcuts).

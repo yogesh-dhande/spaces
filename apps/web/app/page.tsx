@@ -67,9 +67,14 @@ const pillars: Pillar[] = [
       "Name your services and each workspace gets its own port and a stable URL like web.my-branch.localhost:7391. Dev servers and workers run as tracked processes that restart on demand.",
     icon: (
       <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <rect x="3" y="3.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-        <rect x="3" y="11.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
-        <path d="M6 6h.01M6 14h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        <rect x="5" y="5" width="10" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+        <rect x="8" y="8" width="4" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.5" />
+        <path
+          d="M8.5 2.5V5M11.5 2.5V5M8.5 15v2.5M11.5 15v2.5M2.5 8.5H5M2.5 11.5H5M15 8.5h2.5M15 11.5h2.5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
       </svg>
     ),
   },
@@ -92,16 +97,9 @@ const pillars: Pillar[] = [
     hrefLabel: "See how it works",
     icon: (
       <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
-        <circle cx="10" cy="4" r="2" stroke="currentColor" strokeWidth="1.5" />
-        <circle cx="4" cy="16" r="2" stroke="currentColor" strokeWidth="1.5" />
-        <circle cx="16" cy="16" r="2" stroke="currentColor" strokeWidth="1.5" />
-        <path
-          d="M10 6v3m0 0-4.5 5m4.5-5 4.5 5"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        <rect x="3" y="3.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+        <rect x="3" y="11.5" width="14" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M6 6h.01M6 14h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       </svg>
     ),
   },
@@ -109,7 +107,7 @@ const pillars: Pillar[] = [
 
 type Feature = {
   title: string;
-  description: string;
+  description: React.ReactNode;
 };
 
 const keyFeatures: Feature[] = [
@@ -173,28 +171,24 @@ const keyFeatures: Feature[] = [
     description:
       "Built with Swift and AppKit. The interface stays fast and stays out of your way — no web runtime, no sluggish UI, no fan spinning up just to show you a window list.",
   },
-];
-
-type Shortcut = {
-  keys: string;
-  label: string;
-};
-
-// Accurate shortcuts mirror /docs/shortcuts. Leader (⌘⌥) is configurable.
-const navigateShortcuts: Shortcut[] = [
-  { keys: "⌘⌥-", label: "Open the command palette" },
-  { keys: "⌘1–0", label: "Open or focus a workspace target by number" },
-  { keys: "⌘⌥]", label: "Next already-open workspace window" },
-  { keys: "⌘⌥[", label: "Previous window" },
-  { keys: "⌘⌥=", label: "Show or hide Spaces" },
-];
-
-const actShortcuts: Shortcut[] = [
-  { keys: "⌘N", label: "New workspace for the selected project" },
-  { keys: "⌘⌥T", label: "Open a terminal for the selected workspace" },
-  { keys: "⌘⌥E", label: "Open the workspace in your editor" },
-  { keys: "⌘⌥A", label: "Open Alerts" },
-  { keys: "⌘⌥F", label: "Reveal the workspace in Finder" },
+  {
+    title: "Terminals built on libghostty",
+    description: (
+      <>
+        Terminal sessions are powered by{" "}
+        <a
+          href="https://github.com/ghostty-org/ghostty"
+          className="text-accent hover:underline"
+          target="_blank"
+          rel="noreferrer"
+        >
+          libghostty
+        </a>
+        , the engine behind the Ghostty terminal — fast, GPU-accelerated
+        rendering that keeps up with the heaviest output.
+      </>
+    ),
+  },
 ];
 
 type FaqItem = {
@@ -373,6 +367,67 @@ const remoteNodes: RemoteNode[] = [
   { name: "Cloud Linux", detail: "spacesd on Ubuntu" },
 ];
 
+// A row in the Alerts panel mock. Only blocked and done states raise Alerts,
+// so every sample row is one of those two.
+type AgentAlert = {
+  workspace: string;
+  agent: string;
+  status: "blocked" | "done";
+};
+
+const agentAlerts: AgentAlert[] = [
+  {
+    workspace: "auth-refactor",
+    agent: "claude-fable",
+    status: "blocked",
+  },
+  {
+    workspace: "billing-webhooks",
+    agent: "codex",
+    status: "done",
+  },
+  {
+    workspace: "search-reindex",
+    agent: "opencode",
+    status: "blocked",
+  },
+  {
+    workspace: "landing-copy",
+    agent: "claude-sonnet",
+    status: "done",
+  },
+];
+
+type ComparisonItem = {
+  title: string;
+  body: string;
+};
+
+// Left column: what plain localhost does when you run several checkouts of
+// the same app at once. Right column: how named services + the bundled
+// Caddy proxy remove both problems.
+const localhostPains: ComparisonItem[] = [
+  {
+    title: "Port conflicts",
+    body: "Every checkout of the same app wants port 3000. You end up hand-assigning ports per branch, editing .env files, and restarting servers just to run two at once.",
+  },
+  {
+    title: "Shared cookies & sessions",
+    body: "Browsers scope cookies and local storage to hostname, not port — localhost:3000 and localhost:3001 are the same origin for auth. Log in on one, and you're logged into the other.",
+  },
+];
+
+const spacesFixes: ComparisonItem[] = [
+  {
+    title: "One hostname per workspace",
+    body: "Declare a named service once and every workspace reaches it at a stable URL like web.my-branch.localhost:7391, routed by a bundled Caddy proxy — no manual port assignment, ever.",
+  },
+  {
+    title: "Isolated sessions by design",
+    body: "Different hostnames mean different cookie jars and local storage. Stay logged into three branches at once, side by side, with no incognito tabs.",
+  },
+];
+
 export default function HomePage() {
   return (
     <div className="lp relative min-h-screen overflow-x-clip">
@@ -482,7 +537,7 @@ export default function HomePage() {
           <div className="max-w-3xl">
             <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
               One workspace per task.{" "}
-              <span className="text-accent">Open, switch, and close as a unit.</span>
+              <span className="text-accent whitespace-nowrap">Open, switch, and close as a unit.</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               A workspace is one feature, branch, or experiment with its own
@@ -493,7 +548,8 @@ export default function HomePage() {
             </p>
           </div>
 
-          <ol className="mt-14 max-w-3xl">
+          <div className="mt-14 grid gap-12 lg:grid-cols-[1fr_0.82fr] lg:items-start">
+            <ol className="max-w-2xl">
             {workflow.map((step, i) => (
               <li
                 key={step.n}
@@ -511,13 +567,140 @@ export default function HomePage() {
                   <h3 className="text-xl font-semibold tracking-tight md:text-2xl">
                     {step.label}
                   </h3>
-                  <p className="mt-2 max-w-2xl text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                  <p className="mt-2 max-w-2xl text-xs leading-6 text-foreground-soft md:text-sm md:leading-7">
                     {step.body}
                   </p>
                 </div>
               </li>
             ))}
-          </ol>
+            </ol>
+
+            <WorkspaceSidebarMock />
+          </div>
+        </div>
+      </section>
+
+      {/* ── Agent alerts ── */}
+      <section id="agents" className="border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="max-w-3xl">
+            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+              Agent alerts
+            </p>
+            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Know which agent needs you,{" "}
+              <span className="text-accent whitespace-nowrap">
+                and jump straight to it
+              </span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Run Claude Code, Codex, and opencode across a dozen workspaces and
+              it&apos;s easy to lose track of who&apos;s waiting. Each agent
+              reports working, blocked, or done — Alerts gathers the ones that
+              need you into a single list, so you see what&apos;s stuck or
+              finished at a glance and jump to its terminal or workspace with a
+              keystroke.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+            <AlertsPanel />
+
+            <div className="rounded-xl border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
+                One list, every agent
+              </p>
+              <p className="mt-4 text-lg font-semibold leading-snug tracking-tight text-foreground md:text-xl">
+                Open Alerts, jump to whoever needs you.
+              </p>
+              <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                Press <Key>⌘⌥A</Key> from anywhere to open Alerts. Blocked
+                agents clear the moment they move again; finished agents stay
+                until you review them — so the list is always exactly what needs
+                your attention. Select one to focus its terminal, or jump to its
+                workspace to see everything around it.
+              </p>
+              <div className="mt-6 flex flex-wrap items-center gap-2">
+                <span className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-foreground-soft">
+                  Works with
+                </span>
+                {["Claude Code", "Codex", "opencode"].map((name) => (
+                  <span
+                    key={name}
+                    className="rounded-full border border-line/80 bg-surface/60 px-2.5 py-1 text-xs text-foreground"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Ports & proxy ── */}
+      <section id="proxy" className="border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="max-w-3xl">
+            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+              Bundled reverse proxy
+            </p>
+            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              One localhost, one cookie jar, <span className="text-accent">endless conflicts. Solved.</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Three worktrees, one <code>localhost</code>: the ports collide, and since browsers scope
+              cookies to hostname (not port), logging into one logs you into all three. Spaces routes each
+              workspace through its own hostname, so every branch gets its own port and its own cookie jar.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-6 lg:grid-cols-2">
+            <ComparisonColumn tone="negative" label="Plain localhost" items={localhostPains} />
+            <ComparisonColumn tone="accent" label="Spaces" items={spacesFixes} />
+          </div>
+        </div>
+      </section>
+
+      {/* ── Built for the keyboard ── */}
+      <section className="border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-24">
+          <div className="max-w-3xl">
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Built for <span className="text-accent">the keyboard</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Context switching is a keystroke, not a window hunt. Focus any
+              session (browser or terminal) in the active workspace, cycle
+              through just that workspace&apos;s sessions to stay in flow, or
+              pull any window across every workspace from the command palette,
+              all without lifting your hands off the keyboard. <Link href="/docs/shortcuts" className="text-accent hover:underline">
+                Every shortcut is configurable.
+              </Link>
+            </p>
+            <p className="mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
+              <Key>⌘1–0</Key>
+              <span>focus</span>
+              <Key>⌘⌥]</Key>
+              <span>cycle</span>
+              <Key>⌘⌥-</Key>
+              <span>command palette</span>
+            </p>
+          </div>
+
+          <figure className="mt-12 overflow-hidden rounded-xl border border-line/80 bg-surface/70 p-2 md:p-3">
+            <video
+              src="/media/demo_nav_palette.mp4"
+              autoPlay
+              loop
+              muted
+              playsInline
+              className="h-auto w-full rounded-lg"
+            />
+          </figure>
         </div>
       </section>
 
@@ -603,67 +786,6 @@ export default function HomePage() {
               <PhoneGlyph />
             </MediaPlaceholder>
           </div>
-        </div>
-      </section>
-
-      {/* ── Built for the keyboard ── */}
-      <section className="border-t border-line/70">
-        <div className="mx-auto w-full max-w-7xl px-6 py-24">
-          <div className="max-w-3xl">
-            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-              Built for <span className="text-accent">the keyboard</span>
-            </h2>
-            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Context switching is a keystroke, not a hunt. Navigate and act
-              without lifting your hands off the keyboard — the leader is{" "}
-              <Key>⌘⌥</Key> by default, and{" "}
-              <Link href="/docs/shortcuts" className="text-accent hover:underline">
-                every shortcut is configurable
-              </Link>
-              .
-            </p>
-          </div>
-
-          <div className="mt-12 grid gap-x-12 gap-y-10 md:grid-cols-2">
-            <ShortcutGroup title="Navigate" shortcuts={navigateShortcuts} />
-            <ShortcutGroup title="Act" shortcuts={actShortcuts} />
-          </div>
-        </div>
-      </section>
-
-      {/* ── In Action ── */}
-      <section className="border-t border-line/70 bg-background-soft/40">
-        <div className="mx-auto w-full max-w-7xl px-6 py-24">
-          <div className="max-w-3xl">
-            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-              Get to any window{" "}
-              <span className="text-accent whitespace-nowrap">with a few keystrokes</span>
-            </h2>
-            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Numbered shortcuts focus any window in the active workspace.
-              Cycle through windows of the same workspace, or use the
-              global command palette to pull any window across any workspace.
-            </p>
-            <p className="mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
-              <Key>⌘1–0</Key>
-              <span>focus</span>
-              <Key>⌘⌥]</Key>
-              <span>cycle</span>
-              <Key>⌘⌥-</Key>
-              <span>command palette</span>
-            </p>
-          </div>
-
-          <figure className="mt-12 overflow-hidden rounded-xl border border-line/80 bg-surface/70 p-2 md:p-3">
-            <video
-              src="/media/demo_nav_palette.mp4"
-              autoPlay
-              loop
-              muted
-              playsInline
-              className="h-auto w-full rounded-lg"
-            />
-          </figure>
         </div>
       </section>
 
@@ -846,6 +968,250 @@ function RemoteDiagram() {
   );
 }
 
+// A muted keycap used inside the app mocks, distinct from the amber marketing
+// <Key>. Mirrors the subtle shortcut chips in the real sidebar.
+function NumKey({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="inline-flex min-w-[1.35rem] items-center justify-center rounded border border-line bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[0.62rem] leading-none text-foreground-soft">
+      {children}
+    </kbd>
+  );
+}
+
+// Three dimmed traffic-light dots — the window-chrome cue that reads these
+// panels as the native app, not a web widget.
+function WindowChrome({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-1.5 border-b border-line/70 px-4 py-3">
+      <span className="h-2.5 w-2.5 rounded-full bg-negative/60" />
+      <span className="h-2.5 w-2.5 rounded-full bg-accent-2/60" />
+      <span className="h-2.5 w-2.5 rounded-full bg-accent/60" />
+      {children ? <div className="ml-2 min-w-0">{children}</div> : null}
+    </div>
+  );
+}
+
+function BellIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden className={className}>
+      <path
+        d="M6 8a4 4 0 1 1 8 0c0 3 1 4 1.5 4.5H4.5C5 12 6 11 6 8Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path d="M8.5 15a1.5 1.5 0 0 0 3 0" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ProjectIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden className={className}>
+      <circle cx="5" cy="5" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="5" cy="15" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="15" cy="10" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M6.8 5H11a2 2 0 0 1 2 2v1M6.8 15H11a2 2 0 0 0 2-2v-1" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function GlobeIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden className={className}>
+      <circle cx="10" cy="10" r="7" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M3 10h14M10 3c2 2.2 2 11.8 0 14M10 3c-2 2.2-2 11.8 0 14" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function TerminalIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden className={className}>
+      <rect x="3" y="4" width="14" height="12" rx="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M6 8.5 8.5 11 6 13.5M10.5 13.5H14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function SparkleIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden className={className}>
+      <path
+        d="M10 3.2c.5 3 1.8 4.3 4.8 4.8-3 .5-4.3 1.8-4.8 4.8-.5-3-1.8-4.3-4.8-4.8 3-.5 4.3-1.8 4.8-4.8Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M15 12.5c.2 1.2.7 1.7 1.9 1.9-1.2.2-1.7.7-1.9 1.9-.2-1.2-.7-1.7-1.9-1.9 1.2-.2 1.7-.7 1.9-1.9Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// Sidebar mock for the "One workspace per task" section. Mirrors the real app:
+// Alerts entry, a Projects header, and a selected workspace expanded into its
+// numbered targets (browser, process, agent), with sibling workspaces below.
+function WorkspaceSidebarMock() {
+  return (
+    <figure className="overflow-hidden rounded-xl border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
+      <WindowChrome />
+      <div className="p-2.5">
+        <p className="px-2.5 pb-1 pt-3 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-foreground-soft">
+          Projects
+        </p>
+
+        <div className="flex items-center gap-2 px-2.5 py-1.5 text-sm font-semibold text-foreground">
+          <ProjectIcon />
+          <span>spaces</span>
+        </div>
+
+        {/* Selected, active workspace — expanded into its targets. */}
+        <div className="mt-0.5 rounded-lg border border-accent/40 bg-accent/[0.06]">
+          <div className="flex items-center gap-2 px-2.5 py-2 text-sm font-semibold text-foreground">
+            <span className="h-2 w-2 rounded-full bg-accent" />
+            <span>main</span>
+          </div>
+          <ul className="space-y-0.5 pb-1.5 pl-2 pr-2.5">
+            <TargetRow shortcut="⌘1" icon={<GlobeIcon className="h-3.5 w-3.5" />} label="web" />
+            <TargetRow shortcut="⌘2" icon={<TerminalIcon className="h-3.5 w-3.5" />} label="npm:dev" />
+            <TargetRow shortcut="⌘3" icon={<SparkleIcon className="h-3.5 w-3.5" />} label="codex" />
+          </ul>
+        </div>
+
+        <WorkspaceRow name="schema-cleanup" active />
+        <WorkspaceRow name="website-updates" />
+      </div>
+    </figure>
+  );
+}
+
+function TargetRow({
+  shortcut,
+  icon,
+  label,
+}: {
+  shortcut: string;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <li className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
+      <NumKey>{shortcut}</NumKey>
+      <span className="text-foreground-soft">{icon}</span>
+      <span className="text-sm text-foreground">{label}</span>
+    </li>
+  );
+}
+
+function WorkspaceRow({ name, active }: { name: string; active?: boolean }) {
+  return (
+    <div className="flex items-center gap-2 px-2.5 py-2 text-sm text-foreground">
+      <span
+        className={
+          active
+            ? "h-2 w-2 rounded-full bg-accent"
+            : "h-2 w-2 rounded-full border border-foreground-soft/50"
+        }
+      />
+      <span>{name}</span>
+    </div>
+  );
+}
+
+// Alerts panel mock for the agents section. Each row is one agent that raised
+// an alert — blocked (amber) or done (teal) — with its workspace, agent name,
+// and a jump affordance.
+function AlertsPanel() {
+  return (
+    <figure className="overflow-hidden rounded-xl border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
+      <div className="flex items-center border-b border-line/70 px-4 py-3.5">
+        <span className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-foreground">
+          <BellIcon />
+          Alerts
+        </span>
+      </div>
+      <ul className="divide-y divide-line/60">
+        {agentAlerts.map((alert, index) => (
+          <AlertRow key={alert.workspace} alert={alert} shortcut={`⌘${index + 1}`} />
+        ))}
+      </ul>
+    </figure>
+  );
+}
+
+function AlertRow({ alert, shortcut }: { alert: AgentAlert; shortcut: string }) {
+  const blocked = alert.status === "blocked";
+  const tone = blocked
+    ? {
+        dot: "bg-accent-2",
+        pill: "border-accent-2/45 bg-accent-2/10 text-accent-2",
+        label: "Blocked",
+      }
+    : {
+        dot: "bg-accent",
+        pill: "border-accent/45 bg-accent/10 text-accent",
+        label: "Done",
+      };
+  return (
+    <li className="flex items-center gap-3 px-4 py-3 sm:px-5">
+      <NumKey>{shortcut}</NumKey>
+      <span className={`h-2 w-2 shrink-0 rounded-full ${tone.dot}`} aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="flex items-center gap-2 truncate text-sm">
+          <span className="font-mono text-foreground">{alert.workspace}</span>
+          <span className="text-foreground-soft">{alert.agent}</span>
+        </p>
+      </div>
+    </li>
+  );
+}
+
+function ComparisonColumn({
+  tone,
+  label,
+  items,
+}: {
+  tone: "negative" | "accent";
+  label: string;
+  items: ComparisonItem[];
+}) {
+  const toneClasses =
+    tone === "negative"
+      ? {
+          border: "border-negative/35",
+          bg: "bg-[color:color-mix(in_oklab,var(--negative)_6%,var(--surface))]",
+          text: "text-negative",
+          dot: "bg-negative",
+        }
+      : {
+          border: "border-accent/35",
+          bg: "bg-[color:color-mix(in_oklab,var(--accent)_6%,var(--surface))]",
+          text: "text-accent",
+          dot: "bg-accent",
+        };
+
+  return (
+    <div className={`rounded-xl border ${toneClasses.border} ${toneClasses.bg} p-6 md:p-8`}>
+      <p
+        className={`inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] ${toneClasses.text}`}
+      >
+        <span className={`h-1.5 w-1.5 rounded-full ${toneClasses.dot}`} />
+        {label}
+      </p>
+      <ul className="mt-6 space-y-6">
+        {items.map((item) => (
+          <li key={item.title}>
+            <h3 className="text-base font-semibold tracking-tight text-foreground">
+              {item.title}
+            </h3>
+            <p className="mt-1.5 text-sm leading-6 text-foreground-soft">{item.body}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function MediaPlaceholder({
   label,
   aspect,
@@ -894,32 +1260,6 @@ function PhoneGlyph() {
         strokeLinecap="round"
       />
     </svg>
-  );
-}
-
-function ShortcutGroup({
-  title,
-  shortcuts,
-}: {
-  title: string;
-  shortcuts: Shortcut[];
-}) {
-  return (
-    <div>
-      <h3 className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-        {title}
-      </h3>
-      <dl className="mt-4 divide-y divide-line/70 border-y border-line/70">
-        {shortcuts.map((s) => (
-          <div key={s.keys} className="flex items-center gap-4 py-3">
-            <dt className="shrink-0">
-              <Key>{s.keys}</Key>
-            </dt>
-            <dd className="text-sm leading-6 text-foreground-soft">{s.label}</dd>
-          </div>
-        ))}
-      </dl>
-    </div>
   );
 }
 

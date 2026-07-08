@@ -243,10 +243,13 @@ struct ContentView: View {
 
     private func projectHeader(_ pg: ProjectGroup) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(pg.projectName.uppercased())
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.mutedSecondary)
-                .tracking(0.4)
+            HStack(spacing: 6) {
+                ProjectIcon(size: 13)
+                Text(pg.projectName.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.mutedSecondary)
+                    .tracking(0.4)
+            }
             Spacer(minLength: 0)
             Button {
                 workspaceCreateProjectID = pg.projectID

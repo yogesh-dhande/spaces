@@ -14,6 +14,9 @@ It should reduce the overhead of:
 
 Spaces provides a desktop app and a CLI for power users and coding agents.
 
+The public website links to the Spaces GitHub repository from the header and footer,
+and its download actions point to the latest GitHub Release.
+
 ## Non-Goals
 - Spaces does not manage window geometry or tiling. It simply focuses windows as laid out by the user.
 - Spaces does not restore exact browser tab ordering.
@@ -270,7 +273,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
   - `SPACES_<SERVICE>_HOST` — the routed hostname `<service>.<slug>.localhost` for that service, without scheme or port, for framework host allowlists.
   - `SPACES_<SERVICE>_URL` — the routed URL `http://<service>.<slug>.localhost:7391` for that service. Reference this directly (for example `$SPACES_WEB_URL`) instead of composing a URL by hand.
 - A process binds the port Spaces assigns it, for example `PORT=$SPACES_WEB_PORT npm run dev`.
-- A bundled Caddy reverse proxy runs on the Mac and routes `http://<service>.<slug>.localhost:<router port>` to the service's Mac-local upstream, so every workspace reaches its services at stable per-workspace URLs. The default router port is `7391` and is configurable. Routing is plain HTTP on that shared high port, listens only on loopback addresses, and requires no TLS, certificate, or administrator setup because Chrome and Safari treat `*.localhost` as a secure loopback context. Chrome is the supported browser; Firefox does not resolve arbitrary `*.localhost` names by default. Caddy routes every service host whether or not the service has a browser session.
+- A bundled Caddy reverse proxy runs on the Mac and routes `http://<service>.<slug>.localhost:<router port>` to the service's Mac-local upstream, so every workspace reaches its services at stable per-workspace URLs. The router port is `7391`; there is no user-facing setting to change it. Routing is plain HTTP on that shared high port, listens only on loopback addresses, and requires no TLS, certificate, or administrator setup because Chrome and Safari treat `*.localhost` as a secure loopback context. Chrome is the supported browser; Firefox does not resolve arbitrary `*.localhost` names by default. Caddy routes every service host whether or not the service has a browser session.
 - Local workspace service routes point directly at the service's assigned `localhost` port on the Mac, so service processes can bind either IPv4 or IPv6 loopback. Remote and Linux daemons do not run the Caddy router; when the Mac app observes a running remote workspace with named services, it starts one SSH local-forward process for that workspace with one Mac-owned ephemeral binding per assigned service port and registers Caddy routes to those Mac-local forwards. Focusing a remote browser session that targets a named service reuses the workspace's forward when it is ready and opens it on demand when needed.
 - Remote and Linux workspace processes receive `SPACES_<SERVICE>_URL` so app servers can allowlist the browser-facing host or origin for CORS and framework host checks.
 - Adding a service from the workspace settings dialog should reserve its port number immediately instead of waiting for the next workspace launch.

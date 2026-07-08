@@ -160,6 +160,46 @@ enum RowPrimitives {
         NSLayoutConstraint.activate(constraints)
         return chip
     }
+
+    // MARK: Project glyph
+
+    /// Template image of the marketing site's project glyph: two nodes on the left
+    /// merging into one on the right (the `apps/web` `ProjectIcon`). Paths are laid
+    /// out in a 20×20 space and scaled to `side`. Marked as a template so callers can
+    /// tint it via `contentTintColor` like an SF Symbol. Drawn through a handler so it
+    /// re-rasterizes crisply at any backing scale.
+    static func projectGlyphImage(side: CGFloat = 13) -> NSImage {
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.scaleBy(x: side / 20, y: side / 20)
+
+            let path = NSBezierPath()
+            let radius: CGFloat = 1.8
+            for center in [NSPoint(x: 5, y: 5), NSPoint(x: 5, y: 15), NSPoint(x: 15, y: 10)] {
+                path.appendOval(in: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+            }
+            // Top-left node elbows down into the right node; cubic control points
+            // approximate the SVG's radius-2 quarter-circle corner.
+            path.move(to: NSPoint(x: 6.8, y: 5))
+            path.line(to: NSPoint(x: 11, y: 5))
+            path.curve(to: NSPoint(x: 13, y: 7), controlPoint1: NSPoint(x: 12.105, y: 5), controlPoint2: NSPoint(x: 13, y: 5.895))
+            path.line(to: NSPoint(x: 13, y: 8))
+            // Bottom-left node elbows up into the right node.
+            path.move(to: NSPoint(x: 6.8, y: 15))
+            path.line(to: NSPoint(x: 11, y: 15))
+            path.curve(to: NSPoint(x: 13, y: 13), controlPoint1: NSPoint(x: 12.105, y: 15), controlPoint2: NSPoint(x: 13, y: 14.105))
+            path.line(to: NSPoint(x: 13, y: 12))
+
+            path.lineWidth = 1.4
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            NSColor.black.setStroke()
+            path.stroke()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
 }
 
 // MARK: - Row click helper

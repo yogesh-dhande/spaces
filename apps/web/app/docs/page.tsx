@@ -32,9 +32,9 @@ const terms = [
       "URLs you want tied to a workspace (e.g. localhost:3000, github.com/owner/repo) so you can return to them quickly.",
   },
   {
-    name: "Reserved Ports",
+    name: "Service",
     description:
-      "Named port definitions allocated per workspace so parallel work never collides on the same local port.",
+      "A named process (like web or api) that gets its own reserved port per workspace and a stable URL through the bundled proxy — so parallel workspaces never fight over the same local port.",
   },
   {
     name: "Worktree",

@@ -953,16 +953,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         leadingStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         // Every project row reserves a leading icon slot so titles align in one column, and the glyph
         // marks the row as a project (never a workspace, which lead with a status circle). A git project
-        // shows a muted branch glyph; a non-git project is a plain directory, so it shows a folder tinted
-        // by its single workspace's run state — green when running, muted when stopped — which is a
-        // prominent status without mimicking a workspace's leading dot.
+        // shows a muted connected-nodes glyph; a non-git project is a plain directory, so it shows a
+        // folder tinted by its single workspace's run state — green when running, muted when stopped —
+        // which is a prominent status without mimicking a workspace's leading dot.
         let leadingIcon = NSImageView()
         leadingIcon.translatesAutoresizingMaskIntoConstraints = false
         leadingIcon.widthAnchor.constraint(equalToConstant: 13).isActive = true
         leadingIcon.heightAnchor.constraint(equalToConstant: 13).isActive = true
         if project.isGitRepo {
-            // A commit-graph glyph marks a git project without reading as the ubiquitous branch icon.
-            leadingIcon.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: "Git project")
+            // The marketing site's project glyph (connected nodes) marks a git project without reading
+            // as the ubiquitous branch icon.
+            let glyph = RowPrimitives.projectGlyphImage()
+            glyph.accessibilityDescription = "Git project"
+            leadingIcon.image = glyph
             leadingIcon.contentTintColor = .tertiaryLabelColor
             leadingIcon.toolTip = "Git repository"
         } else {

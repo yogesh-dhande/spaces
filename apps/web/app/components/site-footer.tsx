@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import SpacesLogo from "../spaces.svg";
 
+const githubRepoURL = "https://github.com/yogesh-dhande/spaces";
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
 export function SiteFooter() {
@@ -41,10 +42,12 @@ export function SiteFooter() {
             Download
           </a>
           <a
-            href="mailto:support@spaces.dev"
+            href={githubRepoURL}
+            target="_blank"
+            rel="noopener noreferrer"
             className="transition-colors hover:text-foreground"
           >
-            support@spaces.dev
+            GitHub
           </a>
         </nav>
       </div>

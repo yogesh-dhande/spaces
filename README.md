@@ -59,6 +59,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 ![Workspace navigation](apps/web/public/media/demo_nav.gif)
 - Workspace notes — coding agents can write context (what's pending, where things broke) into a per-workspace notes field, surfaced inline in the workspace detail pane.
 - One-click workspace teardown closes tracked windows and shuts down processes; relaunching restores them.
+- Terminal sessions built on [libghostty](https://github.com/ghostty-org/ghostty) for fast, GPU-accelerated rendering.
 - Native AppKit binary, under 10 MB.
 
 ## How it works

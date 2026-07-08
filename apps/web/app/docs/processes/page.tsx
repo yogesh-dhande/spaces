@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -76,7 +77,11 @@ SPACES_PROJECT_DIR                      # project directory
 SPACES_WORKSPACE_DIR                    # this workspace's directory`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Reference them directly in your command, for example <code>PORT=$SPACES_WEB_PORT npm run dev</code>. The shell expands those variables when the process starts.
+          Reference them directly in your command, for example <code>PORT=$SPACES_WEB_PORT npm run dev</code>. The shell expands those variables when the process starts. See{" "}
+          <Link href="/docs/services" className="text-accent hover:underline">
+            Services
+          </Link>{" "}
+          for how these ports and URLs are assigned and routed.
         </p>
       </article>
 
