@@ -106,9 +106,12 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Selection should be obvious without becoming loud.
 - Secondary actions in navigation should remain visually subordinate until hover or selection makes them relevant.
 - Navigation rows should prioritize quick scanning over descriptive prose.
+- A selected expandable workspace should read as one selected region: the selected-row fill and border wrap the workspace row together with any visible child rows instead of highlighting only the title row.
+- Persistent navigation entries such as Alerts use the same selected-row fill and border when active, so the sidebar has one selection language.
 - Example: the current sidebar uses compact single-line project and workspace rows. A git workspace row is labeled with its branch; a non-git project owns a single workspace and collapses to one flat row labeled with its folder name, with no nested workspace row, so the folder name is not duplicated across a header and a child. That flat row still reads as a project — title left-aligned like a git project header, sitting in the project rows' leading glyph column — rather than as a nested workspace of the project above it.
 - A nested list encodes depth two ways at once: a leading glyph that identifies the row's kind and progressive indentation that shows the nesting. In the sidebar, a project row leads with a project-type glyph (a commit-graph mark for a git repository, a run-state-tinted folder for a plain directory), a git project's workspace rows indent one level under it and lead with a run-state status dot, and runtime-target rows indent a further level and lead with their `⌘`-number chip slot. The glyph says what the row is; the indent says where it sits.
 - A collapsible navigation row carries its disclosure affordance as a muted right-edge chevron (`chevron.down` when expanded, `chevron.right` when collapsed), kept visually subordinate to the row's own actions. Clicking the chevron toggles expansion without changing the selection, so a row that is both selectable and collapsible (a workspace) keeps the two gestures separate.
+- Flat tab strips use subtle separators between neighboring tabs. Close glyphs are contextual actions and should appear on tab hover while preserving stable tab width.
 
 ## Overflow Menus
 - Use a trailing `⋯` overflow button for contextual actions that do not deserve persistent visibility.
