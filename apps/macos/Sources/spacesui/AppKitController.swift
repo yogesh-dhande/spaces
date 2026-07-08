@@ -232,6 +232,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// tab strip (hidden while the detail area shows anything but a workspace panel).
     let panelTabStripAccessory = NSTitlebarAccessoryViewController()
     let panelTabStripView = PanelTabStripAccessoryView()
+    private var mainWindowIsFullScreen = false
     private var windowShortcutSpec: HotkeySpec?
     var shortcutButtonsBySetting: [String: NSButton] = [:]
     var activeShortcutCaptureSetting: ShortcutSetting?
@@ -391,6 +392,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let takeoverButtonVisible: Bool?
         let takeoverButtonEnabled: Bool?
         let takeoverMessage: String?
+    }
+
+    private struct WindowFocusResolutionContext {
+        let resolution: DeviceWindowShortcutResolution
+        let target: WorkspaceRunShortcutTarget?
+        let detail: SpacesDeviceWorkspaceDetailViewModel?
     }
 
     enum WindowFocusRequest: Sendable {
@@ -770,7 +777,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
-        guard let action = await executeWindowFocusResolution(resolution) else {
+        guard
+            let action = await executeWindowFocusResolution(
+                resolution, preferredTarget: target, preferredDetail: context.detail)
+        else {
             routeMS = windowShortcutElapsedMS(since: routeStartedAt)
             logResult(false, reason: "focus_failed")
             return
@@ -810,7 +820,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
         let routeStartedAt = Date()
-        guard let action = await executeWindowFocusResolution(resolution, requestID: requestID) else {
+        guard
+            let action = await executeWindowFocusResolution(
+                resolution, requestID: requestID, preferredTarget: target, preferredDetail: context.detail)
+        else {
             routeMS = windowShortcutElapsedMS(since: routeStartedAt)
             logResult(false, reason: "focus_failed")
             return
@@ -821,9 +834,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     // In-memory window-cycle state (a "window" is a client concept). The cursor remembers
-    // the last-focused target per workspace; the cycle session preserves rotation order
-    // across a short burst of rapid presses. MainActor-isolated, so no lock is needed.
+    // the last-focused target per workspace, recent cursors provide MRU ordering at the
+    // start of a cycle burst, and the cycle session preserves that burst's rotation order
+    // across rapid presses. MainActor-isolated, so no lock is needed.
+    private static let maxWindowNavigationRecentCursorCount = 128
     private var windowNavigationCursorByWorkspace: [String: WorkspaceWindowCycle.Cursor] = [:]
+    private var windowNavigationRecentCursorsByWorkspace: [String: [WorkspaceWindowCycle.Cursor]] = [:]
     private var windowNavigationCycleSessionByWorkspace: [String: WorkspaceWindowCycle.CycleSession] = [:]
 
     /// Cycles focus to the next/previous window of a workspace, entirely client-side:
@@ -851,8 +867,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let browserCycleState = await trackedBrowserCycleState(workspaceID: workspaceID, detail: detail)
         let openTerminalSessionIDs = Set(panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID))
 
-        // Cycle over the same ordered targets the numbered shortcuts use, limited to running
-        // windows (open browsers, running processes/terminals, agents) — not launch actions.
+        // Cycle over the same base targets the numbered shortcuts use, limited to running
+        // windows (open browsers, running processes/terminals, agents) and ordered by MRU
+        // at the start of the burst — not launch actions.
         let targets = Self.cycleWindowTargets(
             detail: detail, browserSessions: browserCycleState.openBrowserSessions, openTerminalSessionIDs: openTerminalSessionIDs)
         let targetResolutionMS = windowShortcutElapsedMS(since: targetResolutionStartedAt)
@@ -870,7 +887,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let currentIndex = Self.cycleCurrentIndex(
             targets: targets, detail: detail, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: frontmostBrowserURL,
             browserTargetURLs: configuredBrowserTargetURLs, cursorKeys: cursorKeys, cursor: cursor)
-        let ordering = WorkspaceWindowCycle.cycleOrdering(cursors: cursorKeys, currentIndex: currentIndex, session: cycleSession)
+        if let currentIndex {
+            rememberWindowNavigationCursor(cursorKeys[currentIndex], workspaceID: workspaceID, preserveWindowCycleSession: true)
+        }
+        let ordering = WorkspaceWindowCycle.cycleOrdering(
+            cursors: cursorKeys, currentIndex: currentIndex, session: cycleSession,
+            recentCursors: windowNavigationRecentCursorsByWorkspace[workspaceID] ?? [])
         let orderedTargets = ordering.indices.map { targets[$0] }
         let orderedCursors = ordering.indices.map { cursorKeys[$0] }
         guard !orderedTargets.isEmpty else {
@@ -885,7 +907,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let candidateIndex = (startIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
             let resolution = Self.windowShortcutTargetResolution(
                 orderedTargets[candidateIndex], workspaceID: workspaceID, detail: detail, overview: overview)
-            if let action = await executeWindowFocusResolution(resolution, requestID: requestID) {
+            if let action = await executeWindowFocusResolution(
+                resolution, requestID: requestID, preferredTarget: orderedTargets[candidateIndex], preferredDetail: detail,
+                preserveWindowCycleSession: true)
+            {
                 focusedAction = action
                 resolvedIndex = candidateIndex
                 break
@@ -1091,6 +1116,141 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return detail.terminalRows[index].sessionID
         case .agent: return detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == target.agentWindow?.id })?.sessionID
         case .browser, .missingConfiguredProcess, .agentLauncher: return nil
+        }
+    }
+
+    private func rememberWindowNavigationFocus(
+        resolution: DeviceWindowShortcutResolution, preferredTarget: WorkspaceRunShortcutTarget? = nil,
+        preferredDetail: SpacesDeviceWorkspaceDetailViewModel? = nil, preserveWindowCycleSession: Bool = false
+    ) {
+        guard let workspaceID = Self.workspaceID(for: resolution) else { return }
+        if let preferredTarget {
+            let detail = preferredDetail ?? focusableWindowContext(workspaceID: workspaceID)?.detail
+            if let detail,
+                rememberWindowNavigationTargetIfCycleable(
+                    preferredTarget, workspaceID: workspaceID, detail: detail, preserveWindowCycleSession: preserveWindowCycleSession)
+            { return }
+        }
+
+        switch resolution {
+        case .openURL(_, let targetURL):
+            guard !targetURL.isEmpty else { return }
+            rememberWindowNavigationCursor("browser:\(targetURL)", workspaceID: workspaceID, preserveWindowCycleSession: preserveWindowCycleSession)
+        case .openTerminal(let request):
+            rememberWindowNavigationTerminalSession(
+                workspaceID: request.workspaceID, sessionID: request.sessionID, preserveWindowCycleSession: preserveWindowCycleSession)
+        case .runProcess(_, let processKey, _):
+            rememberWindowNavigationProcess(
+                workspaceID: workspaceID, processKey: processKey, preserveWindowCycleSession: preserveWindowCycleSession)
+        case .runCodingAgent(_, let agentName, let launcherID):
+            rememberWindowNavigationCodingAgent(
+                workspaceID: workspaceID, agentName: agentName, launcherID: launcherID, preserveWindowCycleSession: preserveWindowCycleSession)
+        case .noWorkspace, .noMatch:
+            return
+        }
+    }
+
+    @discardableResult private func rememberWindowNavigationTargetIfCycleable(
+        _ target: WorkspaceRunShortcutTarget, workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel,
+        preserveWindowCycleSession: Bool
+    ) -> Bool {
+        switch target.kind {
+        case .browser:
+            guard target.targetURL?.isEmpty == false else { return false }
+        case .process, .window, .agent:
+            guard Self.cycleTargetSessionID(for: target, detail: detail)?.isEmpty == false else { return false }
+        case .missingConfiguredProcess, .agentLauncher:
+            return false
+        }
+        rememberWindowNavigationCursor(
+            Self.cycleCursorKey(for: target, detail: detail), workspaceID: workspaceID,
+            preserveWindowCycleSession: preserveWindowCycleSession)
+        return true
+    }
+
+    private func rememberWindowNavigationTerminalSession(workspaceID: String, sessionID: String, preserveWindowCycleSession: Bool) {
+        guard !sessionID.isEmpty, let context = focusableWindowContext(workspaceID: workspaceID) else { return }
+        let matches = context.targets.filter { Self.cycleTargetSessionID(for: $0, detail: context.detail) == sessionID }
+        guard !matches.isEmpty else { return }
+        let currentCursor = windowNavigationCursorByWorkspace[workspaceID]
+        if let currentCursor,
+            let target = matches.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == currentCursor }),
+            rememberWindowNavigationTargetIfCycleable(
+                target, workspaceID: workspaceID, detail: context.detail, preserveWindowCycleSession: preserveWindowCycleSession)
+        { return }
+        let recentCursors = windowNavigationRecentCursorsByWorkspace[workspaceID] ?? []
+        for cursor in recentCursors {
+            if let target = matches.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == cursor }),
+                rememberWindowNavigationTargetIfCycleable(
+                    target, workspaceID: workspaceID, detail: context.detail, preserveWindowCycleSession: preserveWindowCycleSession)
+            { return }
+        }
+        if let target = matches.last {
+            rememberWindowNavigationTargetIfCycleable(
+                target, workspaceID: workspaceID, detail: context.detail, preserveWindowCycleSession: preserveWindowCycleSession)
+        }
+    }
+
+    func noteWindowNavigationTerminalFocus(sessionID: String) {
+        guard let workspaceID = clientWorkspaceID(forTerminalSession: sessionID) else { return }
+        rememberWindowNavigationTerminalSession(workspaceID: workspaceID, sessionID: sessionID, preserveWindowCycleSession: false)
+    }
+
+    private func rememberWindowNavigationProcess(workspaceID: String, processKey: String, preserveWindowCycleSession: Bool) {
+        guard let context = focusableWindowContext(workspaceID: workspaceID) else { return }
+        let target = context.targets.first { target in
+            guard target.kind == .process, let processID = target.processID,
+                let row = context.detail.processRows.first(where: { ($0.processID ?? $0.id) == processID })
+            else { return false }
+            return Self.normalizedRunRowName(row.name) == Self.normalizedRunRowName(processKey)
+        }
+        if let target {
+            rememberWindowNavigationTargetIfCycleable(
+                target, workspaceID: workspaceID, detail: context.detail, preserveWindowCycleSession: preserveWindowCycleSession)
+        }
+    }
+
+    private func rememberWindowNavigationCodingAgent(
+        workspaceID: String, agentName: String, launcherID: String?, preserveWindowCycleSession: Bool
+    ) {
+        guard let context = focusableWindowContext(workspaceID: workspaceID) else { return }
+        let target = context.targets.first { target in
+            guard target.kind == .agent, let agentWindow = target.agentWindow,
+                let row = context.detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
+            else { return false }
+            if let launcherID, !launcherID.isEmpty, row.launcherID == launcherID { return true }
+            return Self.normalizedRunRowName(row.name) == Self.normalizedRunRowName(agentName)
+                || Self.normalizedRunRowName(agentWindow.label ?? "") == Self.normalizedRunRowName(agentName)
+        }
+        if let target {
+            rememberWindowNavigationTargetIfCycleable(
+                target, workspaceID: workspaceID, detail: context.detail, preserveWindowCycleSession: preserveWindowCycleSession)
+        }
+    }
+
+    private func rememberWindowNavigationCursor(
+        _ cursor: WorkspaceWindowCycle.Cursor, workspaceID: String, preserveWindowCycleSession: Bool
+    ) {
+        guard !cursor.isEmpty else { return }
+        windowNavigationCursorByWorkspace[workspaceID] = cursor
+        var cursors = windowNavigationRecentCursorsByWorkspace[workspaceID] ?? []
+        cursors.removeAll { $0 == cursor }
+        cursors.insert(cursor, at: 0)
+        if cursors.count > Self.maxWindowNavigationRecentCursorCount {
+            cursors.removeLast(cursors.count - Self.maxWindowNavigationRecentCursorCount)
+        }
+        windowNavigationRecentCursorsByWorkspace[workspaceID] = cursors
+        if !preserveWindowCycleSession { windowNavigationCycleSessionByWorkspace.removeValue(forKey: workspaceID) }
+    }
+
+    nonisolated private static func workspaceID(for resolution: DeviceWindowShortcutResolution) -> String? {
+        switch resolution {
+        case .openURL(let workspaceID, _), .runProcess(let workspaceID, _, _), .runCodingAgent(let workspaceID, _, _):
+            return workspaceID
+        case .openTerminal(let request):
+            return request.workspaceID
+        case .noWorkspace, .noMatch:
+            return nil
         }
     }
 
@@ -3278,8 +3438,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// The ordered focusable targets for a workspace (browsers, configured/running
-    /// processes, ad hoc terminals, agents). Shared by the numbered shortcuts and window
-    /// cycling so both rotate over the same list.
+    /// processes, ad hoc terminals, agents). Numbered shortcuts use this order directly;
+    /// window cycling uses this as the base target set before applying MRU order.
     nonisolated static func workspaceShortcutTargets(detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession])
         -> [WorkspaceRunShortcutTarget]
     {
@@ -3494,11 +3654,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         window.titlebarAppearsTransparent = true
         window.center()
         window.delegate = self
-        panelTabStripAccessory.layoutAttribute = .left
+        Self.configureWorkspacePanelTabStripAccessory(panelTabStripAccessory)
         panelTabStripAccessory.view = panelTabStripView
         window.addTitlebarAccessoryViewController(panelTabStripAccessory)
         panelTabStripAccessory.isHidden = true
         presentWindowIfAllowed(window)
+    }
+
+    static func configureWorkspacePanelTabStripAccessory(_ accessory: NSTitlebarAccessoryViewController) {
+        accessory.layoutAttribute = .left
     }
 
     private func ensureMainWindowVisibleOnLaunch() {
@@ -4089,7 +4253,48 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// switching away from a workspace also clears the workspace-only titlebar tab strip.
     func presentDetailPane(_ pane: DetailPane) {
         detailPane = pane
-        if pane.workspaceID == nil { panelTabStripAccessory.isHidden = true }
+        if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
+    }
+
+    private func hideWorkspacePanelTabStrip() {
+        panelTabStripView.releaseTabBar()
+        panelTabStripView.isHidden = true
+        panelTabStripAccessory.isHidden = true
+    }
+
+    private func showWorkspacePanelTabStrip() {
+        panelTabStripView.isHidden = false
+        panelTabStripAccessory.isHidden = false
+    }
+
+    private var usesContentWorkspacePanelTabStrip: Bool {
+        mainWindowIsFullScreen || window?.styleMask.contains(.fullScreen) == true
+    }
+
+    private func visibleWorkspacePanelView() -> WorkspacePanelView? {
+        guard visibleDetailWorkspaceID != nil else { return nil }
+        return detailContainer.subviews.compactMap { $0 as? WorkspacePanelView }.first
+    }
+
+    private func showWorkspacePanelTabStrip(for panelView: WorkspacePanelView) {
+        if usesContentWorkspacePanelTabStrip {
+            panelTabStripView.releaseTabBar()
+            panelTabStripView.isHidden = true
+            panelTabStripAccessory.isHidden = true
+            panelView.useBuiltInTabBar()
+        } else {
+            panelView.adoptExternalTabBar(panelTabStripView.tabBar)
+            showWorkspacePanelTabStrip()
+        }
+    }
+
+    private func updateVisibleWorkspacePanelTabStripPresentation() {
+        guard let panelView = visibleWorkspacePanelView() else {
+            hideWorkspacePanelTabStrip()
+            return
+        }
+        showWorkspacePanelTabStrip(for: panelView)
+        panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
     }
 
     func showPlaceholder(message: String = "Select a project or workspace.") {
@@ -4339,6 +4544,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         shortcutButtonsBySetting.removeAll()
         activeShortcutCaptureSetting = nil
         settings.handleSettingsWindowClosed()
+    }
+
+    public func windowWillEnterFullScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        mainWindowIsFullScreen = true
+        updateVisibleWorkspacePanelTabStripPresentation()
+    }
+
+    public func windowDidEnterFullScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        mainWindowIsFullScreen = true
+        updateVisibleWorkspacePanelTabStripPresentation()
+    }
+
+    public func windowDidExitFullScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow === window else { return }
+        mainWindowIsFullScreen = false
+        updateVisibleWorkspacePanelTabStripPresentation()
     }
 
     func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView {
@@ -5322,7 +5545,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         workspaceSetupLogTextView = nil
         // Only the workspace-panel detail shows the titlebar tab strip; the panel
         // branch of `showWorkspaceDetail` re-reveals it.
-        panelTabStripAccessory.isHidden = true
+        hideWorkspacePanelTabStrip()
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
         bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
@@ -5378,8 +5601,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return
         }
         prepareWorkspaceDetailContainer(workspaceID: workspace.id)
-        panelView.adoptExternalTabBar(panelTabStripView.tabBar)
-        panelTabStripAccessory.isHidden = false
+        showWorkspacePanelTabStrip(for: panelView)
         panelTabStripView.sidebarWidth = splitView?.arrangedSubviews.first?.frame.width ?? panelTabStripView.sidebarWidth
         panelView.removeFromSuperview()
         detailContainer.addSubview(panelView)
@@ -8784,7 +9006,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// is reopened by the executor itself, so there is no separate recovery prompt.
     func executeWindowFocus(_ request: WindowFocusRequest) async -> ExternalWindowAction? {
         guard let overview = overview(forWorkspaceID: request.workspaceID) else { return nil }
-        return await executeWindowFocusResolution(Self.windowFocusResolution(for: request, overview: overview))
+        let targetContext = Self.windowFocusTarget(for: request, overview: overview)
+        return await executeWindowFocusResolution(
+            Self.windowFocusResolution(for: request, overview: overview), preferredTarget: targetContext?.target,
+            preferredDetail: targetContext?.detail)
     }
 
     private func runWindowShortcut(index: Int, startedAt: Date) async {
@@ -8792,24 +9017,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         logWindowShortcutProfile("stage=received index=\(index) alerts=\(showingAlerts ? 1 : 0)")
         let shortcutDispatchMS = windowShortcutElapsedMS(since: startedAt)
         let resolutionStartedAt = Date()
-        let resolution = windowShortcutResolution(index: index)
+        let resolutionContext = windowShortcutResolutionContext(index: index)
         let targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         await dispatchWindowShortcut(
-            resolution, index: index, startedAt: startedAt, shortcutDispatchMS: shortcutDispatchMS, targetResolutionMS: targetResolutionMS)
+            resolutionContext, index: index, startedAt: startedAt, shortcutDispatchMS: shortcutDispatchMS,
+            targetResolutionMS: targetResolutionMS)
     }
 
     /// Resolves a window-shortcut press to a device-agnostic focus target. Alerts focus
     /// uses the clicked attention item; otherwise the target is reconstructed from the
     /// selected workspace's overview — the same path for local and remote workspaces.
     private func windowShortcutResolution(index: Int) -> DeviceWindowShortcutResolution {
+        windowShortcutResolutionContext(index: index).resolution
+    }
+
+    private func windowShortcutResolutionContext(index: Int) -> WindowFocusResolutionContext {
         if showingAlerts {
-            guard let request = alerts.alertsFocusRequest(for: index) else { return .noMatch }
-            guard let overview = overview(forWorkspaceID: request.workspaceID) else { return .noMatch }
-            return Self.windowFocusResolution(for: request, overview: overview)
+            guard let request = alerts.alertsFocusRequest(for: index) else {
+                return WindowFocusResolutionContext(resolution: .noMatch, target: nil, detail: nil)
+            }
+            guard let overview = overview(forWorkspaceID: request.workspaceID) else {
+                return WindowFocusResolutionContext(resolution: .noMatch, target: nil, detail: nil)
+            }
+            let targetContext = Self.windowFocusTarget(for: request, overview: overview)
+            return WindowFocusResolutionContext(
+                resolution: Self.windowFocusResolution(for: request, overview: overview), target: targetContext?.target,
+                detail: targetContext?.detail)
         }
-        guard let selectedWorkspaceID else { return .noWorkspace }
-        guard let overview = overview(forWorkspaceID: selectedWorkspaceID) else { return .noWorkspace }
-        return Self.deviceWindowShortcutResolution(index: index, selectedWorkspaceID: selectedWorkspaceID, overview: overview)
+        guard let selectedWorkspaceID else { return WindowFocusResolutionContext(resolution: .noWorkspace, target: nil, detail: nil) }
+        guard let overview = overview(forWorkspaceID: selectedWorkspaceID) else {
+            return WindowFocusResolutionContext(resolution: .noWorkspace, target: nil, detail: nil)
+        }
+        guard index > 0 else { return WindowFocusResolutionContext(resolution: .noMatch, target: nil, detail: nil) }
+        guard let deviceWorkspace = overview.workspaces.first(where: { $0.id == selectedWorkspaceID }) else {
+            return WindowFocusResolutionContext(resolution: .noWorkspace, target: nil, detail: nil)
+        }
+        let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
+        let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: detail.config.resolvedBrowserSessions.map(Self.localBrowserSession(from:)))
+        guard targets.indices.contains(index - 1) else {
+            return WindowFocusResolutionContext(resolution: .noMatch, target: nil, detail: detail)
+        }
+        let target = targets[index - 1]
+        return WindowFocusResolutionContext(
+            resolution: Self.windowShortcutTargetResolution(target, workspaceID: selectedWorkspaceID, detail: detail, overview: overview),
+            target: target, detail: detail)
     }
 
     /// The overview for the daemon that owns `workspaceID` (local or remote).
@@ -8941,6 +9192,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    nonisolated private static func windowFocusTarget(for request: WindowFocusRequest, overview: SpacesDeviceOverviewPayload)
+        -> (target: WorkspaceRunShortcutTarget, detail: SpacesDeviceWorkspaceDetailViewModel)?
+    {
+        guard let detail = workspaceDetail(request.workspaceID, in: overview) else { return nil }
+        let targets = workspaceShortcutTargets(detail: detail, browserSessions: detail.config.resolvedBrowserSessions.map(localBrowserSession(from:)))
+        let target: WorkspaceRunShortcutTarget?
+        switch request {
+        case .workspaceBrowserSession(_, let targetURL):
+            target = targets.first { $0.kind == .browser && $0.targetURL == targetURL }
+        case .workspaceProcess(_, let processID):
+            target = targets.first { $0.kind == .process && $0.processID == processID }
+        case .workspaceWindow(_, let index):
+            target = targets.first { $0.kind == .window && $0.windowListIndex == index - 1 }
+        case .workspaceMissingConfiguredProcess(_, let processKey):
+            target = targets.first {
+                $0.kind == .missingConfiguredProcess && normalizedRunRowName($0.processKey ?? "") == normalizedRunRowName(processKey)
+            }
+        case .workspaceAgentLauncher(_, let name):
+            target = targets.first { $0.kind == .agentLauncher && normalizedRunRowName($0.launcherName ?? "") == normalizedRunRowName(name) }
+        case .agentWindow(let record):
+            target = targets.first { $0.kind == .agent && $0.agentWindow?.id == record.id }
+        }
+        guard let target else { return nil }
+        return (target, detail)
+    }
+
     /// Builds an `.openTerminal` target for a session, preferring live session-catalog
     /// metadata from the overview and falling back to the row's own title/dir when the
     /// session has not yet surfaced in the catalog (e.g. a just-started process).
@@ -8963,11 +9240,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// focus work itself lives in `executeWindowFocusResolution` so the cycle and
     /// command-palette paths reuse it.
     private func dispatchWindowShortcut(
-        _ resolution: DeviceWindowShortcutResolution, index: Int, startedAt: Date, shortcutDispatchMS: Int, targetResolutionMS: Int
+        _ context: WindowFocusResolutionContext, index: Int, startedAt: Date, shortcutDispatchMS: Int, targetResolutionMS: Int
     ) async {
         let routeStartedAt = Date()
+        let resolution = context.resolution
         let kind = Self.windowShortcutKind(for: resolution)
-        guard let action = await executeWindowFocusResolution(resolution) else {
+        guard
+            let action = await executeWindowFocusResolution(
+                resolution, preferredTarget: context.target, preferredDetail: context.detail)
+        else {
             logWindowShortcutProfile("stage=aborted index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
             logPerfMetric(
                 "window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
@@ -8992,8 +9273,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// three behave identically. Only two leaves depend on where the workspace's daemon
     /// runs: browser URLs may need remote-service routing before local Chrome focus, and
     /// terminal windows use native sessions locally vs Device API mirrors remotely.
-    @discardableResult func executeWindowFocusResolution(_ resolution: DeviceWindowShortcutResolution, requestID: String? = nil) async
-        -> ExternalWindowAction?
+    @discardableResult func executeWindowFocusResolution(
+        _ resolution: DeviceWindowShortcutResolution, requestID: String? = nil, preferredTarget: WorkspaceRunShortcutTarget? = nil,
+        preferredDetail: SpacesDeviceWorkspaceDetailViewModel? = nil, preserveWindowCycleSession: Bool = false
+    ) async -> ExternalWindowAction?
     {
         switch resolution {
         case .openURL(let workspaceID, let targetURL):
@@ -9041,22 +9324,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, fallbackURL: url)
             }
             Self.setClientActiveWorkspaceID(workspaceID)
+            rememberWindowNavigationFocus(
+                resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
+                preserveWindowCycleSession: preserveWindowCycleSession)
             return .focus(hidesApp: true)
         case .openTerminal(let request):
             guard await openOrFocusTerminalTarget(request, requestID: requestID) else { return nil }
+            rememberWindowNavigationFocus(
+                resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
+                preserveWindowCycleSession: preserveWindowCycleSession)
             return .focus(hidesApp: false)
         case .runProcess(let workspaceID, let processKey, let processTemplateID):
-            return await runTerminalSessionMutationAndOpenPane(workspaceID: workspaceID) { device in
-                try SpacesDeviceClient.runWorkspaceProcess(
-                    workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
+            guard
+                let action = await runTerminalSessionMutationAndOpenPane(
+                    workspaceID: workspaceID,
+                    operation: { device in
+                        try SpacesDeviceClient.runWorkspaceProcess(
+                            workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
+                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    })
+            else { return nil }
+            rememberWindowNavigationFocus(
+                resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
+                preserveWindowCycleSession: preserveWindowCycleSession)
+            return action
         case .runCodingAgent(let workspaceID, let agentName, let agentLauncherID):
-            return await runTerminalSessionMutationAndOpenPane(workspaceID: workspaceID) { device in
-                try SpacesDeviceClient.runCodingAgent(
-                    workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
-                    clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
+            guard
+                let action = await runTerminalSessionMutationAndOpenPane(
+                    workspaceID: workspaceID,
+                    operation: { device in
+                        try SpacesDeviceClient.runCodingAgent(
+                            workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
+                            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                    })
+            else { return nil }
+            rememberWindowNavigationFocus(
+                resolution: resolution, preferredTarget: preferredTarget, preferredDetail: preferredDetail,
+                preserveWindowCycleSession: preserveWindowCycleSession)
+            return action
         case .noWorkspace, .noMatch: return nil
         }
     }

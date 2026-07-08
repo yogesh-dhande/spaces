@@ -304,6 +304,7 @@ import spacesterminalcore
         guard let focusedPaneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: focusedPaneID, in: layout),
             let sessionID = pane.content.terminalSessionID, let content = contentControllers[sessionID]
         else { return }
+        host.noteWindowNavigationTerminalFocus(sessionID: sessionID)
         content.activate(focus: true)
     }
 
