@@ -920,15 +920,40 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 (try? chrome.tabSnapshot(inWindowIDs: trackedWindows.map(\.windowID))) ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil)
             let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
             let trackedTargetURLs = Set(trackedWindows.map(\.targetURL))
+            let trackedTargetURLList = Array(trackedTargetURLs)
             let openBrowserSessions = resolvedSessions.compactMap { session -> BrowserSession? in
                 guard let url = session.url, !url.isEmpty, trackedTargetURLs.contains(url) else { return nil }
-                guard snapshot.tabs.contains(where: { $0.url.hasPrefix(url) }) else { return nil }
+                let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: url, targetURLs: trackedTargetURLList)
+                guard snapshot.tabs.contains(where: { Self.browserTabURL($0.url, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs) })
+                else { return nil }
                 return Self.localBrowserSession(from: session)
             }
             return BrowserCycleState(
                 openBrowserSessions: openBrowserSessions, frontmostURL: snapshot.frontmostActiveTabURL, clientDBLookupMS: clientDBLookupMS,
                 chromeAppleScriptMS: chromeAppleScriptMS, trackedWindowCount: trackedWindows.count, trackedTabCount: snapshot.tabs.count)
         }.value
+    }
+
+    nonisolated static func browserSessionSiblingTargetURLs(targetURL: String, targetURLs: [String]) -> [String] {
+        var seen = Set<String>()
+        return targetURLs.filter { candidate in
+            guard !candidate.isEmpty, candidate != targetURL, candidate.hasPrefix(targetURL), seen.insert(candidate).inserted else { return false }
+            return true
+        }
+    }
+
+    nonisolated static func browserTabURL(_ tabURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String]) -> Bool {
+        guard !targetURL.isEmpty else { return false }
+        if browserTabURLIsExactTarget(tabURL, targetURL: targetURL) { return true }
+        guard tabURL.hasPrefix(targetURL) else { return false }
+        return !siblingTargetURLs.contains { siblingTargetURL in !siblingTargetURL.isEmpty && tabURL.hasPrefix(siblingTargetURL) }
+    }
+
+    nonisolated private static func browserTabURLIsExactTarget(_ tabURL: String, targetURL: String) -> Bool {
+        if tabURL == targetURL { return true }
+        guard !targetURL.contains("?"), !targetURL.contains("#") else { return false }
+        if targetURL.hasSuffix("/") { return tabURL == String(targetURL.dropLast()) }
+        return tabURL == targetURL + "/"
     }
 
     nonisolated static func cycleWindowTargets(
@@ -7534,7 +7559,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // Close only the session's matching tab, never the whole window: the window may hold
                 // other tabs the user opened, and a tracked id can be stale (Chrome reuses window
                 // ids after a restart) so the URL must still match.
-                for entry in tracked { _ = try? chrome.closeMatchingTabsInWindow(windowID: entry.windowID, urlPrefix: entry.targetURL) }
+                let trackedTargetURLs = tracked.map(\.targetURL)
+                for entry in tracked {
+                    _ = try? chrome.closeMatchingTabsInWindow(
+                        windowID: entry.windowID, urlPrefix: entry.targetURL,
+                        excludingURLPrefixes: Self.browserSessionSiblingTargetURLs(targetURL: entry.targetURL, targetURLs: trackedTargetURLs))
+                }
             }
             try? store.clearAll(workspaceID: workspaceID)
         }
@@ -8638,12 +8668,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let dbLookupStartedAt = Date()
             let trackedEntries = ((try? store.windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
             let trackedID = trackedEntries.first(where: { $0.targetURL == targetURL })?.windowID
+            let trackedTargetURLs = trackedEntries.map(\.targetURL)
+            let siblingTargetURLs = AppKitController.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: trackedTargetURLs)
             let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbLookupStartedAt)
             var chromeAppleScriptMS = 0
             var clientDBWriteMS = 0
             if let trackedID {
                 let chromeStartedAt = Date()
-                let didFocus = (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
+                let didFocus =
+                    (try? chrome.focusMatchingTabInWindow(
+                        windowID: trackedID, urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs)) ?? false
                 chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
                 if didFocus {
                     return BrowserFocusResult(
@@ -8653,7 +8687,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
 
             let allWindowFocusStartedAt = Date()
-            let relocatedMatch = try? chrome.focusFirstMatchingTabMatch(urlPrefix: targetURL)
+            let relocatedMatch = try? chrome.focusFirstMatchingTabMatch(urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs)
             chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: allWindowFocusStartedAt)
             if let relocatedMatch {
                 let dbWriteStartedAt = Date()

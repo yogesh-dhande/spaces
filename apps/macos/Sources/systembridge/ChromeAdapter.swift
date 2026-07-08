@@ -94,7 +94,7 @@ public final class ChromeAdapter {
         return windowID
     }
 
-    /// Closes the tabs whose URL begins with `urlPrefix` inside the Chrome window with the given
+    /// Closes the tabs whose URL matches `urlPrefix` inside the Chrome window with the given
     /// AppleScript window id. Returns true when at least one matching tab was closed.
     ///
     /// Used to tear down a workspace browser session's tab when the workspace stops. Only the
@@ -103,9 +103,14 @@ public final class ChromeAdapter {
     /// The URL guard mirrors `focusMatchingTabInWindow`: Chrome reuses AppleScript window ids after
     /// a restart, so a tracked id can point at an unrelated user window — without the URL match a
     /// tab there could be closed by mistake.
-    @discardableResult public func closeMatchingTabsInWindow(windowID: Int, urlPrefix: String) throws -> Bool {
-        let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
+    @discardableResult public func closeMatchingTabsInWindow(windowID: Int, urlPrefix: String, excludingURLPrefixes: [String] = []) throws -> Bool {
+        let escaped = Self.escapedAppleScriptString(urlPrefix)
+        let exactURLs = Self.appleScriptStringList(Self.exactURLCandidates(for: urlPrefix))
+        let excludedPrefixes = Self.appleScriptStringList(Self.uniqueNonEmptyURLPrefixes(excludingURLPrefixes))
         let script = """
+            set targetURLPrefix to "\(escaped)"
+            set exactTargetURLs to {\(exactURLs)}
+            set excludedURLPrefixes to {\(excludedPrefixes)}
             tell application "Google Chrome"
               set requestedWindowID to "\(windowID)"
               set closedCount to 0
@@ -115,7 +120,24 @@ public final class ChromeAdapter {
                   repeat with i from tabCount to 1 by -1
                     set u to URL of tab i of w
                     if u is not missing value then
-                      if u starts with "\(escaped)" then
+                      set shouldClose to false
+                      repeat with exactTargetURL in exactTargetURLs
+                        if u is (exactTargetURL as string) then
+                          set shouldClose to true
+                          exit repeat
+                        end if
+                      end repeat
+                      if shouldClose is false and u starts with targetURLPrefix then
+                        set excludedMatch to false
+                        repeat with excludedURLPrefix in excludedURLPrefixes
+                          if u starts with (excludedURLPrefix as string) then
+                            set excludedMatch to true
+                            exit repeat
+                          end if
+                        end repeat
+                        if excludedMatch is false then set shouldClose to true
+                      end if
+                      if shouldClose then
                         close tab i of w
                         set closedCount to closedCount + 1
                       end if
@@ -228,9 +250,14 @@ public final class ChromeAdapter {
     /// Returns false when the window no longer exists or no longer holds a matching tab, so
     /// callers can adopt a moved tab or reopen the session. Scoping to one window id keeps the
     /// fast path on the window currently tracked for that browser-session URL.
-    public func focusMatchingTabInWindow(windowID: Int, urlPrefix: String) throws -> Bool {
-        let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
+    public func focusMatchingTabInWindow(windowID: Int, urlPrefix: String, excludingURLPrefixes: [String] = []) throws -> Bool {
+        let escaped = Self.escapedAppleScriptString(urlPrefix)
+        let exactURLs = Self.appleScriptStringList(Self.exactURLCandidates(for: urlPrefix))
+        let excludedPrefixes = Self.appleScriptStringList(Self.uniqueNonEmptyURLPrefixes(excludingURLPrefixes))
         let script = """
+            set targetURLPrefix to "\(escaped)"
+            set exactTargetURLs to {\(exactURLs)}
+            set excludedURLPrefixes to {\(excludedPrefixes)}
             tell application "Google Chrome"
               set requestedWindowID to "\(windowID)"
               repeat with w in windows
@@ -239,11 +266,33 @@ public final class ChromeAdapter {
                   repeat with i from 1 to tabCount
                     set u to URL of tab i of w
                     if u is not missing value then
-                      if u starts with "\(escaped)" then
-                        set active tab index of w to i
-                        set index of w to 1
-                        activate
-                        return "1"
+                      repeat with exactTargetURL in exactTargetURLs
+                        if u is (exactTargetURL as string) then
+                          set active tab index of w to i
+                          set index of w to 1
+                          activate
+                          return "1"
+                        end if
+                      end repeat
+                    end if
+                  end repeat
+                  repeat with i from 1 to tabCount
+                    set u to URL of tab i of w
+                    if u is not missing value then
+                      if u starts with targetURLPrefix then
+                        set excludedMatch to false
+                        repeat with excludedURLPrefix in excludedURLPrefixes
+                          if u starts with (excludedURLPrefix as string) then
+                            set excludedMatch to true
+                            exit repeat
+                          end if
+                        end repeat
+                        if excludedMatch is false then
+                          set active tab index of w to i
+                          set index of w to 1
+                          activate
+                          return "1"
+                        end if
                       end if
                     end if
                   end repeat
@@ -259,9 +308,14 @@ public final class ChromeAdapter {
 
     public func focusFirstMatchingTab(urlPrefix: String) throws -> Bool { try focusFirstMatchingTabMatch(urlPrefix: urlPrefix) != nil }
 
-    public func focusFirstMatchingTabMatch(urlPrefix: String) throws -> ChromeWindowMatch? {
-        let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
+    public func focusFirstMatchingTabMatch(urlPrefix: String, excludingURLPrefixes: [String] = []) throws -> ChromeWindowMatch? {
+        let escaped = Self.escapedAppleScriptString(urlPrefix)
+        let exactURLs = Self.appleScriptStringList(Self.exactURLCandidates(for: urlPrefix))
+        let excludedPrefixes = Self.appleScriptStringList(Self.uniqueNonEmptyURLPrefixes(excludingURLPrefixes))
         let script = """
+            set targetURLPrefix to "\(escaped)"
+            set exactTargetURLs to {\(exactURLs)}
+            set excludedURLPrefixes to {\(excludedPrefixes)}
             tell application "Google Chrome"
               repeat with w in windows
                 set wid to id of w
@@ -270,11 +324,38 @@ public final class ChromeAdapter {
                 repeat with i from 1 to tabCount
                   set u to URL of tab i of w
                   if u is not missing value then
-                    if u starts with "\(escaped)" then
-                      set active tab index of w to i
-                      set index of w to 1
-                      activate
-                      return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
+                    repeat with exactTargetURL in exactTargetURLs
+                      if u is (exactTargetURL as string) then
+                        set active tab index of w to i
+                        set index of w to 1
+                        activate
+                        return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
+                      end if
+                    end repeat
+                  end if
+                end repeat
+              end repeat
+              repeat with w in windows
+                set wid to id of w
+                set titleText to title of w
+                set tabCount to count of tabs of w
+                repeat with i from 1 to tabCount
+                  set u to URL of tab i of w
+                  if u is not missing value then
+                    if u starts with targetURLPrefix then
+                      set excludedMatch to false
+                      repeat with excludedURLPrefix in excludedURLPrefixes
+                        if u starts with (excludedURLPrefix as string) then
+                          set excludedMatch to true
+                          exit repeat
+                        end if
+                      end repeat
+                      if excludedMatch is false then
+                        set active tab index of w to i
+                        set index of w to 1
+                        activate
+                        return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
+                      end if
                     end if
                   end if
                 end repeat
@@ -375,6 +456,30 @@ public final class ChromeAdapter {
             """
         let output = try runChromeScript(script)
         return Self.parseTabRows(output)
+    }
+
+    private static func uniqueNonEmptyURLPrefixes(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    private static func exactURLCandidates(for urlPrefix: String) -> [String] {
+        var candidates = [urlPrefix]
+        if !urlPrefix.contains("?"), !urlPrefix.contains("#") {
+            if urlPrefix.hasSuffix("/") {
+                let trimmed = String(urlPrefix.dropLast())
+                if !trimmed.isEmpty { candidates.append(trimmed) }
+            } else {
+                candidates.append(urlPrefix + "/")
+            }
+        }
+        return uniqueNonEmptyURLPrefixes(candidates)
+    }
+
+    private static func escapedAppleScriptString(_ value: String) -> String { value.replacingOccurrences(of: "\"", with: "\\\"") }
+
+    private static func appleScriptStringList(_ values: [String]) -> String {
+        values.map { "\"\(escapedAppleScriptString($0))\"" }.joined(separator: ", ")
     }
 
     private static func parseTabRows(_ output: String) -> [ChromeWindowMatch] {

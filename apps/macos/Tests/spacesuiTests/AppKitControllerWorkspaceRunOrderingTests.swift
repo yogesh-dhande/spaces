@@ -451,6 +451,20 @@ import workspacecore
             ])
     }
 
+    @Test func browserSessionPrefixMatchingSkipsLongerSiblingTargets() {
+        let targetURL = "http://localhost:3000"
+        let siblingTargetURLs = AppKitController.browserSessionSiblingTargetURLs(
+            targetURL: targetURL,
+            targetURLs: ["http://localhost:3000", "http://localhost:3000/admin", "http://localhost:3000/admin"])
+
+        #expect(siblingTargetURLs == ["http://localhost:3000/admin"])
+        #expect(AppKitController.browserTabURL("http://localhost:3000/", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(AppKitController.browserTabURL("http://localhost:3000/docs", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(!AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(!AppKitController.browserTabURL("http://localhost:3000/admin/users", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
+    }
+
     @Test func numberedShortcutResolutionStillOpensUnopenedTargets() {
         let workspace = cycleFilteringWorkspace()
         let overview = SpacesDeviceOverviewPayload(

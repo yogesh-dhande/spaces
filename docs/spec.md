@@ -284,6 +284,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Spaces should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
 - When focusing a browser session, Spaces should first try the tracked Chrome window, then scan all Chrome windows for a tab whose URL matches the session so a user-moved tab can be adopted. If the session is not open, Spaces should open it as a tab in an existing tracked workspace Chrome window when one is available, otherwise in a new Chrome window.
+- When browser-session URLs overlap by prefix, Spaces should prefer the exact target URL and avoid matching a longer sibling session URL during prefix fallback.
 - Terminal focus should land on the intended dedicated process or agent session.
 - After the GUI focuses or opens an external window, Spaces should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Spaces should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.

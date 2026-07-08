@@ -83,7 +83,8 @@ final class ChromeAdapterTests: XCTestCase {
             """
 
         try withMockCommands(["osascript": mock]) {
-            let match = try ChromeAdapter().focusFirstMatchingTabMatch(urlPrefix: "http://localhost:3000")
+            let match = try ChromeAdapter().focusFirstMatchingTabMatch(
+                urlPrefix: "http://localhost:3000", excludingURLPrefixes: ["http://localhost:3000/admin"])
 
             XCTAssertEqual(match?.windowID, 303)
             XCTAssertEqual(match?.tabIndex, 4)
@@ -91,9 +92,58 @@ final class ChromeAdapterTests: XCTestCase {
             XCTAssertEqual(match?.url, "http://localhost:3000/docs")
 
             let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            XCTAssertTrue(script.contains("set exactTargetURLs to {\"http://localhost:3000\", \"http://localhost:3000/\"}"))
+            XCTAssertTrue(script.contains("set excludedURLPrefixes to {\"http://localhost:3000/admin\"}"))
             XCTAssertTrue(script.contains("repeat with w in windows"))
             XCTAssertTrue(script.contains("set active tab index of w to i"))
             XCTAssertTrue(script.contains("return wid &"))
+            let exactRange = try XCTUnwrap(script.range(of: "repeat with exactTargetURL in exactTargetURLs"))
+            let prefixRange = try XCTUnwrap(script.range(of: "if u starts with targetURLPrefix then"))
+            XCTAssertLessThan(script.distance(from: script.startIndex, to: exactRange.lowerBound), script.distance(from: script.startIndex, to: prefixRange.lowerBound))
+        }
+    }
+
+    func testFocusMatchingTabInWindowUsesExactPassBeforePrefixFallback() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '1'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            XCTAssertTrue(
+                try ChromeAdapter().focusMatchingTabInWindow(
+                    windowID: 202, urlPrefix: "http://localhost:3000", excludingURLPrefixes: ["http://localhost:3000/admin"]))
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            XCTAssertTrue(script.contains("set requestedWindowID to \"202\""))
+            XCTAssertTrue(script.contains("set exactTargetURLs to {\"http://localhost:3000\", \"http://localhost:3000/\"}"))
+            XCTAssertTrue(script.contains("set excludedURLPrefixes to {\"http://localhost:3000/admin\"}"))
+            let exactRange = try XCTUnwrap(script.range(of: "repeat with exactTargetURL in exactTargetURLs"))
+            let prefixRange = try XCTUnwrap(script.range(of: "if u starts with targetURLPrefix then"))
+            XCTAssertLessThan(script.distance(from: script.startIndex, to: exactRange.lowerBound), script.distance(from: script.startIndex, to: prefixRange.lowerBound))
+        }
+    }
+
+    func testCloseMatchingTabsInWindowExcludesSiblingPrefixes() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '1'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            XCTAssertTrue(
+                try ChromeAdapter().closeMatchingTabsInWindow(
+                    windowID: 202, urlPrefix: "http://localhost:3000", excludingURLPrefixes: ["http://localhost:3000/admin"]))
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            XCTAssertTrue(script.contains("set requestedWindowID to \"202\""))
+            XCTAssertTrue(script.contains("set exactTargetURLs to {\"http://localhost:3000\", \"http://localhost:3000/\"}"))
+            XCTAssertTrue(script.contains("set excludedURLPrefixes to {\"http://localhost:3000/admin\"}"))
+            XCTAssertTrue(script.contains("if excludedMatch is false then set shouldClose to true"))
         }
     }
 
