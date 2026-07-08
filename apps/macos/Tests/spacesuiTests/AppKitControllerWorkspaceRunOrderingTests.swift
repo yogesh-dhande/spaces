@@ -465,6 +465,19 @@ import workspacecore
         #expect(AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
     }
 
+    @Test func rootBrowserSessionDoesNotMatchOnlyOpenAdminSiblingTab() {
+        let rootURL = "http://localhost:3000"
+        let adminURL = "http://localhost:3000/admin"
+        let trackedTargetURLs = [rootURL, adminURL]
+        let openTabURLs = [adminURL]
+
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: trackedTargetURLs)
+        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: trackedTargetURLs)
+
+        #expect(!openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings) })
+        #expect(openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings) })
+    }
+
     @Test func numberedShortcutResolutionStillOpensUnopenedTargets() {
         let workspace = cycleFilteringWorkspace()
         let overview = SpacesDeviceOverviewPayload(
