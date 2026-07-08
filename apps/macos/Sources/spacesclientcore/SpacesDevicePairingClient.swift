@@ -101,7 +101,7 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
 
 public enum SpacesDevicePairingClient {
     private static let sshPath = "/usr/bin/ssh"
-    private static let remotePairCommand = "~/.spaces/bin/spaces device pair --json"
+    static let baseRemotePairCommand = "~/.spaces/bin/spaces device pair --json"
     private static let remoteInstallProbeCommand = #"""
         os="$(uname -s 2>/dev/null || true)"
         arch="$(uname -m 2>/dev/null || true)"
@@ -125,7 +125,7 @@ public enum SpacesDevicePairingClient {
         try validateRemoteDeviceSSH(destination: destination, port: request.sshPort)
         let probe = try validateRemoteDeviceInstall(destination: destination, port: request.sshPort)
         let metadata = try loadRemotePairingMetadata(
-            destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion)
+            destination: destination, port: request.sshPort, probe: probe, appVersion: request.clientAppVersion, profile: request.profile)
 
         try assertPairingCompatible(deviceProtocolVersion: metadata.protocolVersion, deviceAppVersion: metadata.appVersion, deviceName: metadata.name)
         let deviceID = stablePairedDeviceID(certificateFingerprint: metadata.certificateFingerprint, host: deviceAPIHost, port: metadata.port)
@@ -219,7 +219,7 @@ public enum SpacesDevicePairingClient {
         }
     }
 
-    public static func openRemotePairingWindow(for device: SpacesPairedDeviceRecord, appVersion: String? = nil) throws
+    public static func openRemotePairingWindow(for device: SpacesPairedDeviceRecord, appVersion: String? = nil, profile: SpacesProfile? = nil) throws
         -> SpacesRemoteDevicePairingWindowResult
     {
         let sshHost = try normalizedSSHHost(device.sshHost ?? device.host)
@@ -231,7 +231,8 @@ public enum SpacesDevicePairingClient {
         let deviceAPIHost = try remotePairingWindowDeviceAPIHost(destination: destination, port: device.sshPort, sshHost: sshHost)
         try validateRemoteDeviceSSH(destination: destination, port: device.sshPort)
         let probe = try validateRemoteDeviceInstall(destination: destination, port: device.sshPort)
-        let metadata = try loadRemotePairingMetadata(destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion)
+        let metadata = try loadRemotePairingMetadata(
+            destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, profile: profile)
         let link = SpacesDevicePairingLink(
             host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
             certificateFingerprint: metadata.certificateFingerprint, name: metadata.name, protocolVersion: metadata.protocolVersion,
@@ -380,11 +381,33 @@ public enum SpacesDevicePairingClient {
         return try parseRemoteInstallProbeOutput(result.standardOutput, destination: destination)
     }
 
-    private static func loadRemotePairingMetadata(destination: String, port: Int?, probe: RemoteInstallProbe, appVersion: String?) throws
+    private static func loadRemotePairingMetadata(
+        destination: String, port: Int?, probe: RemoteInstallProbe, appVersion: String?, profile: SpacesProfile?
+    ) throws
         -> RemotePairingMetadata
     {
-        let result = try runSSH(destination: destination, port: port, remoteCommand: remotePairCommand, timeoutSeconds: 15)
+        let result = try runSSH(destination: destination, port: port, remoteCommand: remotePairCommand(profile: profile), timeoutSeconds: 15)
         return try parseRemotePairingMetadataResult(result, destination: destination, probe: probe, appVersion: appVersion)
+    }
+
+    static func remotePairCommand(profile: SpacesProfile?) -> String {
+        guard let remoteProfileRoot = remoteDevelopmentProfileRoot(profile: profile) else { return baseRemotePairCommand }
+        let databasePath = remoteProfileRoot.hasSuffix("/") ? "\(remoteProfileRoot)spaces.db" : "\(remoteProfileRoot)/spaces.db"
+        let runtimePath = remoteProfileRoot.hasSuffix("/") ? "\(remoteProfileRoot)runtime" : "\(remoteProfileRoot)/runtime"
+        return "\(SpacesProfile.databasePathEnvironmentVariable)=\(remoteShellPathExpression(databasePath)) "
+            + "\(SpacesProfile.runtimeDirectoryEnvironmentVariable)=\(remoteShellPathExpression(runtimePath)) \(baseRemotePairCommand)"
+    }
+
+    private static func remoteDevelopmentProfileRoot(profile providedProfile: SpacesProfile?) -> String? {
+        if let override = normalized(ProcessInfo.processInfo.environment["SPACES_E2E_REMOTE_DEVICE_ROOT"]) { return override }
+        let profile = providedProfile ?? (try? SpacesProfile.current())
+        guard let profile else { return nil }
+        let marker = "/.spaces-dev/profiles/spaces/"
+        let canonicalRoot = SpacesProfile.canonicalPath(profile.rootDirectory)
+        guard canonicalRoot.contains(marker) else { return nil }
+        let profileName = URL(fileURLWithPath: canonicalRoot, isDirectory: true).lastPathComponent
+        guard normalized(profileName) != nil else { return nil }
+        return "~/.spaces-dev/profiles/spaces/\(profileName)"
     }
 
     private static func parseRemotePairingMetadataResult(
@@ -650,7 +673,7 @@ public enum SpacesDevicePairingClient {
             return "SSH connected to \(destination), but Spaces cannot be run by that remote user. Fix the install permissions, then retry."
         }
         let suffix = detail.isEmpty ? "Exit status \(exitStatus)." : detail
-        return "SSH connected to \(destination), but `\(remotePairCommand)` failed. \(suffix)"
+        return "SSH connected to \(destination), but `\(baseRemotePairCommand)` failed. \(suffix)"
     }
 
     private static func sshDestination(host: String, user: String?) -> String { user.map { "\($0)@\(host)" } ?? host }
@@ -658,6 +681,23 @@ public enum SpacesDevicePairingClient {
     static func remoteShellCommand(_ command: String) -> String { "sh -c \(shellQuoted(command))" }
 
     private static func shellQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
+
+    private static func remoteShellPathExpression(_ path: String) -> String {
+        if path == "~" { return "$HOME" }
+        if path.hasPrefix("~/") {
+            let suffix = String(path.dropFirst(2))
+            return "\"$HOME/\(shellDoubleQuotedContent(suffix))\""
+        }
+        return shellQuoted(path)
+    }
+
+    private static func shellDoubleQuotedContent(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`")
+    }
 
     private static func normalized(_ value: String?) -> String? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
