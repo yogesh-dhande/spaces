@@ -866,9 +866,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let cursorKeys = targets.map { Self.cycleCursorKey(for: $0, detail: detail) }
         let cursor = windowNavigationCursorByWorkspace[workspaceID]
         let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : browserCycleState.frontmostURL
+        let configuredBrowserTargetURLs = Self.browserSessionTargetURLs(resolvedSessions: detail.config.resolvedBrowserSessions)
         let currentIndex = Self.cycleCurrentIndex(
             targets: targets, detail: detail, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: frontmostBrowserURL,
-            cursorKeys: cursorKeys, cursor: cursor)
+            browserTargetURLs: configuredBrowserTargetURLs, cursorKeys: cursorKeys, cursor: cursor)
         let ordering = WorkspaceWindowCycle.cycleOrdering(cursors: cursorKeys, currentIndex: currentIndex, session: cycleSession)
         let orderedTargets = ordering.indices.map { targets[$0] }
         let orderedCursors = ordering.indices.map { cursorKeys[$0] }
@@ -928,20 +929,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let snapshot =
                 (try? chrome.tabSnapshot(inWindowIDs: trackedWindows.map(\.windowID))) ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil)
             let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
-            let trackedTargetURLs = trackedWindows.map(\.targetURL)
-            let configuredTargetURLs = Self.browserSessionTargetURLs(resolvedSessions: resolvedSessions)
-            let openBrowserSessions = resolvedSessions.compactMap { session -> BrowserSession? in
-                guard let url = session.url, !url.isEmpty, trackedTargetURLs.contains(where: { Self.browserSessionTargetURL($0, matches: url) })
-                else { return nil }
-                let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
-                guard snapshot.tabs.contains(where: { Self.browserTabURL($0.url, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs) })
-                else { return nil }
-                return Self.localBrowserSession(from: session)
-            }
+            let openBrowserSessions = Self.openBrowserSessionsForCycle(
+                resolvedSessions: resolvedSessions, assignedPorts: detail.assignedPorts, trackedTargetURLs: trackedWindows.map(\.targetURL),
+                openTabURLs: snapshot.tabs.map(\.url))
             return BrowserCycleState(
                 openBrowserSessions: openBrowserSessions, frontmostURL: snapshot.frontmostActiveTabURL, clientDBLookupMS: clientDBLookupMS,
                 chromeAppleScriptMS: chromeAppleScriptMS, trackedWindowCount: trackedWindows.count, trackedTabCount: snapshot.tabs.count)
         }.value
+    }
+
+    nonisolated static func openBrowserSessionsForCycle(
+        resolvedSessions: [SpacesDeviceBrowserSession], assignedPorts: [SpacesDeviceAssignedPort], trackedTargetURLs: [String],
+        openTabURLs: [String]
+    ) -> [BrowserSession] {
+        let configuredTargetURLs = browserSessionTargetURLs(resolvedSessions: resolvedSessions)
+        return resolvedSessions.compactMap { session -> BrowserSession? in
+            guard let url = session.url, !url.isEmpty else { return nil }
+            let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
+            guard
+                trackedTargetURLs.contains(where: {
+                    browserObservedURL($0, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs, assignedPorts: assignedPorts)
+                })
+            else { return nil }
+            guard
+                openTabURLs.contains(where: {
+                    browserObservedURL($0, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs, assignedPorts: assignedPorts)
+                })
+            else { return nil }
+            return localBrowserSession(from: session)
+        }
     }
 
     nonisolated static func browserSessionTargetURLs(resolvedSessions: [SpacesDeviceBrowserSession], including targetURL: String? = nil) -> [String] {
@@ -991,6 +1007,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if browserTabURLIsExactTarget(tabURL, targetURL: targetURL) { return true }
         guard tabURL.hasPrefix(targetURL) else { return false }
         return !siblingTargetURLs.contains { siblingTargetURL in !siblingTargetURL.isEmpty && tabURL.hasPrefix(siblingTargetURL) }
+    }
+
+    nonisolated static func browserObservedURL(
+        _ observedURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String],
+        assignedPorts: [SpacesDeviceAssignedPort]
+    ) -> Bool {
+        browserObservedURLMatchLength(
+            observedURL, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, assignedPorts: assignedPorts) != nil
+    }
+
+    nonisolated private static func browserObservedURLMatchLength(
+        _ observedURL: String, targetURL: String, siblingTargetURLs: [String], assignedPorts: [SpacesDeviceAssignedPort]
+    ) -> Int? {
+        if browserTabURL(observedURL, matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs) { return targetURL.count }
+        guard
+            let routedTargetURL = routedBrowserSessionTargetURL(targetURL: targetURL, observedURL: observedURL, assignedPorts: assignedPorts)
+        else { return nil }
+        let routedSiblingTargetURLs = siblingTargetURLs.compactMap {
+            routedBrowserSessionTargetURL(targetURL: $0, observedURL: observedURL, assignedPorts: assignedPorts)
+        }
+        guard browserTabURL(observedURL, matchesBrowserSessionTargetURL: routedTargetURL, excluding: routedSiblingTargetURLs) else { return nil }
+        return routedTargetURL.count
+    }
+
+    nonisolated private static func routedBrowserSessionTargetURL(
+        targetURL: String, observedURL: String, assignedPorts: [SpacesDeviceAssignedPort]
+    ) -> String? {
+        BrowserSSHForwardManager.routePlan(
+            targetURL: targetURL, assignedPorts: assignedPorts, localRouterPort: URLComponents(string: observedURL)?.port
+        )?.browserURL.absoluteString
     }
 
     nonisolated private static func browserTabURLIsExactTarget(_ tabURL: String, targetURL: String) -> Bool {
@@ -1067,7 +1113,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated private static func cycleCurrentIndex(
         targets: [WorkspaceRunShortcutTarget], detail: SpacesDeviceWorkspaceDetailViewModel, focusedTerminalSessionID: String?,
-        frontmostBrowserURL: String?, cursorKeys: [String], cursor: String?
+        frontmostBrowserURL: String?, browserTargetURLs: [String], cursorKeys: [String], cursor: String?
     ) -> Int? {
         if let focusedTerminalSessionID, !focusedTerminalSessionID.isEmpty {
             let matches = targets.indices.filter { cycleTargetSessionID(for: targets[$0], detail: detail) == focusedTerminalSessionID }
@@ -1077,15 +1123,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
         }
         if let frontmostBrowserURL, !frontmostBrowserURL.isEmpty {
-            let matches = targets.indices.compactMap { index -> (offset: Int, targetURL: String)? in
-                guard targets[index].kind == .browser, let targetURL = targets[index].targetURL, !targetURL.isEmpty,
-                    frontmostBrowserURL.hasPrefix(targetURL)
+            let matches = targets.indices.compactMap { index -> (offset: Int, matchLength: Int)? in
+                guard targets[index].kind == .browser, let targetURL = targets[index].targetURL, !targetURL.isEmpty else { return nil }
+                let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserTargetURLs)
+                guard
+                    let matchLength = browserObservedURLMatchLength(
+                        frontmostBrowserURL, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, assignedPorts: detail.assignedPorts)
                 else { return nil }
-                return (index, targetURL)
+                return (index, matchLength)
             }
             if !matches.isEmpty {
                 if let cursor, let match = matches.first(where: { cursorKeys[$0.offset] == cursor }) { return match.offset }
-                return matches.max(by: { $0.targetURL.count < $1.targetURL.count })?.offset
+                return matches.max(by: { $0.matchLength < $1.matchLength })?.offset
             }
         }
         if let cursor { return cursorKeys.firstIndex(of: cursor) }
@@ -4037,9 +4086,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;
-    /// this only updates the state the app reads. Kept side-effect-free so pane state and pane rendering
-    /// stay independently reasoned about.
-    func presentDetailPane(_ pane: DetailPane) { detailPane = pane }
+    /// switching away from a workspace also clears the workspace-only titlebar tab strip.
+    func presentDetailPane(_ pane: DetailPane) {
+        detailPane = pane
+        if pane.workspaceID == nil { panelTabStripAccessory.isHidden = true }
+    }
 
     func showPlaceholder(message: String = "Select a project or workspace.") {
         clearActiveAddFormStateAndCloseWindows()
@@ -9303,12 +9354,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func clientWorkspaceIDForFocusedWindow() -> String? {
         let chrome = ChromeAdapter()
         guard chrome.isAvailable(), let activeURL = (try? chrome.frontmostActiveTabURL()) ?? nil, !activeURL.isEmpty else { return nil }
+        return Self.workspaceIDForObservedBrowserURL(activeURL, in: deviceSections.compactMap(\.overview))
+    }
+
+    nonisolated static func workspaceIDForObservedBrowserURL(_ activeURL: String, in overviews: [SpacesDeviceOverviewPayload]) -> String? {
         var best: (workspaceID: String, prefixLength: Int)?
-        for overview in deviceSections.compactMap({ $0.overview }) {
+        for overview in overviews {
             for workspace in overview.workspaces {
+                let configuredTargetURLs = browserSessionTargetURLs(resolvedSessions: workspace.config.resolvedBrowserSessions)
                 for session in workspace.config.resolvedBrowserSessions {
-                    guard let url = session.url, !url.isEmpty, activeURL.hasPrefix(url) else { continue }
-                    if best == nil || url.count > best!.prefixLength { best = (workspace.id, url.count) }
+                    guard let url = session.url, !url.isEmpty else { continue }
+                    let siblingTargetURLs = browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
+                    guard
+                        let matchLength = browserObservedURLMatchLength(
+                            activeURL, targetURL: url, siblingTargetURLs: siblingTargetURLs, assignedPorts: workspace.assignedPorts)
+                    else { continue }
+                    if best == nil || matchLength > best!.prefixLength { best = (workspace.id, matchLength) }
                 }
             }
         }

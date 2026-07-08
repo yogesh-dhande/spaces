@@ -451,6 +451,35 @@ import workspacecore
             ])
     }
 
+    @Test func remoteRoutedBrowserSessionCountsAsOpenForCycle() {
+        let sessions = [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:32001/docs")]
+        let assignedPorts = [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")]
+        let routedURL = "http://web.feature-123.localhost:7391/docs"
+
+        let openSessions = AppKitController.openBrowserSessionsForCycle(
+            resolvedSessions: sessions, assignedPorts: assignedPorts, trackedTargetURLs: [routedURL], openTabURLs: [routedURL])
+
+        #expect(openSessions.map(\.name) == ["docs"])
+        #expect(openSessions.map(\.url) == ["http://localhost:32001/docs"])
+    }
+
+    @Test func remoteRoutedBrowserSessionMatchingExcludesLongerSiblingTargets() {
+        let rootURL = "http://localhost:32001"
+        let adminURL = "http://localhost:32001/admin"
+        let assignedPorts = [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")]
+        let configuredTargetURLs = [rootURL, adminURL]
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
+        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
+        let observedAdminURL = "http://web.feature-123.localhost:7391/admin/users"
+
+        #expect(
+            !AppKitController.browserObservedURL(
+                observedAdminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings, assignedPorts: assignedPorts))
+        #expect(
+            AppKitController.browserObservedURL(
+                observedAdminURL, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings, assignedPorts: assignedPorts))
+    }
+
     @Test func browserSessionPrefixMatchingSkipsLongerSiblingTargets() {
         let targetURL = "http://localhost:3000"
         let siblingTargetURLs = AppKitController.browserSessionSiblingTargetURLs(
