@@ -333,6 +333,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 }
             }
         }
+        refreshNow(allowGhosttyOwnerAttach: false)
     }
 
     private func clearTakeoverAttempt(id: UUID) {
@@ -509,7 +510,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     if !shouldPreserveOwnerRequest {
                         if currentOwnerClient != nil, currentOwnerClient?.id != client.id { ownerAttachmentRequested = false }
                         preferredAttachmentMode = activeAttachment.mode
-                    } else if !canKeepOwnerRequest {
+                    } else if !canKeepOwnerRequest && takeoverTask == nil {
                         preferredAttachmentMode = activeAttachment.mode
                     }
                     if lastObservedAttachmentMode != activeAttachment.mode {

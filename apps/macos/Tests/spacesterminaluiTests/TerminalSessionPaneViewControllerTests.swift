@@ -1213,11 +1213,14 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
 
         controller.requestOwnershipIfNeeded()
+        XCTAssertTrue(controller.debugTakeoverPending)
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugShowsTakeoverMessage)
 
         let deadline = Date().addingTimeInterval(1)
         while Date() < deadline {
             controller.debugForceRefresh()
-            if controller.attachmentMode == .owner { break }
+            if controller.attachmentMode == .owner && !controller.debugTakeoverPending { break }
             try? await Task.sleep(for: .milliseconds(25))
         }
 

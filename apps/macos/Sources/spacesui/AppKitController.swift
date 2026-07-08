@@ -336,6 +336,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
+    var pendingNewTerminalPaneScopes: Set<PanelScope> = []
+    private var pendingWorkspaceTerminalOpenWorkspaceIDs: Set<String> = []
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -1612,7 +1614,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// mac GUI never opens `spaces.db`.
     private func makeTerminalSessionStateModel(
         sessionID: String, seedDevice: SpacesPairedDeviceRecord? = nil, seedLaunchConfiguration: TerminalSessionLaunchConfiguration? = nil,
-        seedInitialRuntimeState: TerminalSessionRuntimeState? = nil, resolvedSummaryMatch: TerminalSessionSummaryMatch? = nil
+        seedInitialRuntimeState: TerminalSessionRuntimeState? = nil, resolvedSummaryMatch: TerminalSessionSummaryMatch? = nil,
+        preparedCredentials: DeviceTerminalSessionStateModel.PreparedCredentials
     ) throws -> DeviceTerminalSessionStateModel {
         let summaryMatch = terminalSessionSummaryMatch(sessionID: sessionID) ?? resolvedSummaryMatch
         guard let device = seedDevice ?? summaryMatch?.device ?? terminalSessionOwningDevice(sessionID: sessionID) else {
@@ -1632,7 +1635,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return try DeviceTerminalSessionStateModel(
             device: device, sessionID: sessionID, launchConfiguration: launchConfiguration, initialRuntimeState: initialRuntimeState,
             initialAttachmentSnapshot: summaryMatch?.summary.attachmentSnapshot,
-            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+            clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short), preparedCredentials: preparedCredentials)
+    }
+
+    func prepareTerminalPaneOpenRequest(_ request: DeviceTerminalOpenRequest) async -> Result<DeviceTerminalOpenRequest, Error> {
+        if request.preparedCredentials != nil { return .success(request) }
+        let deviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
+        guard let device = deviceForMutation(deviceID: deviceID) else { return .failure(Self.deviceNotLoadedError()) }
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        let result: Result<DeviceTerminalSessionStateModel.PreparedCredentials, Error> = await Task.detached(priority: .userInitiated) {
+            do { return .success(try DeviceTerminalSessionStateModel.resolveCredentials(device: device, clientApp: clientApp)) } catch {
+                return .failure(error)
+            }
+        }.value
+        return result.map { request.prepared(credentials: $0) }
     }
 
     /// Resolves a session's pane open request. An open/focus IPC can arrive before the
@@ -1713,6 +1729,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // directly; otherwise it derives from the request's workspace.
             let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
             let device = deviceForMutation(deviceID: resolvedDeviceID)
+            guard let preparedCredentials = request.preparedCredentials else {
+                throw WorkspaceError.invalidArgument(message: "Terminal credentials are still preparing.")
+            }
             let summary = terminalSessionSummaryMatch(sessionID: sessionID)?.summary
             let createdAt = request.createdAt ?? iso8601Formatter.string(from: Date())
             // The seed launch configuration wins over the state model's own summary lookup,
@@ -1734,7 +1753,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             let stateModel = try makeTerminalSessionStateModel(
                 sessionID: sessionID, seedDevice: device, seedLaunchConfiguration: launchConfiguration, seedInitialRuntimeState: initialRuntimeState,
-                resolvedSummaryMatch: nil)
+                resolvedSummaryMatch: nil, preparedCredentials: preparedCredentials)
             let requestSender = stateModel.terminalServiceRequestSender
             let applyControlState = stateModel.controlStateApplier
             let agentSignalHandler: RemoteGhosttyAgentSignalHandler = { [weak self] events in
@@ -3038,11 +3057,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let childPID: Int32?
         let createdAt: String?
         let updatedAt: String?
+        let preparedCredentials: DeviceTerminalSessionStateModel.PreparedCredentials?
 
         init(
             workspaceID: String, deviceID: String? = nil, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
             shell: String? = nil, command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
-            createdAt: String? = nil, updatedAt: String? = nil
+            createdAt: String? = nil, updatedAt: String? = nil,
+            preparedCredentials: DeviceTerminalSessionStateModel.PreparedCredentials? = nil
         ) {
             self.workspaceID = workspaceID
             self.deviceID = deviceID
@@ -3057,6 +3078,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.childPID = childPID
             self.createdAt = createdAt
             self.updatedAt = updatedAt
+            self.preparedCredentials = preparedCredentials
+        }
+
+        func prepared(credentials: DeviceTerminalSessionStateModel.PreparedCredentials) -> DeviceTerminalOpenRequest {
+            DeviceTerminalOpenRequest(
+                workspaceID: workspaceID, deviceID: deviceID, sessionID: sessionID, title: title, workingDirectory: workingDirectory, kind: kind,
+                shell: shell, command: command, initialState: initialState, servicePID: servicePID, childPID: childPID, createdAt: createdAt,
+                updatedAt: updatedAt, preparedCredentials: credentials)
         }
     }
 
@@ -3616,7 +3645,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The terminal pane owning the key window's first responder — the target of the
     /// Edit menu's Find actions.
-    private func focusedTerminalPaneContentForMenuAction() -> TerminalPaneContentController? {
+    private func focusedTerminalPaneContentForMenuAction() -> (any TerminalPaneContentHosting)? {
         panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder)
     }
 
@@ -7892,6 +7921,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // client-side Chrome browser-session tabs, so close them here too for a clean
                 // restarted state (a later browser focus then opens fresh tabs).
                 self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                self.closeWorkspaceTerminalPanes(workspaceID: id)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
@@ -7926,6 +7956,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             switch result {
             case .success(let response):
                 self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                self.closeWorkspaceTerminalPanes(workspaceID: id)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
@@ -7949,6 +7980,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             Self.closeLocalBrowserSessionWindowsSynchronously(
                 workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
         }
+    }
+
+    /// Closes the workspace's open terminal panes after the owning daemon confirms a workspace
+    /// stop/restart/archive. The terminal sessions are already being stopped by that mutation, so
+    /// pane teardown skips the client-detach cleanup path.
+    private func closeWorkspaceTerminalPanes(workspaceID: String) {
+        panelCoordinator.closeTerminalPanes(workspaceID: workspaceID, sessionIsTerminating: true)
     }
 
     private func configuredBrowserSessionTargetURLsForTeardown(workspaceID: String) -> [String] {
@@ -8015,6 +8053,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .success(let response):
                     button?.isEnabled = true
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+                    self.closeWorkspaceTerminalPanes(workspaceID: id)
                     applyDeviceMutationResponse(response, selectedProjectID: project.id)
                 case .failure(let error):
                     requestSidebarReload()
@@ -8252,11 +8291,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func openWorkspaceTerminal(workspaceID: String, route: WorkspaceTerminalOpenRoute, completion: (() -> Void)? = nil) {
+        guard pendingWorkspaceTerminalOpenWorkspaceIDs.insert(workspaceID).inserted else {
+            completion?()
+            return
+        }
         let startedAt = Date()
         let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID)
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { completion?() }
+            defer {
+                self.pendingWorkspaceTerminalOpenWorkspaceIDs.remove(workspaceID)
+                completion?()
+            }
             if let device = deviceRecord(forDeviceID: workspaceDeviceID) {
                 let result = await Self.deviceMutation(device: device) { device in
                     try SpacesDeviceClient.openWorkspaceTerminal(

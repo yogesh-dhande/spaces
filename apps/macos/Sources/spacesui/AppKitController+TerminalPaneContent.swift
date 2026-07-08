@@ -18,8 +18,11 @@ extension AppKitController {
             workspaceID = panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
         }
         guard let workspaceID else { return }
+        guard pendingNewTerminalPaneScopes.insert(scope).inserted else { return }
         createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
-            guard let self, let request else { return }
+            guard let self else { return }
+            defer { self.pendingNewTerminalPaneScopes.remove(scope) }
+            guard let request else { return }
             self.panelCoordinator.openSessionInNewTab(request, in: scope)
         }
     }
