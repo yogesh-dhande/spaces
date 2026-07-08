@@ -26,6 +26,19 @@ extension AppKitController {
     func applyAppAppearance(_ mode: AppAppearanceMode) {
         NSApp?.appearance = mode.nsAppearance
         NotificationCenter.default.post(name: .spacesAppAppearanceDidChange, object: nil)
+        // Push the newly resolved variant to open terminals. Resolved after the override is set so a
+        // forced mode reflects the pin and `.system` reflects the OS. An OS-driven flip while on `.system`
+        // takes the same path through the effective-appearance observer (see AppKitController).
+        broadcastResolvedAppAppearance()
+    }
+
+    /// Resolves the app's current effective light/dark variant and pushes it to every open terminal so
+    /// remote daemons (and the local one) re-theme their live sessions to match — the same computation the
+    /// attach path uses. Each pane dedupes against its own last-applied appearance, so a broadcast that does
+    /// not change the resolved variant sends nothing. At launch, before any pane exists, this is a no-op.
+    func broadcastResolvedAppAppearance() {
+        let resolved: ThemeAppearance = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        panelCoordinator.broadcastAppearance(resolved)
     }
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import spacesdevicecore
+import spacesterminalcore
 
 /// Owns every panel's layout, view, and pane-content lifecycle. One instance on
 /// `AppKitController` (the standard unowned-host sub-controller). Invariant: a terminal
@@ -358,6 +359,12 @@ import spacesdevicecore
     /// sessions (daemon-owned sessions keep running across quit; panes are rebuilt on
     /// relaunch from the persisted layout).
     func closeAllContentForTermination() { for content in contentControllers.values { content.close() } }
+
+    /// Re-themes every open pane's live session to the app's current light/dark appearance. Called when the
+    /// app appearance changes (`AppKitController.applyAppAppearance`) so open terminals — local and remote —
+    /// recolor within a frame or two. Each pane dedupes against its own last-applied appearance, so a session
+    /// already on `appearance` sends nothing.
+    func broadcastAppearance(_ appearance: ThemeAppearance) { for content in contentControllers.values { content.applyAppearance(appearance) } }
 
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }

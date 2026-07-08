@@ -1583,6 +1583,160 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(scrollRect.deltaColumns, 0)
     }
 
+    @MainActor func testApplyColorSchemeRethemesLiveHeadlessSessionBackground() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let lightBackground = ActiveTheme.descriptor.terminal(for: .light).background.packedRGB
+        let darkBackground = ActiveTheme.descriptor.terminal(for: .dark).background.packedRGB
+        XCTAssertNotEqual(lightBackground, darkBackground, "Light and dark theme backgrounds must differ for this test to be meaningful.")
+
+        let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "color-scheme-retheme-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "sleep 5",
+                createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
+        defer { sessionDriver.terminate() }
+
+        try sessionDriver.startIfNeeded()
+        XCTAssertTrue(sessionDriver.resizeCellGrid(columns: 20, rows: 4))
+        try waitUntil { sessionDriver.renderStateSnapshot() != nil }
+
+        // In the test process NSApp resolves to light, so the session starts on the light variant.
+        let initial = try XCTUnwrap(sessionDriver.renderStateSnapshot())
+        XCTAssertEqual(initial.snapshot.defaultBackgroundRGB, lightBackground)
+
+        // Flip to dark: colors reach the surface on the io thread, so pump ticks while polling.
+        GhosttyEmbeddedAppService.shared.applyColorScheme(.dark)
+        try waitUntil(timeout: 5) {
+            sessionDriver.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return sessionDriver.renderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
+        }
+
+        // Flip back to light and confirm the background returns.
+        GhosttyEmbeddedAppService.shared.applyColorScheme(.light)
+        try waitUntil(timeout: 5) {
+            sessionDriver.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return sessionDriver.renderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
+        }
+    }
+
+    @MainActor func testControlAttachAppliesRequestedAppearanceToLiveSession() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let lightBackground = ActiveTheme.descriptor.terminal(for: .light).background.packedRGB
+        let darkBackground = ActiveTheme.descriptor.terminal(for: .dark).background.packedRGB
+        XCTAssertNotEqual(lightBackground, darkBackground, "Light and dark theme backgrounds must differ for this test to be meaningful.")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = GhosttyEmbeddedSessionHost(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "control-attach-appearance-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "sleep 5",
+                createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            paths: paths)
+        defer { host.terminate() }
+
+        try host.startIfNeeded()
+        // The app service is a process-wide singleton whose config references the theme files of
+        // whichever test started it first; that test's teardown deletes them, so re-anchor the config
+        // to this test's live profile before relying on ghostty_app_update_config re-reading them.
+        try GhosttyEmbeddedAppService.shared.reloadThemeConfigurationForTesting()
+        let rendererHost = try XCTUnwrap(host.rendererHost as? GhosttyHeadlessRendererHost)
+        XCTAssertTrue(rendererHost.resizeCellGrid(columns: 20, rows: 4))
+        try waitUntil { rendererHost.sessionRenderStateSnapshot() != nil }
+
+        // The color scheme is a process-wide singleton; force light so this test starts from a known
+        // baseline regardless of the order tests run in, then confirm the surface reaches it.
+        GhosttyEmbeddedAppService.shared.applyColorScheme(.light)
+        try waitUntil(timeout: 5) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
+        }
+
+        // Attaching with a dark appearance must re-theme the live session even though the client only
+        // conveys light/dark; colors reach the surface on the io thread, so pump ticks while polling.
+        let client = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
+            connectedAt: "2026-07-07T00:00:00Z")
+        let response = host.core.handleControlRequest(
+            TerminalControlRequest(command: .attach(TerminalControlAttachPayload(client: client, attachmentMode: .owner, appearance: .dark))))
+        XCTAssertTrue(response.ok, response.message)
+
+        try waitUntil(timeout: 5) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
+        }
+
+        // Reset the shared app-service scheme so dark does not leak into later tests.
+        GhosttyEmbeddedAppService.shared.applyColorScheme(.light)
+    }
+
+    @MainActor func testControlSetAppearanceRethemesLiveSessionForViewerClient() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+
+        let lightBackground = ActiveTheme.descriptor.terminal(for: .light).background.packedRGB
+        let darkBackground = ActiveTheme.descriptor.terminal(for: .dark).background.packedRGB
+        XCTAssertNotEqual(lightBackground, darkBackground, "Light and dark theme backgrounds must differ for this test to be meaningful.")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let host = GhosttyEmbeddedSessionHost(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "control-set-appearance-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "sleep 5",
+                createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            paths: paths)
+        defer { host.terminate() }
+
+        try host.startIfNeeded()
+        // The app service is a process-wide singleton whose config references the theme files of
+        // whichever test started it first; re-anchor the config to this test's live profile before
+        // relying on ghostty_app_update_config re-reading them.
+        try GhosttyEmbeddedAppService.shared.reloadThemeConfigurationForTesting()
+        let rendererHost = try XCTUnwrap(host.rendererHost as? GhosttyHeadlessRendererHost)
+        XCTAssertTrue(rendererHost.resizeCellGrid(columns: 20, rows: 4))
+        try waitUntil { rendererHost.sessionRenderStateSnapshot() != nil }
+
+        // Force light so this test starts from a known baseline regardless of the order tests run in.
+        GhosttyEmbeddedAppService.shared.applyColorScheme(.light)
+        try waitUntil(timeout: 5) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
+        }
+
+        // A viewer that never took ownership can still flip the appearance: setAppearance is a
+        // per-client view preference with last-writer-wins semantics, not an owner-gated mutation.
+        let response = host.core.handleControlRequest(
+            TerminalControlRequest(
+                command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "viewer-without-ownership", appearance: .dark))))
+        XCTAssertTrue(response.ok, response.message)
+
+        // Colors reach the surface on the io thread, so pump ticks while polling.
+        try waitUntil(timeout: 5) {
+            rendererHost.requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+            return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
+        }
+
+        // Reset the shared app-service scheme so dark does not leak into later tests.
+        GhosttyEmbeddedAppService.shared.applyColorScheme(.light)
+    }
+
     @MainActor func testHeadlessDriverExportsNativeScrollRectAfterViewportScrollback() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }

@@ -112,6 +112,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private var isStopping = false
     private var hasSentStopDetach = false
     private var hasAttachedToSession = false
+    /// The light/dark appearance the session currently carries — set from the value sent on attach and on
+    /// each live push. `sendAppearance` dedupes against it so an unchanged app appearance costs no request;
+    /// the daemon would no-op a same-value setAppearance anyway, but skipping it avoids the round-trip.
+    private var lastAppearanceSentToSession: ThemeAppearance?
     private var hasAttemptedAutomaticTakeover = false
     private var hasConfirmedOwnerInputReadiness = false
     private var ownerRecoveryGraceDeadline: Date?
@@ -478,6 +482,22 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         enqueueInputSend(kind: "send_key", detail: key) { [weak self, key] in
             guard let self else { return }
             try await self.performSendKeyRequest(key)
+        }
+    }
+
+    /// Pushes the app's effective light/dark appearance to the live session so the daemon re-themes it
+    /// while the terminal is open. Called when the resolved appearance changes (a mode flip, or an OS trait
+    /// change while the mode follows the system). Not owner-gated: appearance is a per-client view
+    /// preference, and last-writer-wins across clients is the accepted semantic. Best-effort — a failed
+    /// re-theme leaves the session on its prior appearance until the next attach or appearance change.
+    func sendAppearance(_ appearance: ThemeAppearance) async {
+        guard appearance != lastAppearanceSentToSession else { return }
+        lastAppearanceSentToSession = appearance
+        trace("send_appearance value=\(appearance == .dark ? "dark" : "light")")
+        do {
+            try await bridgeClient.setAppearance(sessionID: session.id, clientID: remoteClient.id, appearance: appearance)
+        } catch {
+            trace("send_appearance_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
         }
     }
 
@@ -946,12 +966,15 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
         do {
             if shouldAttachBeforeSubscribing {
+                let attachAppearance = AppAppearanceStorage.current.resolvedThemeAppearance
                 try await bridgeClient.attach(
                     sessionID: session.id,
                     client: remoteClient,
-                    mode: .viewer
+                    mode: .viewer,
+                    appearance: attachAppearance
                 )
                 hasAttachedToSession = true
+                lastAppearanceSentToSession = attachAppearance
                 trace("connect_attach_success")
             }
             let handle = try bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in

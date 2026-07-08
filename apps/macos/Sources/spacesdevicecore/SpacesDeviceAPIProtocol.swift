@@ -1176,6 +1176,7 @@ public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equata
     case clearScreen
     case resize
     case scroll
+    case setAppearance
 }
 
 public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {

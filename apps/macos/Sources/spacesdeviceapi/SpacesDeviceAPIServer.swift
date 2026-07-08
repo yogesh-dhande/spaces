@@ -1224,6 +1224,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 TerminalControlScrollPayload(
                     clientID: clientID, ownerEpoch: payload.ownerEpoch, scrollHorizontal: payload.scrollHorizontal,
                     scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods))
+        case .setAppearance: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: payload.appearance))
         }
     }
 

@@ -499,6 +499,7 @@
             case .takeover: controlResponseForTakeoverRequest(request)
             case .resize: controlResponseForResizeRequest(request)
             case .scroll: controlResponseForScrollRequest(request)
+            case .setAppearance: controlResponseForSetAppearanceRequest(request)
             case .unsupported(let name): TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(name)'.")
             }
         }
@@ -562,6 +563,15 @@
             let attachedAt = nowISO8601()
             let authoritativeClient = Self.clientForAttachLease(client, attachedAt: attachedAt)
             do {
+                // Adopt the attaching client's light/dark appearance. The Ghostty color scheme is
+                // app-scoped (one ghostty_app_t per daemon), so this re-themes every live surface in
+                // the daemon on a last-writer-wins basis. The io thread applies the colors
+                // asynchronously, so we deliberately do NOT broadcast inline here: an immediate frame
+                // would still carry the pre-retheme colors. Instead we arm forceNextBroadcastFull
+                // below and let the recolored screen reach subscribers through the existing screen
+                // state-change broadcast that Ghostty triggers once the retheme lands (and the
+                // always-fresh initial-frame export for subscribers that connect afterwards).
+                let appearanceChanged = request.appearance.map { GhosttyEmbeddedAppService.shared.applyColorScheme($0) } ?? false
                 let previousOwnerClientID = activeOwnerClientID()
                 try TerminalSessionPersistence.upsertClient(authoritativeClient, paths: paths)
                 let currentAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == authoritativeClient.id }
@@ -572,6 +582,12 @@
                     postAttachmentStateDidChange()
                 }
                 refreshRuntimeState(force: true)
+                // Set after the attachment broadcast above so the recolored screen (delivered by the
+                // next broadcast, once Ghostty finishes the async retheme) is a self-contained full
+                // frame rather than a color-only delta from a stale baseline. There is no host-side
+                // screen revision to bump here: lastScreenStateRevision tracks Ghostty's own
+                // revisions, which the retheme advances on its own.
+                if appearanceChanged { forceNextBroadcastFullRenderUpdate = true }
                 TerminalPerformance.logMetric(
                     "terminal_control_attach", target: "session=\(launchConfiguration.sessionID) client=\(authoritativeClient.id)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
@@ -582,6 +598,35 @@
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "mode=\(mode.rawValue)")
                 return TerminalControlResponse(ok: false, message: String(describing: error))
             }
+        }
+
+        private func controlResponseForSetAppearanceRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            let startedAt = Date()
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+            // Appearance is a per-client view preference on a shared session with last-writer-wins
+            // semantics, so it is deliberately NOT owner-gated: viewers flip their own app appearance
+            // and every client should be able to re-theme the terminal it is watching.
+            guard let appearance = request.appearance else {
+                TerminalPerformance.logMetric(
+                    "terminal_control_set_appearance", target: "session=\(launchConfiguration.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
+                return TerminalControlResponse(ok: false, message: "Missing appearance.", errorCode: .invalidArgument)
+            }
+            // Re-theme every live surface app-wide (one ghostty_app_t per daemon). The io thread
+            // applies the colors asynchronously, so we do NOT broadcast inline here: an immediate
+            // frame would still carry the pre-retheme colors. Instead arm forceNextBroadcastFull so
+            // the recolored screen reaches subscribers as a self-contained full frame through the
+            // screen state-change broadcast Ghostty triggers once the retheme lands.
+            let appearanceChanged = GhosttyEmbeddedAppService.shared.applyColorScheme(appearance)
+            if appearanceChanged { forceNextBroadcastFullRenderUpdate = true }
+            TerminalPerformance.logMetric(
+                "terminal_control_set_appearance", target: "session=\(launchConfiguration.sessionID)",
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "appearance=\(appearance.rawValue) changed=\(appearanceChanged ? 1 : 0)")
+            return TerminalControlResponse(
+                ok: true, message: appearanceChanged ? "Applied \(appearance.rawValue) appearance." : "Terminal already matches the requested appearance.")
         }
 
         private func controlResponseForDetachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {

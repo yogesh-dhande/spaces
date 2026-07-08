@@ -304,10 +304,12 @@ struct SpacesDeviceAPIClient: Sendable {
         sessionID: String,
         client: TerminalClient,
         mode: TerminalAttachmentMode,
+        appearance: ThemeAppearance,
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
-            command: .terminalControl(.init(action: .attach, sessionID: sessionID, client: client, attachmentMode: mode)),
+            command: .terminalControl(
+                .init(action: .attach, sessionID: sessionID, client: client, attachmentMode: mode, appearance: appearance)),
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity
         )
@@ -447,6 +449,25 @@ struct SpacesDeviceAPIClient: Sendable {
                     scrollVertical: vertical,
                     scrollMods: scrollMods
                 )),
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity
+        )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
+    /// Pushes the app's light/dark appearance to a live session so the daemon re-themes it mid-session.
+    /// Appearance is a per-client view preference, not owner-gated, so a viewer may send it; the daemon
+    /// treats a same-value request as a cheap no-op (see the session core's setAppearance handler).
+    func setAppearance(
+        sessionID: String,
+        clientID: String,
+        appearance: ThemeAppearance,
+        timeout: Duration = .seconds(3),
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(.init(action: .setAppearance, sessionID: sessionID, clientID: clientID, appearance: appearance)),
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity
         )

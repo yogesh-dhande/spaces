@@ -302,6 +302,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var workspaceDidTerminateApplicationObserver: NSObjectProtocol?
     private var terminalAttachmentStateDidChangeObserver: NSObjectProtocol?
     private var textInputDidEndEditingObserver: NSObjectProtocol?
+    private var appEffectiveAppearanceObservation: NSKeyValueObservation?
     private var didStartBackgroundServices = false
     private let browserSSHForwardManager = BrowserSSHForwardManager()
     private var remoteBrowserForwardRevisions: [String: Int] = [:]
@@ -467,6 +468,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         setupWorkspaceApplicationObservers()
         setupTerminalAttachmentStateObserver()
         setupTextInputDidEndEditingObserver()
+        setupAppEffectiveAppearanceObserver()
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(Self.terminateBuiltInTerminalSession)
         logStartupProfile("ipc_observers_ready")
         Self.scheduleAfterNextRunLoopTurn { [weak self] in
@@ -543,6 +545,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             NotificationCenter.default.removeObserver(textInputDidEndEditingObserver)
             self.textInputDidEndEditingObserver = nil
         }
+        appEffectiveAppearanceObservation?.invalidate()
+        appEffectiveAppearanceObservation = nil
         commandPalette.commandPaletteLoadTask?.cancel()
         commandPalette.commandPaletteLoadTask = nil
         commandPalette.commandPalettePanel?.close()
@@ -1139,6 +1143,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    /// The light/dark appearance a terminal session should carry, shared thread-safely between the
+    /// pane's attach closure (which reads it when the client attaches, off the main actor) and the
+    /// appearance-broadcast path (which advances it on an app appearance change). One value across both
+    /// means an appearance change that lands before the pane attaches is carried by the pending attach
+    /// rather than lost, and it doubles as the per-session dedupe state for `applyAppearanceToLiveSession`.
+    private final class SessionAppearanceStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var appearance: ThemeAppearance
+
+        init(_ appearance: ThemeAppearance) { self.appearance = appearance }
+
+        func set(_ appearance: ThemeAppearance) {
+            lock.lock()
+            self.appearance = appearance
+            lock.unlock()
+        }
+
+        func current() -> ThemeAppearance {
+            lock.lock()
+            defer { lock.unlock() }
+            return appearance
+        }
+    }
+
     struct TerminalSessionSummaryMatch: Sendable, Equatable {
         let device: SpacesPairedDeviceRecord
         let summary: SpacesDeviceTerminalSessionSummary
@@ -1368,17 +1396,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return self.applyRemoteAgentSignals(events)
             }
             let remoteClientStore = RemoteTerminalWindowClientStore()
-            // Resolved once here (this runs on the main actor); the attach closure is @Sendable and
-            // may run off-main, so it cannot read NSApp. A remote daemon renders its terminal with
-            // this appearance's theme variant; like local terminals, a mid-session OS appearance
-            // change takes effect on the next pane open / relaunch.
+            // Resolved once here (this runs on the main actor); the attach closure is @Sendable and may
+            // run off-main, so it cannot read NSApp. Seeds the shared appearance store, which the attach
+            // reads when it fires and the broadcast path advances on a mid-session appearance change
+            // (settings picker or an OS flip while on `.system`) — so an appearance change that lands
+            // before the pane attaches is carried by the attach, and one after it re-themes the live
+            // session without waiting for a reopen.
             let themeAppearance: ThemeAppearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+            let appearanceStore = SessionAppearanceStore(themeAppearance)
             let attachClientAction: @Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void = { client, attachmentMode in
                 remoteClientStore.set(client.id)
                 let response = try Self.sendDeviceTerminalControl(
                     sessionID: sessionID,
                     request: TerminalControlRequest(
-                        command: .attach(TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: themeAppearance))),
+                        command: .attach(
+                            TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: appearanceStore.current()))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
             }
@@ -1421,6 +1453,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     sessionID: sessionID, request: TerminalControlRequest(command: .takeover(TerminalControlClientPayload(clientID: clientID))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
             }
+            // Re-themes this session to a new app appearance mid-session (see `applyAppearanceToLiveSession`).
+            // Reuses the pane's captured request sender and `remoteClientStore` clientID, mirroring the input
+            // closures above. The dedupe/desired state lives in `appearanceStore`, which the attach also reads,
+            // so a change that arrives before attach is recorded here and carried by the pending attach.
+            let setAppearanceAction: (ThemeAppearance) -> Void = { appearance in
+                appearanceStore.set(
+                    Self.applyAppearanceToLiveSession(
+                        appearance, sessionID: sessionID, clientID: remoteClientStore.current(), lastAppliedAppearance: appearanceStore.current(),
+                        requestSender: requestSender, applyState: applyControlState))
+            }
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
@@ -1433,7 +1475,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 })
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
-                sessionID: sessionID, pane: pane)
+                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction)
         } catch {
             showError(error)
             return nil
@@ -1526,6 +1568,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             applyState(sessionState)
         }
         return response.controlResponse ?? TerminalControlResponse(ok: response.ok, message: response.message)
+    }
+
+    /// Re-themes one live session to `appearance` by sending `setAppearance`, and returns the appearance the
+    /// session's store should now carry. A redundant re-theme (already on `appearance`) sends nothing and keeps
+    /// the value. When no client is attached yet the send is skipped but the value still advances to `appearance`
+    /// so the pending attach carries it — otherwise a change that lands before attach would be lost, and later
+    /// broadcasts of the actual variant would dedupe against a stale value until the next flip. `clientID` is
+    /// trace-only for setAppearance — appearance is deliberately not owner-gated — but the daemon still expects
+    /// one. Best-effort: a failed send returns `lastAppliedAppearance` unchanged so the next flip retries it.
+    nonisolated static func applyAppearanceToLiveSession(
+        _ appearance: ThemeAppearance, sessionID: String, clientID: String?, lastAppliedAppearance: ThemeAppearance,
+        requestSender: RemoteGhosttyTerminalServiceRequestSender, applyState: @Sendable (GhosttyRemoteSessionStatePayload) -> Void
+    ) -> ThemeAppearance {
+        guard appearance != lastAppliedAppearance else { return lastAppliedAppearance }
+        guard let clientID else { return appearance }
+        do {
+            _ = try sendDeviceTerminalControl(
+                sessionID: sessionID,
+                request: TerminalControlRequest(
+                    command: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: appearance))),
+                requestSender: requestSender, applyState: applyState)
+            return appearance
+        } catch {
+            return lastAppliedAppearance
+        }
     }
 
     private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) -> [String] {
@@ -1759,6 +1826,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// runs at natural idle points (forms closing, app re-activation) in place of
     /// the old poll re-check.
     func flushDeferredSidebarReloadsIfNeeded() { sidebar.flushPendingDatabaseReloadIfNeeded() }
+
+    /// Observes the app's effective light/dark appearance so an OS-driven flip — the user changing the
+    /// system theme while the appearance setting follows the system — re-themes the daemon-rendered
+    /// terminals. Those terminals run in `spacesd`, which has no `NSApp`, so per-view
+    /// `viewDidChangeEffectiveAppearance` recolors app chrome but cannot reach them; without this they
+    /// would keep the stale variant until reopened. The handler re-runs the same resolved-value broadcast
+    /// the settings picker uses, and per-pane dedupe (seeded from attach) makes a redundant trigger free.
+    ///
+    /// It cannot fire-loop with `applyAppAppearance`'s `NSApp.appearance` assignment: the broadcast only
+    /// reads `effectiveAppearance` and sends `setAppearance` to open panes — it never assigns
+    /// `NSApp.appearance` — so it provokes no further appearance change here. KVO delivers on the main
+    /// thread that mutated `effectiveAppearance`, so `assumeIsolated` is safe.
+    private func setupAppEffectiveAppearanceObserver() {
+        appEffectiveAppearanceObservation = NSApplication.shared.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.broadcastResolvedAppAppearance() }
+        }
+    }
 
     func canReloadAfterBackgroundWorkspaceRefresh() -> Bool {
         !projectHasUnsavedChanges && activeAddWorkspaceFormTag == nil && activeAddProjectFormTag == nil && !isTextInputFocused()

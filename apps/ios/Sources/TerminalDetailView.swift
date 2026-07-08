@@ -2,6 +2,7 @@ import QuickLook
 import SwiftUI
 import spacesterminalmobileghostty
 import spacesdevicecore
+import spacesterminalcore
 
 struct TerminalDetailView: View {
     private static let chromeControlHeight: CGFloat = 36
@@ -21,6 +22,10 @@ struct TerminalDetailView: View {
     @State private var isBackNavigationInProgress = false
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
+    /// The app's effective light/dark scheme. `preferredColorScheme` at the app scene stamps the forced
+    /// mode here, and a `.system` mode lets it track the OS trait, so observing it covers both an appearance
+    /// setting flip and an OS switch — either way the live session is re-themed to match the app.
+    @Environment(\.colorScheme) private var colorScheme
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
     private var e2eCommandRequestPath: String? {
@@ -132,6 +137,9 @@ struct TerminalDetailView: View {
         }
         .onChange(of: model.shouldPresentLiveSurface) { shouldPresentLiveSurface in
             writeE2EEventIfNeeded(kind: "surface_visibility", detail: shouldPresentLiveSurface ? "visible" : "hidden")
+        }
+        .onChange(of: colorScheme) { newColorScheme in
+            Task { await model.sendAppearance(newColorScheme == .dark ? .dark : .light) }
         }
         .sheet(
             item: Binding(

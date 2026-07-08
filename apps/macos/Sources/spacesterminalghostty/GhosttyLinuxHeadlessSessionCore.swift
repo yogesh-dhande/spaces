@@ -196,6 +196,7 @@
             case "clearScreen": response = clearScreen(request)
             case "resize": response = resize(request)
             case "scroll": response = scroll(request)
+            case "setAppearance": response = setAppearance(request)
             default: response = TerminalControlResponse(ok: false, message: "Unsupported terminal command '\(request.command)'.")
             }
             logMobileTakeoverPerformance(
@@ -349,6 +350,30 @@
             logMobileTakeoverPerformance(
                 name: "scroll_broadcast_end", elapsedMS: TerminalPerformance.elapsedMS(since: broadcastStartedAt), attributes: attributes)
             return TerminalControlResponse(ok: true, message: "Scrolled terminal.")
+        }
+
+        private func setAppearance(_ request: TerminalControlRequest) -> TerminalControlResponse {
+            guard let appearance = request.appearance else {
+                return TerminalControlResponse(ok: false, message: "Missing appearance.", errorCode: .invalidArgument)
+            }
+            // Don't re-theme an exited session (parity with the macOS host's isRuntimeInteractiveForControl
+            // guard). The renderer is freed on exit, and the control socket is torn down with it, so this
+            // is the same not-running check the scroll handler makes before touching the vt session.
+            guard started, vtSession != nil else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            // Appearance is a per-client view preference on a shared session with last-writer-wins
+            // semantics, so it is deliberately NOT owner-gated: any attached client may re-theme the
+            // terminal it is watching.
+            guard appearance != currentAppearance else {
+                return TerminalControlResponse(ok: true, message: "Terminal already matches the requested appearance.")
+            }
+            // The vt re-theme is synchronous (unlike the macOS io thread), and applyThemeAppearance
+            // arms the full-frame flag and bumps the screen revision, so broadcast right after to push
+            // the recolored full frame to subscribers promptly.
+            applyThemeAppearance(appearance)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.stateChange)
+            return TerminalControlResponse(ok: true, message: "Applied \(appearance.rawValue) appearance.")
         }
 
         private func ownerRequestIsCurrent(_ request: TerminalControlRequest) -> Bool {
