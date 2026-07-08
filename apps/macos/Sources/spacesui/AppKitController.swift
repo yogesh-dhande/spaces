@@ -9042,12 +9042,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // (`focusedBuiltInTerminalSessionIDForGlobalNavigation`). Mirrors `openTerminalSessionPane`.
         cancelDeferredExternalWindowHide()
         // A row-built resolution can predate the session's overview entry and lack the
-        // real shell/command; recover them through the cold overview fetch so the pane's
-        // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
+        // real shell/command. Only recover that metadata when opening a new pane: an
+        // already-open pane already has its state model and can focus entirely client-side.
+        let existingPaneBeforeResolution = panelCoordinator.placement(forSessionID: request.sessionID) != nil
         let requestResolveStartedAt = Date()
-        let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
+        let openRequest: DeviceTerminalOpenRequest
+        if Self.terminalOpenRequestNeedsColdResolution(request, hasExistingPane: existingPaneBeforeResolution) {
+            openRequest = await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request
+        } else {
+            openRequest = request
+        }
         requestResolveMS = windowShortcutElapsedMS(since: requestResolveStartedAt)
-        let reusedExistingPane = panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil
+        let reusedExistingPane = existingPaneBeforeResolution || panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil
         let paneFocusStartedAt = Date()
         guard panelCoordinator.openOrFocusTerminalPane(openRequest) else {
             if reusedExistingPane {
@@ -9091,6 +9097,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
         }
         return true
+    }
+
+    nonisolated static func terminalOpenRequestNeedsColdResolution(_ request: DeviceTerminalOpenRequest, hasExistingPane: Bool) -> Bool {
+        !hasExistingPane && request.shell == nil
     }
 
     private func runTerminalSessionMutationAndOpenPane(

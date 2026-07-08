@@ -113,7 +113,9 @@ private struct E2EScenarioDescriptor: Sendable {
             kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: { $0.appProfileEnvironment() })),
         E2EScenarioDescriptor(
             name: "window-cycle-small",
-            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-small"], environment: { $0.appProfileEnvironment() })),
+            kind: .script(
+                scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-small"],
+                environment: { $0.appProfileEnvironment(remoteEnabled: true) })),
     ]
 
     fileprivate static let terminal: [E2EScenarioDescriptor] = [
@@ -391,8 +393,8 @@ private struct E2ERunner {
         return environment
     }
 
-    fileprivate func appProfileEnvironment() -> [String: String] {
-        var environment = remoteEnvironment(enabled: false)
+    fileprivate func appProfileEnvironment(remoteEnabled: Bool = false) -> [String: String] {
+        var environment = remoteEnvironment(enabled: remoteEnabled)
         if let samples = command.samples { environment["REAL_SYSTEM_PROFILE_REPETITIONS"] = String(samples) }
         return environment
     }

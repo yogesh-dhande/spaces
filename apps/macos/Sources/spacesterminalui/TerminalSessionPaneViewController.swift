@@ -246,7 +246,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
         preferredAttachmentMode = .owner
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
         lastObservedRuntimeState = (stateProvider.currentRuntimeState) ?? lastObservedRuntimeState
-        let currentOwnerClient = activeOwnerClient(snapshot: stateProvider.currentAttachmentSnapshot)
+        let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
+        let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
         lastObservedOwnerClientID = currentOwnerClient?.id
         let hasDifferentActiveOwner = currentOwnerClient != nil && currentOwnerClient?.id != client.id
         if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
@@ -255,6 +256,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
         }
         guard canAttachToGhosttyRuntime(lastObservedRuntimeState) else {
             refreshNow(allowGhosttyOwnerAttach: false)
+            return
+        }
+        if currentOwnerClient?.id == client.id, activeAttachment(snapshot: attachmentSnapshot)?.mode == .owner {
+            isClientAttached = true
+            lastRequestedAttachmentMode = .owner
+            lastObservedAttachmentMode = .owner
+            ensureGhosttyHostAttached(reason: "request_owner_mode")
+            refreshNow()
             return
         }
         attachLocalClientIfNeeded(mode: .owner, force: true)
@@ -755,6 +764,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let activeAttachments = snapshot.attachments
         guard let ownerAttachment = activeAttachments.last(where: { $0.mode == .owner && $0.detachedAt == nil }) else { return nil }
         return snapshot.clients.first(where: { $0.id == ownerAttachment.clientID })
+    }
+
+    private func activeAttachment(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalAttachment? {
+        snapshot?.attachments.last { $0.clientID == client.id && $0.detachedAt == nil }
     }
 
     /// Refreshes `lastObservedRuntimeState` from the provider, keeping the previous
