@@ -60,6 +60,24 @@ final class ChromeAdapterTests: XCTestCase {
         }
     }
 
+    func testTabSnapshotInWindowIDsParsesRowsWhenFrontmostURLIsEmpty() throws {
+        let mock = """
+            #!/bin/sh
+            printf '\\n'
+            printf '__SPACES_FRONTMOST_TABS__\\n'
+            printf '101\t1\tDocs\thttp://localhost:3000/docs\\n'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            let snapshot = try ChromeAdapter().tabSnapshot(inWindowIDs: [101])
+
+            XCTAssertNil(snapshot.frontmostActiveTabURL)
+            XCTAssertEqual(snapshot.tabs.map(\.windowID), [101])
+            XCTAssertEqual(snapshot.tabs.map(\.tabIndex), [1])
+            XCTAssertEqual(snapshot.tabs.map(\.url), ["http://localhost:3000/docs"])
+        }
+    }
+
     func testTabSnapshotInWindowIDsReturnsEmptyWithoutAppleScriptForEmptyInput() throws {
         let mock = """
             #!/bin/sh

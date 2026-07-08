@@ -468,14 +468,41 @@ import workspacecore
     @Test func rootBrowserSessionDoesNotMatchOnlyOpenAdminSiblingTab() {
         let rootURL = "http://localhost:3000"
         let adminURL = "http://localhost:3000/admin"
-        let trackedTargetURLs = [rootURL, adminURL]
+        let configuredTargetURLs = [rootURL, adminURL]
         let openTabURLs = [adminURL]
 
-        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: trackedTargetURLs)
-        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: trackedTargetURLs)
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
+        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
 
         #expect(!openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings) })
         #expect(openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings) })
+    }
+
+    @Test func focusRequestsUseConfiguredBrowserSessionSiblingsForPrefixExclusion() {
+        let rootURL = "http://localhost:3000"
+        let adminURL = "http://localhost:3000/admin"
+        let workspace = SpacesDeviceWorkspaceSummary(
+            id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
+            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
+            config: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
+                SpacesDeviceBrowserSession(name: "root", url: rootURL), SpacesDeviceBrowserSession(name: "admin", url: adminURL),
+            ]))
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [workspace], sessions: [])
+
+        let targetURLs = AppKitController.browserSessionTargetURLs(workspaceID: "workspace", targetURL: rootURL, overview: overview)
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: targetURLs)
+
+        #expect(targetURLs == [rootURL, adminURL])
+        #expect(rootSiblings == [adminURL])
+        #expect(!AppKitController.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
+    }
+
+    @Test func trackedBrowserSessionTargetMatchingAcceptsTrailingSlashOnlyDifference() {
+        #expect(AppKitController.browserSessionTargetURL("http://localhost:3000/", matches: "http://localhost:3000"))
+        #expect(AppKitController.browserSessionTargetURL("http://localhost:3000", matches: "http://localhost:3000/"))
+        #expect(!AppKitController.browserSessionTargetURL("http://localhost:3000/admin", matches: "http://localhost:3000"))
     }
 
     @Test func numberedShortcutResolutionStillOpensUnopenedTargets() {

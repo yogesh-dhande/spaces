@@ -200,9 +200,9 @@ public final class ChromeAdapter {
             return frontmostURL & "\\n\(separator)\\n" & output
             """
         let output = try runChromeScript(script)
-        let split = output.components(separatedBy: "\n\(separator)\n")
+        let split = output.components(separatedBy: separator)
         let frontmostURL = split.first?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tabRows = split.dropFirst().joined(separator: "\n\(separator)\n")
+        let tabRows = split.dropFirst().joined(separator: separator)
         return ChromeTabSnapshot(tabs: Self.parseTabRows(tabRows), frontmostActiveTabURL: frontmostURL?.isEmpty == false ? frontmostURL : nil)
     }
 

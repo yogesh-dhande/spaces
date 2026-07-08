@@ -358,6 +358,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let chromeAppleScriptMS: Int
     }
 
+    private struct RoutedBrowserFocusTarget: Sendable {
+        let targetURL: URL
+        let siblingTargetURLs: [String]
+    }
+
     private struct TerminalSessionWindowStateDump: Codable {
         let sessionID: String
         let requestedMode: String
@@ -919,11 +924,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let snapshot =
                 (try? chrome.tabSnapshot(inWindowIDs: trackedWindows.map(\.windowID))) ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil)
             let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
-            let trackedTargetURLs = Set(trackedWindows.map(\.targetURL))
-            let trackedTargetURLList = Array(trackedTargetURLs)
+            let trackedTargetURLs = trackedWindows.map(\.targetURL)
+            let configuredTargetURLs = Self.browserSessionTargetURLs(resolvedSessions: resolvedSessions)
             let openBrowserSessions = resolvedSessions.compactMap { session -> BrowserSession? in
-                guard let url = session.url, !url.isEmpty, trackedTargetURLs.contains(url) else { return nil }
-                let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: url, targetURLs: trackedTargetURLList)
+                guard let url = session.url, !url.isEmpty,
+                    trackedTargetURLs.contains(where: { Self.browserSessionTargetURL($0, matches: url) })
+                else { return nil }
+                let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
                 guard snapshot.tabs.contains(where: { Self.browserTabURL($0.url, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs) })
                 else { return nil }
                 return Self.localBrowserSession(from: session)
@@ -934,12 +941,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }.value
     }
 
+    nonisolated static func browserSessionTargetURLs(resolvedSessions: [SpacesDeviceBrowserSession], including targetURL: String? = nil) -> [String] {
+        var values = resolvedSessions.compactMap(\.url)
+        if let targetURL { values.append(targetURL) }
+        return uniqueBrowserSessionTargetURLs(values)
+    }
+
+    nonisolated static func browserSessionTargetURLs(workspaceID: String, targetURL: String, overview: SpacesDeviceOverviewPayload?) -> [String] {
+        browserSessionTargetURLs(
+            resolvedSessions: overview.flatMap { workspaceDetail(workspaceID, in: $0)?.config.resolvedBrowserSessions } ?? [], including: targetURL)
+    }
+
+    nonisolated private static func uniqueBrowserSessionTargetURLs(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
     nonisolated static func browserSessionSiblingTargetURLs(targetURL: String, targetURLs: [String]) -> [String] {
+        guard !targetURL.isEmpty else { return [] }
         var seen = Set<String>()
         return targetURLs.filter { candidate in
-            guard !candidate.isEmpty, candidate != targetURL, candidate.hasPrefix(targetURL), seen.insert(candidate).inserted else { return false }
+            guard !candidate.isEmpty, !browserSessionTargetURL(candidate, matches: targetURL), candidate.hasPrefix(targetURL),
+                seen.insert(candidate).inserted
+            else { return false }
             return true
         }
+    }
+
+    nonisolated static func browserSessionTargetURL(_ candidateURL: String, matches targetURL: String) -> Bool {
+        guard !candidateURL.isEmpty, !targetURL.isEmpty else { return false }
+        return browserTabURLIsExactTarget(candidateURL, targetURL: targetURL)
     }
 
     nonisolated static func browserTabURL(_ tabURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String]) -> Bool {
@@ -8660,16 +8691,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// by hand is adopted into tracking instead of duplicated. `NSWorkspace.open` is a last resort
     /// when Chrome cannot be scripted. Remote service sessions use this after their URL has been
     /// routed through the Mac Caddy router.
-    private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
+    private func focusLocalChromeTab(workspaceID: String, targetURL: String, siblingTargetURLs: [String], fallbackURL: URL) async {
         let startedAt = Date()
         let result: BrowserFocusResult = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
             let store = ClientBrowserWindowIDStore()
             let dbLookupStartedAt = Date()
             let trackedEntries = ((try? store.windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
-            let trackedID = trackedEntries.first(where: { $0.targetURL == targetURL })?.windowID
-            let trackedTargetURLs = trackedEntries.map(\.targetURL)
-            let siblingTargetURLs = AppKitController.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: trackedTargetURLs)
+            let trackedID = trackedEntries.first(where: { AppKitController.browserSessionTargetURL($0.targetURL, matches: targetURL) })?.windowID
             let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbLookupStartedAt)
             var chromeAppleScriptMS = 0
             var clientDBWriteMS = 0
@@ -8839,6 +8868,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 showError(WorkspaceError.invalidArgument(message: "Browser session URL is invalid."))
                 return nil
             }
+            let browserSessionTargetURLs = Self.browserSessionTargetURLs(
+                workspaceID: workspaceID, targetURL: targetURL, overview: overview(forWorkspaceID: workspaceID))
+            let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserSessionTargetURLs)
             if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
                 guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                     showDeviceNotLoadedError()
@@ -8853,21 +8885,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // actor to keep the focus keypress from freezing the UI. The manager is `Sendable` and
                 // serializes its own state, so the detached task can safely own the reconciliation.
                 let manager = browserSSHForwardManager
-                let routeResult: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
-                    do { return .success(try manager.routedURL(targetURL: targetURL, workspace: workspace, device: device)) } catch {
+                let routeResult: Result<RoutedBrowserFocusTarget, Error> = await Task.detached(priority: .userInitiated) {
+                    do {
+                        let routedURL = try manager.routedURL(targetURL: targetURL, workspace: workspace, device: device)
+                        let routedSiblingTargetURLs = try siblingTargetURLs.map {
+                            try manager.routedURL(targetURL: $0, workspace: workspace, device: device).absoluteString
+                        }
+                        return .success(RoutedBrowserFocusTarget(targetURL: routedURL, siblingTargetURLs: routedSiblingTargetURLs))
+                    } catch {
                         return .failure(error)
                     }
                 }.value
                 switch routeResult {
-                case .success(let routedURL):
+                case .success(let routedTarget):
                     refreshVisibleServicePortDisplays(deviceID: device.id)
-                    await focusLocalChromeTab(workspaceID: workspaceID, targetURL: routedURL.absoluteString, fallbackURL: routedURL)
+                    await focusLocalChromeTab(
+                        workspaceID: workspaceID, targetURL: routedTarget.targetURL.absoluteString,
+                        siblingTargetURLs: routedTarget.siblingTargetURLs, fallbackURL: routedTarget.targetURL)
                 case .failure(let error):
                     showError(error)
                     return nil
                 }
             } else {
-                await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, fallbackURL: url)
+                await focusLocalChromeTab(workspaceID: workspaceID, targetURL: targetURL, siblingTargetURLs: siblingTargetURLs, fallbackURL: url)
             }
             Self.setClientActiveWorkspaceID(workspaceID)
             return .focus(hidesApp: true)
