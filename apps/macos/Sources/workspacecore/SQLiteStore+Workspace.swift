@@ -5,19 +5,18 @@ import systembridge
 
 extension SQLiteStore {
     /// Canonical column order for a full `workspaces` row read; reused by every SELECT and by the
-    /// INSERT below since both list the same 13 columns in the same order.
+    /// INSERT below since both list the same 12 columns in the same order.
     private static let workspaceColumns =
-        "id, project_id, dir, runtime_path, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes"
+        "id, project_id, dir, dirname, branch, base_branch, is_default, is_archived, is_hidden, is_running, last_launched_at, notes"
 
     public func upsert(workspace: WorkspaceRecord) throws {
         try withImmediateTransaction {
             try execute(
                 sql: """
                     INSERT INTO workspaces(\(Self.workspaceColumns))
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                       dir = excluded.dir,
-                      runtime_path = excluded.runtime_path,
                       dirname = excluded.dirname,
                       branch = excluded.branch,
                       base_branch = excluded.base_branch,
@@ -29,7 +28,7 @@ extension SQLiteStore {
                       notes = excluded.notes
                     """,
                 bindings: [
-                    workspace.id, workspace.projectID, workspace.dir, workspace.runtimePath, workspace.dirname ?? "", workspace.branch ?? "",
+                    workspace.id, workspace.projectID, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
                     workspace.baseBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
                     workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.notes ?? "",
                 ])
@@ -292,11 +291,11 @@ extension SQLiteStore {
     }
 
     func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
-        guard row.count >= 13 else { return nil }
+        guard row.count >= 12 else { return nil }
         return WorkspaceRecord(
-            id: row[0], projectID: row[1], dir: row[2], runtimePath: row[3].isEmpty ? row[2] : row[3], dirname: row[4].isEmpty ? nil : row[4],
-            branch: row[5].isEmpty ? nil : row[5], baseBranch: row[6].isEmpty ? nil : row[6], isDefault: row[7] == "1", isArchived: row[8] == "1",
-            isHidden: row[9] == "1", isRunning: row[10] == "1", lastLaunchedAt: row[11].isEmpty ? nil : row[11],
-            notes: row[12].isEmpty ? nil : row[12])
+            id: row[0], projectID: row[1], dir: row[2], dirname: row[3].isEmpty ? nil : row[3],
+            branch: row[4].isEmpty ? nil : row[4], baseBranch: row[5].isEmpty ? nil : row[5], isDefault: row[6] == "1", isArchived: row[7] == "1",
+            isHidden: row[8] == "1", isRunning: row[9] == "1", lastLaunchedAt: row[10].isEmpty ? nil : row[10],
+            notes: row[11].isEmpty ? nil : row[11])
     }
 }

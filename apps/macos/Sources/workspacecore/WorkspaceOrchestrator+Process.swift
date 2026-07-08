@@ -84,7 +84,7 @@ extension WorkspaceOrchestrator {
             if let runtimeState = resolvedBuiltInSessionRuntimeState(for: process), !runtimeState.state.isInteractive {
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                    terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID,
                     pid: runtimeState.childPID.map(Int.init) ?? process.pid, status: .exited, logPath: process.logPath,
                     lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: runtimeState.exitedAt ?? nowISO8601())
                 try store.upsert(runningProcess: updatedProcess)
@@ -101,7 +101,7 @@ extension WorkspaceOrchestrator {
             if process.pid != pid {
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
-                    terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID,
+                    terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID,
                     pid: pid, status: process.status, logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt,
                     exitedAt: process.exitedAt)
                 try store.upsert(runningProcess: updatedProcess)
@@ -111,7 +111,7 @@ extension WorkspaceOrchestrator {
                 let updatedProcess = RunningProcessRecord(
                     id: process.id, workspaceID: process.workspaceID, templateName: process.templateName, command: process.command,
                     runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp, terminalTrackingID: process.terminalTrackingID,
-                    terminalNativeID: process.terminalNativeID, pid: process.pid, status: .exited, logPath: process.logPath,
+                    pid: process.pid, status: .exited, logPath: process.logPath,
                     lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: nowISO8601())
                 try store.upsert(runningProcess: updatedProcess)
                 didUpdate = true
@@ -157,7 +157,7 @@ extension WorkspaceOrchestrator {
     ) throws -> RunningProcessRecord {
         try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
         _ = background
-        let previousSessionID = process.terminalNativeID ?? process.terminalTrackingID
+        let previousSessionID = process.terminalTrackingID
         if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
             Self.writeStandardError(
                 "spaces: restart_process begin workspace=\(workspaceID) name=\(process.templateName) previous_session=\(previousSessionID ?? "-")\n")
@@ -188,14 +188,14 @@ extension WorkspaceOrchestrator {
         let now = nowISO8601()
         let restartedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateID: template.id, templateName: process.templateName, command: template.command,
-            terminalApp: TerminalHost.spaces.appName, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
+            terminalApp: TerminalHost.spaces.appName, terminalTrackingID: session.sessionID,
             pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
         try store.upsert(runningProcess: restartedProcess)
         let existingWindows = try store.windows(workspaceID: workspace.id)
         let existingWindow = existingWindows.first(where: { matchesTrackedTerminalWindow($0, process: process) })
         let restoredWindow = WindowRecord(
             id: existingWindow?.id ?? process.id, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: process.templateName,
-            detail: process.command, targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
+            detail: process.command, targetURL: nil, terminalTrackingID: session.sessionID, role: "terminal",
             orderIndex: existingWindow?.orderIndex ?? Self.nextWindowOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
             lastSeenAt: now)
         try store.upsert(window: restoredWindow)
@@ -327,7 +327,7 @@ extension WorkspaceOrchestrator {
                 let restartedProcess = RunningProcessRecord(
                     id: runningProcess.id, workspaceID: runningProcess.workspaceID, templateID: edit.updated.id, templateName: edit.updatedKey,
                     command: edit.updated.command, runtimeTargetID: runningProcess.runtimeTargetID, terminalApp: runningProcess.terminalApp,
-                    terminalTrackingID: runningProcess.terminalTrackingID, terminalNativeID: runningProcess.terminalNativeID, pid: runningProcess.pid,
+                    terminalTrackingID: runningProcess.terminalTrackingID, pid: runningProcess.pid,
                     status: runningProcess.status, logPath: runningProcess.logPath, lastOutputAt: runningProcess.lastOutputAt,
                     startedAt: runningProcess.startedAt, exitedAt: runningProcess.exitedAt)
                 try restartProcessInTerminal(workspaceID: workspace.id, process: restartedProcess, templateOverride: edit.updated)
@@ -354,7 +354,7 @@ extension WorkspaceOrchestrator {
         let updatedProcess = RunningProcessRecord(
             id: process.id, workspaceID: process.workspaceID, templateID: templateID ?? process.templateID, templateName: templateName,
             command: command, runtimeTargetID: process.runtimeTargetID, terminalApp: process.terminalApp,
-            terminalTrackingID: process.terminalTrackingID, terminalNativeID: process.terminalNativeID, pid: process.pid, status: process.status,
+            terminalTrackingID: process.terminalTrackingID, pid: process.pid, status: process.status,
             logPath: process.logPath, lastOutputAt: process.lastOutputAt, startedAt: process.startedAt, exitedAt: process.exitedAt)
         try store.upsert(runningProcess: updatedProcess)
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: {
@@ -364,7 +364,7 @@ extension WorkspaceOrchestrator {
                 window: WindowRecord(
                     id: terminalWindow.id, workspaceID: terminalWindow.workspaceID, app: terminalWindow.app, name: templateName, detail: command,
                     targetURL: terminalWindow.targetURL, terminalTrackingID: terminalWindow.terminalTrackingID,
-                    terminalNativeID: terminalWindow.terminalNativeID, role: terminalWindow.role, orderIndex: terminalWindow.orderIndex,
+                    role: terminalWindow.role, orderIndex: terminalWindow.orderIndex,
                     lastSeenAt: nowISO8601()))
         }
     }
@@ -400,13 +400,13 @@ extension WorkspaceOrchestrator {
             let now = nowISO8601()
             let running = RunningProcessRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: session.sessionID,
                 pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
             try store.upsert(runningProcess: running)
             terminalWindows.append(
                 WindowRecord(
                     id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: name, detail: template.command,
-                    targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
+                    targetURL: nil, terminalTrackingID: session.sessionID, role: "terminal",
                     orderIndex: 200 + index, lastSeenAt: now))
         }
         return terminalWindows
@@ -566,7 +566,7 @@ extension WorkspaceOrchestrator {
         }
         if let terminalWindow = try store.windows(workspaceID: workspaceID).first(where: { matchesTrackedTerminalWindow($0, process: process) }) {
             if terminalWindow.roleValue == .terminal, isManagedTerminalApp(terminalWindow.app),
-                let sessionID = normalizedTerminalSessionID(terminalWindow.terminalNativeID ?? terminalWindow.terminalTrackingID)
+                let sessionID = normalizedTerminalSessionID(terminalWindow.terminalTrackingID)
             {
                 builtInTerminalWindowCloser(sessionID)
             }
@@ -607,14 +607,14 @@ extension WorkspaceOrchestrator {
         let now = nowISO8601()
         let record = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateID: template.id, templateName: name, command: template.command,
-            terminalApp: TerminalHost.spaces.appName, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID,
+            terminalApp: TerminalHost.spaces.appName, terminalTrackingID: session.sessionID,
             pid: session.childPID, status: .running, logPath: session.outputPath, lastOutputAt: nil, startedAt: now, exitedAt: nil)
         try store.upsert(runningProcess: record)
         let nextOrder = Self.nextWindowOrderIndex(existing: try store.windows(workspaceID: workspace.id), role: "terminal", orderOffset: 200)
         try store.upsert(
             window: WindowRecord(
                 id: UUID().uuidString, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: name, detail: template.command,
-                targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal", orderIndex: nextOrder,
+                targetURL: nil, terminalTrackingID: session.sessionID, role: "terminal", orderIndex: nextOrder,
                 lastSeenAt: now))
         launchSucceeded = true
         return record

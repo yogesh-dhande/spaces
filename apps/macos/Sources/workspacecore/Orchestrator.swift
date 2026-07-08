@@ -818,7 +818,7 @@ public final class WorkspaceOrchestrator {
         for window in uniqueWindows {
             let stored = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
+                targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
                 role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
             index += 1
             try store.upsert(window: stored)
@@ -846,7 +846,7 @@ public final class WorkspaceOrchestrator {
         var skippedStopScriptBecauseWorkspaceDirectoryMissing = false
         for process in processes {
             if isManagedTerminalApp(process.terminalApp) {
-                if let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty {
+                if let sessionID = process.terminalTrackingID, !sessionID.isEmpty {
                     terminateBuiltInTerminalSession(sessionID)
                     closedBuiltInTerminalSessionIDs.insert(sessionID)
                 }
@@ -855,7 +855,7 @@ public final class WorkspaceOrchestrator {
             }
         }
         for agent in try store.agentWindows(workspaceID: workspace.id) {
-            if let sessionID = agent.terminalNativeID ?? agent.terminalTrackingID, !sessionID.isEmpty {
+            if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty {
                 terminateBuiltInTerminalSession(sessionID)
                 closedBuiltInTerminalSessionIDs.insert(sessionID)
             }
@@ -873,7 +873,7 @@ public final class WorkspaceOrchestrator {
         // are never closed by the daemon on stop; only Spaces-managed terminal sessions are
         // terminated by session id here.
         for window in windows where window.roleValue == .terminal && isManagedTerminalApp(window.app) {
-            guard let sessionID = normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) else { continue }
+            guard let sessionID = normalizedTerminalSessionID(window.terminalTrackingID) else { continue }
             if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
                 terminateBuiltInTerminalSession(sessionID)
                 closedBuiltInTerminalSessionIDs.insert(sessionID)
@@ -1185,7 +1185,7 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: windowRecordID, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: sessionTitle, detail: nil,
-                    targetURL: nil, terminalTrackingID: session.id, terminalNativeID: session.id, role: "terminal",
+                    targetURL: nil, terminalTrackingID: session.id, role: "terminal",
                     orderIndex: Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200), lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspace)
         } catch {
@@ -1249,7 +1249,7 @@ public final class WorkspaceOrchestrator {
         try store.upsert(
             window: WindowRecord(
                 id: windowRecordID, workspaceID: workspace.id, app: appName, name: generatedTitle, detail: nil, targetURL: nil,
-                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: nextOrder, lastSeenAt: nowISO8601()))
         try markWorkspaceRunningIfNeeded(workspace)
         return WorkspaceTerminalLaunchReservation(
             sessionID: sessionID, workspaceID: workspace.id, windowRecordID: windowRecordID, windowRecordInsertedBeforeLaunch: true, appName: appName,
@@ -1278,7 +1278,7 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: reservation.windowRecordID, workspaceID: reservation.workspaceID, app: reservation.appName, name: reservation.title,
-                    detail: nil, targetURL: nil, terminalTrackingID: session.sessionID, terminalNativeID: session.sessionID, role: "terminal",
+                    detail: nil, targetURL: nil, terminalTrackingID: session.sessionID, role: "terminal",
                     orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspaceID: reservation.workspaceID, launchedAtFallback: reservation.createdAt)
             return session.sessionID
@@ -1733,7 +1733,7 @@ public final class WorkspaceOrchestrator {
                 project: project, workspace: workspace,
                 namedPorts: namedPorts.map { WorkspaceRuntimePortMapping(id: $0.name, name: $0.name, port: $0.port) })
         env.merge(manifest.processEnvironment) { _, new in new }
-        env["SPACES_WORKSPACE_DIR"] = workspace.runtimePath
+        env["SPACES_WORKSPACE_DIR"] = workspace.dir
         env["SPACES_PROJECT_DIR"] = project.dir
         // Browser-facing per-service URL variables so app servers can allowlist the host/origin for
         // CORS or framework host checks. These need the shared router port, which is app configuration
@@ -1793,7 +1793,6 @@ public final class WorkspaceOrchestrator {
         if window.roleValue == .browser { return "browser:\(window.targetURL ?? "")" }
         if window.roleValue == .terminal {
             let app = window.app.lowercased()
-            if let terminalNativeID = window.terminalNativeID, !terminalNativeID.isEmpty { return "terminal:\(app):native:\(terminalNativeID)" }
             if let terminalTrackingID = window.terminalTrackingID, !terminalTrackingID.isEmpty {
                 return "terminal:\(app):tracking:\(terminalTrackingID)"
             }

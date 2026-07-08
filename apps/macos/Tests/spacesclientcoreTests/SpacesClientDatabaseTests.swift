@@ -1,6 +1,12 @@
 import Foundation
 import XCTest
 
+#if os(Linux)
+    import CSQLite3
+#else
+    import SQLite3
+#endif
+
 @testable import spacesclientcore
 @testable import spacesterminalcore
 
@@ -56,23 +62,76 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try database.panelWindows().map(\.id), ["win-2"])
     }
 
-    func testPanelLayoutsSurviveMigrationFromVersionFour() throws {
+    // A database with tables but no readable `migration_state` marker is unrecognized, not
+    // upgradeable: opening it fails closed instead of silently resetting or migrating (there are no
+    // existing users, so old on-disk databases are deleted by hand instead of carried forward).
+    func testOpenFailsClosedWhenMigrationStateMarkerIsMissing() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let path = root.appendingPathComponent("spaces-client.db").path
 
-        // Open at a pre-panel schema version, then reopen at the current version; the migrator
-        // steps serially through every intermediate version (reserved no-op v5, panel layouts,
-        // unused-table drops) and user data survives.
-        let legacy = try SpacesClientDatabase(
-            path: path, currentVersion: 4, migrationSteps: SpacesClientDatabase.defaultMigrationSteps.filter { $0.toVersion <= 4 })
-        try legacy.setProjectCollapsed(deviceID: "local", projectID: "project-1", isCollapsed: true)
+        let database = try SpacesClientDatabase(path: path)
+        let record = device(id: "device-untouched")
+        try database.upsert(device: record)
 
-        let migrated = try SpacesClientDatabase(path: path)
-        XCTAssertTrue(try migrated.isProjectCollapsed(deviceID: "local", projectID: "project-1"))
-        try migrated.writeWorkspacePanelLayout(deviceID: "local", workspaceID: "ws-1", layoutJSON: "{\"version\":1}")
-        XCTAssertEqual(try migrated.workspacePanelLayout(deviceID: "local", workspaceID: "ws-1"), "{\"version\":1}")
+        // Remove the marker row while leaving every table (including its data) in place.
+        try withRawSQLiteConnection(path: path) { handle in
+            XCTAssertEqual(sqlite3_exec(handle, "DELETE FROM migration_state;", nil, nil, nil), SQLITE_OK)
+        }
+
+        do {
+            _ = try SpacesClientDatabase(path: path)
+            XCTFail("Expected opening a database without a migration_state marker to throw.")
+        } catch {
+            guard case SpacesClientError.invalidArgument(let message) = error else {
+                return XCTFail("Expected SpacesClientError.invalidArgument, got \(error)")
+            }
+            XCTAssertTrue(message.contains("missing migration_state marker"), message)
+        }
+
+        // The failed open must not have touched the file: restoring the marker (no data rewrite)
+        // reveals the paired-device row is exactly as it was left.
+        try withRawSQLiteConnection(path: path) { handle in
+            XCTAssertEqual(sqlite3_exec(handle, "INSERT INTO migration_state(current_version) VALUES (1);", nil, nil, nil), SQLITE_OK)
+        }
+        let reopened = try SpacesClientDatabase(path: path)
+        XCTAssertEqual(try reopened.pairedDevice(id: record.id), record)
+    }
+
+    // A `migration_state` marker ahead of this build's schema (e.g. a downgrade, or a database from
+    // a build that raised the version) is unsupported: opening it fails closed rather than guessing
+    // at a downgrade path.
+    func testOpenFailsClosedWhenMigrationStateVersionIsAheadOfCurrent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("spaces-client.db").path
+
+        _ = try SpacesClientDatabase(path: path)
+        try withRawSQLiteConnection(path: path) { handle in
+            XCTAssertEqual(sqlite3_exec(handle, "DELETE FROM migration_state;", nil, nil, nil), SQLITE_OK)
+            XCTAssertEqual(sqlite3_exec(handle, "INSERT INTO migration_state(current_version) VALUES (7);", nil, nil, nil), SQLITE_OK)
+        }
+
+        do {
+            _ = try SpacesClientDatabase(path: path)
+            XCTFail("Expected opening a database with an unsupported schema version to throw.")
+        } catch {
+            guard case SpacesClientError.invalidArgument(let message) = error else {
+                return XCTFail("Expected SpacesClientError.invalidArgument, got \(error)")
+            }
+            XCTAssertTrue(message.contains("7"), message)
+        }
+    }
+
+    private func withRawSQLiteConnection(path: String, _ body: (OpaquePointer) throws -> Void) throws {
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw XCTSkip("Failed opening raw sqlite3 connection at \(path).")
+        }
+        defer { sqlite3_close(handle) }
+        try body(handle)
     }
 
     // Any database at a released schema version must reach the current version by applying every

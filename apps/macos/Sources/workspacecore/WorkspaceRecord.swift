@@ -4,7 +4,6 @@ public struct WorkspaceRecord: Codable, Sendable {
     public let id: String
     public let projectID: String
     public let dir: String
-    public let runtimePath: String
     public let dirname: String?
     public let branch: String?
     public let baseBranch: String?
@@ -16,13 +15,12 @@ public struct WorkspaceRecord: Codable, Sendable {
     public let notes: String?
 
     public init(
-        id: String, projectID: String, dir: String, runtimePath: String? = nil, dirname: String?, branch: String?, baseBranch: String? = nil,
+        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String? = nil,
         isDefault: Bool, isArchived: Bool, isHidden: Bool = false, isRunning: Bool, lastLaunchedAt: String?, notes: String? = nil
     ) {
         self.id = id
         self.projectID = projectID
         self.dir = dir
-        self.runtimePath = runtimePath ?? dir
         self.dirname = dirname
         self.branch = branch
         self.baseBranch = baseBranch

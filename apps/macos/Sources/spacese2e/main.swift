@@ -1038,17 +1038,15 @@ private struct DumpWorkspaceCommand: ParsableCommand {
             runningProcesses: try orchestrator.runningProcesses(workspaceID: workspace.id).map {
                 RunningProcessPayload(
                     id: $0.id, name: $0.templateName, pid: try resolvedPID(for: $0), status: $0.status.rawValue, terminalApp: $0.terminalApp,
-                    terminalTrackingID: $0.terminalTrackingID, terminalNativeID: $0.terminalNativeID)
+                    terminalTrackingID: $0.terminalTrackingID)
             },
             windows: try orchestrator.windows(workspaceID: workspace.id).map {
                 WindowPayload(
-                    name: $0.name, app: $0.app, role: $0.role, detail: $0.detail, targetURL: $0.targetURL, terminalTrackingID: $0.terminalTrackingID,
-                    terminalNativeID: $0.terminalNativeID)
+                    name: $0.name, app: $0.app, role: $0.role, detail: $0.detail, targetURL: $0.targetURL, terminalTrackingID: $0.terminalTrackingID)
             },
             agentWindows: try orchestrator.agentWindows(workspaceID: workspace.id).map {
                 AgentWindowPayload(
-                    id: $0.id, label: $0.label, provider: $0.provider.rawValue, status: $0.status.rawValue, terminalTrackingID: $0.terminalTrackingID,
-                    terminalNativeID: $0.terminalNativeID)
+                    id: $0.id, label: $0.label, provider: $0.provider.rawValue, status: $0.status.rawValue, terminalTrackingID: $0.terminalTrackingID)
             })
         try emitJSON(payload)
     }
@@ -1056,7 +1054,7 @@ private struct DumpWorkspaceCommand: ParsableCommand {
     private func resolvedPID(for process: RunningProcessRecord) throws -> Int? {
         if let pid = process.pid { return pid }
         guard process.terminalApp == TerminalHost.spaces.appName else { return nil }
-        guard let sessionID = process.terminalTrackingID ?? process.terminalNativeID, !sessionID.isEmpty else { return nil }
+        guard let sessionID = process.terminalTrackingID, !sessionID.isEmpty else { return nil }
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         return try TerminalSessionPersistence.readRuntimeState(paths: paths).childPID.map(Int.init)
     }
@@ -1132,7 +1130,7 @@ private struct CloseWorkspaceProcessWindowCommand: ParsableCommand {
         guard let process = try orchestrator.runningProcesses(workspaceID: workspace.id).first(where: { $0.templateName == processName }) else {
             throw ValidationError("Running process not found: \(processName)")
         }
-        guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else {
+        guard let sessionID = process.terminalTrackingID, !sessionID.isEmpty else {
             throw ValidationError("Running process has no built-in terminal session: \(processName)")
         }
         try IPCNotification.post(IPCNotification.closeTerminalSessionWindow, userInfo: [IPCNotification.terminalSessionIDUserInfoKey: sessionID])
@@ -1510,7 +1508,6 @@ private struct RunningProcessPayload: Codable {
     let status: String
     let terminalApp: String?
     let terminalTrackingID: String?
-    let terminalNativeID: String?
 }
 
 private struct WindowPayload: Codable {
@@ -1520,7 +1517,6 @@ private struct WindowPayload: Codable {
     let detail: String?
     let targetURL: String?
     let terminalTrackingID: String?
-    let terminalNativeID: String?
 }
 
 private struct AgentWindowPayload: Codable {
@@ -1529,7 +1525,6 @@ private struct AgentWindowPayload: Codable {
     let provider: String
     let status: String
     let terminalTrackingID: String?
-    let terminalNativeID: String?
 }
 
 private struct SurfaceSnapshotPayload: Codable {

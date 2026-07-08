@@ -44,7 +44,7 @@ public enum SpacesDevicePlanner {
     public static func runtimeManifest(project: ProjectRecord, workspace: WorkspaceRecord, namedPorts: [WorkspaceRuntimePortMapping])
         -> WorkspaceRuntimeManifest
     {
-        let workingPath = workspace.runtimePath
+        let workingPath = workspace.dir
         let slug = SpacesProfile.workspaceHostSlug(
             branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         var environment = ["SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug]
@@ -54,7 +54,7 @@ public enum SpacesDevicePlanner {
         }
 
         return WorkspaceRuntimeManifest(
-            workspaceID: workspace.id, projectID: project.id, localPath: workspace.runtimePath, branch: workspace.branch,
+            workspaceID: workspace.id, projectID: project.id, localPath: workspace.dir, branch: workspace.branch,
             baseBranch: workspace.baseBranch, namedPorts: namedPorts, processEnvironment: environment, allowedFileRoots: [workingPath])
     }
 }

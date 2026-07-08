@@ -53,7 +53,7 @@ func seedTerminalSessionWindow(store: SQLiteStore, workspaceID: String, sessionI
     try store.upsert(
         window: WindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, app: TerminalHost.spaces.appName, name: sessionID, detail: nil, targetURL: nil,
-            terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 }
 
 /// Marks a built-in terminal session as live for window-reconciliation purposes. Window liveness is

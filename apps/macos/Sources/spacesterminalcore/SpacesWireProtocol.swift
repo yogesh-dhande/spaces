@@ -8,37 +8,7 @@ import Foundation
 /// Client and daemon must speak the exact same version (lockstep — there is no backwards-compatibility
 /// window). Raise `version` whenever the wire contract changes.
 public enum SpacesWireProtocol {
-    // 2: SpacesDeviceTerminalSessionSummary carries the session shell/command (shell is a
-    //    required decode field) and TerminalClient carries leaseRefreshedAt. A protocol-1
-    //    daemon's overview omits these, so client and daemon must match exactly.
-    // 3: Device API adds renameTerminalSession and terminalPasteImage (uploads an image
-    //    payload to the owning daemon and injects the daemon-local temp path into the
-    //    terminal). Both are new mutating wire operations a protocol-2 daemon cannot decode,
-    //    so clients and daemons must update in lockstep.
-    // 4: Device API transport moves from TLS-PSK (transport key) to the daemon's pinned
-    //    self-signed TLS identity with pairing-issued bearer tokens; pairing links drop the
-    //    psk field (link v2) and overview rows drop the always-nil daemonEndpoint. A
-    //    protocol-3 client cannot even complete a TLS handshake with a protocol-4 daemon,
-    //    so devices must re-pair after updating both sides. Also adds the agent-facing
-    //    sendTerminalInput and tailTerminalOutput commands (one-shot terminal input and
-    //    rendered output tail, token-authorized without attachment/owner gating).
-    // 5: Pairing is version-gated at redemption. Pairing links become v3, advertising the
-    //    daemon's wire-protocol version (pv) and app version (av); the client refuses to
-    //    redeem an incompatible link, and the daemon symmetrically rejects a pair request
-    //    whose clientProtocolVersion does not match before it validates the code. A v4 client
-    //    and v5 daemon can still complete the TLS handshake, so the pairing gate — not the
-    //    transport — is what stops the mismatch.
-    // 6: The `profileCommand` payload changes from a flat operation-enum struct (one `operation`
-    //    plus fifteen optionals) to `TerminalServiceProfileCommand`, a one-key-tagged union whose
-    //    per-operation payload owns only that operation's fields, and terminal-send input becomes
-    //    the tagged `TerminalProfileInput` (text xor bytes). A protocol-5 daemon cannot decode the
-    //    new shape, so clients and daemons must update in lockstep.
-    // 7: Failure responses carry a machine-readable `errorCode` (`SpacesDeviceErrorCode`) alongside
-    //    the human-readable `message` on `SpacesDeviceAPIResponse`, `TerminalServiceResponse`, and
-    //    `TerminalControlResponse`. Clients branch on the code instead of substring-matching the
-    //    message. The field is optional and encoded only on failures, so the JSON shape differs from
-    //    a protocol-6 peer; both sides must update in lockstep.
-    public static let version = 7
+    public static let version = 1
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

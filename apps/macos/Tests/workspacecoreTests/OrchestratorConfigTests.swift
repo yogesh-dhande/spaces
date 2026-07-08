@@ -99,7 +99,6 @@ extension OrchestratorTests {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: paths.serviceLogPath)).count, 0)
         let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first { $0.id == reservation.windowRecordID })
         XCTAssertEqual(terminalWindow.role, "terminal")
-        XCTAssertEqual(terminalWindow.terminalNativeID, reservation.sessionID)
         XCTAssertEqual(terminalWindow.terminalTrackingID, reservation.sessionID)
         XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
         XCTAssertEqual(try orchestrator.workspaceSetupState(workspaceID: workspace.id).status, .pending)
@@ -210,7 +209,6 @@ extension OrchestratorTests {
 
         let terminalWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
-        XCTAssertEqual(terminalWindow.terminalTrackingID, terminalWindow.terminalNativeID)
     }
 
     func testCreateWorkspaceTerminalSessionCreatesAdHocWorkspaceTerminalRowAndStopsWithWorkspace() throws {
@@ -247,7 +245,6 @@ extension OrchestratorTests {
         XCTAssertEqual(terminalWindow.name, "shell-1")
         XCTAssertEqual(terminalWindow.role, "terminal")
         XCTAssertEqual(terminalWindow.terminalTrackingID, session.id)
-        XCTAssertEqual(terminalWindow.terminalNativeID, session.id)
         XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
 
         _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
@@ -312,7 +309,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                terminalTrackingID: "session-123", terminalNativeID: "session-123", role: "terminal", orderIndex: 200,
+                terminalTrackingID: "session-123", role: "terminal", orderIndex: 200,
                 lastSeenAt: "2026-05-10T18:00:00Z"))
 
         XCTAssertEqual(try orchestrator.workspaceIDForTerminalSession("session-123"), workspace.id)
@@ -375,7 +372,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -418,7 +415,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -461,7 +458,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "window-spaces-shell-1", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil,
-                targetURL: nil, terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -941,7 +938,7 @@ extension OrchestratorTests {
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                terminalTrackingID: sessionID, terminalNativeID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1259,7 +1256,7 @@ extension OrchestratorTests {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         let workspace = WorkspaceRecord(
-            id: "workspace-a", projectID: project.id, dir: "/projects/app", runtimePath: "/projects/app", dirname: nil, branch: "main",
+            id: "workspace-a", projectID: project.id, dir: "/projects/app", dirname: nil, branch: "main",
             baseBranch: "main", isDefault: false, isArchived: false, isRunning: true, lastLaunchedAt: nil)
         try store.upsert(project: project)
         try store.upsert(workspace: workspace)

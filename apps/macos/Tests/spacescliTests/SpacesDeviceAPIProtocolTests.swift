@@ -176,33 +176,6 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         for request in requests { XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request) }
     }
 
-    func testLegacyOverviewDecodesWithProjectAndRowDefaults() throws {
-        let payload = """
-            {
-              "workspaces": [{
-                "id": "workspace-1",
-                "projectID": "project-1",
-                "projectName": "Project",
-                "title": "Main",
-                "dir": "/repo",
-                "isRunning": false,
-                "isArchived": false,
-                "isHidden": false,
-                "isDefault": true,
-                "sessionCount": 0
-              }],
-              "sessions": []
-            }
-            """.data(using: .utf8)!
-
-        let overview = try JSONDecoder().decode(SpacesDeviceOverviewPayload.self, from: payload)
-
-        XCTAssertEqual(overview.projects, [])
-        XCTAssertEqual(overview.workspaces.first?.processRows, [])
-        XCTAssertEqual(overview.workspaces.first?.codingAgentRows, [])
-        XCTAssertEqual(overview.workspaces.first?.terminalRows, [])
-    }
-
     func testOverviewRoundTripsRuntimeRowsAndSessionSummary() throws {
         let processRow = SpacesDeviceWorkspaceProcessRow(
             id: "process-1", workspaceID: "workspace-1", name: "API", command: "npm run dev", processID: "runtime-1", sessionID: "session-1",

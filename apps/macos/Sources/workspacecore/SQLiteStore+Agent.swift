@@ -143,13 +143,13 @@ extension SQLiteStore {
     }
 
     public func appendAgentSessionEvent(
-        agentSessionID: String, eventType: String, source: String, message: String?, runtimeTargetID: String?, createdAt: String
+        agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String
     ) throws {
         try execute(
             sql: """
-                INSERT INTO agent_session_events(id, agent_session_id, event_type, source, message, runtime_target_id, created_at)
-                VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?)
-                """, bindings: [UUID().uuidString, agentSessionID, eventType, source, message ?? "", runtimeTargetID ?? "", createdAt])
+                INSERT INTO agent_session_events(id, agent_session_id, event_type, source, message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """, bindings: [UUID().uuidString, agentSessionID, eventType, source, message ?? "", createdAt])
     }
 
     public func deleteAgentWindows(workspaceID: String) throws {
@@ -195,7 +195,7 @@ extension SQLiteStore {
             window: WindowRecord(
                 id: targetID, workspaceID: record.workspaceID, app: TerminalHost.spaces.appName,
                 name: preservesExistingMetadata ? (existingWindow?.name ?? record.label ?? "Coding Agent CLI") : (record.label ?? "Coding Agent CLI"),
-                detail: preservesExistingMetadata ? existingWindow?.detail : nil, targetURL: nil,                 terminalTrackingID: terminalTarget.trackingID, terminalNativeID: terminalTarget.trackingID, role: "terminal",
+                detail: preservesExistingMetadata ? existingWindow?.detail : nil, targetURL: nil, terminalTrackingID: terminalTarget.trackingID, role: "terminal",
                 orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
                 lastSeenAt: now))
         return targetID

@@ -403,7 +403,6 @@ extension OrchestratorTests {
 
         let runningProcess = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         XCTAssertEqual(runningProcess.terminalApp, TerminalHost.spaces.appName)
-        XCTAssertEqual(runningProcess.terminalTrackingID, runningProcess.terminalNativeID)
 
         let window = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first(where: { $0.role == "terminal" }))
         XCTAssertEqual(window.app, TerminalHost.spaces.appName)

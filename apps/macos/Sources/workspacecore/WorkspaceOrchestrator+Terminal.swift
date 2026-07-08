@@ -37,7 +37,7 @@ extension WorkspaceOrchestrator {
         }
         guard let workspaceID else { return false }
         let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
-            $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID
+            $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && $0.terminalTrackingID == sessionID
         }.map(\.id)
         guard !matchingWindowIDs.isEmpty else { return false }
         for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
@@ -94,7 +94,7 @@ extension WorkspaceOrchestrator {
                 try store.upsert(
                     window: WindowRecord(
                         id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
-                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, terminalNativeID: window.terminalNativeID,
+                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
                         role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
             }
             if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {
@@ -119,17 +119,17 @@ extension WorkspaceOrchestrator {
     }
 
     func terminalTargetID(process: RunningProcessRecord) -> String? {
-        if let sessionID = process.terminalNativeID, !sessionID.isEmpty { return sessionID }
+        if let sessionID = process.terminalTrackingID, !sessionID.isEmpty { return sessionID }
         return process.terminalTrackingKey
     }
 
     func terminalTargetID(record: AgentWindowRecord) -> String? {
-        if let sessionID = record.terminalNativeID, !sessionID.isEmpty { return sessionID }
+        if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { return sessionID }
         return record.terminalTrackingKey
     }
 
     func terminalTargetID(window: WindowRecord) -> String? {
-        if let sessionID = window.terminalNativeID, !sessionID.isEmpty { return sessionID }
+        if let sessionID = window.terminalTrackingID, !sessionID.isEmpty { return sessionID }
         return window.terminalTrackingKey
     }
 
@@ -255,7 +255,7 @@ extension WorkspaceOrchestrator {
 
     func builtInTrackedWindowIsStillLive(window: WindowRecord) -> Bool {
         guard window.roleValue == .terminal, terminalHost(for: window.app) == .spaces else { return false }
-        guard let sessionID = window.terminalNativeID ?? window.terminalTrackingID, !sessionID.isEmpty else { return false }
+        guard let sessionID = window.terminalTrackingID, !sessionID.isEmpty else { return false }
         if builtInSessionBelongsToRunningProcess(sessionID: sessionID, workspaceID: window.workspaceID) {
             return builtInSessionIsStillLive(sessionID: sessionID) || builtInSessionLaunchIsPending(sessionID: sessionID)
         }
@@ -307,13 +307,13 @@ extension WorkspaceOrchestrator {
 
     func builtInAgentSessionID(for record: AgentWindowRecord) -> String? {
         guard record.provider == .spaces else { return nil }
-        let sessionID = record.terminalNativeID ?? record.terminalTrackingID
+        let sessionID = record.terminalTrackingID
         guard let trimmed = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
     }
 
     func builtInSessionBelongsToRunningProcess(sessionID: String, workspaceID: String) -> Bool {
-        ((try? store.runningProcesses(workspaceID: workspaceID)) ?? []).contains { ($0.terminalNativeID ?? $0.terminalTrackingID) == sessionID }
+        ((try? store.runningProcesses(workspaceID: workspaceID)) ?? []).contains { $0.terminalTrackingID == sessionID }
     }
 
     func builtInSessionBelongsToConfiguredAgent(sessionID: String, workspaceID: String) -> Bool {
@@ -335,7 +335,7 @@ extension WorkspaceOrchestrator {
 
     func resolvedBuiltInSessionRuntimeState(for process: RunningProcessRecord) -> TerminalSessionRuntimeState? {
         guard terminalHost(for: process.terminalApp) == .spaces else { return nil }
-        guard let sessionID = process.terminalNativeID ?? process.terminalTrackingID, !sessionID.isEmpty else { return nil }
+        guard let sessionID = process.terminalTrackingID, !sessionID.isEmpty else { return nil }
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
         return try? TerminalSessionPersistence.readRuntimeState(paths: paths)
     }
@@ -401,15 +401,15 @@ extension WorkspaceOrchestrator {
 
     func builtInTerminalSessionID(for process: RunningProcessRecord) -> String? {
         guard terminalHost(for: process.terminalApp) == .spaces else { return nil }
-        return normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
+        return normalizedTerminalSessionID(process.terminalTrackingID)
     }
 
     func builtInTerminalSessionID(for agent: AgentWindowRecord) -> String? {
         guard agent.provider == .spaces else { return nil }
-        return normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
+        return normalizedTerminalSessionID(agent.terminalTrackingID)
     }
 
-    func terminalSessionID(for window: WindowRecord) -> String? { normalizedTerminalSessionID(window.terminalNativeID ?? window.terminalTrackingID) }
+    func terminalSessionID(for window: WindowRecord) -> String? { normalizedTerminalSessionID(window.terminalTrackingID) }
 
     func normalizedTerminalSessionID(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
@@ -497,7 +497,6 @@ extension WorkspaceOrchestrator {
     func matchesTrackedTerminalWindow(_ window: WindowRecord, process: RunningProcessRecord) -> Bool {
         guard window.roleValue == .terminal, window.app == process.terminalApp else { return false }
         if window.id == process.id { return true }
-        if let terminalID = process.terminalNativeID, !terminalID.isEmpty, window.terminalNativeID == terminalID { return true }
         if let terminalID = process.terminalTrackingID, !terminalID.isEmpty, window.terminalTrackingID == terminalID { return true }
         return false
     }

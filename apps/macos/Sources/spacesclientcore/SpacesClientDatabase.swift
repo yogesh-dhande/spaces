@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 7
+    public static let currentVersion = 1
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -369,8 +369,8 @@ public final class SpacesClientDatabase {
         }
 
         guard var version = try schemaVersionValue() else {
-            try resetUnsupportedSchemaWithBackup(fromVersion: 0)
-            return
+            throw SpacesClientError.invalidArgument(
+                "Unsupported client database schema at \(databasePath): missing migration_state marker.")
         }
         guard version <= schemaVersion else {
             throw SpacesClientError.invalidArgument("Unsupported client database schema version \(version) at \(databasePath).")
@@ -391,20 +391,6 @@ public final class SpacesClientDatabase {
                     try setSchemaVersion(step.toVersion)
                 }
                 version = step.toVersion
-            }
-        } catch {
-            try restoreBackup(from: backupURL)
-            throw error
-        }
-    }
-
-    private func resetUnsupportedSchemaWithBackup(fromVersion: Int) throws {
-        let backupURL = try backupManager.createMigrationBackup(sourceHandle: db, fromVersion: fromVersion, toVersion: schemaVersion)
-        do {
-            try withImmediateTransaction {
-                try executeBatch(sql: Self.dropSchemaSQL)
-                try createSchema()
-                try setSchemaVersion(schemaVersion)
             }
         } catch {
             try restoreBackup(from: backupURL)
@@ -607,22 +593,6 @@ public final class SpacesClientDatabase {
             );
         """
 
-    private static let dropSchemaSQL = """
-            DROP TABLE IF EXISTS panel_windows;
-            DROP TABLE IF EXISTS workspace_panel_layouts;
-            DROP TABLE IF EXISTS browser_session_window_ids;
-            DROP TABLE IF EXISTS desktop_window_ids;
-            DROP TABLE IF EXISTS local_window_focus_state;
-            DROP TABLE IF EXISTS runtime_target_events;
-            DROP TABLE IF EXISTS browser_targets;
-            DROP TABLE IF EXISTS runtime_targets;
-            DROP TABLE IF EXISTS terminal_window_frames;
-            DROP TABLE IF EXISTS project_sidebar_state;
-            DROP TABLE IF EXISTS client_settings;
-            DROP TABLE IF EXISTS paired_devices;
-            DROP TABLE IF EXISTS migration_state;
-        """
-
     private static let clientStateSchemaSQL = """
             CREATE TABLE IF NOT EXISTS client_settings (
               key TEXT PRIMARY KEY,
@@ -678,32 +648,10 @@ public final class SpacesClientDatabase {
             );
         """
 
-    public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
-        SpacesClientMigrationStep(fromVersion: 1, toVersion: 2, description: "Add Mac client UI state") { database in
-            try executeClientBatch(database: database, sql: clientStateSchemaSQL)
-        }, SpacesClientMigrationStep(fromVersion: 2, toVersion: 3, description: "Reserve dropped desktop window IDs version") { _ in },
-        SpacesClientMigrationStep(fromVersion: 3, toVersion: 4, description: "Add client-owned browser session window IDs") { database in
-            try executeClientBatch(database: database, sql: browserSessionWindowIDsSchemaSQL)
-        }, SpacesClientMigrationStep(fromVersion: 4, toVersion: 5, description: "Reserve merged client schema version") { _ in },
-        SpacesClientMigrationStep(fromVersion: 5, toVersion: 6, description: "Add panel layouts") { database in
-            try executeClientBatch(database: database, sql: panelLayoutsSchemaSQL)
-        },
-        // Drops tables nothing reads or writes: terminal_window_frames is from the
-        // one-window-per-terminal era (panes in panel layouts replaced it), and the rest were
-        // scaffolded for the thin-client split before panes removed desktop window identity.
-        SpacesClientMigrationStep(fromVersion: 6, toVersion: 7, description: "Drop unused window tracking tables") { database in
-            try executeClientBatch(
-                database: database,
-                sql: """
-                    DROP TABLE IF EXISTS terminal_window_frames;
-                    DROP TABLE IF EXISTS runtime_target_events;
-                    DROP TABLE IF EXISTS browser_targets;
-                    DROP TABLE IF EXISTS runtime_targets;
-                    DROP TABLE IF EXISTS local_window_focus_state;
-                    DROP TABLE IF EXISTS desktop_window_ids;
-                    """)
-        },
-    ]
+    // Schema resets to version 1; there is no upgrade path from an older on-disk database (see
+    // `initializeSchema` — a database without a current `migration_state` marker fails closed
+    // instead of migrating or resetting). This stays empty until a version-2 step is introduced.
+    public static let defaultMigrationSteps: [SpacesClientMigrationStep] = []
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }
 }

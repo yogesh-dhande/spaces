@@ -621,7 +621,7 @@ import workspacecore
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, dir: value.dir, runtimePath: value.runtimePath, dirname: value.dirname, branch: value.branch,
+            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch,
             baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
             isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
@@ -682,18 +682,18 @@ import workspacecore
         switch type {
         case .`init`:
             try orchestrator.registerAgentWindow(
-                workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID, terminalNativeID: sessionID,
+                workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID,
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
         case .working, .blocked, .done:
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, codexThreadID: nil, terminalNativeID: sessionID,
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID,
                 label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal",
                 environmentKeys: environmentKeys)
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
             try orchestrator.handleAgentExit(
-                existingAgent, terminalNativeID: sessionID, eventType: type.rawValue, eventSource: "spaces_agent_signal",
+                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal",
                 environmentKeys: environmentKeys)
         }
         postAgentEventNotification()
@@ -703,7 +703,7 @@ import workspacecore
     private func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> AgentWindowRecord?
     {
         try orchestrator.agentWindows(workspaceID: workspaceID).first {
-            $0.provider == .spaces && ($0.terminalTrackingID == sessionID || $0.terminalNativeID == sessionID)
+            $0.provider == .spaces && $0.terminalTrackingID == sessionID
         }
     }
 

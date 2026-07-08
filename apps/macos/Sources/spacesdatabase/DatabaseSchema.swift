@@ -7,167 +7,15 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 12
+    public static let currentVersion = 1
 
-    public static let migrationSteps: [DatabaseMigrationStep] = [
-        DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Reset daemon-owned device schema", requiresBackup: true) { database in
-            try executeBatch(database: database, sql: destructiveResetSQL)
-        },
-        DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "Rename target_branch to base_branch", requiresBackup: false) { database in
-            try executeBatch(database: database, sql: "ALTER TABLE workspaces RENAME COLUMN target_branch TO base_branch")
-        },
-        DatabaseMigrationStep(fromVersion: 3, toVersion: 4, description: "Remove daemon project collapse state", requiresBackup: true) { database in
-            try executeBatch(
-                database: database,
-                sql: """
-                    CREATE TABLE projects_v4 (
-                      id TEXT PRIMARY KEY,
-                      name TEXT NOT NULL,
-                      dir TEXT NOT NULL UNIQUE,
-                      is_git INTEGER NOT NULL,
-                      default_branch TEXT,
-                      setup_script TEXT,
-                      stop_script TEXT
-                    );
-                    INSERT INTO projects_v4(id, name, dir, is_git, default_branch, setup_script, stop_script)
-                    SELECT id, name, dir, is_git, default_branch, setup_script, stop_script FROM projects;
-                    DROP TABLE projects;
-                    ALTER TABLE projects_v4 RENAME TO projects;
-                    DELETE FROM settings
-                    WHERE key IN (
-                      'app_editor',
-                      'gui_hotkey',
-                      'gui_command_palette_hotkey',
-                      'gui_leader_hotkey',
-                      'gui_alerts_shortcut',
-                      'gui_add_project_shortcut',
-                      'gui_add_workspace_shortcut',
-                      'gui_reload_shortcut',
-                      'gui_open_editor_shortcut',
-                      'gui_open_terminal_shortcut',
-                      'gui_open_finder_shortcut',
-                      'gui_open_settings_shortcut',
-                      'gui_next_shortcut',
-                      'gui_previous_shortcut',
-                      'gui_window_shortcut',
-                      'active_workspace_id',
-                      'window_focus_pulse_color',
-                      'window_focus_pulse_enabled'
-                    );
-                    """)
-        },
-        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Drop workspace title column", requiresBackup: true) { database in
-            try executeBatch(database: database, sql: "ALTER TABLE workspaces DROP COLUMN title")
-        },
-        // Desktop window IDs moved to the client database (client-owned, desktop-local). The
-        // daemon never has a desktop session, so this column was only ever written by the GUI.
-        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "Drop daemon-owned desktop window IDs", requiresBackup: true) { database in
-            try executeBatch(database: database, sql: "ALTER TABLE runtime_targets DROP COLUMN window_id;")
-        },
-        // Browser session windows moved to the client database (client-owned, desktop-local).
-        // The daemon never has a desktop session, so these extracted-window columns were only
-        // ever written by the GUI's former in-process orchestrator.
-        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "Drop daemon-owned browser extracted window IDs", requiresBackup: true) {
-            database in
-            try executeBatch(
-                database: database,
-                sql: """
-                    ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_window_valid;
-                    ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_window_id;
-                    ALTER TABLE workspace_browser_sessions DROP COLUMN extracted_target_url;
-                    """)
-        },
-        // Runtime-target events recorded a desktop window id alongside each event. Desktop window
-        // tracking is gone, so the column is never written; drop it to match the runtime model.
-        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "Drop runtime-target event window IDs", requiresBackup: true) { database in
-            try executeBatch(database: database, sql: "ALTER TABLE runtime_target_events DROP COLUMN window_id;")
-        },
-        DatabaseMigrationStep(fromVersion: 8, toVersion: 9, description: "Rename port tables and columns to service names", requiresBackup: true) {
-            database in
-            // Non-destructive rename of the per-workspace/project port tables to service-oriented
-            // names. Guarded by existence checks so it is a no-op on databases that already carry the
-            // service-named schema, while preserving all rows on databases created before the rename.
-            if try tableExists(database: database, table: "project_port_definitions") {
-                try executeBatch(database: database, sql: "ALTER TABLE project_port_definitions RENAME TO project_services;")
-            }
-            if try tableExists(database: database, table: "workspace_port_definitions") {
-                try executeBatch(database: database, sql: "ALTER TABLE workspace_port_definitions RENAME TO workspace_services;")
-            }
-            if try tableExists(database: database, table: "workspace_ports") {
-                try executeBatch(
-                    database: database,
-                    sql: """
-                        ALTER TABLE workspace_ports RENAME TO workspace_service_ports;
-                        ALTER TABLE workspace_service_ports RENAME COLUMN port_index TO service_index;
-                        ALTER TABLE workspace_service_ports RENAME COLUMN port_number TO port;
-                        ALTER TABLE workspace_service_ports RENAME COLUMN port_name TO service_name;
-                        ALTER TABLE workspace_service_ports RENAME COLUMN definition_id TO service_id;
-                        """)
-            }
-        },
-        // Manual terminal-session rename: stored separately from the launch-time title so
-        // Ghostty set_title-driven runtime title updates never clobber a user's rename.
-        DatabaseMigrationStep(fromVersion: 9, toVersion: 10, description: "Add terminal session user title", requiresBackup: false) { database in
-            try executeBatch(database: database, sql: "ALTER TABLE terminal_sessions ADD COLUMN user_title TEXT;")
-        },
-        // terminal_window_frames is from the one-window-per-terminal era (terminals render as
-        // panes inside client-owned panel layouts); runtime_target_events was only ever deleted
-        // from, never written or read. Nothing reads or writes either table.
-        DatabaseMigrationStep(fromVersion: 10, toVersion: 11, description: "Drop unused window frame and target event tables", requiresBackup: true) {
-            database in
-            try executeBatch(
-                database: database,
-                sql: """
-                    DROP TABLE IF EXISTS terminal_window_frames;
-                    DROP TABLE IF EXISTS runtime_target_events;
-                    """)
-        },
-        // Every terminal session is now workspace-owned (the CLI's `spaces terminal command`
-        // always resolves a workspace instead of creating a standalone session), so a NULL
-        // workspace_id can no longer happen going forward. Any surviving NULL rows are
-        // transient session records from before this change, not projects/workspaces, so
-        // dropping them is safe.
-        DatabaseMigrationStep(fromVersion: 11, toVersion: 12, description: "Require terminal sessions to carry a workspace", requiresBackup: true) {
-            database in
-            try executeBatch(
-                database: database,
-                sql: """
-                    CREATE TABLE terminal_sessions_v12 (
-                      session_id TEXT PRIMARY KEY,
-                      root_directory TEXT NOT NULL UNIQUE,
-                      backend TEXT NOT NULL,
-                      lifetime_policy TEXT NOT NULL,
-                      workspace_id TEXT NOT NULL,
-                      kind TEXT NOT NULL DEFAULT 'shell',
-                      title TEXT NOT NULL,
-                      user_title TEXT,
-                      working_directory TEXT NOT NULL,
-                      shell TEXT NOT NULL,
-                      command TEXT,
-                      created_at TEXT NOT NULL
-                    );
-                    INSERT INTO terminal_sessions_v12(
-                      session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title, working_directory, shell,
-                      command, created_at
-                    )
-                    SELECT session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title, working_directory, shell,
-                      command, created_at
-                    FROM terminal_sessions
-                    WHERE workspace_id IS NOT NULL;
-                    DROP TABLE terminal_sessions;
-                    ALTER TABLE terminal_sessions_v12 RENAME TO terminal_sessions;
-                    """)
-        },
-    ]
+    public static let migrationSteps: [DatabaseMigrationStep] = []
 
     static let terminalRemoteSessionStateSQL = """
             CREATE TABLE IF NOT EXISTS terminal_remote_session_states (
               session_id TEXT PRIMARY KEY,
               root_directory TEXT NOT NULL UNIQUE,
-              reason TEXT NOT NULL,
-              payload_json TEXT NOT NULL,
-              emitted_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              payload_json TEXT NOT NULL
             );
         """
 
@@ -182,8 +30,6 @@ public enum DatabaseSchema {
               provider TEXT NOT NULL,
               label TEXT,
               terminal_tracking_id TEXT,
-              terminal_native_id TEXT,
-              codex_thread_id TEXT,
               environment_keys_json TEXT NOT NULL,
               created_at TEXT NOT NULL,
               acknowledged_at TEXT
@@ -330,7 +176,6 @@ public enum DatabaseSchema {
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
               dir TEXT NOT NULL,
-              runtime_path TEXT NOT NULL,
               dirname TEXT,
               branch TEXT,
               base_branch TEXT,
@@ -445,7 +290,6 @@ public enum DatabaseSchema {
               app TEXT NOT NULL,
               tracking_id TEXT,
               order_index INTEGER NOT NULL,
-              created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
             );
@@ -453,7 +297,6 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS browser_targets (
               runtime_target_id TEXT PRIMARY KEY,
               target_url TEXT,
-              resolved_url TEXT,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE CASCADE
             );
 
@@ -480,10 +323,8 @@ public enum DatabaseSchema {
               event_type TEXT NOT NULL,
               source TEXT NOT NULL,
               message TEXT,
-              runtime_target_id TEXT,
               created_at TEXT NOT NULL,
-              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
-              FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
+              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
             );
 
             \(terminalSchemaSQL)
@@ -492,63 +333,4 @@ public enum DatabaseSchema {
               current_version INTEGER NOT NULL
             );
         """
-
-    static let destructiveResetSQL = """
-            PRAGMA foreign_keys = OFF;
-
-            DROP TABLE IF EXISTS terminal_agent_signal_events;
-            DROP TABLE IF EXISTS terminal_remote_session_states;
-            DROP TABLE IF EXISTS terminal_window_frames;
-            DROP TABLE IF EXISTS terminal_attachments;
-            DROP TABLE IF EXISTS terminal_clients;
-            DROP TABLE IF EXISTS terminal_runtime_states;
-            DROP TABLE IF EXISTS terminal_sessions;
-            DROP TABLE IF EXISTS agent_session_events;
-            DROP TABLE IF EXISTS runtime_target_events;
-            DROP TABLE IF EXISTS agent_sessions;
-            DROP TABLE IF EXISTS browser_targets;
-            DROP TABLE IF EXISTS runtime_targets;
-            DROP TABLE IF EXISTS ignored_worktrees;
-            DROP TABLE IF EXISTS settings;
-            DROP TABLE IF EXISTS running_processes;
-            DROP TABLE IF EXISTS workspace_agent_launchers;
-            DROP TABLE IF EXISTS workspace_browser_sessions;
-            DROP TABLE IF EXISTS workspace_processes;
-            DROP TABLE IF EXISTS workspace_settings;
-            DROP TABLE IF EXISTS workspace_port_definitions;
-            DROP TABLE IF EXISTS workspace_ports;
-            DROP TABLE IF EXISTS workspaces;
-            DROP TABLE IF EXISTS project_agent_launchers;
-            DROP TABLE IF EXISTS project_browser_sessions;
-            DROP TABLE IF EXISTS project_processes;
-            DROP TABLE IF EXISTS project_port_definitions;
-            DROP TABLE IF EXISTS projects;
-            DROP TABLE IF EXISTS compute_hosts;
-            DROP TABLE IF EXISTS migration_state;
-
-            PRAGMA foreign_keys = ON;
-
-            \(latestSchemaSQL)
-        """
-
-    private static func executeBatch(database: OpaquePointer, sql: String) throws {
-        var errorMessage: UnsafeMutablePointer<CChar>?
-        if sqlite3_exec(database, sql, nil, nil, &errorMessage) != SQLITE_OK {
-            let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(database))
-            if let errorMessage { sqlite3_free(errorMessage) }
-            throw SpacesDatabaseError.migrationFailed(message: message)
-        }
-    }
-
-    /// Whether a table exists, for migrations that must run conditionally. The table name is always a
-    /// hardcoded constant here, so interpolating it into the query carries no injection risk.
-    private static func tableExists(database: OpaquePointer, table: String) throws -> Bool {
-        var statement: OpaquePointer?
-        let sql = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '\(table)' LIMIT 1"
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw SpacesDatabaseError.migrationFailed(message: String(cString: sqlite3_errmsg(database)))
-        }
-        defer { sqlite3_finalize(statement) }
-        return sqlite3_step(statement) == SQLITE_ROW
-    }
 }
