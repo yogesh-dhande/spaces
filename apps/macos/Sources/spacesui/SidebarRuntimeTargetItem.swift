@@ -4,9 +4,9 @@ import spacesdevicecore
 import workspacecore
 
 /// One compact sidebar row for a focusable runtime target of a workspace. Items are
-/// derived from the same ordered target list the numbered shortcuts and window cycling
-/// use (`workspaceShortcutTargets`), so the sidebar order, ⌘-number hints, and cycle
-/// order always agree.
+/// derived from the same ordered target list the numbered shortcuts use
+/// (`workspaceShortcutTargets`). Window cycling uses the already-open subset of that
+/// order, so sidebar order, ⌘-number hints, and cycle identities stay aligned.
 struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// Stable per-target identity, using the cycle-cursor key scheme
     /// (e.g. `process:<id>`, `terminal:<sessionID>`, `browser:<url>`).
@@ -72,8 +72,7 @@ extension AppKitController {
                 canRun: false, canStop: row.canStop, canRestart: false, processID: nil, processKey: nil, processTemplateID: nil, agentID: nil,
                 launcherName: nil, launcherID: nil, browserTargetURL: nil)
         case .agent:
-            guard let agentWindow = target.agentWindow,
-                let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
+            guard let agentWindow = target.agentWindow, let row = detail.codingAgentRows.first(where: { ($0.agentID ?? $0.id) == agentWindow.id })
             else { return nil }
             return SidebarRuntimeTargetItem(
                 key: key, title: title ?? row.name, kind: .agent, runState: row.runState, shortcutIndex: shortcutIndex, sessionID: row.sessionID,
@@ -112,15 +111,14 @@ extension AppKitController {
     }
 
     /// Opens or focuses a sidebar runtime target through the same resolution pipeline the
-    /// numbered shortcuts, command palette, and window cycling use, so a sidebar click
+    /// numbered shortcuts, command palette, and cycle focus use, so a sidebar click
     /// behaves identically to those paths.
     func focusSidebarRuntimeTarget(workspaceID: String, key: String) {
         Task { @MainActor [weak self] in
             guard let self, let context = self.focusableWindowContext(workspaceID: workspaceID),
                 let target = context.targets.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == key })
             else { return }
-            let resolution = Self.windowShortcutTargetResolution(
-                target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+            let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
             guard let action = await self.executeWindowFocusResolution(resolution) else { return }
             self.hideAfterSuccessfulExternalWindowAction(action)
         }
@@ -132,8 +130,7 @@ extension AppKitController {
             guard let processKey = item.processKey else { return }
             runSidebarDeviceMutation(workspaceID: workspaceID) { device, clientApp in
                 try SpacesDeviceClient.runWorkspaceProcess(
-                    workspaceID: workspaceID, processKey: processKey, processTemplateID: item.processTemplateID, device: device,
-                    clientApp: clientApp)
+                    workspaceID: workspaceID, processKey: processKey, processTemplateID: item.processTemplateID, device: device, clientApp: clientApp)
             }
         case .agent, .agentLauncher:
             guard let launcherName = item.launcherName else { return }

@@ -278,7 +278,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
         host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID)
+            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID,
+            previousOverview: previousLocalSection?.overview)
         rebuildFlatSidebarData()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
@@ -315,16 +316,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// longer running, comparing the previous local-section runtime state against the just-fetched
     /// snapshot. This reload is the only channel through which the GUI learns about stop/archive
     /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
-    /// diff those externally-stopped workspaces would leave their dedicated Chrome tabs and the
+    /// diff those externally-stopped workspaces would leave their tracked Chrome tabs and the
     /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/archive handlers
     /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
     /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
     private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus]
+        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus], previousOverview: SpacesDeviceOverviewPayload?
     ) {
         guard let previous else { return }
         for workspaceID in Self.workspaceIDsTransitionedToNotRunning(previous: previous, current: current) {
-            host.closeLocalBrowserSessionWindows(workspaceID: workspaceID)
+            host.closeLocalBrowserSessionWindows(
+                workspaceID: workspaceID,
+                configuredBrowserSessionTargetURLs: AppKitController.browserSessionTargetURLs(workspaceID: workspaceID, overview: previousOverview))
         }
     }
 

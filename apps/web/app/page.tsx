@@ -71,8 +71,8 @@ type Shortcut = {
 // Accurate shortcuts mirror /docs/shortcuts. Leader (⌘⌥) is configurable.
 const navigateShortcuts: Shortcut[] = [
   { keys: "⌘⌥-", label: "Open the command palette" },
-  { keys: "⌘1–9", label: "Focus a workspace window by number" },
-  { keys: "⌘⌥]", label: "Next window — cycles workspaces when Spaces is frontmost" },
+  { keys: "⌘1–0", label: "Open or focus a workspace target by number" },
+  { keys: "⌘⌥]", label: "Next already-open workspace window" },
   { keys: "⌘⌥[", label: "Previous window" },
   { keys: "⌘⌥=", label: "Show or hide Spaces" },
 ];
@@ -158,9 +158,9 @@ const faqItems: FaqItem[] = [
             <span className="font-semibold text-foreground">
               If you keep your window count low.
             </span>{" "}
-            Spaces opens a dedicated window for every tab, terminal, and
-            editor instance so you can lay them out across your screens and
-            recall them on demand. The upside is speed and flexibility —
+            Spaces gives each browser session, terminal, and editor instance
+            a tracked focus target so you can lay them out across your screens
+            and recall them on demand. The upside is speed and flexibility —
             focusing a window takes 20–30 ms, versus 200 ms to a full second
             to reconcile and focus a specific tab in Chrome as you add or
             move them. It also lets you view any two windows side by side
@@ -367,7 +367,7 @@ export default function HomePage() {
               <Key>⌘⌥-</Key>
               <span className="text-line">·</span>
               <span>focus by number</span>
-              <Key>⌘1–9</Key>
+              <Key>⌘1–0</Key>
             </p>
           </div>
         </div>
@@ -544,7 +544,7 @@ export default function HomePage() {
               global command palette to pull any window across any workspace.
             </p>
             <p className="mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
-              <Key>⌘1–9</Key>
+              <Key>⌘1–0</Key>
               <span>focus</span>
               <Key>⌘⌥]</Key>
               <span>cycle</span>

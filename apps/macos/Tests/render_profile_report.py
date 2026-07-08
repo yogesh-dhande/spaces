@@ -151,6 +151,29 @@ def stat(row: dict[str, str], key: str) -> str:
     return value if value else "n/a"
 
 
+def delta_stat(latest: dict[str, str], previous: dict[str, str] | None, key: str) -> str:
+    if previous is None:
+        return "n/a"
+    latest_value = float(latest[key])
+    previous_value = float(previous[key])
+    delta = latest_value - previous_value
+    if previous_value == 0:
+        percent = "n/a"
+    else:
+        percent = f"{(delta / previous_value) * 100:+.1f}%"
+    return f"{delta:+.1f} ms ({percent})"
+
+
+def render_delta_summary(latest: dict[str, str], previous: dict[str, str] | None) -> str:
+    return (
+        "<p class=\"delta\">Latest vs previous: "
+        f"p50 <strong>{html.escape(delta_stat(latest, previous, 'p50_ms'))}</strong> · "
+        f"p95 <strong>{html.escape(delta_stat(latest, previous, 'p95_ms'))}</strong> · "
+        f"max <strong>{html.escape(delta_stat(latest, previous, 'max_ms'))}</strong>"
+        "</p>"
+    )
+
+
 def render_snapshot_row(label: str, row: dict[str, str] | None) -> str:
     if row is None:
         return "<tr><th>{}</th><td colspan=\"12\">No run yet</td></tr>".format(html.escape(label))
@@ -244,6 +267,7 @@ def render_report(rows: list[dict[str, str]], report_path: Path) -> None:
   <p class="meta">Host: <code>{html.escape(host_label(terminal_host))}</code> · Workspace scope: <code>{html.escape(workspace_scope)}</code></p>
   <p>{html.escape(metric_description(metric, terminal_host, workspace_scope))}</p>
   <p class="samples">Latest samples: <code>{html.escape(latest["samples_ms"])}</code></p>
+  {render_delta_summary(latest, previous)}
   <table>
     <thead>
       <tr>
@@ -331,6 +355,9 @@ def render_report(rows: list[dict[str, str]], report_path: Path) -> None:
     .samples {{
       margin-top: 0;
       overflow-wrap: anywhere;
+    }}
+    .delta {{
+      margin: 8px 0 0;
     }}
     table {{
       width: 100%;

@@ -320,7 +320,7 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(Set(workspaceOneWindows.map(\.windowID)), [11, 22])
         XCTAssertEqual(Set(workspaceOneWindows.map(\.targetURL)), ["http://localhost:3000", "http://localhost:4000"])
 
-        // Stopping a workspace clears all of its tracked browser windows, and only that workspace's.
+        // Stopping a workspace clears all of its tracked browser-session tab locations, and only that workspace's.
         try database.clearBrowserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1")
         XCTAssertTrue(try database.browserSessionWindowIDs(deviceID: deviceID, workspaceID: "ws-1").isEmpty)
         XCTAssertEqual(try database.browserSessionWindowID(deviceID: deviceID, workspaceID: "ws-2", targetURL: "http://localhost:3000"), 33)

@@ -29,7 +29,7 @@ export default function GettingStartedDocsPage() {
           <li>2. Add a project from a local directory or a Git URL.</li>
           <li>3. Create a workspace for the branch or task you&apos;re starting.</li>
           <li>4. Launch the workspace. Spaces starts its processes; browser sessions open when you focus them.</li>
-          <li>5. Focus any of the workspace&apos;s windows with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+1</code> through <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+9</code>, or cycle through them with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+alt+]</code> / <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+alt+[</code>.</li>
+          <li>5. Open or focus any of the workspace&apos;s ordered targets with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+1</code> through <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+0</code>, or cycle through already-open windows with <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+alt+]</code> / <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">cmd+alt+[</code>.</li>
         </ol>
       </article>
 

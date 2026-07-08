@@ -1,4 +1,6 @@
 import Testing
+import spacesclientcore
+import spacesdevicecore
 import workspacecore
 
 @testable import spacesui
@@ -431,6 +433,107 @@ import workspacecore
         #expect(shortcutTargets.first?.processKey == "api")
     }
 
+    @Test func cycleTargetsIncludeOnlyOpenBrowserWindowsAndOpenTerminalPanes() {
+        let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: cycleFilteringWorkspace())
+
+        let withoutOpenBrowser = AppKitController.cycleWindowTargets(
+            detail: detail, browserSessions: [], openTerminalSessionIDs: ["session-web", "session-agent"])
+        #expect(withoutOpenBrowser.map(\.kind) == [.process, .agent])
+        #expect(withoutOpenBrowser.map { AppKitController.cycleCursorKey(for: $0, detail: detail) } == ["process:process-web", "agent:agent-1"])
+
+        let withOpenBrowserAndShell = AppKitController.cycleWindowTargets(
+            detail: detail, browserSessions: [BrowserSession(name: "docs", url: "http://localhost:3000")],
+            openTerminalSessionIDs: ["session-web", "session-shell", "session-agent"])
+        #expect(withOpenBrowserAndShell.map(\.kind) == [.browser, .process, .window, .agent])
+        #expect(
+            withOpenBrowserAndShell.map { AppKitController.cycleCursorKey(for: $0, detail: detail) } == [
+                "browser:http://localhost:3000", "process:process-web", "terminal:session-shell", "agent:agent-1",
+            ])
+    }
+
+    @Test func browserSessionPrefixMatchingSkipsLongerSiblingTargets() {
+        let targetURL = "http://localhost:3000"
+        let siblingTargetURLs = AppKitController.browserSessionSiblingTargetURLs(
+            targetURL: targetURL,
+            targetURLs: ["http://localhost:3000", "http://localhost:3000/admin", "http://localhost:3000/admin"])
+
+        #expect(siblingTargetURLs == ["http://localhost:3000/admin"])
+        #expect(AppKitController.browserTabURL("http://localhost:3000/", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(AppKitController.browserTabURL("http://localhost:3000/docs", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(!AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(!AppKitController.browserTabURL("http://localhost:3000/admin/users", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
+    }
+
+    @Test func rootBrowserSessionDoesNotMatchOnlyOpenAdminSiblingTab() {
+        let rootURL = "http://localhost:3000"
+        let adminURL = "http://localhost:3000/admin"
+        let configuredTargetURLs = [rootURL, adminURL]
+        let openTabURLs = [adminURL]
+
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
+        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
+
+        #expect(!openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings) })
+        #expect(openTabURLs.contains { AppKitController.browserTabURL($0, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings) })
+    }
+
+    @Test func focusRequestsUseConfiguredBrowserSessionSiblingsForPrefixExclusion() {
+        let rootURL = "http://localhost:3000"
+        let adminURL = "http://localhost:3000/admin"
+        let workspace = SpacesDeviceWorkspaceSummary(
+            id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
+            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
+            config: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
+                SpacesDeviceBrowserSession(name: "root", url: rootURL), SpacesDeviceBrowserSession(name: "admin", url: adminURL),
+            ]))
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [workspace], sessions: [])
+
+        let targetURLs = AppKitController.browserSessionTargetURLs(workspaceID: "workspace", targetURL: rootURL, overview: overview)
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: targetURLs)
+
+        #expect(targetURLs == [rootURL, adminURL])
+        #expect(rootSiblings == [adminURL])
+        #expect(!AppKitController.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
+    }
+
+    @Test func trackedBrowserSessionTargetMatchingAcceptsTrailingSlashOnlyDifference() {
+        #expect(AppKitController.browserSessionTargetURL("http://localhost:3000/", matches: "http://localhost:3000"))
+        #expect(AppKitController.browserSessionTargetURL("http://localhost:3000", matches: "http://localhost:3000/"))
+        #expect(!AppKitController.browserSessionTargetURL("http://localhost:3000/admin", matches: "http://localhost:3000"))
+    }
+
+    @Test func teardownSiblingExclusionsIncludeConfiguredButUntrackedBrowserSessions() {
+        let rootURL = "http://localhost:3000"
+        let adminURL = "http://localhost:3000/admin"
+        let teardownTargetURLs = AppKitController.browserSessionTeardownTargetURLs(
+            configuredTargetURLs: [rootURL, adminURL], trackedTargetURLs: [rootURL])
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: teardownTargetURLs)
+
+        #expect(teardownTargetURLs == [rootURL, adminURL])
+        #expect(rootSiblings == [adminURL])
+        #expect(!AppKitController.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
+    }
+
+    @Test func numberedShortcutResolutionStillOpensUnopenedTargets() {
+        let workspace = cycleFilteringWorkspace()
+        let overview = SpacesDeviceOverviewPayload(
+            projects: [SpacesDeviceProjectSummary(id: "project", name: "Project", dir: "/tmp/project", isGitRepo: true, defaultBranch: "main")],
+            workspaces: [workspace], sessions: [])
+
+        #expect(
+            AppKitController.deviceWindowShortcutResolution(index: 1, selectedWorkspaceID: "workspace", overview: overview)
+                == .openURL(workspaceID: "workspace", targetURL: "http://localhost:3000"))
+        #expect(
+            AppKitController.deviceWindowShortcutResolution(index: 3, selectedWorkspaceID: "workspace", overview: overview)
+                == .runProcess(workspaceID: "workspace", processKey: "api", processTemplateID: "tpl-api"))
+        #expect(
+            AppKitController.deviceWindowShortcutResolution(index: 6, selectedWorkspaceID: "workspace", overview: overview)
+                == .runCodingAgent(workspaceID: "workspace", agentName: "codex", agentLauncherID: "launcher-codex"))
+    }
+
     @Test func doneAndWaitingAgentsRemainAlertsAttentionItems() {
         let agents = [
             AgentWindowRecord(
@@ -449,4 +552,37 @@ import workspacecore
         #expect(attentionAgents.map(\.id) == ["agent-waiting", "agent-done"])
     }
 
+    private func cycleFilteringWorkspace() -> SpacesDeviceWorkspaceSummary {
+        let config = SpacesDeviceWorkspaceConfig(
+            processes: [
+                SpacesDeviceProcessTemplate(id: "tpl-web", name: "web", command: "npm run dev"),
+                SpacesDeviceProcessTemplate(id: "tpl-api", name: "api", command: "npm run api"),
+            ], resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:3000")],
+            agentLaunchers: [
+                SpacesDeviceAgentLauncher(id: "launcher-claude", name: "claude", command: "claude"),
+                SpacesDeviceAgentLauncher(id: "launcher-codex", name: "codex", command: "codex"),
+            ])
+        return SpacesDeviceWorkspaceSummary(
+            id: "workspace", projectID: "project", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/tmp/project-feature",
+            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 3, config: config,
+            processRows: [
+                SpacesDeviceWorkspaceProcessRow(
+                    id: "row-web", workspaceID: "workspace", name: "web", command: "npm run dev", templateID: "tpl-web", processID: "process-web",
+                    sessionID: "session-web", runState: .running, canRun: false, canStop: true, canRestart: true),
+                SpacesDeviceWorkspaceProcessRow(
+                    id: "row-api", workspaceID: "workspace", name: "api", command: "npm run api", templateID: "tpl-api", processID: nil,
+                    sessionID: nil, runState: .notStarted, canRun: true, canStop: false, canRestart: false),
+            ],
+            codingAgentRows: [
+                SpacesDeviceWorkspaceCodingAgentRow(
+                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", launcherID: "launcher-claude", agentID: "agent-1",
+                    sessionID: "session-agent", isConfigured: true, runState: .running, activityState: .idle, canRun: false, canStop: true,
+                    canRestart: true)
+            ],
+            terminalRows: [
+                SpacesDeviceWorkspaceTerminalRow(
+                    id: "row-shell", workspaceID: "workspace", title: "shell", workingDirectory: "/tmp/project-feature", sessionID: "session-shell",
+                    runState: .running, canOpenTerminal: true, canStop: true)
+            ])
+    }
 }

@@ -107,12 +107,13 @@ private struct E2EScenarioDescriptor: Sendable {
             name: "full", kind: .script(scriptName: "e2e_macos_app.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: true) })),
         E2EScenarioDescriptor(
             name: "smoke",
-            kind: .script(
-                scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: { $0.remoteEnvironment(enabled: false) })),
+            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: { $0.appProfileEnvironment() })),
         E2EScenarioDescriptor(
             name: "window-cycle",
-            kind: .script(
-                scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: { $0.remoteEnvironment(enabled: false) })),
+            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-profile"], environment: { $0.appProfileEnvironment() })),
+        E2EScenarioDescriptor(
+            name: "window-cycle-small",
+            kind: .script(scriptName: "e2e_macos_app.sh", arguments: ["--only-window-cycle-small"], environment: { $0.appProfileEnvironment() })),
     ]
 
     fileprivate static let terminal: [E2EScenarioDescriptor] = [
@@ -390,6 +391,12 @@ private struct E2ERunner {
         return environment
     }
 
+    fileprivate func appProfileEnvironment() -> [String: String] {
+        var environment = remoteEnvironment(enabled: false)
+        if let samples = command.samples { environment["REAL_SYSTEM_PROFILE_REPETITIONS"] = String(samples) }
+        return environment
+    }
+
     private func deviceAPIEnvironment(remote: Bool) -> [String: String] {
         var environment = remoteEnvironment(enabled: remote)
         if let samples = command.samples { environment["SPACES_E2E_DEVICE_TERMINAL_LATENCY_SAMPLES"] = String(samples) }
@@ -582,11 +589,11 @@ private struct E2ERunner {
         let ext = url.pathExtension.lowercased()
         if [
             "metrics.json", "summary.txt", "terminal-latency-summary.json", "result.json", "metrics.log", "results.log", "events.log", "debug.log",
-            "perf.log",
+            "perf.log", "metrics-history.csv", "report.html",
         ].contains(name) {
             return true
         }
-        if ext == "jsonl" || ext == "tsv" { return true }
+        if ext == "csv" || ext == "html" || ext == "jsonl" || ext == "tsv" { return true }
         if ext == "json", name.hasSuffix("-summary.json") || name.hasSuffix("-result.json") || name.contains("parity") { return true }
         return false
     }

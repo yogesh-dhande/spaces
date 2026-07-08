@@ -894,7 +894,7 @@ public final class WorkspaceOrchestrator {
                 skippedStopScriptBecauseWorkspaceDirectoryMissing = true
             }
         }
-        // Browser windows are client-owned (the app tracks each session's Chrome window) and
+        // Browser tabs are client-owned (the app tracks each session's Chrome window) and
         // are never closed by the daemon on stop; only Spaces-managed terminal sessions are
         // terminated by session id here.
         for window in windows where window.roleValue == .terminal && isManagedTerminalApp(window.app) {

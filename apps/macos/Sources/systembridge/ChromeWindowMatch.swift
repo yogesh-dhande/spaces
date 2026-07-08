@@ -13,3 +13,13 @@ public struct ChromeWindowMatch: Sendable {
         self.url = url
     }
 }
+
+public struct ChromeTabSnapshot: Sendable {
+    public let tabs: [ChromeWindowMatch]
+    public let frontmostActiveTabURL: String?
+
+    public init(tabs: [ChromeWindowMatch], frontmostActiveTabURL: String?) {
+        self.tabs = tabs
+        self.frontmostActiveTabURL = frontmostActiveTabURL
+    }
+}

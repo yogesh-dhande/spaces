@@ -35,7 +35,7 @@ extension AppKitController {
             case .guiOpenTerminalShortcut: return "New terminal"
             case .guiOpenFinderShortcut: return "Open Finder"
             case .guiOpenSettingsShortcut: return "Open settings"
-            case .guiWindowShortcut: return "Focus window 1-9"
+            case .guiWindowShortcut: return "Focus window 1-0"
             }
         }
 

@@ -28,7 +28,7 @@ import workspacecore
 
     var dismissedAlertsAttentionItemIDs: Set<String> = []
     var alertsShortcutSpec: HotkeySpec?
-    /// Maps sequential window shortcut numbers (1-9) to focus targets for the current Alerts view.
+    /// Maps sequential window shortcut numbers (1-10, shown as 1-0) to focus targets for the current Alerts view.
     private var alertsFocusRequestMap: [Int: WindowFocusRequest] = [:]
 
     func alertsFocusRequest(for index: Int) -> WindowFocusRequest? { alertsFocusRequestMap[index] }
