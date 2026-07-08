@@ -304,7 +304,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                         TerminalPerformance.logMetric(
                             "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
                             elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=control_response")
-                        self.updateInputStatus(message: response.message, isError: true)
+                        self.finishFailedTakeoverAttempt(id: attemptID, message: response.message)
                         return
                     }
                     self.ownerAttachmentRequested = true
@@ -325,15 +325,26 @@ private final class NotificationObserverBag: @unchecked Sendable {
             } catch {
                 await MainActor.run {
                     guard self.takeoverAttemptID == attemptID else { return }
-                    self.clearTakeoverAttempt(id: attemptID)
                     TerminalPerformance.logMetric(
                         "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
-                    self.updateInputStatus(message: String(describing: error), isError: true)
+                    self.finishFailedTakeoverAttempt(id: attemptID, message: String(describing: error))
                 }
             }
         }
         refreshNow(allowGhosttyOwnerAttach: false)
+    }
+
+    private func finishFailedTakeoverAttempt(id: UUID, message: String) {
+        guard takeoverAttemptID == id else { return }
+        clearTakeoverAttempt(id: id)
+        let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
+        if activeOwnerClient(snapshot: attachmentSnapshot)?.id != client.id {
+            ownerAttachmentRequested = false
+            preferredAttachmentMode = activeAttachment(snapshot: attachmentSnapshot)?.mode ?? .viewer
+        }
+        refreshNow(allowGhosttyOwnerAttach: false)
+        updateInputStatus(message: message, isError: true)
     }
 
     private func clearTakeoverAttempt(id: UUID) {

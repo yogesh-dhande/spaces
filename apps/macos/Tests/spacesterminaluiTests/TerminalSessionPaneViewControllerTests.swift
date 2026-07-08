@@ -1236,6 +1236,58 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(fakeHost.attachedModes.last, .owner)
     }
 
+    @MainActor func testOwnerSeekingPaneRestoresTakeoverControlsAfterFailedOwnerRequest() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-owner-seeking-failed-takeover"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-seeking", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            takeoverAction: { _ in TerminalControlResponse(ok: false, message: "Takeover denied.") }, detachClientAction: { _ in })
+
+        controller.showEmbedded(focus: true)
+
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+        XCTAssertTrue(controller.debugShowsTakeoverButton)
+        XCTAssertTrue(controller.debugTakeoverEnabled)
+
+        controller.requestOwnershipIfNeeded()
+        XCTAssertTrue(controller.debugTakeoverPending)
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            if !controller.debugTakeoverPending { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+
+        XCTAssertFalse(controller.debugTakeoverPending)
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+        XCTAssertTrue(controller.debugShowsTakeoverMessage)
+        XCTAssertTrue(controller.debugShowsTakeoverButton)
+        XCTAssertTrue(controller.debugTakeoverEnabled)
+        XCTAssertEqual(controller.debugInputStatus, "Takeover denied.")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
+    }
+
     @MainActor func testTakeoverRetrySupersedesStalePendingAttempt() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
