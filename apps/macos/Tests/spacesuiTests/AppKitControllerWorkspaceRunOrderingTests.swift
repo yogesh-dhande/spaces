@@ -505,6 +505,18 @@ import workspacecore
         #expect(!AppKitController.browserSessionTargetURL("http://localhost:3000/admin", matches: "http://localhost:3000"))
     }
 
+    @Test func teardownSiblingExclusionsIncludeConfiguredButUntrackedBrowserSessions() {
+        let rootURL = "http://localhost:3000"
+        let adminURL = "http://localhost:3000/admin"
+        let teardownTargetURLs = AppKitController.browserSessionTeardownTargetURLs(
+            configuredTargetURLs: [rootURL, adminURL], trackedTargetURLs: [rootURL])
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: teardownTargetURLs)
+
+        #expect(teardownTargetURLs == [rootURL, adminURL])
+        #expect(rootSiblings == [adminURL])
+        #expect(!AppKitController.browserTabURL(adminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings))
+    }
+
     @Test func numberedShortcutResolutionStillOpensUnopenedTargets() {
         let workspace = cycleFilteringWorkspace()
         let overview = SpacesDeviceOverviewPayload(

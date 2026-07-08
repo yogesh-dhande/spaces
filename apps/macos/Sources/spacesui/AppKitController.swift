@@ -952,6 +952,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             resolvedSessions: overview.flatMap { workspaceDetail(workspaceID, in: $0)?.config.resolvedBrowserSessions } ?? [], including: targetURL)
     }
 
+    nonisolated static func browserSessionTargetURLs(workspaceID: String, overview: SpacesDeviceOverviewPayload?) -> [String] {
+        browserSessionTargetURLs(resolvedSessions: overview.flatMap { workspaceDetail(workspaceID, in: $0)?.config.resolvedBrowserSessions } ?? [])
+    }
+
+    nonisolated static func browserSessionTeardownTargetURLs(configuredTargetURLs: [String], trackedTargetURLs: [String]) -> [String] {
+        uniqueBrowserSessionTargetURLs(configuredTargetURLs + trackedTargetURLs)
+    }
+
     nonisolated private static func uniqueBrowserSessionTargetURLs(_ values: [String]) -> [String] {
         var seen = Set<String>()
         return values.filter { !$0.isEmpty && seen.insert($0).inserted }
@@ -7511,6 +7519,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func restartWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performRestartWorkspace(id: id) } }
 
     private func performRestartWorkspace(id: String) async {
+        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         let result: Result<SpacesDeviceAPIResponse, Error>?
         if let device = deviceForWorkspaceMutation(workspaceID: id) {
             result = await Self.deviceMutation(device: device) { device in
@@ -7526,7 +7535,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // Restart goes through the daemon stop path; the daemon does not own the
                 // client-side Chrome browser-session tabs, so close them here too for a clean
                 // restarted state (a later browser focus then opens fresh tabs).
-                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
@@ -7547,6 +7556,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func stopWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performStopWorkspace(id: id) } }
 
     private func performStopWorkspace(id: String) async {
+        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         let result: Result<SpacesDeviceAPIResponse, Error>?
         if let device = deviceForWorkspaceMutation(workspaceID: id) {
             result = await Self.deviceMutation(device: device) { device in
@@ -7559,7 +7569,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let result {
             switch result {
             case .success(let response):
-                self.closeLocalBrowserSessionWindows(workspaceID: id)
+                self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
@@ -7578,7 +7588,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// transition diff (the net for stop/archive initiated outside this GUI — CLI, MCP, the Device
     /// API, or another device). Idempotent: it clears the tracking rows, so a later reload that
     /// re-observes the same stopped workspace finds nothing to close.
-    func closeLocalBrowserSessionWindows(workspaceID: String) {
+    func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
         Task.detached(priority: .utility) {
             let store = ClientBrowserWindowIDStore()
             guard let tracked = try? store.windowIDs(workspaceID: workspaceID), !tracked.isEmpty else { return }
@@ -7591,14 +7601,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // other tabs the user opened, and a tracked id can be stale (Chrome reuses window
                 // ids after a restart) so the URL must still match.
                 let trackedTargetURLs = tracked.map(\.targetURL)
+                let teardownTargetURLs = AppKitController.browserSessionTeardownTargetURLs(
+                    configuredTargetURLs: configuredBrowserSessionTargetURLs, trackedTargetURLs: trackedTargetURLs)
                 for entry in tracked {
                     _ = try? chrome.closeMatchingTabsInWindow(
                         windowID: entry.windowID, urlPrefix: entry.targetURL,
-                        excludingURLPrefixes: Self.browserSessionSiblingTargetURLs(targetURL: entry.targetURL, targetURLs: trackedTargetURLs))
+                        excludingURLPrefixes: AppKitController.browserSessionSiblingTargetURLs(
+                            targetURL: entry.targetURL, targetURLs: teardownTargetURLs))
                 }
             }
             try? store.clearAll(workspaceID: workspaceID)
         }
+    }
+
+    private func configuredBrowserSessionTargetURLsForTeardown(workspaceID: String) -> [String] {
+        Self.browserSessionTargetURLs(workspaceID: workspaceID, overview: overview(forWorkspaceID: workspaceID))
     }
 
     @objc private func archiveWorkspace(_ sender: Any) {
@@ -7639,6 +7656,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deleteLocalBranch = project.isGitRepo && deleteLocalBranchCheckbox.state == .on
         let deleteRemoteBranch = project.isGitRepo && deleteRemoteBranchCheckbox.state == .on
         let button = sender as? NSButton
+        let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         // Resolve the owning device before the optimistic removal below; once the row
         // is gone from workspacesByProject, deviceForWorkspaceMutation can no longer
         // find it and would fall back to the local device, misrouting remote archives.
@@ -7659,7 +7677,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 switch result {
                 case .success(let response):
                     button?.isEnabled = true
-                    self.closeLocalBrowserSessionWindows(workspaceID: id)
+                    self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     applyDeviceMutationResponse(response, selectedProjectID: project.id)
                 case .failure(let error):
                     requestSidebarReload()

@@ -278,7 +278,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
         host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID)
+            previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID,
+            previousOverview: previousLocalSection?.overview)
         rebuildFlatSidebarData()
         host.loadAlertsDismissedAttentionItemIDs()
         host.pruneDismissedAlertsAttentionItemIDsIfNeeded()
@@ -320,11 +321,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
     /// workspace stopped through the GUI that also surfaces here closes nothing the second time.
     private func tearDownBrowserSessionsForLocallyStoppedWorkspaces(
-        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus]
+        previous: [String: WorkspaceRuntimeStatus]?, current: [String: WorkspaceRuntimeStatus], previousOverview: SpacesDeviceOverviewPayload?
     ) {
         guard let previous else { return }
         for workspaceID in Self.workspaceIDsTransitionedToNotRunning(previous: previous, current: current) {
-            host.closeLocalBrowserSessionWindows(workspaceID: workspaceID)
+            host.closeLocalBrowserSessionWindows(
+                workspaceID: workspaceID,
+                configuredBrowserSessionTargetURLs: AppKitController.browserSessionTargetURLs(workspaceID: workspaceID, overview: previousOverview))
         }
     }
 
