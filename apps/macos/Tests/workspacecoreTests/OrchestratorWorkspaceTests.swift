@@ -56,6 +56,47 @@ extension OrchestratorTests {
         XCTAssertEqual(try orchestrator.workspacePorts(workspaceID: workspace.id).count, 0)
     }
 
+    func testStopWorkspaceSemanticsClearRunningRuntimeRowsAndAdHocTerminalWindows() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let project = makeProjectRecord(dir: projectDir.path)
+        let workspace = WorkspaceRecord(
+            id: "workspace-stop-all-quit", projectID: project.id, dir: projectDir.path, dirname: nil, branch: nil, isDefault: true, isArchived: false,
+            isRunning: true, lastLaunchedAt: "2026-07-01T00:00:00Z")
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "process-web", workspaceID: workspace.id, templateName: "web", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
+                terminalTrackingID: "session-process", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-07-01T00:00:01Z",
+                exitedAt: nil))
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-agent",
+                codexThreadID: nil, status: .idle, createdAt: "2026-07-01T00:00:02Z", updatedAt: "2026-07-01T00:00:02Z"))
+        try store.upsert(
+            window: WindowRecord(
+                id: "terminal-ad-hoc", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Shell",
+                terminalTrackingID: "session-shell", terminalNativeID: "session-shell", role: .terminal, orderIndex: 300,
+                lastSeenAt: "2026-07-01T00:00:03Z"))
+        let closed = TerminalCloseCapture()
+        let terminated = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowCloser: { closed.sessionIDs.append($0) },
+            builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+
+        try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isRunning)
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(Set(closed.sessionIDs), ["session-process", "session-agent", "session-shell"])
+        XCTAssertEqual(Set(terminated.sessionIDs), ["session-process", "session-agent", "session-shell"])
+    }
+
     // Tests create workspace rejects directory name override for non git project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceRejectsDirectoryNameOverrideForNonGitProject() throws {
         let root = try makeTempDirectory()

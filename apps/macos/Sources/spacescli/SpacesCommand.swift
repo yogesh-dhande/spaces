@@ -335,7 +335,7 @@ func availableTerminalSessionRows(fileManager: FileManager = .default) throws ->
 }
 
 struct TerminalCommandCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start a background terminal session in a workspace.")
+    static let configuration = CommandConfiguration(commandName: "command", abstract: "Start an ad hoc terminal session in a workspace.")
 
     @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
 

@@ -213,6 +213,93 @@ extension OrchestratorTests {
         XCTAssertEqual(terminalWindow.terminalTrackingID, terminalWindow.terminalNativeID)
     }
 
+    func testCreateWorkspaceTerminalSessionCreatesAdHocWorkspaceTerminalRowAndStopsWithWorkspace() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let launchCapture = TerminalLaunchConfigurationCapture()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store,
+            builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
+            builtInTerminalSessionLauncher: { configuration in
+                launchCapture.append(configuration)
+                return TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123,
+                    childPID: 456, controlSocketPath: "/tmp/control-\(configuration.sessionID)",
+                    outputPath: "/tmp/output-\(configuration.sessionID)", launchConfiguration: configuration)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspace.id, title: nil, command: "echo hello")
+
+        let launchConfiguration = try XCTUnwrap(launchCapture.snapshot().first)
+        XCTAssertEqual(launchConfiguration.sessionID, session.id)
+        XCTAssertEqual(launchConfiguration.workspaceID, workspace.id)
+        XCTAssertEqual(launchConfiguration.kind, .shell)
+        XCTAssertEqual(launchConfiguration.title, "shell-1")
+        XCTAssertTrue(launchConfiguration.command?.contains("echo hello") == true)
+        let terminalWindow = try XCTUnwrap(try store.windows(workspaceID: workspace.id).first)
+        XCTAssertEqual(terminalWindow.app, TerminalHost.spaces.appName)
+        XCTAssertEqual(terminalWindow.name, "shell-1")
+        XCTAssertEqual(terminalWindow.role, "terminal")
+        XCTAssertEqual(terminalWindow.terminalTrackingID, session.id)
+        XCTAssertEqual(terminalWindow.terminalNativeID, session.id)
+        XCTAssertTrue(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+
+        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertEqual(terminateCapture.sessionIDs, [session.id])
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+    }
+
+    func testStopWorkspaceTerminatesLaunchOwnedAdHocTerminalSessionWithoutWindowRow() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store,
+            builtInTerminalSessionTerminator: { sessionID in
+                terminateCapture.sessionIDs.append(sessionID)
+                guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+                    let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+                else { return }
+                try? TerminalSessionPersistence.writeRuntimeState(
+                    TerminalSessionRuntimeState(
+                        sessionID: sessionID, backend: runtimeState.backend, servicePID: runtimeState.servicePID,
+                        childPID: runtimeState.childPID, state: .exited, updatedAt: "2026-06-06T00:00:01Z",
+                        exitedAt: "2026-06-06T00:00:01Z", title: runtimeState.title, workingDirectory: runtimeState.workingDirectory,
+                        columns: runtimeState.columns, rows: runtimeState.rows, foregroundPID: runtimeState.foregroundPID,
+                        foregroundExecutablePath: runtimeState.foregroundExecutablePath,
+                        foregroundExecutableName: runtimeState.foregroundExecutableName, foregroundArgv: runtimeState.foregroundArgv,
+                        foregroundDetectedAgentKind: runtimeState.foregroundDetectedAgentKind,
+                        foregroundDisplayLabel: runtimeState.foregroundDisplayLabel,
+                        foregroundDisplayCommand: runtimeState.foregroundDisplayCommand),
+                    paths: paths)
+            })
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "launch-owned-shell"
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-06-06T00:00:00Z")
+        try writeTerminalSessionFixture(
+            sessionID: sessionID, workspace: workspace, kind: .shell,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 456,
+                state: .running, updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir))
+
+        _ = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(try store.workspace(id: workspace.id)).isRunning)
+    }
+
     func testWorkspaceIDForTerminalSessionUsesTrackedBuiltInSessionID() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)

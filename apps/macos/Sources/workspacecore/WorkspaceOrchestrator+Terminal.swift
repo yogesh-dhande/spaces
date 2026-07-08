@@ -346,6 +346,34 @@ extension WorkspaceOrchestrator {
         builtInTerminalSessionTerminator(sessionID)
     }
 
+    func liveAdHocBuiltInTerminalSessionIDs(workspaceID: String) throws -> [String] {
+        guard let workspace = try store.workspace(id: workspaceID) else { return [] }
+        let liveSessions: [TerminalSessionCatalogEntry]
+        do {
+            liveSessions = try TerminalSessionCatalog.listLiveSessions()
+        } catch {
+            // This sweep is only for untracked shells; tracked process and agent sessions
+            // have already been handled, so catalog errors must not leave stop half-applied.
+            if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
+                Self.writeStandardError("spaces: unable to enumerate ad-hoc terminal sessions during workspace stop: \(error.localizedDescription)\n")
+            }
+            return []
+        }
+        var sessionIDs: [String] = []
+        var seen = Set<String>()
+        for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
+            let sessionID = session.sessionID
+            let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+            guard !builtInTerminalSessionHasConfiguredOwner(ownership) else { continue }
+            let ownedWorkspaceID = ownership.terminalWindowWorkspaceID ?? ownership.launchWorkspaceID
+            guard ownedWorkspaceID == workspaceID || (ownedWorkspaceID == nil && terminalSession(sessionID: sessionID, belongsTo: workspace)) else {
+                continue
+            }
+            if seen.insert(sessionID).inserted { sessionIDs.append(sessionID) }
+        }
+        return sessionIDs
+    }
+
     func terminateBuiltInTerminalSessionsForConfiguredProcesses(workspaceID: String) throws {
         for process in try store.runningProcesses(workspaceID: workspaceID) { terminateBuiltInTerminalSession(for: process) }
     }
