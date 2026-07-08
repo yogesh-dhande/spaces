@@ -1,13 +1,13 @@
 import Testing
-import workspacecore
+import spacesclientcore
 
 @testable import spacesui
 
 @Suite struct CommandPaletteShortcutSettingTests {
-    @Test func commandPaletteShortcutSettingMapsToWorkspacecoreKey() {
-        #expect(AppKitController.ShortcutSetting(settingKey: SettingsKey.guiCommandPaletteHotkey) == .guiCommandPaletteHotkey)
-        #expect(AppKitController.ShortcutSetting.guiCommandPaletteHotkey.settingKey == SettingsKey.guiCommandPaletteHotkey)
-        #expect(AppKitController.ShortcutSetting.guiCommandPaletteHotkey.defaultSpec == SettingsKey.defaultGUICommandPaletteHotkey)
+    @Test func commandPaletteShortcutSettingMapsToClientSettingsKey() {
+        #expect(AppKitController.ShortcutSetting(settingKey: ClientSettingsKey.guiCommandPaletteHotkey) == .guiCommandPaletteHotkey)
+        #expect(AppKitController.ShortcutSetting.guiCommandPaletteHotkey.settingKey == ClientSettingsKey.guiCommandPaletteHotkey)
+        #expect(AppKitController.ShortcutSetting.guiCommandPaletteHotkey.defaultSpec == ClientSettingsKey.defaultGUICommandPaletteHotkey)
     }
 
     @Test func commandPaletteShortcutAppearsInSettingsPanel() {
@@ -44,7 +44,7 @@ import workspacecore
     }
 
     @Test func shortcutLeaderSettingRequiresAtLeastTwoModifiers() throws {
-        let resolver = AppKitController.ShortcutSettingResolver { key in key == SettingsKey.guiLeaderHotkey ? "ctrl" : nil }
+        let resolver = AppKitController.ShortcutSettingResolver { key in key == ClientSettingsKey.guiLeaderHotkey ? "ctrl" : nil }
         do {
             _ = try resolver.normalizedValue(for: .guiLeaderHotkey, rawValue: "ctrl")
             Issue.record("expected single-modifier leader to be rejected")

@@ -14,7 +14,6 @@ final class SpacesDeviceTests: XCTestCase {
         try store.upsert(workspace: workspace)
 
         let storedWorkspace = try XCTUnwrap(try store.workspace(id: workspace.id))
-        XCTAssertEqual(storedWorkspace.deviceID, SpacesDeviceRecord.localDeviceID)
         XCTAssertEqual(storedWorkspace.runtimePath, workspace.runtimePath)
         XCTAssertEqual(storedWorkspace.branch, workspace.branch)
     }
@@ -51,23 +50,15 @@ final class SpacesDeviceTests: XCTestCase {
         XCTAssertEqual(Set(try store.workspaces(projectID: project.id, includeArchived: true).map(\.id)), ["workspace-active", "workspace-archived"])
     }
 
-    func testPlannerTargetsLocalDeviceDaemon() throws {
+    func testPlannerBuildsRuntimeManifest() throws {
         let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
             id: "workspace", projectID: project.id, dir: "/project/.worktrees/feature", runtimePath: "/srv/spaces/project/feature", dirname: nil,
             branch: "feature", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
 
-        let selection = SpacesDevicePlanner.selectDevice(
-            project: project, workspace: workspace, devicesByID: [SpacesDeviceRecord.localDeviceID: .local()])
-        let daemonTarget = SpacesDevicePlanner.daemonTarget(selection: selection, localSocketPath: "/tmp/spacesd.sock")
         let manifest = SpacesDevicePlanner.runtimeManifest(
-            project: project, workspace: workspace, selection: selection,
-            namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)])
+            project: project, workspace: workspace, namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)])
 
-        XCTAssertEqual(selection, .local(SpacesDeviceRecord.local()))
-        XCTAssertEqual(daemonTarget.deviceID, SpacesDeviceRecord.localDeviceID)
-        XCTAssertEqual(daemonTarget.socketPath, "/tmp/spacesd.sock")
-        XCTAssertEqual(manifest.deviceID, SpacesDeviceRecord.localDeviceID)
         XCTAssertEqual(manifest.localPath, workspace.runtimePath)
         XCTAssertEqual(manifest.processEnvironment["SPACES_WEB_PORT"], "3000")
         let slug = try XCTUnwrap(manifest.processEnvironment["SPACES_WORKSPACE_SLUG"])
