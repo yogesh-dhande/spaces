@@ -37,13 +37,13 @@ import workspacecore
         #expect(sessions.isEmpty)
     }
 
-    @Test func stopAllQuitSelectionMapsLiveSessionsToUniqueLocalWorkspaceIDs() throws {
+    @Test func stopAllQuitSelectionMapsLiveSessionsToUniqueWorkspaceIDs() throws {
         let runningWorkspace = Self.workspaceRecord(id: "workspace-running", isRunning: true)
         let stoppedWorkspaceWithSession = Self.workspaceRecord(id: "workspace-session", isRunning: false)
-        let remoteWorkspaceWithSession = Self.workspaceRecord(id: "remote-workspace-session", deviceID: "remote-device", isRunning: false)
+        let secondStoppedWorkspaceWithSession = Self.workspaceRecord(id: "workspace-session-b", isRunning: false)
         let sessions = [
             Self.terminalSessionSummary(id: "session-owned-a"), Self.terminalSessionSummary(id: "session-owned-b"),
-            Self.terminalSessionSummary(id: "session-remote"),
+            Self.terminalSessionSummary(id: "session-owned-c"),
         ]
 
         let selection = try AppKitController.stopAllQuitWorkspaceSelection(runningWorkspaces: [runningWorkspace], liveSessions: sessions) {
@@ -51,13 +51,13 @@ import workspacecore
             switch sessionID {
             case "session-owned-a": stoppedWorkspaceWithSession
             case "session-owned-b": runningWorkspace
-            case "session-remote": remoteWorkspaceWithSession
+            case "session-owned-c": secondStoppedWorkspaceWithSession
             default: nil
             }
         }
 
-        #expect(selection.workspaceIDs == ["workspace-running", "workspace-session"])
-        #expect(selection.associatedLiveSessionIDs == ["session-owned-a", "session-owned-b", "session-remote"])
+        #expect(selection.workspaceIDs == ["workspace-running", "workspace-session", "workspace-session-b"])
+        #expect(selection.associatedLiveSessionIDs == ["session-owned-a", "session-owned-b", "session-owned-c"])
     }
 
     @Test func stopAllQuitCleanupMappingFailureRequiresFailureChoice() {
@@ -225,12 +225,10 @@ import workspacecore
             servicePID: 123, childPID: 456, controlSocketPath: "/tmp/\(id).sock", outputPath: "/tmp/\(id).log")
     }
 
-    private static func workspaceRecord(id: String, deviceID: String = SpacesDeviceRecord.localDeviceID, isArchived: Bool = false, isRunning: Bool)
-        -> WorkspaceRecord
-    {
+    private static func workspaceRecord(id: String, isArchived: Bool = false, isRunning: Bool) -> WorkspaceRecord {
         WorkspaceRecord(
-            id: id, projectID: "project-\(id)", deviceID: deviceID, dir: "/tmp/\(id)", dirname: nil, branch: nil, isDefault: false,
-            isArchived: isArchived, isRunning: isRunning, lastLaunchedAt: isRunning ? "2026-07-01T00:00:00Z" : nil)
+            id: id, projectID: "project-\(id)", dir: "/tmp/\(id)", dirname: nil, branch: nil, isDefault: false, isArchived: isArchived,
+            isRunning: isRunning, lastLaunchedAt: isRunning ? "2026-07-01T00:00:00Z" : nil)
     }
 
     private static func cleanupResult(workspaceIDs: [String], remainingSessionIDs: [String]) -> AppKitController.StopAllQuitCleanupResult {

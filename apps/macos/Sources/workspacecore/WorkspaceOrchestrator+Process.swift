@@ -165,10 +165,10 @@ extension WorkspaceOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let template = try templateOverride ?? configuredProcessTemplate(for: process, workspace: workspace, project: project)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        )
         let session: SpacesTerminalSessionHandle
         if isManagedTerminalApp(process.terminalApp) {
             terminateBuiltInTerminalSession(for: process)
@@ -526,10 +526,10 @@ extension WorkspaceOrchestrator {
         }
 
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        )
         let process = try launchConfiguredProcess(template: template, workspace: workspace, env: env)
         try markWorkspaceRunningIfNeeded(workspace)
         logPerfMetric(

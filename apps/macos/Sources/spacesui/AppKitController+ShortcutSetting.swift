@@ -1,4 +1,5 @@
 import Foundation
+import spacesclientcore
 import workspacecore
 
 extension AppKitController {
@@ -70,61 +71,61 @@ extension AppKitController {
 
         var settingKey: String {
             switch self {
-            case .guiHotkey: return SettingsKey.guiHotkey
-            case .guiCommandPaletteHotkey: return SettingsKey.guiCommandPaletteHotkey
-            case .guiLeaderHotkey: return SettingsKey.guiLeaderHotkey
-            case .guiAlertsShortcut: return SettingsKey.guiAlertsShortcut
-            case .guiAddWorkspaceShortcut: return SettingsKey.guiAddWorkspaceShortcut
-            case .guiReloadShortcut: return SettingsKey.guiReloadShortcut
-            case .guiNextShortcut: return SettingsKey.guiNextShortcut
-            case .guiPreviousShortcut: return SettingsKey.guiPreviousShortcut
-            case .guiSidebarNextShortcut: return SettingsKey.guiSidebarNextShortcut
-            case .guiSidebarPreviousShortcut: return SettingsKey.guiSidebarPreviousShortcut
-            case .guiOpenEditorShortcut: return SettingsKey.guiOpenEditorShortcut
-            case .guiOpenTerminalShortcut: return SettingsKey.guiOpenTerminalShortcut
-            case .guiOpenFinderShortcut: return SettingsKey.guiOpenFinderShortcut
-            case .guiOpenSettingsShortcut: return SettingsKey.guiOpenSettingsShortcut
-            case .guiWindowShortcut: return SettingsKey.guiWindowShortcut
+            case .guiHotkey: return ClientSettingsKey.guiHotkey
+            case .guiCommandPaletteHotkey: return ClientSettingsKey.guiCommandPaletteHotkey
+            case .guiLeaderHotkey: return ClientSettingsKey.guiLeaderHotkey
+            case .guiAlertsShortcut: return ClientSettingsKey.guiAlertsShortcut
+            case .guiAddWorkspaceShortcut: return ClientSettingsKey.guiAddWorkspaceShortcut
+            case .guiReloadShortcut: return ClientSettingsKey.guiReloadShortcut
+            case .guiNextShortcut: return ClientSettingsKey.guiNextShortcut
+            case .guiPreviousShortcut: return ClientSettingsKey.guiPreviousShortcut
+            case .guiSidebarNextShortcut: return ClientSettingsKey.guiSidebarNextShortcut
+            case .guiSidebarPreviousShortcut: return ClientSettingsKey.guiSidebarPreviousShortcut
+            case .guiOpenEditorShortcut: return ClientSettingsKey.guiOpenEditorShortcut
+            case .guiOpenTerminalShortcut: return ClientSettingsKey.guiOpenTerminalShortcut
+            case .guiOpenFinderShortcut: return ClientSettingsKey.guiOpenFinderShortcut
+            case .guiOpenSettingsShortcut: return ClientSettingsKey.guiOpenSettingsShortcut
+            case .guiWindowShortcut: return ClientSettingsKey.guiWindowShortcut
             }
         }
 
         var defaultSpec: String {
             switch self {
-            case .guiHotkey: return SettingsKey.defaultGUIHotkey
-            case .guiCommandPaletteHotkey: return SettingsKey.defaultGUICommandPaletteHotkey
-            case .guiLeaderHotkey: return SettingsKey.defaultGUILeaderHotkey
-            case .guiAlertsShortcut: return SettingsKey.defaultGUIAlertsShortcut
-            case .guiAddWorkspaceShortcut: return SettingsKey.defaultGUIAddWorkspaceShortcut
-            case .guiReloadShortcut: return SettingsKey.defaultGUIReloadShortcut
-            case .guiNextShortcut: return SettingsKey.defaultGUINextShortcut
-            case .guiPreviousShortcut: return SettingsKey.defaultGUIPreviousShortcut
-            case .guiSidebarNextShortcut: return SettingsKey.defaultGUISidebarNextShortcut
-            case .guiSidebarPreviousShortcut: return SettingsKey.defaultGUISidebarPreviousShortcut
-            case .guiOpenEditorShortcut: return SettingsKey.defaultGUIOpenEditorShortcut
-            case .guiOpenTerminalShortcut: return SettingsKey.defaultGUIOpenTerminalShortcut
-            case .guiOpenFinderShortcut: return SettingsKey.defaultGUIOpenFinderShortcut
-            case .guiOpenSettingsShortcut: return SettingsKey.defaultGUIOpenSettingsShortcut
-            case .guiWindowShortcut: return SettingsKey.defaultGUIWindowShortcut
+            case .guiHotkey: return ClientSettingsKey.defaultGUIHotkey
+            case .guiCommandPaletteHotkey: return ClientSettingsKey.defaultGUICommandPaletteHotkey
+            case .guiLeaderHotkey: return ClientSettingsKey.defaultGUILeaderHotkey
+            case .guiAlertsShortcut: return ClientSettingsKey.defaultGUIAlertsShortcut
+            case .guiAddWorkspaceShortcut: return ClientSettingsKey.defaultGUIAddWorkspaceShortcut
+            case .guiReloadShortcut: return ClientSettingsKey.defaultGUIReloadShortcut
+            case .guiNextShortcut: return ClientSettingsKey.defaultGUINextShortcut
+            case .guiPreviousShortcut: return ClientSettingsKey.defaultGUIPreviousShortcut
+            case .guiSidebarNextShortcut: return ClientSettingsKey.defaultGUISidebarNextShortcut
+            case .guiSidebarPreviousShortcut: return ClientSettingsKey.defaultGUISidebarPreviousShortcut
+            case .guiOpenEditorShortcut: return ClientSettingsKey.defaultGUIOpenEditorShortcut
+            case .guiOpenTerminalShortcut: return ClientSettingsKey.defaultGUIOpenTerminalShortcut
+            case .guiOpenFinderShortcut: return ClientSettingsKey.defaultGUIOpenFinderShortcut
+            case .guiOpenSettingsShortcut: return ClientSettingsKey.defaultGUIOpenSettingsShortcut
+            case .guiWindowShortcut: return ClientSettingsKey.defaultGUIWindowShortcut
             }
         }
 
         init?(settingKey: String) {
             switch settingKey {
-            case SettingsKey.guiHotkey: self = .guiHotkey
-            case SettingsKey.guiCommandPaletteHotkey: self = .guiCommandPaletteHotkey
-            case SettingsKey.guiLeaderHotkey: self = .guiLeaderHotkey
-            case SettingsKey.guiAlertsShortcut: self = .guiAlertsShortcut
-            case SettingsKey.guiAddWorkspaceShortcut: self = .guiAddWorkspaceShortcut
-            case SettingsKey.guiReloadShortcut: self = .guiReloadShortcut
-            case SettingsKey.guiNextShortcut: self = .guiNextShortcut
-            case SettingsKey.guiPreviousShortcut: self = .guiPreviousShortcut
-            case SettingsKey.guiSidebarNextShortcut: self = .guiSidebarNextShortcut
-            case SettingsKey.guiSidebarPreviousShortcut: self = .guiSidebarPreviousShortcut
-            case SettingsKey.guiOpenEditorShortcut: self = .guiOpenEditorShortcut
-            case SettingsKey.guiOpenTerminalShortcut: self = .guiOpenTerminalShortcut
-            case SettingsKey.guiOpenFinderShortcut: self = .guiOpenFinderShortcut
-            case SettingsKey.guiOpenSettingsShortcut: self = .guiOpenSettingsShortcut
-            case SettingsKey.guiWindowShortcut: self = .guiWindowShortcut
+            case ClientSettingsKey.guiHotkey: self = .guiHotkey
+            case ClientSettingsKey.guiCommandPaletteHotkey: self = .guiCommandPaletteHotkey
+            case ClientSettingsKey.guiLeaderHotkey: self = .guiLeaderHotkey
+            case ClientSettingsKey.guiAlertsShortcut: self = .guiAlertsShortcut
+            case ClientSettingsKey.guiAddWorkspaceShortcut: self = .guiAddWorkspaceShortcut
+            case ClientSettingsKey.guiReloadShortcut: self = .guiReloadShortcut
+            case ClientSettingsKey.guiNextShortcut: self = .guiNextShortcut
+            case ClientSettingsKey.guiPreviousShortcut: self = .guiPreviousShortcut
+            case ClientSettingsKey.guiSidebarNextShortcut: self = .guiSidebarNextShortcut
+            case ClientSettingsKey.guiSidebarPreviousShortcut: self = .guiSidebarPreviousShortcut
+            case ClientSettingsKey.guiOpenEditorShortcut: self = .guiOpenEditorShortcut
+            case ClientSettingsKey.guiOpenTerminalShortcut: self = .guiOpenTerminalShortcut
+            case ClientSettingsKey.guiOpenFinderShortcut: self = .guiOpenFinderShortcut
+            case ClientSettingsKey.guiOpenSettingsShortcut: self = .guiOpenSettingsShortcut
+            case ClientSettingsKey.guiWindowShortcut: self = .guiWindowShortcut
             default: return nil
             }
         }
@@ -145,10 +146,10 @@ extension AppKitController {
         }
 
         func leaderModifiers() throws -> Set<HotkeyModifier> {
-            if let raw = try value(SettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw), !modifiers.isEmpty {
+            if let raw = try value(ClientSettingsKey.guiLeaderHotkey), let modifiers = try? HotkeySpec.parseModifierSet(raw), !modifiers.isEmpty {
                 return modifiers
             }
-            return try HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)
+            return try HotkeySpec.parseModifierSet(ClientSettingsKey.defaultGUILeaderHotkey)
         }
 
         private func effectiveLeaderBackedShortcut(setting: ShortcutSetting) throws -> String {

@@ -105,13 +105,6 @@ public final class WorkspaceOrchestrator {
     /// to the client, since a bundle-less daemon cannot post OS notifications.
     public static func setProcessWideNotificationDeliverer(_ deliverer: NotificationDeliverer?) { notificationDelivererOverrideStore.set(deliverer) }
 
-    public static func sendTerminalServiceRequest(to target: SpacesDaemonConnectionTarget, request: TerminalServiceRequest) throws
-        -> TerminalServiceResponse
-    {
-        guard let socketPath = target.socketPath else { throw WorkspaceError.invalidArgument(message: "Local spacesd socket path is missing.") }
-        return try TerminalServiceClient.send(request: request, socketPath: socketPath, timeout: 15)
-    }
-
     struct ResolvedBrowserSession {
         let index: Int
         let prefix: String
@@ -265,19 +258,6 @@ public final class WorkspaceOrchestrator {
 
     public func appConfig() throws -> AppConfig { try store.appConfig() }
 
-    public func effectiveSpacesDevice(workspaceID: String) throws -> SpacesDeviceSelection {
-        guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
-        guard try store.project(id: workspace.projectID) != nil else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
-        return .local(SpacesDeviceRecord.local())
-    }
-
-    public func workspaceRuntimePlan(workspaceID: String) throws -> WorkspaceRuntimePlan {
-        guard let workspace = try store.workspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
-        guard let project = try store.project(id: workspace.projectID) else { throw WorkspaceError.missingProject(dir: workspace.projectID) }
-        return try workspaceRuntimePlan(
-            project: project, workspace: workspace, assignedPorts: try store.workspacePortsAssigned(workspaceID: workspace.id))
-    }
-
     public func project(id: String) throws -> ProjectRecord? { try store.project(id: id) }
 
     public func project(dir: String) throws -> ProjectRecord? { try store.project(dir: dir) }
@@ -322,7 +302,7 @@ public final class WorkspaceOrchestrator {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let env = buildWorkspaceEnv(
             project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts).manifest)
+            runtimeManifest: workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts))
         return resolveBrowserSessions(sessions, env: env).map { resolved in BrowserSession(name: resolved.session.name, url: resolved.prefix) }
     }
 
@@ -379,9 +359,7 @@ public final class WorkspaceOrchestrator {
                 throw WorkspaceError.invalidArgument(message: "Protected branches main/master cannot be renamed.")
             }
             if trimmedBranch != workspace.branch {
-                if let existing = try workspaceForBranch(projectID: workspace.projectID, branch: trimmedBranch, deviceID: workspace.deviceID),
-                    existing.id != workspace.id
-                {
+                if let existing = try workspaceForBranch(projectID: workspace.projectID, branch: trimmedBranch), existing.id != workspace.id {
                     throw WorkspaceError.invalidArgument(message: "Branch '\(trimmedBranch)' is already used by workspace '\(existing.displayName)'.")
                 }
                 try git.renameCurrentBranch(path: workspace.dir, to: trimmedBranch)
@@ -488,7 +466,7 @@ public final class WorkspaceOrchestrator {
             resolvedBaseBranch = nil
         }
         if project.isGitRepo, let branchName = resolvedBranch {
-            if let existing = try workspaceForBranch(projectID: projectID, branch: branchName, deviceID: SpacesDeviceRecord.localDeviceID) {
+            if let existing = try workspaceForBranch(projectID: projectID, branch: branchName) {
                 if existing.isArchived {
                     guard allowExistingBranchReuse else {
                         throw WorkspaceError.invalidArgument(
@@ -508,9 +486,7 @@ public final class WorkspaceOrchestrator {
                     message: "Branch '\(branchName)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
         }
-        if project.isGitRepo, let branchName = resolvedBranch,
-            let existing = try archivedWorkspace(projectID: projectID, branch: branchName, deviceID: SpacesDeviceRecord.localDeviceID)
-        {
+        if project.isGitRepo, let branchName = resolvedBranch, let existing = try archivedWorkspace(projectID: projectID, branch: branchName) {
             let revivedDir: String
             let revivedDirname: String?
             let revivedBranch: String?
@@ -633,7 +609,7 @@ public final class WorkspaceOrchestrator {
         }
         let branchOutput = try git.runGitAndCapture(["-C", normalizedWorktreePath, "rev-parse", "--abbrev-ref", "HEAD"])
         let branch = branchOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let existing = try workspaceForBranch(projectID: project.id, branch: branch, deviceID: SpacesDeviceRecord.localDeviceID) {
+        if let existing = try workspaceForBranch(projectID: project.id, branch: branch) {
             if existing.isArchived {
                 throw WorkspaceError.invalidArgument(
                     message:
@@ -682,7 +658,6 @@ public final class WorkspaceOrchestrator {
                     try store.upsert(workspace: updatedWorkspace)
                 }
 
-                guard workspace.deviceID == SpacesDeviceRecord.localDeviceID else { continue }
                 guard !workspace.isArchived, !workspace.isDefault else { continue }
                 guard discoverableWorktreeByPath[normalizedWorkspacePath] == nil else { continue }
                 try archiveWorkspaceBecauseWorktreeIsInvalid(workspaceID: workspace.id)
@@ -708,12 +683,12 @@ public final class WorkspaceOrchestrator {
         return createdWorkspaces
     }
 
-    private func workspaceForBranch(projectID: String, branch: String, deviceID: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.deviceID == deviceID }
+    private func workspaceForBranch(projectID: String, branch: String) throws -> WorkspaceRecord? {
+        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch }
     }
 
-    private func archivedWorkspace(projectID: String, branch: String, deviceID: String) throws -> WorkspaceRecord? {
-        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.deviceID == deviceID && $0.isArchived }
+    private func archivedWorkspace(projectID: String, branch: String) throws -> WorkspaceRecord? {
+        try store.workspaces(projectID: projectID, includeArchived: true).first { $0.branch == branch && $0.isArchived }
     }
 
     private func archivedWorkspace(projectID: String, dir: String) throws -> WorkspaceRecord? {
@@ -801,10 +776,10 @@ public final class WorkspaceOrchestrator {
         }
 
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        )
         let shouldReleaseReservedPortsForLaunch = !assignedPorts.isEmpty
         if shouldReleaseReservedPortsForLaunch {
             // Workspace port assignments remain pinned in the store until archive, but placeholder
@@ -861,10 +836,10 @@ public final class WorkspaceOrchestrator {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try indexedWorkspaceWindows(workspaceID: workspace.id)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = buildWorkspaceEnv(
-            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-            runtimeManifest: runtimePlan.manifest)
+            project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) }, runtimeManifest: runtimeManifest
+        )
         let settings = try loadWorkspaceSettings(project: project, workspace: workspace)
         let processes = try store.runningProcesses(workspaceID: workspace.id)
         var closedBuiltInTerminalSessionIDs = Set<String>()
@@ -932,7 +907,7 @@ public final class WorkspaceOrchestrator {
         guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be archived.") }
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, waitForTerminalExit: false)
         try store.deleteAgentWindows(workspaceID: workspaceID)
-        if project.isGitRepo, workspace.deviceID == SpacesDeviceRecord.localDeviceID {
+        if project.isGitRepo {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
         try PortAllocator(store: store).releasePorts(workspaceID: workspace.id)
@@ -1185,11 +1160,11 @@ public final class WorkspaceOrchestrator {
         } else {
             sessionTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
         }
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-                runtimeManifest: runtimePlan.manifest
+                runtimeManifest: runtimeManifest
             ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
         let rawCommand: String
@@ -1244,11 +1219,11 @@ public final class WorkspaceOrchestrator {
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
-        let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
+        let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
-                runtimeManifest: runtimePlan.manifest
+                runtimeManifest: runtimeManifest
             ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true)
         let generatedTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
         let workingDirectory = workspace.dir
@@ -1602,22 +1577,6 @@ public final class WorkspaceOrchestrator {
 
     static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
 
-    public func alertsDismissedAttentionItemIDs() throws -> Set<String> {
-        guard let raw = try store.setting(key: SettingsKey.alertsDismissedAttentionItems), !raw.isEmpty else { return [] }
-        guard let data = raw.data(using: .utf8) else { return [] }
-        let decoded = (try? JSONDecoder().decode([String].self, from: data)) ?? []
-        return Set(decoded)
-    }
-
-    public func setAlertsDismissedAttentionItemIDs(_ ids: Set<String>) throws {
-        guard !ids.isEmpty else {
-            try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: nil)
-            return
-        }
-        let encoded = try JSONEncoder().encode(ids.sorted())
-        try store.setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
-    }
-
     func normalizeDir(id: String, _ dir: String) throws -> ProjectRecord {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
@@ -1766,27 +1725,21 @@ public final class WorkspaceOrchestrator {
     ) -> [String: String] {
         var env: [String: String] = [:]
         // The runtime manifest is the authoritative source of the per-service port variables
-        // (SPACES_<SVC>_PORT) and the workspace identity variables (SPACES_WORKSPACE_SLUG / _HOST),
-        // so they stay consistent across the local and remote daemon paths. Merge it first.
+        // (SPACES_<SVC>_PORT) and the workspace identity variables (SPACES_WORKSPACE_SLUG / _HOST).
+        // Merge it first.
         let manifest =
             runtimeManifest
             ?? SpacesDevicePlanner.runtimeManifest(
-                project: project, workspace: workspace, selection: .local(SpacesDeviceRecord.local()),
+                project: project, workspace: workspace,
                 namedPorts: namedPorts.map { WorkspaceRuntimePortMapping(id: $0.name, name: $0.name, port: $0.port) })
         env.merge(manifest.processEnvironment) { _, new in new }
-        let runtimeWorkspacePath =
-            manifest.location == .remote ? manifest.remotePath?.trimmingCharacters(in: .whitespacesAndNewlines) : workspace.runtimePath
-        let workspacePath = runtimeWorkspacePath.flatMap { $0.isEmpty ? nil : $0 } ?? workspace.runtimePath
-        env["SPACES_WORKSPACE_DIR"] = workspacePath
-        env["SPACES_PROJECT_DIR"] = manifest.location == .remote ? workspacePath : project.dir
-        // Browser-facing per-service URL variables. Remote/Linux services still receive these values
-        // so app servers can allowlist the host/origin for CORS or framework host checks; the URL is
-        // the client-facing identity, not evidence that the remote daemon itself runs Caddy.
-        // These need the shared router port, which is app configuration available here but not inside
-        // the pure planner, so they live only here. The router port is a Mac-only concept (only the
-        // macOS client runs Caddy), so remote daemons never seed one; the fallback below then yields
-        // the canonical `AppConfig.defaultRouterPort`, a stable client-facing identity the Mac client
-        // rewrites to its own live Caddy port before navigation.
+        env["SPACES_WORKSPACE_DIR"] = workspace.runtimePath
+        env["SPACES_PROJECT_DIR"] = project.dir
+        // Browser-facing per-service URL variables so app servers can allowlist the host/origin for
+        // CORS or framework host checks. These need the shared router port, which is app configuration
+        // available here but not inside the pure planner, so they live only here. The fallback to
+        // `AppConfig.defaultRouterPort` yields a stable client-facing identity the client rewrites to
+        // its own live Caddy port before navigation.
         let slug = SpacesProfile.workspaceHostSlug(
             branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         let routerPort = (try? store.appConfig().routerPort) ?? AppConfig.defaultRouterPort
@@ -1798,17 +1751,13 @@ public final class WorkspaceOrchestrator {
         return env
     }
 
-    func workspaceRuntimePlan(project: ProjectRecord, workspace: WorkspaceRecord, assignedPorts: [(definitionID: String, port: Int, name: String)])
-        throws -> WorkspaceRuntimePlan
-    {
-        let selection = try effectiveSpacesDevice(workspaceID: workspace.id)
+    func workspaceRuntimeManifest(
+        project: ProjectRecord, workspace: WorkspaceRecord, assignedPorts: [(definitionID: String, port: Int, name: String)]
+    ) -> WorkspaceRuntimeManifest {
         let namedPorts = assignedPorts.map {
             WorkspaceRuntimePortMapping(id: $0.definitionID.isEmpty ? $0.name : $0.definitionID, name: $0.name, port: $0.port)
         }
-        let manifest = SpacesDevicePlanner.runtimeManifest(project: project, workspace: workspace, selection: selection, namedPorts: namedPorts)
-        let daemonTarget = SpacesDevicePlanner.daemonTarget(selection: selection, localSocketPath: try TerminalServicePaths.socketPath())
-        return WorkspaceRuntimePlan(
-            project: project, workspace: workspace, selection: selection, manifest: manifest, daemonTarget: daemonTarget, remoteSSHURI: nil)
+        return SpacesDevicePlanner.runtimeManifest(project: project, workspace: workspace, namedPorts: namedPorts)
     }
 
     struct RunningWorkspaceProcessEdit {

@@ -45,51 +45,6 @@ final class TerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [Str
 
 final class TerminalLaunchAttemptCapture: @unchecked Sendable { var count = 0 }
 
-final class RemoteStateCapture: @unchecked Sendable {
-    private let lock = NSLock()
-    private let sessionID: String
-    private let workspaceID: String
-    private let workingDirectory: String
-    private var recordedRequests: [TerminalServiceRequest] = []
-
-    init(sessionID: String, workspaceID: String, workingDirectory: String) {
-        self.sessionID = sessionID
-        self.workspaceID = workspaceID
-        self.workingDirectory = workingDirectory
-    }
-
-    func client(target _: SpacesDaemonConnectionTarget, request: TerminalServiceRequest) throws -> TerminalServiceResponse {
-        lock.lock()
-        recordedRequests.append(request)
-        lock.unlock()
-
-        guard case .state(let payload) = request.command, payload.sessionID == sessionID else {
-            return TerminalServiceResponse(ok: true, message: "ok")
-        }
-        let timestamp = "2026-06-11T00:00:00Z"
-        let runtimeState = TerminalSessionRuntimeState(
-            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 42, childPID: 4242, state: .running, updatedAt: timestamp, title: "shell-1",
-            workingDirectory: workingDirectory)
-        let client = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
-            connectedAt: timestamp)
-        let attachment = TerminalAttachment(sessionID: sessionID, clientID: client.id, mode: .owner, attachedAt: timestamp)
-        return TerminalServiceResponse(
-            ok: true, message: "state",
-            sessionState: GhosttyRemoteSessionStatePayload(
-                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: timestamp, sessionStateRevision: 1,
-                sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtimeState,
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attachment]), title: "shell-1",
-                workingDirectory: workingDirectory, outputByteCount: 0))
-    }
-
-    func requests() -> [TerminalServiceRequest] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recordedRequests
-    }
-}
-
 func managedProjectStorageDirname(namespace: String, source: String, preferredName: String) -> String {
     let digest = SHA256.hash(data: Data("\(namespace)\u{0}\(source)".utf8)).map { String(format: "%02x", $0) }.joined()
     let cleaned = preferredName.map { char -> String in

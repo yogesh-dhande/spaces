@@ -8,14 +8,14 @@ extension AppKitController {
     /// Called once at launch and again whenever the General settings picker changes it.
     /// A missing or unreadable setting resolves to the dark default.
     func applyStoredAppAppearance() {
-        let stored = (try? SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appAppearanceMode)) ?? nil
+        let stored = (try? SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.appAppearanceMode)) ?? nil
         applyAppAppearance(AppAppearanceMode(persistedRawValue: stored))
     }
 
     /// The persisted appearance mode, resolving a missing value to the dark default.
     /// Backs the General settings picker's current selection.
     func storedAppAppearanceMode() -> AppAppearanceMode {
-        let stored = (try? SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appAppearanceMode)) ?? nil
+        let stored = (try? SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.appAppearanceMode)) ?? nil
         return AppAppearanceMode(persistedRawValue: stored)
     }
 

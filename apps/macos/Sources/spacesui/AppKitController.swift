@@ -424,7 +424,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ipcNotificationObject = launchContext.profile.ipcNotificationObject
         // Bind the active theme before any Theme token or embedded terminal is touched;
         // an unset or unknown stored id resolves to the default theme.
-        if let storedThemeID = (try? SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appThemeID)) ?? nil {
+        if let storedThemeID = (try? SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.appThemeID)) ?? nil {
             ActiveTheme.id = ThemeID(rawValue: storedThemeID)
         }
         switch launchContext.desktopControlState {
@@ -6775,7 +6775,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Attention-item dismissals are per-client desktop state, so they live in the client
     /// database rather than the daemon's settings.
     func loadDismissedAlertsAttentionItemIDs() -> Set<String> {
-        guard let raw = (try? clientDatabase().setting(key: SettingsKey.alertsDismissedAttentionItems)) ?? nil, !raw.isEmpty,
+        guard let raw = (try? clientDatabase().setting(key: ClientSettingsKey.alertsDismissedAttentionItems)) ?? nil, !raw.isEmpty,
             let data = raw.data(using: .utf8), let decoded = try? JSONDecoder().decode([String].self, from: data)
         else { return [] }
         return Set(decoded)
@@ -6783,11 +6783,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func storeDismissedAlertsAttentionItemIDs(_ ids: Set<String>) throws {
         guard !ids.isEmpty else {
-            try clientDatabase().setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: nil)
+            try clientDatabase().setSetting(key: ClientSettingsKey.alertsDismissedAttentionItems, value: nil)
             return
         }
         let encoded = try JSONEncoder().encode(ids.sorted())
-        try clientDatabase().setSetting(key: SettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
+        try clientDatabase().setSetting(key: ClientSettingsKey.alertsDismissedAttentionItems, value: String(decoding: encoded, as: UTF8.self))
     }
 
     func macPairedDevices() -> [SpacesPairedDeviceRecord] {
@@ -8633,26 +8633,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// database). The port range is daemon-owned and never read by the GUI, so it carries a
     /// placeholder rather than a daemon-DB read — keeping config sourcing off the orchestrator.
     nonisolated static func clientAppConfig() throws -> AppConfig {
-        let editor = try SpacesClientDatabase.defaultDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
+        let editor = try SpacesClientDatabase.defaultDatabase().setting(key: ClientSettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
         return AppConfig(editor: editor, portRange: .default)
     }
 
     private func clientAppConfig() throws -> AppConfig {
-        let editor = try clientDatabase().setting(key: SettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
+        let editor = try clientDatabase().setting(key: ClientSettingsKey.appEditor).flatMap(EditorPreference.init(rawValue:))
         return AppConfig(editor: editor, portRange: .default)
     }
 
-    private func clientActiveWorkspaceID() -> String? { try? clientDatabase().setting(key: SettingsKey.activeWorkspaceID) }
+    private func clientActiveWorkspaceID() -> String? { try? clientDatabase().setting(key: ClientSettingsKey.activeWorkspaceID) }
 
     nonisolated static func setClientActiveWorkspaceID(_ workspaceID: String?) {
-        try? SpacesClientDatabase.setDefaultSetting(key: SettingsKey.activeWorkspaceID, value: workspaceID)
+        try? SpacesClientDatabase.setDefaultSetting(key: ClientSettingsKey.activeWorkspaceID, value: workspaceID)
     }
 
     func loadShortcutSpecs() {
         if let modifiers = try? shortcutSettingResolver().leaderModifiers() {
             shortcutLeaderModifiers = modifiers
         } else {
-            shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(SettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
+            shortcutLeaderModifiers = (try? HotkeySpec.parseModifierSet(ClientSettingsKey.defaultGUILeaderHotkey)) ?? [.cmd, .alt]
         }
         toggleShortcutSpec = loadShortcutSpec(setting: .guiHotkey)
         commandPaletteShortcutSpec = loadShortcutSpec(setting: .guiCommandPaletteHotkey)

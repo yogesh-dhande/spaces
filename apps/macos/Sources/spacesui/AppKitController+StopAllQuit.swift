@@ -59,15 +59,11 @@ extension AppKitController {
             workspaceIDs.append(workspaceID)
         }
 
-        for workspace in runningWorkspaces
-        where workspace.deviceID == SpacesDeviceRecord.localDeviceID && !workspace.isArchived && workspace.isRunning {
-            appendWorkspaceID(workspace.id)
-        }
+        for workspace in runningWorkspaces where !workspace.isArchived && workspace.isRunning { appendWorkspaceID(workspace.id) }
 
         for session in liveSessions {
             guard let workspace = try workspaceForLiveSession(session.id) else { continue }
             associatedLiveSessionIDs.insert(session.id)
-            guard workspace.deviceID == SpacesDeviceRecord.localDeviceID else { continue }
             appendWorkspaceID(workspace.id)
         }
 
